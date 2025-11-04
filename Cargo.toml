@@ -1,0 +1,29 @@
+[package]
+name = "multicast_relay"
+version = "0.1.0"
+edition = "2024"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0.82"
+clap = { version = "4.5.4", features = ["derive"] }
+serde = { version = "1.0.197", features = ["derive"] }
+serde_json = "1.0.115"
+socket2 = "0.5.6"
+tokio = { version = "1.37.0", features = ["full"] }
+metrics = "0.22.0"
+metrics-exporter-prometheus = "0.13.0"
+sysinfo = "0.30.11"
+
+[[bin]]
+name = "multicast_relay"
+path = "src/main.rs"
+
+[[bin]]
+name = "traffic_generator"
+path = "src/traffic_generator.rs"
+
+[[bin]]
+name = "control_client"
+path = "src/control_client.rs"
