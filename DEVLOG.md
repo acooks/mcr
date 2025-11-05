@@ -158,7 +158,7 @@ User provided a link to a GitHub repository for additional context: https://gith
 *   **Outcome:** This makes `GetStats`/`ListRules` nearly instantaneous from the control plane's perspective, ensuring it remains responsive. The small amount of data staleness (<= the push interval) is an acceptable trade-off for system stability.
 
 **Design Decision Recorded:**
-*   **D14:** The application will decouple statistics aggregation from the control plane's request/response loop. A dedicated `StatsAggregator` task will be created. Data plane threads will proactively push their state to the aggregator on a fixed interval. The `ControlPlane` task will query this aggregator to serve `GetStats` and `ListRules` requests, ensuring the control plane remains non-blocking and responsive to configuration changes.
+*   **D14 (Revised - Timestamped Asynchronous Aggregation):** The statistics aggregation mechanism will use a timestamp-based approach to ensure clarity and prevent misleading "smear." The original, high-performance, asynchronous push model will be retained. Each data plane worker will include a high-resolution timestamp in its periodic `StatsUpdate` message to the `StatsAggregator`. **This timestamp will be captured only once per aggregation interval by each worker, ensuring minimal system call overhead.** The `StatsAggregator` will store these timestamps alongside the metrics. The `GetStats` command response will include the per-core timestamps, making any temporal skew transparent to the operator and empowering client-side analysis.
 
 **Adversarial Question 5: Jumbo Frame Penalty**
 *   **Question:** Packet reconstruction involves a memory copy of the payload. For large datagrams like jumbo frames (9000 bytes), has the performance cost of this copy been justified against more complex zero-copy alternatives?
@@ -176,7 +176,7 @@ User provided a link to a GitHub repository for additional context: https://gith
         *   **Performance Cost:** While a memory copy consumes bandwidth (~4.5 GB/s per core for jumbo frames at 500k pps), this is within modern CPU capabilities and is a known, measurable cost. The complexity cost of zero-copy is a greater risk.
 
 **Design Decision Recorded:**
-*   **D5 (Reverted to Original, with Justification):** The packet forwarding logic will involve a **userspace memory copy of the payload**. An incoming packet's payload will be copied from the `AF_PACKET` ring buffer into a new, core-local buffer. This immediately frees the `AF_PACKET` buffer for reuse, decoupling ingress from egress. The new packet will then be constructed (headers + copied payload) and sent via `io_uring` `sendto` operations. This design is explicitly chosen to **simplify the architecture, reduce state management complexity, and enable a clean, robust implementation of QoS priority queuing.** The known performance cost of the memory copy is accepted as a trade-off for this architectural simplicity and robustness.
+*   **D5 (Reverted to Original, with Justification):** The packet forwarding logic will involve a **userspace memory copy of the payload**. An incoming packet's payload will be copied from the `AF_PACKET` ring buffer into a new, core-local buffer. This immediately frees the `AF_PACKET` buffer for reuse, decoupling ingress from egress. This payload is then sent via `io_uring` `sendto` operations on a standard `AF_INET` `UdpSocket` that has been **bound to the desired source IP address**. The kernel will then construct the new IP/UDP headers. This design is explicitly chosen to **simplify the architecture, reduce state management complexity, and enable a clean, robust implementation of QoS priority queuing.** The known performance cost of the memory copy is accepted as a trade-off for this architectural simplicity and robustness.
 
 **Adversarial Question 6: Buffer Management and Memory Allocation**
 *   **Question:** The design involves copying the payload for each packet and potentially managing multiple priority queues. How will memory for these buffers be managed to minimize dynamic allocations and avoid fragmentation, especially under sustained high load with varying packet sizes?
@@ -316,3 +316,86 @@ User provided a link to a GitHub repository for additional context: https://gith
 
 **Design Decision Recorded:**
 *   **D26 (Egress Error Handling):** The application will use a "Drop and Count" strategy for transient egress errors. Packets that fail to send due to transient errors will be dropped immediately, with no retry mechanism, to preserve low latency and prevent head-of-line blocking. A new metric, `egress_errors_total`, will be tracked on a per-output-destination basis and exposed via the control plane to provide immediate visibility into egress failures.
+
+**Adversarial Question 16: Tooling Black Hole**
+*   **Question:** Standard tools like `netstat` are blind to the application's activity because it operates below the kernel's main network stack. What custom observability tools are provided to inspect forwarding tables, packet counters, and error rates per-core?
+*   **Analysis:** The application must provide its own comprehensive observability tools because standard Linux utilities will not work for `AF_PACKET` sockets.
+*   **Mitigation Strategy:** The Control Plane's JSON-RPC interface (D9) will serve as the primary tool for observability.
+    *   A `ListRules` command will provide a detailed view of the forwarding table, including rule IDs and core assignments.
+    *   A `GetStats` command will provide a rich, structured set of metrics collected by the `StatsAggregator` (D14).
+    *   Metrics will have fine-grained granularity, including: per-core (D10), per-buffer-pool (D16), per-rule/flow (D13), and per-output-destination (D26).
+*   **Outcome:** This approach provides a complete and custom observability solution, allowing operators to inspect all critical aspects of the application's state and performance without relying on incompatible standard tools.
+
+**Design Decision Recorded:**
+*   **D27 (Custom Observability via Control Plane):** The application will provide comprehensive observability through its control plane. A `ListRules` command will expose the forwarding table, and a `GetStats` command will expose a detailed set of metrics with per-core, per-rule, per-buffer-pool, and per-destination granularity, compensating for the lack of visibility from standard networking tools.
+
+
+**Adversarial Question 17: Packet Drop Analysis (Follow-up - Tracing Capability)**
+*   **Question:** Can we implement a tracing capability?
+*   **Analysis:** A tracing capability would significantly enhance diagnostic abilities by providing detailed, chronological events for individual packets, but must be designed to avoid performance impact.
+*   **Mitigation Strategy: Conditional, Sampling-Based, In-Memory Ring Buffer Trace:**
+    *   **Configuration:** A new `trace: bool` flag will be added to `ForwardingRule`, disabled by default. Control plane commands (`EnableTrace`, `DisableTrace`, `GetTrace`) will manage this.
+    *   **Data Plane Implementation:** Each worker process will have a small, pre-allocated, in-memory ring buffer. Packet processing will include a conditional check (`if rule.trace_enabled`) to write structured trace events (e.g., `PacketReceived`, `EgressFailure`) at key lifecycle stages. Sampling can be added if needed.
+    *   **Control Plane Access:** `GetTrace` will retrieve the ring buffer contents for a specific rule.
+    *   **Performance Impact:** Negligible when disabled (branch prediction). Measurable when enabled for a specific rule, but isolated and on-demand.
+*   **Outcome:** Provides a powerful, surgical debugging tool without compromising overall system performance during normal operation.
+
+**Design Decision Recorded:**
+*   **D28 (On-Demand Packet Tracing):** The application will implement a low-impact, on-demand packet tracing capability. Tracing will be configurable on a per-rule basis via control plane commands (`EnableTrace`, `DisableTrace`, `GetTrace`) and disabled by default. Each data plane worker will maintain a pre-allocated, in-memory ring buffer to store key diagnostic events for packets matching an enabled rule. The `GetTrace` command will retrieve these events, providing a detailed, chronological log of a packet's lifecycle or the reason for its drop.
+
+
+**Adversarial Question 19: MPSC Channel Overflow**
+*   **Question:** What is the defined behavior if a command is sent to a data plane thread whose MPSC channel is full (e.g., the thread is stuck)? Does the control plane block, drop the command, or immediately return a "busy" error?
+*   **Analysis:** A blocking channel would cause cascading failures, freezing the control plane. Silently dropping commands leads to state inconsistency. The only acceptable behavior is an immediate error.
+*   **Mitigation Strategy: Bounded MPSC Channels with Non-Blocking Sends:**
+    *   **Implementation:** Use bounded MPSC channels for Supervisor-to-worker communication (small buffer size). The Supervisor will use `try_send()`.
+    *   **Behavior:** If `try_send()` fails (channel full), the Supervisor immediately propagates an error back to the Control Plane.
+*   **Outcome:** Ensures control plane responsiveness, provides immediate feedback to the operator, and prevents state inconsistency, even if a worker process is stuck or unresponsive.
+
+**Design Decision Recorded:**
+*   **D29 (Non-Blocking Command Dispatch):** Communication from the Supervisor to the data plane worker processes will use bounded MPSC channels. The Supervisor will use a non-blocking `try_send()` operation to dispatch commands. If a worker's command channel is full, `try_send()` will fail immediately, and this failure will be propagated back to the operator as an immediate "Worker busy or unresponsive" error, ensuring the control plane remains responsive and the operator is informed.
+
+
+**Adversarial Question 20 (Follow-up): Egress Path Clarification**
+*   **Question:** There are multiple types of egress: control, igmp and the fast data path. Which one uses which socket type? The MTU issue is only a concern on the data path.
+*   **Analysis:** The application has three distinct egress paths with different socket types and performance characteristics. The concerns about MTU, fragmentation, and offloading apply *only* to the fast data path.
+    1.  **Control Plane Egress:** Uses `AF_UNIX` sockets for local IPC. MTU is not applicable.
+    2.  **IGMP Egress:** Uses `AF_INET` sockets for the Supervisor to trigger kernel-managed IGMP joins. MTU is not a practical concern.
+    3.  **Fast Data Path Egress:** Uses `AF_INET` sockets in the data plane workers. This is the only path subject to MTU, fragmentation, and offloading considerations.
+*   **Outcome:** Explicitly defining these paths removes ambiguity from the architecture and clarifies the scope of decisions like D31 and D32.
+
+**Design Decision Recorded:**
+*   **D33 (Egress Path Clarification):** The application has three distinct egress paths: 1. **Control Plane:** Uses `AF_UNIX` sockets for local IPC where MTU is not applicable. 2. **IGMP Signaling:** Uses `AF_INET` sockets managed by the Supervisor where the kernel sends small control packets and MTU is not a practical concern. 3. **Fast Data Path:** Uses `AF_INET` sockets managed by the data plane workers. This is the only path that handles high-volume data, and it is the exclusive subject of the design decisions regarding MTU handling (D32), egress error counting (D26), and NIC offloading (D31).
+
+
+**Adversarial Question 20: IP Fragmentation**
+*   **Question:** How does the system handle inbound fragmented IP packets? Does it perform IP reassembly in userspace, or does it assume that all multicast traffic will fit within the MTU and drop any fragments it sees?
+*   **Analysis:** IP reassembly in userspace is too complex, performance-intensive, and a security risk for this application. Most multicast applications avoid fragmentation.
+*   **Mitigation Strategy: "Drop Fragments" with Observability:**
+    *   **Detection:** Inspect IP header for "More Fragments" flag or non-zero "Fragment Offset."
+    *   **Behavior:** Immediately drop any identified fragments. Release buffer.
+    *   **Observability:** Track `ip_fragments_dropped_total` per-core via `GetStats` to alert operators to upstream misconfiguration.
+*   **Outcome:** Preserves simplicity, security, and performance. Provides clear diagnostic visibility.
+
+**Design Decision Recorded:**
+*   **D30 (No IP Reassembly):** The application will not support IP fragmentation. The data plane will inspect the IP header of every incoming packet to identify fragments. Any packet identified as a fragment (either the first, middle, or last) will be immediately dropped. A new metric, `ip_fragments_dropped_total`, will be tracked on a per-core basis and exposed via the control plane to make the presence of fragmented traffic visible to the operator.
+
+**Adversarial Question 20 (Re-evaluation): MTU Mismatch Handling**
+*   **Question:** How does the system handle mismatched MTUs on the ingress and egress interfaces?
+*   **Answer:** The application relies on the Linux kernel for all egress IP fragmentation.
+*   **Analysis:** Userspace fragmentation is too complex and performance-intensive. The kernel handles this robustly.
+*   **Observability/Recommendation:** Operators must use `netstat -s` to monitor kernel `OutFragOKs`. Strong recommendation to ensure MTU consistency to avoid performance degradation.
+
+**Design Decision Recorded:**
+*   **D32 (Egress Fragmentation by Kernel):** The application will not implement userspace IP fragmentation. It will always present the complete, reconstructed datagram (UDP payload) to the egress `AF_INET` socket, regardless of size. The application will rely entirely on the Linux kernel's IP stack to perform any necessary fragmentation on the egress path if a packet's size exceeds the egress interface's MTU. The operational documentation will strongly recommend that operators maintain consistent MTU sizes across the data path to avoid performance degradation from fragmentation, and will instruct them to use tools like `netstat` to monitor for kernel-level fragmentation.
+
+**Adversarial Question 20 (Follow-up): NIC Offloading (Revised)**
+*   **Question:** How does the MTU handling strategy affect the recommendation to disable NIC offloading?
+*   **Answer:** The MTU analysis makes our recommendation for NIC offloading more nuanced and critical.
+*   **Analysis:**
+    *   **Ingress (GRO/LRO):** Still unambiguously harmful. Can create artificial jumbo frames from smaller packets, leading to unexpected egress fragmentation. **Must be disabled.**
+    *   **Egress (GSO/TSO):** Nuanced. Beneficial for intentional MTU mismatches (hardware segmentation is efficient). Recommended to disable for maximum predictability and performance testing (to see true on-wire packet rates).
+*   **Outcome:** Explicit, nuanced recommendations for operators.
+
+**Design Decision Recorded:**
+*   **D31 (Revised - Nuanced NIC Offloading):** For the application to function correctly, NIC offloading features that coalesce packets must be disabled on all ingress interfaces. Generic Receive Offload (GRO) and Large Receive Offload (LRO) **must be disabled** on all `input_interface`s. These features are fundamentally incompatible with the application's `AF_PACKET` processing model and can cause artificial jumbo frames, leading to unnecessary egress fragmentation. For egress offloads (GSO/TSO), the recommendation depends on the operator's goal: for handling MTU mismatches, it is **recommended to enable** GSO/TSO on the egress interface; for maximum predictability or performance testing, it is **recommended to disable** GSO/TSO. These explicit, nuanced recommendations will be a critical part of the operational documentation.
