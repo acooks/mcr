@@ -4,6 +4,22 @@ First off, thank you for considering contributing. This project is a high-perfor
 
 This document outlines the code style, structure, and methods we use to promote good practices.
 
+## Core Development Principles
+
+Beyond the mechanical checks for formatting and linting, this project adheres to a set of core principles to ensure the final application is readable, maintainable, and robust.
+
+1.  **Simplicity and Linearity in the Fast Path:** The data plane code that processes packets must be as simple and linear as possible. It must be non-blocking, avoid dynamic memory allocation, and handle all transient errors with a "Drop and Count" strategy (D26).
+
+2.  **Strict Separation of Concerns:** The roles of the Supervisor, Control Plane, and Data Plane workers are distinct and must not be blurred. The Supervisor manages lifecycles and privileged operations. The Control Plane handles user interaction. The Data Plane only processes packets.
+
+3.  **State is Centralized and Explicit:** The Supervisor is the single source of truth for configuration (D18). Data plane workers operate on replicated state and never modify their own configuration based on the data they process.
+
+4.  **Observability is a First-Class Feature:** Every significant event, especially packet drops, must be counted and exposed as a metric (D27). The state of all critical resources (e.g., buffer pools) must be observable.
+
+5.  **Panic is Not an Error Handling Strategy:** The data plane must be panic-free. All functions must be total, handling every possible input and error condition gracefully (typically via "Drop and Count").
+
+6.  **Comments Explain "Why," Not "What":** The code should be self-evident in what it does. Comments must provide the context and reasoning that the code cannot, such as performance trade-offs or links to specific design decisions.
+
 ## Code Style and Structure
 
 We adhere to standard, idiomatic Rust conventions. The primary goal is to write code that is clear, concise, and easy for other developers to understand.
