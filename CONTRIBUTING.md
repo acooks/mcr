@@ -24,6 +24,18 @@ Beyond the mechanical checks for formatting and linting, this project adheres to
 
 We adhere to standard, idiomatic Rust conventions. The primary goal is to write code that is clear, concise, and easy for other developers to understand.
 
+### Module Structure
+
+The project's module structure directly mirrors the multi-process architecture to ensure a clear separation of concerns.
+
+-   **`main.rs` (Binary Entry Point):** Responsible only for parsing arguments, initializing the environment, and launching the Supervisor Process.
+-   **`supervisor.rs`:** Contains all logic for the privileged Supervisor Process, including lifecycle management of worker processes, privileged operations, and handling network interface changes.
+-   **`control_plane.rs`:** Contains all logic for the unprivileged Control Plane Process, including managing the JSON-RPC Unix socket and communicating with the Supervisor.
+-   **`data_plane.rs`:** Contains all logic for the unprivileged Data Plane Worker Processes. This is the performance-critical "hot path" for packet processing.
+-   **`lib.rs` (Shared Library Crate):** Defines all shared data structures, types, and constants used across the different processes (e.g., `ForwardingRule`, `Command`, `Response`).
+
+This layout makes the codebase easier to navigate and reinforces the architectural separation of concerns.
+
 ### Formatting
 
 All Rust code in this repository is formatted using `rustfmt`. Before committing any changes, please ensure your code is formatted by running:
