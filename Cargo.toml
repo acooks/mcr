@@ -20,6 +20,13 @@ sysinfo = "0.30.12"
 tokio = { version = "1.37.0", features = ["full"] }
 tokio-uring = "0.5.0"
 
+[dev-dependencies]
+assert_cmd = "2.0"
+
+[features]
+default = []
+integration_test = []
+
 [[bin]]
 name = "multicast_relay"
 path = "src/main.rs"

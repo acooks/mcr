@@ -35,12 +35,14 @@ pub async fn control_plane_task(
             let response = match command {
                 Ok(cmd) => match cmd {
                     Command::AddRule {
+                        input_interface,
                         input_group,
                         input_port,
                         outputs,
                         dtls_enabled,
                     } => {
                         let rule = ForwardingRule {
+                            input_interface,
                             input_group,
                             input_port,
                             outputs,

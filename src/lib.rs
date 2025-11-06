@@ -15,6 +15,7 @@ pub struct OutputDestination {
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub enum Command {
     AddRule {
+        input_interface: String,
         input_group: Ipv4Addr,
         input_port: u16,
         outputs: Vec<OutputDestination>,
@@ -39,6 +40,7 @@ pub enum Response {
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Hash)]
 pub struct ForwardingRule {
+    pub input_interface: String,
     pub input_group: Ipv4Addr,
     pub input_port: u16,
     pub outputs: Vec<OutputDestination>,

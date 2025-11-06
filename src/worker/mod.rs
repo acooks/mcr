@@ -61,6 +61,7 @@ pub async fn run(user: String, group: String) -> Result<()> {
         args.output_interface,
     ) {
         Some(ForwardingRule {
+            input_interface: args.input_interface_name.clone().unwrap(),
             input_group: ig,
             input_port: ip,
             outputs: vec![OutputDestination {

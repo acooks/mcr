@@ -20,6 +20,8 @@ enum CliCommand {
     /// Add a new forwarding rule
     Add {
         #[arg(long)]
+        input_interface: String,
+        #[arg(long)]
         input_group: Ipv4Addr,
         #[arg(long)]
         input_port: u16,
@@ -80,10 +82,12 @@ async fn main() -> Result<()> {
 
     let command = match args.command {
         CliCommand::Add {
+            input_interface,
             input_group,
             input_port,
             outputs,
         } => Command::AddRule {
+            input_interface,
             input_group,
             input_port,
             outputs,
