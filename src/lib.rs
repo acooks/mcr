@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::net::Ipv4Addr;
 
-
+pub mod supervisor;
+pub mod worker;
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Hash)]
 pub struct OutputDestination {
@@ -62,7 +63,8 @@ pub enum RelayCommand {
         input_group: Ipv4Addr,
         input_port: u16,
     },
-}#[cfg(test)]
+}
+#[cfg(test)]
 mod tests {
     use super::*;
 

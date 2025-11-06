@@ -1,10 +1,8 @@
 use anyhow::Result;
 use clap::Parser;
+use multicast_relay::OutputDestination;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
-use tokio::net::UnixStream;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use multicast_relay::{Command, Response, OutputDestination};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -46,29 +44,58 @@ fn parse_output_destination(s: &str) -> Result<OutputDestination, String> {
     if parts.len() != 3 && parts.len() != 4 {
         return Err("Invalid format. Expected group:port:interface[:dtls]".to_string());
     }
-    let group = parts[0].parse().map_err(|e| format!("Invalid group IP: {}", e))?;
-    let port = parts[1].parse().map_err(|e| format!("Invalid port: {}", e))?;
-    let interface = parts[2].parse().map_err(|e| format!("Invalid interface IP: {}", e))?;
+    let group = parts[0]
+        .parse()
+        .map_err(|e| format!("Invalid group IP: {}", e))?;
+    let port = parts[1]
+        .parse()
+        .map_err(|e| format!("Invalid port: {}", e))?;
+    let interface = parts[2]
+        .parse()
+        .map_err(|e| format!("Invalid interface IP: {}", e))?;
     let dtls_enabled = if parts.len() == 4 {
-        parts[3].parse().map_err(|e| format!("Invalid dtls flag: {}", e))?
+        parts[3]
+            .parse()
+            .map_err(|e| format!("Invalid dtls flag: {}", e))?
     } else {
         false
     };
-    Ok(OutputDestination { group, port, interface, dtls_enabled })
+    Ok(OutputDestination {
+        group,
+        port,
+        interface,
+        dtls_enabled,
+    })
 }
 
 #[cfg(not(test))]
 #[tokio::main]
 async fn main() -> Result<()> {
+    use clap::Parser;
+    use multicast_relay::{Command, Response};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::UnixStream;
+
     let args = Args::parse();
 
     let command = match args.command {
-        CliCommand::Add { input_group, input_port, outputs } => {
-            Command::AddRule { input_group, input_port, outputs, dtls_enabled: false }
-        }
-        CliCommand::Remove { input_group, input_port } => {
-            Command::RemoveRule { input_group, input_port }
-        }
+        CliCommand::Add {
+            input_group,
+            input_port,
+            outputs,
+        } => Command::AddRule {
+            input_group,
+            input_port,
+            outputs,
+            dtls_enabled: false,
+        },
+        CliCommand::Remove {
+            input_group,
+            input_port,
+        } => Command::RemoveRule {
+            input_group,
+            input_port,
+        },
         CliCommand::List => Command::ListRules,
         CliCommand::Stats => Command::GetStats,
     };
@@ -97,15 +124,15 @@ mod tests {
         assert_eq!(dest.group, "224.0.0.1".parse::<Ipv4Addr>().unwrap());
         assert_eq!(dest.port, 5000);
         assert_eq!(dest.interface, "127.0.0.1".parse::<Ipv4Addr>().unwrap());
-        assert_eq!(dest.dtls_enabled, false);
+        assert!(!dest.dtls_enabled);
 
         let s = "224.0.0.1:5000:127.0.0.1:true";
         let dest = parse_output_destination(s).unwrap();
-        assert_eq!(dest.dtls_enabled, true);
+        assert!(dest.dtls_enabled);
 
         let s = "224.0.0.1:5000:127.0.0.1:false";
         let dest = parse_output_destination(s).unwrap();
-        assert_eq!(dest.dtls_enabled, false);
+        assert!(!dest.dtls_enabled);
 
         let s = "invalid";
         assert!(parse_output_destination(s).is_err());

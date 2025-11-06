@@ -1,9 +1,5 @@
-use std::net::{Ipv4Addr, SocketAddrV4};
-use anyhow::Result;
 use clap::Parser;
-use socket2::{Domain, Protocol, Socket, Type};
-use tokio::net::UdpSocket;
-use tokio::time::{self, Duration};
+use std::net::Ipv4Addr;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -31,7 +27,12 @@ struct Args {
 
 #[cfg(not(test))]
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> anyhow::Result<()> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    use std::net::SocketAddrV4;
+    use tokio::net::UdpSocket;
+    use tokio::time::{self, Duration};
+
     let args = Args::parse();
 
     let dest_addr = SocketAddrV4::new(args.group, args.port);
