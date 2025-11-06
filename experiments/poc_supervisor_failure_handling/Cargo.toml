@@ -1,8 +1,0 @@
-[package]
-name = "poc_supervisor_failure_handling"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-tokio = { version = "1", features = ["full"] }
-anyhow = "1"
