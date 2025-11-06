@@ -6,16 +6,18 @@ edition = "2024"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-anyhow = "1.0.82"
+anyhow = "1.0.86"
 clap = { version = "4.5.4", features = ["derive"] }
-serde = { version = "1.0.197", features = ["derive"] }
-serde_json = "1.0.115"
-socket2 = "0.5.6"
-tokio = { version = "1.37.0", features = ["full"] }
+libc = "0.2.155"
 metrics = "0.22.0"
 metrics-exporter-prometheus = "0.13.0"
-sysinfo = "0.30.11"
-privdrop = "0.5.6"
+privdrop = "0.5.0"
+serde = { version = "1.0.203", features = ["derive"] }
+serde_json = "1.0.117"
+socket2 = "0.5.7"
+sysinfo = "0.30.12"
+tokio = { version = "1.37.0", features = ["full"] }
+tokio-uring = "0.5.0"
 
 [[bin]]
 name = "multicast_relay"
