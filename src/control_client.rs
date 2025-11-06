@@ -4,7 +4,7 @@ use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use tokio::net::UnixStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use multicast_relay::control_plane::{Command, Response, OutputDestination};
+use multicast_relay::{Command, Response, OutputDestination};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -57,6 +57,7 @@ fn parse_output_destination(s: &str) -> Result<OutputDestination, String> {
     Ok(OutputDestination { group, port, interface, dtls_enabled })
 }
 
+#[cfg(not(test))]
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();

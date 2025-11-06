@@ -29,6 +29,7 @@ struct Args {
     size: usize,
 }
 
+#[cfg(not(test))]
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
