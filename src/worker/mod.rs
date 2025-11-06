@@ -18,6 +18,7 @@ use self::control_plane::control_plane_task;
 use self::stats::{monitoring_task, stats_aggregator_task};
 use crate::{FlowStats, ForwardingRule, OutputDestination, RelayCommand};
 use clap::Parser;
+use tokio::task::{self, JoinHandle};
 
 type SharedFlows = Arc<Mutex<HashMap<(Ipv4Addr, u16), (ForwardingRule, FlowStats)>>>;
 
@@ -76,60 +77,71 @@ pub async fn run(user: String, group: String) -> Result<()> {
 
     let control_socket_path = Path::new("/tmp/multicast_relay_control.sock");
 
-    let relay_task = async {
-        let mut flow_tasks = HashMap::new();
-        if let (Some(rule), Some(fd)) = (initial_rule, &ingress_socket_fd) {
-            let stats_tx_clone = stats_tx.clone();
-            let key = (rule.input_group, rule.input_port);
-            let fd_clone = Arc::clone(fd);
-            let task = tokio::spawn(async move {
-                if let Err(e) =
-                    data_plane::run_flow_task(rule.clone(), fd_clone, stats_tx_clone).await
-                {
-                    eprintln!("Flow task failed: {}", e);
-                }
-            });
-            flow_tasks.insert(key, task);
-        }
+    // Spawn the static, long-running tasks locally.
+    task::spawn_local(stats_aggregator_task(stats_rx, shared_flows.clone()));
+    task::spawn_local(control_plane_task(
+        control_socket_path,
+        relay_command_tx.clone(),
+        shared_flows.clone(),
+    ));
+    task::spawn_local(monitoring_task(
+        shared_flows.clone(),
+        args.reporting_interval,
+    ));
 
-        while let Some(command) = relay_command_rx.recv().await {
+    // Handle for the dynamic, replaceable flow task.
+    let mut flow_task_handle: Option<JoinHandle<()>> = None;
+
+    // Start the initial flow task if a rule was provided via CLI args.
+    if let (Some(rule), Some(fd)) = (initial_rule, &ingress_socket_fd) {
+        let stats_tx_clone = stats_tx.clone();
+        let fd_clone = Arc::clone(fd);
+        flow_task_handle = Some(task::spawn_local(async move {
+            if let Err(e) = data_plane::run_flow_task(rule.clone(), fd_clone, stats_tx_clone).await
+            {
+                eprintln!("Flow task failed: {}", e);
+            }
+        }));
+    }
+
+    // Main event loop: listen for commands to manage the flow task.
+    loop {
+        if let Some(command) = relay_command_rx.recv().await {
             match command {
                 RelayCommand::AddRule(rule) => {
-                    let key = (rule.input_group, rule.input_port);
-                    if let Some(existing_task) = flow_tasks.remove(&key) {
-                        existing_task.abort();
+                    println!("Received AddRule command.");
+                    if let Some(handle) = flow_task_handle.take() {
+                        println!("Aborting previous flow task.");
+                        handle.abort();
                     }
                     if let Some(fd) = &ingress_socket_fd {
+                        println!("Spawning new flow task.");
                         let stats_tx_clone = stats_tx.clone();
                         let fd_clone = Arc::clone(fd);
-                        let task = tokio::spawn(async move {
+                        flow_task_handle = Some(task::spawn_local(async move {
                             if let Err(e) =
                                 data_plane::run_flow_task(rule.clone(), fd_clone, stats_tx_clone)
                                     .await
                             {
                                 eprintln!("Flow task failed: {}", e);
                             }
-                        });
-                        flow_tasks.insert(key, task);
+                        }));
                     }
                 }
-                RelayCommand::RemoveRule {
-                    input_group,
-                    input_port,
-                } => {
-                    if let Some(task) = flow_tasks.remove(&(input_group, input_port)) {
-                        task.abort();
+                RelayCommand::RemoveRule { .. } => {
+                    println!("Received RemoveRule command.");
+                    if let Some(handle) = flow_task_handle.take() {
+                        println!("Aborting flow task.");
+                        handle.abort();
                     }
                 }
             }
+        } else {
+            // The command channel was closed, which means the control plane
+            // task has died. We should exit gracefully.
+            println!("Command channel closed. Worker shutting down.");
+            break;
         }
-    };
-
-    tokio::select! {
-        _ = relay_task => {},
-        _ = stats_aggregator_task(stats_rx, shared_flows.clone()) => {},
-        _ = control_plane_task(control_socket_path, relay_command_tx, shared_flows.clone()) => {},
-        _ = monitoring_task(shared_flows.clone(), args.reporting_interval) => {},
     }
 
     Ok(())

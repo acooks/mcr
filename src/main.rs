@@ -31,7 +31,14 @@ async fn main() -> Result<()> {
             supervisor::run().await?;
         }
         Command::Worker { user, group } => {
-            worker::run(user, group).await?;
+            // D1, D7: The worker process uses a `tokio-uring` runtime
+            // to drive the high-performance data plane.
+            tokio_uring::start(async {
+                if let Err(e) = worker::run(user, group).await {
+                    eprintln!("Worker process failed: {}", e);
+                    std::process::exit(1);
+                }
+            });
         }
     }
 

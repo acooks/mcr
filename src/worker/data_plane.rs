@@ -6,6 +6,7 @@ use std::mem;
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use tokio_uring::fs::File;
 
 pub fn setup_ingress_socket(interface_name: &str) -> Result<OwnedFd> {
     let if_name = CString::new(interface_name)?;
@@ -52,18 +53,16 @@ pub async fn run_flow_task(
     raw_fd: Arc<OwnedFd>,
     _stats_tx: mpsc::Sender<(ForwardingRule, FlowStats)>,
 ) -> Result<()> {
-    let mut buf = vec![0u8; 2048]; // MTU
+    let uring_file = unsafe { File::from_raw_fd(raw_fd.as_raw_fd()) };
+    let mut buffer = vec![0u8; 2048]; // MTU
+
     loop {
-        let len = unsafe {
-            libc::read(
-                raw_fd.as_raw_fd(),
-                buf.as_mut_ptr() as *mut libc::c_void,
-                buf.len(),
-            )
-        };
-        if len < 0 {
-            return Err(anyhow::anyhow!("Read from raw socket failed"));
+        let (res, b) = uring_file.read_at(buffer, 0).await;
+        buffer = b;
+        let bytes_read = res?;
+
+        if bytes_read > 0 {
+            // Packet processing logic will go here.
         }
-        // Packet processing logic will go here.
     }
 }
