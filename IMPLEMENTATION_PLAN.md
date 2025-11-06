@@ -23,10 +23,10 @@ This document is the strategic roadmap for building the `multicast-relay` applic
 2.  **Implement Basic Workers:** Create skeleton `data_plane.rs` and `control_plane.rs` modules that can be spawned and monitored.
 3.  **Implement Basic IPC:** Establish the MPSC channels for Supervisor-to-worker communication.
 4.  **Write Lifecycle Integration Test:** Create a new integration test in the `tests/` directory. This test will:
-    -   Start the `multicast_relay` binary as a child process.
-    -   Verify that the Supervisor and its worker processes are running.
-    -   Send a `SIGKILL` signal to one of the worker processes.
-    -   Verify that the Supervisor detects the failure and successfully restarts the worker.
+    - Start the `multicast_relay` binary as a child process.
+    - Verify that the Supervisor and its worker processes are running.
+    - Send a `SIGKILL` signal to one of the worker processes.
+    - Verify that the Supervisor detects the failure and successfully restarts the worker.
 
 **Exit Criteria:** The Supervisor can spawn and monitor worker processes. The lifecycle integration test passes, proving the self-healing mechanism works.
 
@@ -37,10 +37,10 @@ This document is the strategic roadmap for building the `multicast-relay` applic
 1.  **Implement Control Plane Server (`control_plane.rs`):** Implement the Unix Domain Socket listener and JSON-RPC handling.
 2.  **Implement Supervisor Rule Management:** Implement the logic in the Supervisor to maintain the master rule list and dispatch commands to workers (D23).
 3.  **Write Control Plane Integration Test:** Create a new integration test that uses the `control_client` binary to communicate with a live `multicast_relay` process. The test must:
-    -   Add a new forwarding rule and verify the command succeeds.
-    -   List the current rules and verify the newly added rule is present and correct.
-    -   Remove the forwarding rule and verify the command succeeds.
-    -   List the rules again and verify the rule has been removed.
+    - Add a new forwarding rule and verify the command succeeds.
+    - List the current rules and verify the newly added rule is present and correct.
+    - Remove the forwarding rule and verify the command succeeds.
+    - List the rules again and verify the rule has been removed.
 
 **Exit Criteria:** The `control_client` can successfully add, list, and remove rules on a running `multicast_relay` instance, as verified by a passing integration test.
 
@@ -49,17 +49,17 @@ This document is the strategic roadmap for building the `multicast-relay` applic
 **Goal:** Implement the core packet processing logic in a testable, piecemeal fashion, culminating in a full end-to-end data flow test.
 
 1.  **Unit Test Data Plane Components:** Before building the `io_uring` loop, create and unit-test the core components in isolation:
-    -   **Buffer Pool:** Implement the core-local buffer pool (D15) and write unit tests to verify its allocation, deallocation, and exhaustion logic.
-    -   **Packet Parsing:** Implement any necessary packet header parsing logic and write unit tests using static, pre-captured packet data.
-    -   **Rule Lookup:** Write unit tests for the hash map lookup logic (D11).
+    - **Buffer Pool:** Implement the core-local buffer pool (D15) and write unit tests to verify its allocation, deallocation, and exhaustion logic.
+    - **Packet Parsing:** Implement any necessary packet header parsing logic and write unit tests using static, pre-captured packet data.
+    - **Rule Lookup:** Write unit tests for the hash map lookup logic (D11).
 2.  **Implement Data Plane I/O Loop:** Assemble the tested components into the main `tokio-uring` processing loop in `data_plane.rs`.
 3.  **Write End-to-End Data Flow Test:** Create a comprehensive test script (`test_high_load.sh` or similar) that:
-    -   Starts the `multicast_relay` application.
-    -   Starts a separate UDP listener to receive the relayed traffic.
-    -   Uses the `control_client` to add a valid forwarding rule.
-    -   Uses the `traffic_generator` to send a known quantity of multicast packets to the input address.
-    -   Verifies that the UDP listener receives the correct number of packets at the correct output address.
-    -   Uses the `control_client` to remove the rule and verifies that traffic stops.
+    - Starts the `multicast_relay` application.
+    - Starts a separate UDP listener to receive the relayed traffic.
+    - Uses the `control_client` to add a valid forwarding rule.
+    - Uses the `traffic_generator` to send a known quantity of multicast packets to the input address.
+    - Verifies that the UDP listener receives the correct number of packets at the correct output address.
+    - Uses the `control_client` to remove the rule and verifies that traffic stops.
 
 **Exit Criteria:** All data plane components are unit-tested. The end-to-end data flow test passes, proving the relay can successfully forward traffic according to a dynamically configured rule.
 
@@ -68,14 +68,14 @@ This document is the strategic roadmap for building the `multicast-relay` applic
 **Goal:** Layer in the remaining features, ensuring each is accompanied by its own set of verifying tests.
 
 1.  **Implement & Test Statistics:**
-    -   Implement the statistics collection and aggregation logic (D14).
-    -   Write unit tests for the `StatsAggregator` logic.
-    -   Extend the end-to-end data flow test to query the `control_client stats` endpoint and verify that the reported packet/byte counts are accurate.
+    - Implement the statistics collection and aggregation logic (D14).
+    - Write unit tests for the `StatsAggregator` logic.
+    - Extend the end-to-end data flow test to query the `control_client stats` endpoint and verify that the reported packet/byte counts are accurate.
 2.  **Implement & Test Resilience:**
-    -   Implement the Netlink listener in the Supervisor (D19).
-    -   Create a test script that uses `ip` commands to bring an interface down and then up, while using the `control_client` to verify that the corresponding forwarding rules are correctly paused and resumed.
+    - Implement the Netlink listener in the Supervisor (D19).
+    - Create a test script that uses `ip` commands to bring an interface down and then up, while using the `control_client` to verify that the corresponding forwarding rules are correctly paused and resumed.
 3.  **Implement & Test Advanced Observability:**
-    -   Implement on-demand packet tracing (D28).
-    -   Extend an integration test to enable tracing on a rule, send a single packet, fetch the trace via the `control_client`, and verify its contents.
+    - Implement on-demand packet tracing (D28).
+    - Extend an integration test to enable tracing on a rule, send a single packet, fetch the trace via the `control_client`, and verify its contents.
 
 **Exit Criteria:** All architectural decisions are implemented and verified by a comprehensive suite of unit, integration, and end-to-end tests.

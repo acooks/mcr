@@ -72,6 +72,7 @@ mod tests {
     #[test]
     fn test_command_serialization() {
         let command = Command::AddRule {
+            input_interface: "eth0".to_string(),
             input_group: "224.0.0.1".parse().unwrap(),
             input_port: 5000,
             outputs: vec![OutputDestination {

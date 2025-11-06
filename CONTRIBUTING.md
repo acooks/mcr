@@ -28,11 +28,11 @@ We adhere to standard, idiomatic Rust conventions. The primary goal is to write 
 
 The project's module structure directly mirrors the multi-process architecture to ensure a clear separation of concerns.
 
--   **`main.rs` (Binary Entry Point):** Responsible only for parsing arguments, initializing the environment, and launching the Supervisor Process.
--   **`supervisor.rs`:** Contains all logic for the privileged Supervisor Process, including lifecycle management of worker processes, privileged operations, and handling network interface changes.
--   **`control_plane.rs`:** Contains all logic for the unprivileged Control Plane Process, including managing the JSON-RPC Unix socket and communicating with the Supervisor.
--   **`data_plane.rs`:** Contains all logic for the unprivileged Data Plane Worker Processes. This is the performance-critical "hot path" for packet processing.
--   **`lib.rs` (Shared Library Crate):** Defines all shared data structures, types, and constants used across the different processes (e.g., `ForwardingRule`, `Command`, `Response`).
+- **`main.rs` (Binary Entry Point):** Responsible only for parsing arguments, initializing the environment, and launching the Supervisor Process.
+- **`supervisor.rs`:** Contains all logic for the privileged Supervisor Process, including lifecycle management of worker processes, privileged operations, and handling network interface changes.
+- **`control_plane.rs`:** Contains all logic for the unprivileged Control Plane Process, including managing the JSON-RPC Unix socket and communicating with the Supervisor.
+- **`data_plane.rs`:** Contains all logic for the unprivileged Data Plane Worker Processes. This is the performance-critical "hot path" for packet processing.
+- **`lib.rs` (Shared Library Crate):** Defines all shared data structures, types, and constants used across the different processes (e.g., `ForwardingRule`, `Command`, `Response`).
 
 This layout makes the codebase easier to navigate and reinforces the architectural separation of concerns.
 
@@ -60,9 +60,9 @@ This command will run `clippy` on all targets (the library, binaries, tests, etc
 
 We follow the official [Rust API Guidelines](https://rust-lang.github.io/api-guidelines/naming.html) for all naming conventions. In summary:
 
--   **Modules, crates, and variables:** `snake_case`
--   **Types (structs, enums, traits):** `PascalCase`
--   **Constants:** `UPPER_SNAKE_CASE`
+- **Modules, crates, and variables:** `snake_case`
+- **Types (structs, enums, traits):** `PascalCase`
+- **Constants:** `UPPER_SNAKE_CASE`
 
 ### Error Handling
 
@@ -82,14 +82,16 @@ This project does not prescribe specific developer environment setups or pin exa
 
 All new features and bug fixes must be accompanied by tests.
 
--   **Unit Tests:** Should be placed in the same file as the code they are testing, within a `#[cfg(test)]` module.
--   **Integration Tests:** Should be placed in the `tests/` directory.
+- **Unit Tests:** Should be placed in the same file as the code they are testing, within a `#[cfg(test)]` module.
+- **Integration Tests:** Should be placed in the `tests/` directory.
 
 You can run all tests using:
 
 ```bash
-cargo test
+cargo test --features integration_test
 ```
+
+**Note:** The `--features integration_test` flag is required to enable the helper functions used by the integration tests in the `tests/` directory.
 
 ## Enforcement
 

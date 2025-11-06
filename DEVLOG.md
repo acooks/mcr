@@ -1,6 +1,6 @@
 # Multicast Relay - Development Log
 
-This document tracks the development plan, decisions, and actions taken on the `multicast_relay` project. It is a chronological, historical record of the project's evolution, ensuring the development process is auditable and recoverable. It captures *what* was done and *why*.
+This document tracks the development plan, decisions, and actions taken on the `multicast_relay` project. It is a chronological, historical record of the project's evolution, ensuring the development process is auditable and recoverable. It captures _what_ was done and _why_.
 
 ## Project Roadmap
 

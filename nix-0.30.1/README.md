@@ -1,4 +1,4 @@
-# Rust bindings to *nix APIs
+# Rust bindings to \*nix APIs
 
 [![Cirrus Build Status](https://api.cirrus-ci.com/github/nix-rust/nix.svg)](https://cirrus-ci.com/github/nix-rust/nix)
 [![crates.io](https://img.shields.io/crates/v/nix.svg)](https://crates.io/crates/nix)
@@ -6,15 +6,14 @@
 ![maintenance-status](https://img.shields.io/badge/maintenance-actively--developed-brightgreen.svg)
 [![msrv](https://img.shields.io/badge/msrv-1.69-blue?style=flat-square&logo=rust)](https://www.rust-lang.org)
 
-Nix seeks to provide friendly bindings to various *nix platform APIs (Linux, Darwin,
+Nix seeks to provide friendly bindings to various \*nix platform APIs (Linux, Darwin,
 ...). The goal is to not provide a 100% unified interface, but to unify
 what can be while still providing platform specific APIs.
 
 For many system APIs, Nix provides a safe alternative to the unsafe APIs
-exposed by the [libc crate](https://github.com/rust-lang/libc).  This is done by
+exposed by the [libc crate](https://github.com/rust-lang/libc). This is done by
 wrapping the libc functionality with types/abstractions that enforce legal/safe
 usage.
-
 
 As an example of what Nix provides, examine the differences between what is
 exposed by libc and nix for the
@@ -36,15 +35,15 @@ platforms supported by [libc](https://github.com/rust-lang/libc), only some
 platforms are actively supported due to either technical or manpower
 limitations. Support for platforms is split into three tiers:
 
-  * Tier 1 - Builds and tests for this target are run in CI. Failures of either
-             block the inclusion of new code.
-  * Tier 2 - Builds for this target are run in CI. Failures during the build
-             blocks the inclusion of new code. Tests may be run, but failures
-             in tests don't block the inclusion of new code.
-  * Tier 3 - Builds for this target are run in CI. Failures during the build
-             *do not* necessarily block the inclusion of new code.  That is, at
-             our discretion a Tier 3 target may be dropped at any time, if it
-             would otherwise block development.
+- Tier 1 - Builds and tests for this target are run in CI. Failures of either
+  block the inclusion of new code.
+- Tier 2 - Builds for this target are run in CI. Failures during the build
+  blocks the inclusion of new code. Tests may be run, but failures
+  in tests don't block the inclusion of new code.
+- Tier 3 - Builds for this target are run in CI. Failures during the build
+  _do not_ necessarily block the inclusion of new code. That is, at
+  our discretion a Tier 3 target may be dropped at any time, if it
+  would otherwise block development.
 
 Platforms not listed are supported on a best-effort basis, relying on our users
 to report any problems.
@@ -110,12 +109,12 @@ The following targets are supported by `nix`:
 
 ## Minimum Supported Rust Version (MSRV)
 
-nix is supported on Rust 1.69 and higher.  Its MSRV will not be
+nix is supported on Rust 1.69 and higher. Its MSRV will not be
 changed in the future without bumping the major or minor version.
 
 ## Contributing
 
-Contributions are very welcome.  Please See [CONTRIBUTING](CONTRIBUTING.md) for
+Contributions are very welcome. Please See [CONTRIBUTING](CONTRIBUTING.md) for
 additional details.
 
 Feel free to join us in [the nix-rust/nix](https://discord.com/invite/rkBeJUsmyd) channel on Discord to
@@ -123,4 +122,4 @@ discuss `nix` development.
 
 ## License
 
-Nix is licensed under the MIT license.  See [LICENSE](LICENSE) for more details.
+Nix is licensed under the MIT license. See [LICENSE](LICENSE) for more details.

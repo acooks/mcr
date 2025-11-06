@@ -11,6 +11,7 @@ However, this creates a conflict with the standard `tokio::spawn` function, whic
 The correct solution is to use `tokio::task::spawn_local`. This function spawns a future that will only be run on the current thread, which is exactly what the `tokio-uring` runtime provides.
 
 This PoC demonstrates the correct pattern for:
+
 1.  Starting a `tokio-uring` runtime.
 2.  Using `tokio::task::spawn_local` to run multiple, long-lived, concurrent background tasks.
 3.  Using a `tokio::select!` loop to manage the application state.

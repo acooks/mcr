@@ -28,15 +28,16 @@ async fn main() -> Result<()> {
 
     match args.command {
         Command::Supervisor => {
-                            if let Err(e) = supervisor::run(
-                                || async { supervisor::spawn_control_plane_worker() },
-                                || supervisor::spawn_data_plane_worker(0),
-                            )
-                            .await
-                            {
-                                eprintln!("[Supervisor] Error: {}", e);
-                                std::process::exit(1);
-                            }        }
+            if let Err(e) = supervisor::run(
+                || async { supervisor::spawn_control_plane_worker() },
+                || supervisor::spawn_data_plane_worker(0),
+            )
+            .await
+            {
+                eprintln!("[Supervisor] Error: {}", e);
+                std::process::exit(1);
+            }
+        }
         Command::Worker { user, group } => {
             // D1, D7: The worker process uses a `tokio-uring` runtime
             // to drive the high-performance data plane.
