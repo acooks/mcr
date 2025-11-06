@@ -66,7 +66,7 @@ pub async fn run(user: String, group: String) -> Result<()> {
             outputs: vec![OutputDestination {
                 group: og,
                 port: op,
-                interface: oi,
+                interface: oi.to_string(),
                 dtls_enabled: false,
             }],
             dtls_enabled: false,

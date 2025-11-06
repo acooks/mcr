@@ -8,8 +8,7 @@ pub mod worker;
 pub struct OutputDestination {
     pub group: Ipv4Addr,
     pub port: u16,
-    pub interface: Ipv4Addr,
-    #[serde(default)]
+    pub interface: String,
     pub dtls_enabled: bool,
 }
 

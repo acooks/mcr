@@ -123,7 +123,7 @@ mod tests {
         let dest = parse_output_destination(s).unwrap();
         assert_eq!(dest.group, "224.0.0.1".parse::<Ipv4Addr>().unwrap());
         assert_eq!(dest.port, 5000);
-        assert_eq!(dest.interface, "127.0.0.1".parse::<Ipv4Addr>().unwrap());
+        assert_eq!(dest.interface, "127.0.0.1".to_string());
         assert!(!dest.dtls_enabled);
 
         let s = "224.0.0.1:5000:127.0.0.1:true";
