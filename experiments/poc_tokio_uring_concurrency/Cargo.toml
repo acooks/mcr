@@ -1,0 +1,9 @@
+[package]
+name = "poc_tokio_uring_concurrency"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.86"
+tokio = { version = "1.37.0", features = ["full"] }
+tokio-uring = "0.5.0"
