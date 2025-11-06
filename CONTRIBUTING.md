@@ -1,6 +1,6 @@
 # Contributing to Multicast Relay
 
-First off, thank you for considering contributing. This project is a high-performance, security-sensitive application, and as such, we adhere to a strict set of coding standards to ensure the code is as correct, readable, and maintainable as possible.
+First off, thank you for considering contributing. This document is the rulebook for all contributions, outlining the standards, procedures, and quality gates that all code changes must adhere to. This project is a high-performance, security-sensitive application, and as such, we adhere to a strict set of coding standards to ensure the code is as correct, readable, and maintainable as possible.
 
 This document outlines the code style, structure, and methods we use to promote good practices.
 
@@ -73,6 +73,10 @@ For specific, well-defined errors within a library component, defining a custom 
 ### Dependencies
 
 All dependencies are managed through `Cargo.toml`. When adding a new dependency, please choose it carefully, considering its performance, security implications, and maintenance status.
+
+## Developer Environment and Compatibility
+
+This project does not prescribe specific developer environment setups or pin exact package versions beyond what is strictly necessary for `Cargo.toml`. Developers are free to configure their environments as they see fit. Compatibility issues that arise due to environment differences or dependency versions will be addressed on a case-by-case basis, either by fixing bugs or explicitly identifying compatibility requirements.
 
 ## Testing
 

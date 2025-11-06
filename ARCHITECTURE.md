@@ -1,6 +1,6 @@
 # Multicast Relay - Architecture
 
-This document describes the architecture of the `multicast_relay` application. It is the definitive guide to the system's design, components, and core technical decisions.
+This document describes the architecture of the `multicast_relay` application. It is the definitive, up-to-date guide to the system's design, components, and core technical decisions. As the project evolves, this document must be updated to reflect the current state of the implementation.
 
 ## 1. Overview
 

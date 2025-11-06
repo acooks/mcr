@@ -12,6 +12,17 @@ The application is built for performance, using an asynchronous, parallel archit
 - **Real-time Monitoring:** Built-in monitoring for packet rates, byte rates, CPU usage, and memory usage, available via console output and a Prometheus exporter.
 - **Standalone Tools:** Includes a high-performance traffic generator for load testing and a control client for interacting with the relay.
 
+## Project Documentation
+
+This project maintains several key documents to guide development and understanding:
+
+- **`README.md` (This file):** Provides a high-level overview of the project, its features, and instructions for building and running the application.
+- **`ARCHITECTURE.md`:** The definitive, up-to-date guide to the system's design, components, and core technical decisions. This document describes *what* the system is.
+- **`DEVLOG.md`:** A chronological, historical record of the project's evolution, including requirements, design discussions, and implementation progress. This document describes *how* the system came to be.
+- **`CONTRIBUTING.md`:** The rulebook for all contributions, outlining the coding standards, testing requirements, and development principles that must be followed.
+- **`IMPLEMENTATION_PLAN.md`:** The strategic roadmap for building the application. It breaks the work into sequential phases, defining the goals and exit criteria for each step.
+- **`TESTING.md`:** Outlines the project's comprehensive, tiered testing philosophy and strategy, emphasizing unit, integration, and end-to-end testing, as well as the role of prototypes.
+
 ## Components
 
 The project is composed of three binaries:

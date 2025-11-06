@@ -1,78 +1,81 @@
 # Implementation Plan
 
-This document outlines the development roadmap for the `multicast-relay` application, breaking the work into sequential phases.
+This document is the strategic roadmap for building the `multicast-relay` application. It breaks the work into sequential, test-driven phases. Each phase includes specific testing requirements as primary deliverables, not afterthoughts. This plan is the primary reference for tracking progress and ensuring a high-quality, verifiable implementation.
 
-## Phase 1: Stabilize the Baseline & Core Types
+**Core Principle:** We will build this application incrementally, maintaining a high level of automated test coverage (aiming for 90%+) from the start. No feature is complete until it is tested.
 
-**Goal:** Create a compilable, testable foundation with all core data structures defined.
+## Phase 1: Testable Foundation & Core Types
 
-1.  **Define Core Types:** In `lib.rs`, define all the shared data structures as decided in the architecture. This includes:
-    -   `ForwardingRule`
-    -   `OutputDestination`
-    -   `Command` and `Response` enums for the control plane.
-    -   Internal command types for Supervisor-to-worker communication.
-    -   All statistics-related structs.
-2.  **Fix Existing Code:** Refactor the existing placeholder code in `main.rs`, `control_client.rs`, etc., to use these new types.
-3.  **Achieve Compilation:** The primary goal is to get the entire project to a state where `cargo build` and `cargo test` complete successfully, even if the tests do nothing yet.
-4.  **Setup CI:** Implement the CI pipeline (as defined in `CONTRIBUTING.md`) to run `cargo fmt --check`, `cargo clippy`, and `cargo test` on every commit.
+**Goal:** Create a compilable, verifiable foundation with all core data structures fully unit-tested.
 
-**Exit Criteria:** The project compiles without errors or warnings, and the CI pipeline is green.
+1.  **Define Core Types (`lib.rs`):** Define all shared data structures, including `ForwardingRule`, `Command`, `Response`, and all statistics structs.
+2.  **Unit Test Core Types:** Write comprehensive unit tests for all defined types. This must include tests for serialization/deserialization, validation logic, and any other business logic contained within these types.
+3.  **Establish a Testable Baseline:** Refactor all existing placeholder code in `main.rs`, `control_client.rs`, etc., to use the new, tested types. Ensure `cargo build` and `cargo test` complete successfully.
+4.  **Setup CI & Code Coverage:** Implement the CI pipeline as defined in `CONTRIBUTING.md`. Configure it to run `cargo test` and track code coverage, failing the build if coverage for the `lib` crate drops below 90%.
 
-## Phase 2: The Supervisor and Process Management
+**Exit Criteria:** The project compiles without warnings, the CI pipeline is green, and the `lib` crate has at least 90% unit test coverage.
 
-**Goal:** Implement the multi-process architecture and prove that the Supervisor can manage worker lifecycles.
+## Phase 2: Supervisor & Process Lifecycle (Integration Tested)
 
-1.  **Implement Supervisor (`supervisor.rs`):**
-    -   Create the main loop for the Supervisor.
-    -   Implement the logic to spawn unprivileged Data Plane and Control Plane processes.
-    -   Implement the panic-detection and automatic restart logic for worker processes (D18).
-2.  **Implement Basic Workers:** Create skeleton `data_plane.rs` and `control_plane.rs` modules that can be spawned by the Supervisor. Initially, they will just start, print a message, and loop indefinitely.
-3.  **Implement IPC:**
-    -   Establish the MPSC channels for Supervisor-to-worker communication.
-    -   Prove that the Supervisor can send a simple command (e.g., `Ping`) and a worker can receive it.
+**Goal:** Implement the multi-process architecture and prove, through integration testing, that the Supervisor can robustly manage worker lifecycles.
 
-**Exit Criteria:** The main application starts a Supervisor, which in turn spawns and monitors at least one data plane and one control plane process. Basic IPC is functional.
+1.  **Implement Supervisor (`supervisor.rs`):** Implement the logic to spawn, monitor, and automatically restart the unprivileged Data Plane and Control Plane processes (D18).
+2.  **Implement Basic Workers:** Create skeleton `data_plane.rs` and `control_plane.rs` modules that can be spawned and monitored.
+3.  **Implement Basic IPC:** Establish the MPSC channels for Supervisor-to-worker communication.
+4.  **Write Lifecycle Integration Test:** Create a new integration test in the `tests/` directory. This test will:
+    -   Start the `multicast_relay` binary as a child process.
+    -   Verify that the Supervisor and its worker processes are running.
+    -   Send a `SIGKILL` signal to one of the worker processes.
+    -   Verify that the Supervisor detects the failure and successfully restarts the worker.
 
-## Phase 3: The Control Plane
+**Exit Criteria:** The Supervisor can spawn and monitor worker processes. The lifecycle integration test passes, proving the self-healing mechanism works.
 
-**Goal:** Build a functional control plane that can manage rules, but without a working data plane yet.
+## Phase 3: Control Plane (End-to-End Tested)
 
-1.  **Implement Control Plane Server (`control_plane.rs`):**
-    -   Implement the Unix Domain Socket listener.
-    -   Implement the JSON-RPC command parsing and response serialization.
-    -   Implement the logic to forward commands to the Supervisor (e.g., `AddRule`, `RemoveRule`).
-2.  **Implement Supervisor Rule Management:**
-    -   In the Supervisor, implement the logic to maintain the master rule list.
-    -   Implement the rule-to-core assignment logic (D23).
-    -   Prove that an `AddRule` command from the control client results in the Supervisor sending the correct `AddRuleInternal` command to the correct (mocked) data plane worker.
-3.  **Update Control Client:** Make the `control_client.rs` binary a fully functional tool for sending all supported commands.
+**Goal:** Build a functional control plane, verified by end-to-end tests using the `control_client`.
 
-**Exit Criteria:** The `control_client` can add, list, and remove rules. The Supervisor's internal state correctly reflects these changes.
+1.  **Implement Control Plane Server (`control_plane.rs`):** Implement the Unix Domain Socket listener and JSON-RPC handling.
+2.  **Implement Supervisor Rule Management:** Implement the logic in the Supervisor to maintain the master rule list and dispatch commands to workers (D23).
+3.  **Write Control Plane Integration Test:** Create a new integration test that uses the `control_client` binary to communicate with a live `multicast_relay` process. The test must:
+    -   Add a new forwarding rule and verify the command succeeds.
+    -   List the current rules and verify the newly added rule is present and correct.
+    -   Remove the forwarding rule and verify the command succeeds.
+    -   List the rules again and verify the rule has been removed.
 
-## Phase 4: The Data Plane (Ingress & Egress)
+**Exit Criteria:** The `control_client` can successfully add, list, and remove rules on a running `multicast_relay` instance, as verified by a passing integration test.
 
-**Goal:** Implement the core packet processing loop. This is the most complex phase.
+## Phase 4: Data Plane (Test-Driven Implementation)
 
-1.  **Implement Privileged Socket Creation:** In the Supervisor, implement the logic to create `AF_PACKET` "helper" (D6) and main sockets, and pass their file descriptors to the data plane workers upon startup.
-2.  **Implement Data Plane Worker (`data_plane.rs`):**
-    -   Initialize the `tokio-uring` runtime.
-    -   Receive the socket file descriptors from the Supervisor.
-    -   Implement the core-local buffer pool (D15).
-    -   Implement the main `io_uring` loop for receiving from the `AF_PACKET` socket.
-    -   Implement the userspace hash map for rule lookup (D11).
-    -   Implement the egress path using `AF_INET` sockets, including the payload copy (D5).
-3.  **End-to-End Test:** Perform the first end-to-end test: send a multicast packet to an input group and verify it is relayed correctly to an output destination.
+**Goal:** Implement the core packet processing logic in a testable, piecemeal fashion, culminating in a full end-to-end data flow test.
 
-**Exit Criteria:** A single forwarding rule can be added, and it will successfully relay traffic.
+1.  **Unit Test Data Plane Components:** Before building the `io_uring` loop, create and unit-test the core components in isolation:
+    -   **Buffer Pool:** Implement the core-local buffer pool (D15) and write unit tests to verify its allocation, deallocation, and exhaustion logic.
+    -   **Packet Parsing:** Implement any necessary packet header parsing logic and write unit tests using static, pre-captured packet data.
+    -   **Rule Lookup:** Write unit tests for the hash map lookup logic (D11).
+2.  **Implement Data Plane I/O Loop:** Assemble the tested components into the main `tokio-uring` processing loop in `data_plane.rs`.
+3.  **Write End-to-End Data Flow Test:** Create a comprehensive test script (`test_high_load.sh` or similar) that:
+    -   Starts the `multicast_relay` application.
+    -   Starts a separate UDP listener to receive the relayed traffic.
+    -   Uses the `control_client` to add a valid forwarding rule.
+    -   Uses the `traffic_generator` to send a known quantity of multicast packets to the input address.
+    -   Verifies that the UDP listener receives the correct number of packets at the correct output address.
+    -   Uses the `control_client` to remove the rule and verifies that traffic stops.
 
-## Phase 5: Features & Resilience
+**Exit Criteria:** All data plane components are unit-tested. The end-to-end data flow test passes, proving the relay can successfully forward traffic according to a dynamically configured rule.
 
-**Goal:** Layer in the remaining features and resilience mechanisms.
+## Phase 5: Advanced Features (Test-Driven)
 
-1.  **Implement Statistics:** Implement the full statistics collection in the data plane and the `StatsAggregator` logic (D14).
-2.  **Implement QoS:** Implement the DSCP-based classification and priority queuing logic (D13).
-3.  **Implement Tracing:** Implement the on-demand packet tracing feature (D28).
-4.  **Implement Netlink Listener:** In the Supervisor, implement the Netlink socket listener to handle network interface changes (D19).
-5.  **Integration Testing:** Create a comprehensive suite of integration tests in the `tests/` directory to validate all functionality under various conditions.
+**Goal:** Layer in the remaining features, ensuring each is accompanied by its own set of verifying tests.
 
-**Exit Criteria:** All architectural decisions are implemented and tested. The application is feature-complete.
+1.  **Implement & Test Statistics:**
+    -   Implement the statistics collection and aggregation logic (D14).
+    -   Write unit tests for the `StatsAggregator` logic.
+    -   Extend the end-to-end data flow test to query the `control_client stats` endpoint and verify that the reported packet/byte counts are accurate.
+2.  **Implement & Test Resilience:**
+    -   Implement the Netlink listener in the Supervisor (D19).
+    -   Create a test script that uses `ip` commands to bring an interface down and then up, while using the `control_client` to verify that the corresponding forwarding rules are correctly paused and resumed.
+3.  **Implement & Test Advanced Observability:**
+    -   Implement on-demand packet tracing (D28).
+    -   Extend an integration test to enable tracing on a rule, send a single packet, fetch the trace via the `control_client`, and verify its contents.
+
+**Exit Criteria:** All architectural decisions are implemented and verified by a comprehensive suite of unit, integration, and end-to-end tests.
