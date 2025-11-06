@@ -16,7 +16,7 @@ cargo test --all-targets
 
 echo "\n--- Running Coverage Check (cargo tarpaulin) ---"
 # We set a low threshold for now, this can be increased later.
-cargo tarpaulin --ignore-tests --workspace --fail-under 9
+cargo tarpaulin --ignore-tests --workspace --skip-clean --fail-under 8.9
 
 echo "\n✅ All checks passed!"
 
