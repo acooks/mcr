@@ -104,6 +104,9 @@ pub async fn run(user: String, group: String) -> Result<()> {
         }));
     }
 
+    let igmp_socket = std::net::UdpSocket::bind("0.0.0.0:0")?;
+    let mut joined_groups = HashMap::new();
+
     // Main event loop: listen for commands to manage the flow task.
     loop {
         if let Some(command) = relay_command_rx.recv().await {
@@ -114,6 +117,13 @@ pub async fn run(user: String, group: String) -> Result<()> {
                         println!("Aborting previous flow task.");
                         handle.abort();
                     }
+
+                    if let Some(_interface_name) = &args.input_interface_name {
+                        let interface_addr = Ipv4Addr::UNSPECIFIED; // Let the OS choose
+                        igmp_socket.join_multicast_v4(&rule.input_group, &interface_addr)?;
+                        joined_groups.insert((rule.input_group, rule.input_port), ());
+                    }
+
                     if let Some(fd) = &ingress_socket_fd {
                         println!("Spawning new flow task.");
                         let stats_tx_clone = stats_tx.clone();
@@ -128,11 +138,19 @@ pub async fn run(user: String, group: String) -> Result<()> {
                         }));
                     }
                 }
-                RelayCommand::RemoveRule { .. } => {
+                RelayCommand::RemoveRule {
+                    input_group,
+                    input_port,
+                } => {
                     println!("Received RemoveRule command.");
                     if let Some(handle) = flow_task_handle.take() {
                         println!("Aborting flow task.");
                         handle.abort();
+                    }
+
+                    if joined_groups.remove(&(input_group, input_port)).is_some() {
+                        let interface_addr = Ipv4Addr::UNSPECIFIED; // Let the OS choose
+                        igmp_socket.leave_multicast_v4(&input_group, &interface_addr)?;
                     }
                 }
             }
