@@ -215,9 +215,100 @@ pub fn spawn_dummy_worker(_relay_command_socket_path: PathBuf) -> Result<Child> 
     command.spawn().map_err(anyhow::Error::from)
 }
 
-#[cfg(feature = "integration_test")]
-pub fn spawn_dummy_worker_async(_relay_command_socket_path: PathBuf) -> Result<Child> {
-    let mut command = Command::new("sleep");
-    command.arg("30");
-    command.spawn().map_err(anyhow::Error::from)
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+    use tokio::time::Instant;
+
+    fn spawn_failing_worker() -> Result<Child> {
+        let mut command = Command::new("sh");
+        command.arg("-c").arg("exit 1");
+        command.spawn().map_err(anyhow::Error::from)
+    }
+
+    fn spawn_sleeping_worker() -> Result<Child> {
+        let mut command = Command::new("sleep");
+        command.arg("30");
+        command.spawn().map_err(anyhow::Error::from)
+    }
+
+    #[tokio::test]
+    async fn test_supervisor_restarts_cp_worker_with_backoff() {
+        let cp_spawn_count = Arc::new(Mutex::new(0));
+        let cp_spawn_times = Arc::new(Mutex::new(Vec::new()));
+
+        let cp_spawn_count_clone = cp_spawn_count.clone();
+        let cp_spawn_times_clone = cp_spawn_times.clone();
+        let spawn_cp = move || {
+            *cp_spawn_count_clone.lock().unwrap() += 1;
+            cp_spawn_times_clone.lock().unwrap().push(Instant::now());
+            spawn_failing_worker()
+        };
+
+        let spawn_dp = || spawn_sleeping_worker();
+
+        let socket_path = PathBuf::from(format!("/tmp/test_supervisor_{}.sock", uuid::Uuid::new_v4()));
+        let (_tx, rx) = mpsc::channel(10);
+
+        let supervisor_task = tokio::spawn(run(spawn_cp, spawn_dp, rx, socket_path.clone()));
+
+        // Allow time for a few restarts
+        tokio::time::sleep(Duration::from_millis(INITIAL_BACKOFF_MS * 4)).await;
+
+        supervisor_task.abort();
+        let _ = std::fs::remove_file(&socket_path);
+
+        // Verify spawn counts
+        assert!(*cp_spawn_count.lock().unwrap() > 1);
+
+        // Verify backoff
+        let cp_times = cp_spawn_times.lock().unwrap();
+        let cp_interval1 = cp_times[1].duration_since(cp_times[0]).as_millis() as u64;
+        assert!(
+            (INITIAL_BACKOFF_MS..INITIAL_BACKOFF_MS * 2).contains(&cp_interval1),
+            "CP backoff interval1 was {}",
+            cp_interval1
+        );
+    }
+
+    #[tokio::test]
+    async fn test_supervisor_restarts_dp_worker_with_backoff() {
+        let dp_spawn_count = Arc::new(Mutex::new(0));
+        let dp_spawn_times = Arc::new(Mutex::new(Vec::new()));
+
+        let spawn_cp = || spawn_sleeping_worker();
+
+        let dp_spawn_count_clone = dp_spawn_count.clone();
+        let dp_spawn_times_clone = dp_spawn_times.clone();
+        let spawn_dp = move || {
+            *dp_spawn_count_clone.lock().unwrap() += 1;
+            dp_spawn_times_clone.lock().unwrap().push(Instant::now());
+            spawn_failing_worker()
+        };
+
+        let socket_path = PathBuf::from(format!("/tmp/test_supervisor_{}.sock", uuid::Uuid::new_v4()));
+        let (_tx, rx) = mpsc::channel(10);
+
+        let supervisor_task = tokio::spawn(run(spawn_cp, spawn_dp, rx, socket_path.clone()));
+
+        // Allow time for a few restarts
+        tokio::time::sleep(Duration::from_millis(INITIAL_BACKOFF_MS * 4)).await;
+
+        supervisor_task.abort();
+        let _ = std::fs::remove_file(&socket_path);
+
+        // Verify spawn counts
+        assert!(*dp_spawn_count.lock().unwrap() > 1);
+
+        // Verify backoff
+        let dp_times = dp_spawn_times.lock().unwrap();
+        let dp_interval1 = dp_times[1].duration_since(dp_times[0]).as_millis() as u64;
+        assert!(
+            (INITIAL_BACKOFF_MS..INITIAL_BACKOFF_MS * 2).contains(&dp_interval1),
+            "DP backoff interval1 was {}",
+            dp_interval1
+        );
+    }
 }
