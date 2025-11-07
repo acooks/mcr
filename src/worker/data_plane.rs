@@ -252,4 +252,65 @@ mod tests {
         let result = parse_and_filter_packet(&packet, &rule);
         assert!(result.is_none());
     }
+
+    #[test]
+    #[ignore] // Requires kernel support for memfd
+    fn test_run_flow_task() {
+        use crate::OutputDestination;
+        use std::os::unix::io::FromRawFd;
+        use tokio::io::AsyncWriteExt;
+
+        tokio_uring::start(async {
+            // Create a memfd to act as a mock raw socket
+            let memfd_name = CString::new("test_memfd").unwrap();
+            let fd = unsafe { libc::memfd_create(memfd_name.as_ptr(), 0) };
+            assert!(fd >= 0);
+            let owned_fd = Arc::new(unsafe { OwnedFd::from_raw_fd(fd) });
+            let mut memfd_file = tokio::fs::File::from(std::fs::File::from(owned_fd.try_clone().unwrap()));
+
+            // Create a mock egress socket
+            let egress_socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            let egress_addr = egress_socket.local_addr().unwrap();
+
+            // Create a forwarding rule
+            let rule = ForwardingRule {
+                rule_id: "test-rule".to_string(),
+                input_interface: "lo".to_string(),
+                input_group: "224.0.0.1".parse().unwrap(),
+                input_port: 5000,
+                outputs: vec![OutputDestination {
+                    group: "127.0.0.1".parse().unwrap(),
+                    port: egress_addr.port(),
+                    interface: "lo".to_string(),
+                    dtls_enabled: false,
+                }],
+                dtls_enabled: false,
+            };
+
+            // Create a mock stats channel
+            let (stats_tx, _stats_rx) = mpsc::channel(10);
+
+            // Spawn the run_flow_task
+            let task = task::spawn_local(run_flow_task(rule, owned_fd, stats_tx));
+
+            // Write a mock packet to the memfd
+            let payload = b"test payload";
+            let packet = build_test_packet(
+                "192.168.1.1".parse().unwrap(),
+                "224.0.0.1".parse().unwrap(),
+                1234,
+                5000,
+                payload,
+            );
+            memfd_file.write_all(&packet).await.unwrap();
+
+            // Verify that the packet is received on the egress socket
+            let mut egress_buffer = [0; 1024];
+            let (len, _) = egress_socket.recv_from(&mut egress_buffer).unwrap();
+            assert_eq!(&egress_buffer[..len], payload);
+
+            // Clean up
+            task.abort();
+        });
+    }
 }
