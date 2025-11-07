@@ -170,11 +170,20 @@ pub async fn run_data_plane(config: DataPlaneConfig) -> Result<()> {
 
     // Spawn the static, long-running tasks locally.
     tokio::task::spawn_local(stats_aggregator_task(stats_rx, shared_flows.clone()));
-    // The data plane worker does not run the control_plane_task directly.
     tokio::task::spawn_local(monitoring_task(
         shared_flows.clone(),
         config.reporting_interval,
     ));
+
+    if let (Some(rule), Some(fd)) = (_initial_rule, _ingress_socket_fd) {
+        let stats_tx = _stats_tx.clone();
+        // The Arc should have only one owner here, so we can safely unwrap it.
+        let owned_fd = Arc::try_unwrap(fd).expect("Failed to unwrap Arc<OwnedFd>");
+        tokio::task::spawn_local(data_plane::run_flow_task(rule, owned_fd, stats_tx));
+    }
+
+    // The data plane worker runs indefinitely.
+    std::future::pending::<()>().await;
 
     Ok(())
 }
@@ -279,12 +288,9 @@ mod tests {
                 let result =
                     tokio::time::timeout(std::time::Duration::from_millis(100), task).await;
 
-                // The task is expected to return Ok(()), so we check for that.
-                assert!(result.is_ok(), "run_data_plane should not time out");
-                let task_result = result.unwrap();
-                assert!(task_result.is_ok(), "run_data_plane should not panic");
-                let final_result = task_result.unwrap();
-                assert!(final_result.is_ok(), "run_data_plane should return Ok(())");
+                // The task is expected to run indefinitely, so a timeout is expected.
+                // We are checking that it didn't complete (or panic).
+                assert!(result.is_err(), "run_data_plane should not complete");
             })
             .await;
     }

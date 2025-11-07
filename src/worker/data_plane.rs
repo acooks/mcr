@@ -3,9 +3,8 @@ use anyhow::Result;
 use socket2::{Domain, Protocol, Socket, Type};
 use std::ffi::CString;
 use std::net::{Ipv4Addr, SocketAddrV4};
-use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::io::{FromRawFd, OwnedFd};
 use std::rc::Rc;
-use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task;
 use tokio_uring::fs::File;
@@ -82,13 +81,13 @@ fn parse_and_filter_packet(
     }
 }
 
-#[allow(dead_code)]
 pub async fn run_flow_task(
     rule: ForwardingRule,
-    raw_fd: Arc<OwnedFd>,
+    raw_fd: OwnedFd,
     _stats_tx: mpsc::Sender<(ForwardingRule, FlowStats)>,
 ) -> Result<()> {
-    let uring_file = unsafe { File::from_raw_fd(raw_fd.as_raw_fd()) };
+    let std_file = std::fs::File::from(raw_fd);
+    let uring_file = File::from_std(std_file);
 
     // --- Egress Setup ---
     let mut output_sockets = Vec::new();
@@ -110,13 +109,15 @@ pub async fn run_flow_task(
     }
 
     let mut buffer = vec![0u8; 2048]; // MTU
+    let mut current_offset = 0;
 
     loop {
-        let (res, b) = uring_file.read_at(buffer, 0).await;
+        let (res, b) = uring_file.read_at(buffer, current_offset).await;
         buffer = b;
         let bytes_read = res?;
 
         if bytes_read > 0 {
+            current_offset += bytes_read as u64;
             let raw_packet = &buffer[..bytes_read];
 
             if let Some(packet_data) = parse_and_filter_packet(raw_packet, &rule) {
@@ -254,25 +255,32 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Requires kernel support for memfd
     fn test_run_flow_task() {
         use crate::OutputDestination;
-        use std::os::unix::io::FromRawFd;
-        use tokio::io::AsyncWriteExt;
+        use nix::sys::socket::{self, AddressFamily, SockFlag, SockType};
+        use std::os::unix::io::{FromRawFd, IntoRawFd};
+        use tokio::net::UdpSocket;
 
         tokio_uring::start(async {
-            // Create a memfd to act as a mock raw socket
-            let memfd_name = CString::new("test_memfd").unwrap();
-            let fd = unsafe { libc::memfd_create(memfd_name.as_ptr(), 0) };
-            assert!(fd >= 0);
-            let owned_fd = Arc::new(unsafe { OwnedFd::from_raw_fd(fd) });
-            let mut memfd_file = tokio::fs::File::from(std::fs::File::from(owned_fd.try_clone().unwrap()));
+            // 1. Setup: Create a socket pair to mock the raw AF_PACKET socket.
+            let (sock_a_fd, sock_b_fd) = socket::socketpair(
+                AddressFamily::Unix,
+                SockType::Datagram,
+                None,
+                SockFlag::empty(),
+            )
+            .unwrap();
 
-            // Create a mock egress socket
-            let egress_socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            let sock_a_std = unsafe { std::net::UdpSocket::from_raw_fd(sock_a_fd.into_raw_fd()) };
+            sock_a_std.set_nonblocking(true).unwrap();
+            let sock_a = UdpSocket::from_std(sock_a_std).unwrap();
+            let sock_b_owned = unsafe { OwnedFd::from_raw_fd(sock_b_fd.into_raw_fd()) };
+
+            // Create a mock egress socket to receive the forwarded packet.
+            let egress_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
             let egress_addr = egress_socket.local_addr().unwrap();
 
-            // Create a forwarding rule
+            // Create a forwarding rule that matches our test packet.
             let rule = ForwardingRule {
                 rule_id: "test-rule".to_string(),
                 input_interface: "lo".to_string(),
@@ -287,13 +295,13 @@ mod tests {
                 dtls_enabled: false,
             };
 
-            // Create a mock stats channel
+            // Create a mock stats channel.
             let (stats_tx, _stats_rx) = mpsc::channel(10);
 
-            // Spawn the run_flow_task
-            let task = task::spawn_local(run_flow_task(rule, owned_fd, stats_tx));
+            // 2. Action: Spawn the run_flow_task with one end of the socket pair.
+            let task = task::spawn_local(run_flow_task(rule, sock_b_owned, stats_tx));
 
-            // Write a mock packet to the memfd
+            // Send a test packet into the other end of the socket pair.
             let payload = b"test payload";
             let packet = build_test_packet(
                 "192.168.1.1".parse().unwrap(),
@@ -302,14 +310,17 @@ mod tests {
                 5000,
                 payload,
             );
-            memfd_file.write_all(&packet).await.unwrap();
+            sock_a.send(&packet).await.unwrap();
 
-            // Verify that the packet is received on the egress socket
+            // 3. Verification: Check if the packet was forwarded to the egress socket.
             let mut egress_buffer = [0; 1024];
-            let (len, _) = egress_socket.recv_from(&mut egress_buffer).unwrap();
+            let len = egress_socket
+                .recv(&mut egress_buffer)
+                .await
+                .expect("Failed to receive packet on egress socket");
             assert_eq!(&egress_buffer[..len], payload);
 
-            // Clean up
+            // 4. Cleanup: Abort the task.
             task.abort();
         });
     }
