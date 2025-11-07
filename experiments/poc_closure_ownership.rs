@@ -41,7 +41,10 @@ async fn dummy_spawner(val: PathBuf) {
 #[tokio::main]
 async fn main() {
     let original_path = PathBuf::from("/tmp/my_test_path.sock");
-    println!("'main' created and owns 'original_path': {:?}", original_path);
+    println!(
+        "'main' created and owns 'original_path': {:?}",
+        original_path
+    );
 
     // Clone `original_path` once for each closure.
     // Each clone is a new, independent owned value.

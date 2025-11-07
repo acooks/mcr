@@ -58,7 +58,6 @@ pub fn spawn_data_plane_worker(core_id: u32, relay_command_socket_path: PathBuf)
 // --- Supervisor Core Logic ---
 
 pub async fn run<F, G>(
-
     mut spawn_cp: F,
 
     mut spawn_dp: G,
@@ -66,51 +65,33 @@ pub async fn run<F, G>(
     _relay_command_rx: mpsc::Receiver<RelayCommand>, // This is now unused, will be removed
 
     relay_command_socket_path: PathBuf,
-
 ) -> Result<()>
-
 where
-
     F: FnMut() -> Result<Child>,
 
     G: FnMut() -> Result<Child>,
-
 {
-
     println!("[Supervisor] Starting.");
 
-
-
     let mut master_rules: HashMap<String, ForwardingRule> = HashMap::new();
-
-
 
     // Clean up old socket if it exists
 
     if relay_command_socket_path.exists() {
-
         std::fs::remove_file(&relay_command_socket_path)?;
-
     }
 
     let listener = UnixListener::bind(&relay_command_socket_path)?;
-
-
 
     let mut cp_child = spawn_cp()?;
 
     let mut dp_child = spawn_dp()?;
 
-
-
     let mut cp_backoff_ms = INITIAL_BACKOFF_MS;
 
     let mut dp_backoff_ms = INITIAL_BACKOFF_MS;
 
-
-
     loop {
-
         tokio::select! {
 
             // Monitor the Control Plane worker
@@ -222,9 +203,7 @@ where
             }
 
         }
-
     }
-
 }
 
 // --- Test-Specific Spawning Logic ---
