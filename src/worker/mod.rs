@@ -253,4 +253,39 @@ mod tests {
             })
             .await;
     }
+
+    #[tokio::test]
+    async fn test_run_data_plane_starts_successfully() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let config = DataPlaneConfig {
+                    user: "nobody".to_string(),
+                    group: "nogroup".to_string(),
+                    core_id: 0,
+                    prometheus_addr: "127.0.0.1:9002".parse().unwrap(),
+                    input_interface_name: None,
+                    input_group: None,
+                    input_port: None,
+                    output_group: None,
+                    output_port: None,
+                    output_interface: None,
+                    reporting_interval: 1,
+                };
+
+                let task = tokio::task::spawn_local(run_data_plane(config));
+
+                // Let the task run for a short time to ensure it doesn't panic immediately.
+                let result =
+                    tokio::time::timeout(std::time::Duration::from_millis(100), task).await;
+
+                // The task is expected to return Ok(()), so we check for that.
+                assert!(result.is_ok(), "run_data_plane should not time out");
+                let task_result = result.unwrap();
+                assert!(task_result.is_ok(), "run_data_plane should not panic");
+                let final_result = task_result.unwrap();
+                assert!(final_result.is_ok(), "run_data_plane should return Ok(())");
+            })
+            .await;
+    }
 }

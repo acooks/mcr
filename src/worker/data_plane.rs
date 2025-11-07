@@ -57,7 +57,30 @@ use pnet::packet::ipv4::Ipv4Packet;
 use pnet::packet::udp::UdpPacket;
 use pnet::packet::Packet;
 
-// ... (imports and setup_ingress_socket remain the same) ...
+fn parse_and_filter_packet(
+    raw_packet: &[u8],
+    rule: &ForwardingRule,
+) -> Option<Vec<u8>> {
+    let ethernet_packet = EthernetPacket::new(raw_packet)?;
+    if ethernet_packet.get_ethertype() != EtherTypes::Ipv4 {
+        return None;
+    }
+
+    let ipv4_packet = Ipv4Packet::new(ethernet_packet.payload())?;
+    if ipv4_packet.get_next_level_protocol() != IpNextHeaderProtocols::Udp {
+        return None;
+    }
+
+    let udp_packet = UdpPacket::new(ipv4_packet.payload())?;
+
+    if ipv4_packet.get_destination() == rule.input_group
+        && udp_packet.get_destination() == rule.input_port
+    {
+        Some(udp_packet.payload().to_vec())
+    } else {
+        None
+    }
+}
 
 #[allow(dead_code)]
 pub async fn run_flow_task(
@@ -96,33 +119,47 @@ pub async fn run_flow_task(
         if bytes_read > 0 {
             let raw_packet = &buffer[..bytes_read];
 
-            // --- Packet Parsing & Filtering ---
-            #[allow(clippy::collapsible_if)]
-            if let Some(ethernet_packet) = EthernetPacket::new(raw_packet) {
-                if ethernet_packet.get_ethertype() == EtherTypes::Ipv4 {
-                    if let Some(ipv4_packet) = Ipv4Packet::new(ethernet_packet.payload()) {
-                        if ipv4_packet.get_next_level_protocol() == IpNextHeaderProtocols::Udp {
-                            if let Some(udp_packet) = UdpPacket::new(ipv4_packet.payload()) {
-                                if ipv4_packet.get_destination() == rule.input_group
-                                    && udp_packet.get_destination() == rule.input_port
-                                {
-                                    // --- Egress Forwarding ---
-                                    for (socket, dest) in &output_sockets {
-                                        let packet_data = udp_packet.payload().to_vec();
-                                        let dest_addr = SocketAddrV4::new(dest.group, dest.port);
-                                        let socket_clone = Rc::clone(socket);
-                                        task::spawn_local(async move {
-                                            let _ = socket_clone
-                                                .send_to(packet_data, dest_addr.into())
-                                                .await;
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                    }
+            if let Some(packet_data) = parse_and_filter_packet(raw_packet, &rule) {
+                // --- Egress Forwarding ---
+                for (socket, dest) in &output_sockets {
+                    let dest_addr = SocketAddrV4::new(dest.group, dest.port);
+                    let socket_clone = Rc::clone(socket);
+                    let packet_data_clone = packet_data.clone();
+                    task::spawn_local(async move {
+                        let _ = socket_clone
+                            .send_to(packet_data_clone, dest_addr.into())
+                            .await;
+                    });
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::io::AsRawFd;
+
+    #[test]
+    fn test_setup_ingress_socket_success() {
+        if unsafe { libc::getuid() } != 0 {
+            eprintln!("Skipping test_setup_ingress_socket_success: requires root privileges.");
+            return;
+        }
+        // Test with a valid interface (e.g., "lo" for loopback)
+        let result = setup_ingress_socket("lo");
+        assert!(result.is_ok(), "setup_ingress_socket should succeed for 'lo' interface");
+        let fd = result.unwrap();
+        assert!(fd.as_raw_fd() >= 0, "File descriptor should be valid");
+    }
+
+    #[test]
+    fn test_setup_ingress_socket_interface_not_found() {
+        // Test with a non-existent interface
+        let result = setup_ingress_socket("nonexistent_interface123");
+        assert!(result.is_err(), "setup_ingress_socket should fail for a non-existent interface");
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Interface 'nonexistent_interface123' not found"));
     }
 }
