@@ -5,13 +5,10 @@ mod stats;
 
 use anyhow::Result;
 use metrics::{describe_counter, describe_gauge};
-use metrics_exporter_prometheus::PrometheusBuilder;
-use privdrop::PrivDrop;
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 use tokio::sync::{mpsc, Mutex};
 use uuid::Uuid;
@@ -26,12 +23,12 @@ use tokio::task::JoinHandle;
 type SharedFlows = Arc<Mutex<HashMap<String, (ForwardingRule, FlowStats)>>>;
 
 // A custom sender that serializes RelayCommands and sends them over a UnixStream
-pub struct UnixSocketRelayCommandSender {
-    stream: Mutex<UnixStream>,
+pub struct UnixSocketRelayCommandSender<S> {
+    stream: Mutex<S>,
 }
 
-impl UnixSocketRelayCommandSender {
-    pub fn new(stream: UnixStream) -> Self {
+impl<S: tokio::io::AsyncWriteExt + Unpin> UnixSocketRelayCommandSender<S> {
+    pub fn new(stream: S) -> Self {
         Self {
             stream: Mutex::new(stream),
         }
@@ -45,6 +42,79 @@ impl UnixSocketRelayCommandSender {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ForwardingRule;
+    use tokio::io::AsyncReadExt;
+
+    #[tokio::test]
+    async fn test_unix_socket_relay_command_sender() {
+        let (mut client_stream, server_stream) = tokio::io::duplex(1024);
+        let sender = UnixSocketRelayCommandSender::new(server_stream);
+
+        let command = RelayCommand::AddRule(ForwardingRule {
+            rule_id: "test-rule-1".to_string(),
+            input_interface: "eth0".to_string(),
+            input_group: "224.0.0.1".parse().unwrap(),
+            input_port: 5000,
+            outputs: vec![],
+            dtls_enabled: false,
+        });
+
+        sender.send(command.clone()).await.unwrap();
+        drop(sender); // Drop the sender to close the server_stream
+
+        let mut buffer = Vec::new();
+        client_stream.read_to_end(&mut buffer).await.unwrap();
+
+        let received_command: RelayCommand = serde_json::from_slice(&buffer).unwrap();
+        assert_eq!(command, received_command);
+    }
+
+    #[tokio::test]
+    async fn test_setup_worker_environment_success() {
+        let user = "nobody".to_string();
+        let group = "nogroup".to_string();
+        let prometheus_addr = "127.0.0.1:9000".parse().unwrap();
+
+        let result = setup_worker_environment(user, group, prometheus_addr).await;
+        assert!(result.is_ok(), "setup_worker_environment should succeed");
+    }
+}
+
+#[cfg(not(test))]
+fn drop_privileges(user: &str, group: &str) -> Result<()> {
+    use privdrop::PrivDrop;
+    PrivDrop::default()
+        .user(user)
+        .group(group)
+        .apply()
+        .map_err(|e| anyhow::anyhow!("Failed to drop privileges: {}", e))
+}
+
+#[cfg(test)]
+fn drop_privileges(_user: &str, _group: &str) -> Result<()> {
+    // Do nothing in tests
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn install_prometheus_recorder(prometheus_addr: std::net::SocketAddr) -> Result<()> {
+    use metrics_exporter_prometheus::PrometheusBuilder;
+    let builder = PrometheusBuilder::new();
+    builder
+        .with_http_listener(prometheus_addr)
+        .install()
+        .map_err(anyhow::Error::from)
+}
+
+#[cfg(test)]
+fn install_prometheus_recorder(_prometheus_addr: std::net::SocketAddr) -> Result<()> {
+    // Do nothing in tests to avoid starting a server and hanging.
+    Ok(())
+}
+
 async fn setup_worker_environment(
     user: String,
     group: String,
@@ -55,16 +125,11 @@ async fn setup_worker_environment(
         user, group
     );
 
-    PrivDrop::default()
-        .user(&user)
-        .group(&group)
-        .apply()
-        .map_err(|e| anyhow::anyhow!("Failed to drop privileges: {}", e))?;
+    drop_privileges(&user, &group)?;
 
     println!("Successfully dropped privileges.");
 
-    let builder = PrometheusBuilder::new();
-    builder.with_http_listener(prometheus_addr).install()?;
+    install_prometheus_recorder(prometheus_addr)?;
     describe_counter!("packets_relayed_total", "Total packets relayed");
     describe_gauge!("memory_usage_bytes", "Current memory usage");
     Ok(())
@@ -92,7 +157,7 @@ pub async fn run_control_plane(
     tokio::task::spawn_local(stats_aggregator_task(stats_rx, shared_flows.clone()));
     tokio::task::spawn_local(control_plane_task(
         control_socket_path,
-        supervisor_relay_command_tx.clone(), // Pass the Unix socket sender
+        supervisor_relay_command_tx.clone(),
         shared_flows.clone(),
     ));
     tokio::task::spawn_local(monitoring_task(

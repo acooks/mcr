@@ -15,7 +15,7 @@ type SharedFlows = Arc<Mutex<HashMap<String, (ForwardingRule, FlowStats)>>>;
 
 pub async fn control_plane_task(
     socket_path: &Path,
-    relay_command_tx: Arc<UnixSocketRelayCommandSender>,
+    relay_command_tx: Arc<UnixSocketRelayCommandSender<tokio::net::UnixStream>>,
     shared_flows: SharedFlows,
 ) -> Result<()> {
     if socket_path.exists() {

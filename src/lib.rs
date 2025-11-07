@@ -60,7 +60,7 @@ pub struct FlowStats {
     pub bits_per_second: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)] // Added Serialize and Deserialize
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum RelayCommand {
     AddRule(ForwardingRule),
     RemoveRule { rule_id: String },
