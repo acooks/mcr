@@ -16,7 +16,7 @@ struct Args {
 }
 
 #[derive(Parser, Debug)]
-enum CliCommand {
+pub enum CliCommand {
     /// Add a new forwarding rule
     Add {
         #[arg(long)]
