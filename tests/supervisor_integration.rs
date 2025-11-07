@@ -27,7 +27,6 @@ async fn find_child_pids_by_command(command_name: &str) -> Result<Vec<u32>> {
 
 /// **Passing Test:** Verifies the supervisor's resilience by killing a worker and checking that it gets replaced.
 #[tokio::test]
-#[ignore]
 async fn test_supervisor_restarts_failed_worker() -> Result<()> {
     println!("--- Running test: test_supervisor_restarts_failed_worker ---");
 

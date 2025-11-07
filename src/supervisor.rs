@@ -209,21 +209,17 @@ where
 // --- Test-Specific Spawning Logic ---
 
 #[cfg(feature = "integration_test")]
-pub fn spawn_dummy_worker(relay_command_socket_path: PathBuf) -> Result<Child> {
+pub fn spawn_dummy_worker(_relay_command_socket_path: PathBuf) -> Result<Child> {
     let mut command = Command::new("sleep");
     command
-        .arg("30")
-        .arg("--relay-command-socket-path")
-        .arg(relay_command_socket_path);
+        .arg("30");
     command.spawn().map_err(anyhow::Error::from)
 }
 
 #[cfg(feature = "integration_test")]
-pub fn spawn_dummy_worker_async(relay_command_socket_path: PathBuf) -> Result<Child> {
+pub fn spawn_dummy_worker_async(_relay_command_socket_path: PathBuf) -> Result<Child> {
     let mut command = Command::new("sleep");
     command
-        .arg("30")
-        .arg("--relay-command-socket-path")
-        .arg(relay_command_socket_path);
+        .arg("30");
     command.spawn().map_err(anyhow::Error::from)
 }
