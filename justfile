@@ -4,7 +4,7 @@
 default: check
 
 # Run all quality gates, mirroring the CI pipeline
-check: fmt clippy build test audit outdated
+check: fmt clippy build test audit outdated coverage
     @echo "\n✅ All checks passed!"
 
 # Format check
@@ -38,6 +38,12 @@ outdated:
     @echo "--- Checking for Outdated Dependencies (cargo outdated) ---"
     @command -v cargo-outdated >/dev/null || cargo install cargo-outdated
     cargo outdated --exit-code 1
+
+# Generate test coverage report
+coverage:
+    @echo "--- Generating Test Coverage Report (cargo tarpaulin) ---"
+    @command -v cargo-tarpaulin >/dev/null || cargo install cargo-tarpaulin
+    CARGO_INCREMENTAL=0 RUSTFLAGS="-Cinstrument-coverage" cargo tarpaulin --engine llvm --features integration_test --follow-exec --all-targets --exclude-files "nix-0.30.1/*"
 
 # Clean the project
 clean:
