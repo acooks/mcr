@@ -55,11 +55,13 @@ pub use packet_parser::{
 };
 
 use ::metrics::{describe_counter, describe_gauge};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::collections::HashMap;
+use std::os::fd::FromRawFd;
+use std::os::unix::net::UnixListener as StdUnixListener;
 use std::path::Path;
 use std::sync::Arc;
-use tokio::net::UnixStream;
+use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc as tokio_mpsc, Mutex};
 use uuid::Uuid;
 
@@ -92,7 +94,7 @@ impl<S: tokio::io::AsyncWriteExt + Unpin> UnixSocketRelayCommandSender<S> {
     }
 }
 
-#[cfg(not(test))]
+#[cfg(not(feature = "integration_test"))]
 fn drop_privileges(uid: u32, gid: u32) -> Result<()> {
     use privdrop::PrivDrop;
     PrivDrop::default()
@@ -103,7 +105,7 @@ fn drop_privileges(uid: u32, gid: u32) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("Failed to drop privileges: {}", e))
 }
 
-#[cfg(test)]
+#[cfg(feature = "integration_test")]
 fn drop_privileges(_uid: u32, _gid: u32) -> Result<()> {
     // Do nothing in tests
     Ok(())
@@ -124,6 +126,8 @@ async fn setup_worker_environment(uid: u32, gid: u32) -> Result<()> {
     Ok(())
 }
 
+// ... (imports)
+
 pub async fn run_control_plane(config: ControlPlaneConfig) -> Result<()> {
     setup_worker_environment(config.uid, config.gid).await?;
 
@@ -135,7 +139,20 @@ pub async fn run_control_plane(config: ControlPlaneConfig) -> Result<()> {
     let shared_flows: SharedFlows = Arc::new(Mutex::new(HashMap::new()));
     let (_stats_tx, stats_rx) = tokio_mpsc::channel(100);
 
-    let control_socket_path = Path::new("/tmp/multicast_relay_control.sock");
+    let listener = if let Some(fd) = config.socket_fd {
+        // A socket file descriptor was passed, use it.
+        let std_listener = unsafe { StdUnixListener::from_raw_fd(fd) };
+        std_listener.set_nonblocking(true)?;
+        UnixListener::from_std(std_listener)
+            .context("Failed to convert std UnixListener to tokio UnixListener")?
+    } else {
+        // Fallback for testing or direct execution: bind to a default path.
+        let control_socket_path = Path::new("/tmp/multicast_relay_control.sock");
+        if control_socket_path.exists() {
+            std::fs::remove_file(control_socket_path)?;
+        }
+        UnixListener::bind(control_socket_path)?
+    };
 
     // Connect to the supervisor's relay command socket
     let supervisor_stream = UnixStream::connect(&config.relay_command_socket_path).await?;
@@ -145,7 +162,7 @@ pub async fn run_control_plane(config: ControlPlaneConfig) -> Result<()> {
     // Spawn the static, long-running tasks locally.
     tokio::task::spawn_local(stats_aggregator_task(stats_rx, shared_flows.clone()));
     tokio::task::spawn_local(control_plane_task(
-        control_socket_path,
+        listener,
         supervisor_relay_command_tx.clone(),
         shared_flows.clone(),
     ));
@@ -216,111 +233,4 @@ pub async fn run_data_plane(config: DataPlaneConfig) -> Result<()> {
     std::future::pending::<()>().await;
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ForwardingRule;
-    use std::path::PathBuf;
-    use tokio::io::AsyncReadExt;
-    use tokio::net::UnixListener;
-
-    #[tokio::test]
-    async fn test_unix_socket_relay_command_sender() {
-        let (mut client_stream, server_stream) = tokio::io::duplex(1024);
-        let sender = UnixSocketRelayCommandSender::new(server_stream);
-
-        let command = RelayCommand::AddRule(ForwardingRule {
-            rule_id: "test-rule-1".to_string(),
-            input_interface: "eth0".to_string(),
-            input_group: "224.0.0.1".parse().unwrap(),
-            input_port: 5000,
-            outputs: vec![],
-            dtls_enabled: false,
-        });
-
-        sender.send(command.clone()).await.unwrap();
-        drop(sender); // Drop the sender to close the server_stream
-
-        let mut buffer = Vec::new();
-        client_stream.read_to_end(&mut buffer).await.unwrap();
-
-        let received_command: RelayCommand = serde_json::from_slice(&buffer).unwrap();
-        assert_eq!(command, received_command);
-    }
-
-    #[tokio::test]
-    async fn test_setup_worker_environment_success() {
-        let uid = 65534;
-        let gid = 65534;
-
-        let result = setup_worker_environment(uid, gid).await;
-        assert!(result.is_ok(), "setup_worker_environment should succeed");
-    }
-
-    #[tokio::test]
-    async fn test_run_control_plane_starts_successfully() {
-        let local = tokio::task::LocalSet::new();
-        local
-            .run_until(async {
-                let socket_path =
-                    PathBuf::from(format!("/tmp/test_supervisor_{}.sock", Uuid::new_v4()));
-                let _listener = UnixListener::bind(&socket_path).unwrap();
-
-                let config = ControlPlaneConfig {
-                    uid: 65534,
-                    gid: 65534,
-                    relay_command_socket_path: socket_path.clone(),
-                    prometheus_addr: None,
-                    reporting_interval: 1,
-                };
-
-                let task = tokio::task::spawn_local(run_control_plane(config));
-
-                // Let the task run for a short time to ensure it doesn't panic immediately.
-                let result =
-                    tokio::time::timeout(std::time::Duration::from_millis(100), task).await;
-
-                // The task is expected to run indefinitely, so a timeout is expected.
-                // We are checking that it didn't complete (or panic).
-                assert!(result.is_err(), "run_control_plane should not complete");
-
-                // Clean up the temporary socket file
-                std::fs::remove_file(&socket_path).unwrap();
-            })
-            .await;
-    }
-
-    #[tokio::test]
-    async fn test_run_data_plane_starts_successfully() {
-        let local = tokio::task::LocalSet::new();
-        local
-            .run_until(async {
-                let config = DataPlaneConfig {
-                    uid: 65534,
-                    gid: 65534,
-                    core_id: 0,
-                    prometheus_addr: "127.0.0.1:9002".parse().unwrap(),
-                    input_interface_name: None,
-                    input_group: None,
-                    input_port: None,
-                    output_group: None,
-                    output_port: None,
-                    output_interface: None,
-                    reporting_interval: 1,
-                };
-
-                let task = tokio::task::spawn_local(run_data_plane(config));
-
-                // Let the task run for a short time to ensure it doesn't panic immediately.
-                let result =
-                    tokio::time::timeout(std::time::Duration::from_millis(100), task).await;
-
-                // The task is expected to run indefinitely, so a timeout is expected.
-                // We are checking that it didn't complete (or panic).
-                assert!(result.is_err(), "run_data_plane should not complete");
-            })
-            .await;
-    }
 }

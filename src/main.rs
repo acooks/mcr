@@ -51,6 +51,7 @@ fn main() -> Result<()> {
             output_port,
             output_interface,
             reporting_interval,
+            socket_fd,
         } => {
             if data_plane {
                 let config = multicast_relay::DataPlaneConfig {
@@ -82,6 +83,7 @@ fn main() -> Result<()> {
                     relay_command_socket_path,
                     prometheus_addr,
                     reporting_interval: reporting_interval.unwrap_or(1),
+                    socket_fd,
                 };
                 // Control Plane worker
                 tokio_uring::start(async {
@@ -160,6 +162,7 @@ mod tests {
                 output_port: Some(5001),
                 output_interface: Some("eth1".to_string()),
                 reporting_interval: Some(5),
+                socket_fd: None,
             }
         );
 
@@ -189,6 +192,7 @@ mod tests {
                 output_port: None,
                 output_interface: None,
                 reporting_interval: None,
+                socket_fd: None,
             }
         );
     }

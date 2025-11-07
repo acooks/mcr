@@ -4,8 +4,8 @@
 
 # --- Configuration ---
 NS_NAME="mcr_e2e_test_$$" # Unique namespace name per script run
-VETH_HOST="veth-host-$$"
-VETH_NS="veth-ns-$$"
+VETH_HOST="vh-$$"
+VETH_NS="vn-$$"
 IP_HOST="192.168.200.1/24"
 IP_NS="192.168.200.2/24"
 
@@ -44,8 +44,8 @@ setup_namespace() {
     sudo ip netns exec "$NS_NAME" ip link set lo up
 
     # Add routes for multicast traffic
-    sudo ip route add 224.0.0.0/4 dev "$VETH_HOST"
-    sudo ip netns exec "$NS_NAME" ip route add 224.0.0.0/4 dev "$VETH_NS"
+    sudo ip route add 224.0.0.0/4 dev "$VETH_HOST" src "${IP_HOST%/*}"
+    sudo ip netns exec "$NS_NAME" ip route add 224.0.0.0/4 dev "$VETH_NS" src "${IP_NS%/*}"
 
     echo "Network namespace '$NS_NAME' created."
 }
@@ -56,7 +56,7 @@ start_listener() {
     local output_port="$2"
     echo "--- Starting UDP listener (socat) in background ---"
     sudo ip netns exec "$NS_NAME" \
-        socat -u UDP4-RECV:$output_port,ip-add-membership=$output_group:$VETH_NS \
+        socat -u UDP4-RECV:$output_port,ip-add-membership="$output_group:$VETH_NS" \
         "OPEN:$OUTPUT_FILE,creat,append" &
     LISTENER_PID=$!
     echo "Listener started with PID $LISTENER_PID."
@@ -74,8 +74,14 @@ start_relay() {
         --relay-command-socket-path "$RELAY_COMMAND_SOCKET" &
     RELAY_PID=$!
     echo "Relay started with PID $RELAY_PID."
-    sleep 2 # Give the relay time to initialize
 
+    # The socket is created by a root process, so we need to change its ownership
+    # to allow the non-root control_client to connect.
+    # We need to wait a moment for the socket to be created.
+    sleep 1
+    sudo chown "$(id -u):$(id -g)" "$RELAY_COMMAND_SOCKET"
+
+    sleep 1 # Give the relay time to fully initialize
 }
 
 # Function to send packets using traffic_generator

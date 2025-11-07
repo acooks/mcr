@@ -1,7 +1,5 @@
 use anyhow::Result;
 use std::collections::HashMap;
-use std::fs;
-use std::path::Path;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixListener;
@@ -14,14 +12,10 @@ use crate::{FlowStats, ForwardingRule, Response, SupervisorCommand};
 type SharedFlows = Arc<Mutex<HashMap<String, (ForwardingRule, FlowStats)>>>;
 
 pub async fn control_plane_task(
-    socket_path: &Path,
+    listener: UnixListener,
     relay_command_tx: Arc<UnixSocketRelayCommandSender<tokio::net::UnixStream>>,
     shared_flows: SharedFlows,
 ) -> Result<()> {
-    if socket_path.exists() {
-        fs::remove_file(socket_path)?;
-    }
-    let listener = UnixListener::bind(socket_path)?;
     loop {
         let (mut stream, _) = listener.accept().await?;
         let relay_command_tx = relay_command_tx.clone();
@@ -100,12 +94,14 @@ pub async fn control_plane_task(
 mod tests {
     use super::*;
     use crate::{OutputDestination, RelayCommand};
+    use std::fs;
     use std::path::PathBuf;
     use tokio::net::UnixStream;
 
     #[tokio::test]
     async fn test_control_plane_task_add_rule() {
         let socket_path = PathBuf::from(format!("/tmp/test_control_plane_{}.sock", Uuid::new_v4()));
+        let listener = UnixListener::bind(&socket_path).unwrap();
         let relay_socket_path =
             PathBuf::from(format!("/tmp/test_relay_command_{}.sock", Uuid::new_v4()));
 
@@ -129,9 +125,8 @@ mod tests {
         let shared_flows: SharedFlows = Arc::new(Mutex::new(HashMap::new()));
 
         // Spawn the control_plane_task
-        let task_socket_path = socket_path.clone();
         let task = tokio::spawn(async move {
-            control_plane_task(&task_socket_path, relay_command_tx, shared_flows)
+            control_plane_task(listener, relay_command_tx, shared_flows)
                 .await
                 .unwrap();
         });
