@@ -70,24 +70,15 @@ fn parse_output_destination(s: &str) -> Result<OutputDestination, String> {
     })
 }
 
-#[cfg(not(test))]
-#[tokio::main]
-async fn main() -> Result<()> {
-    use clap::Parser;
-    use multicast_relay::{Command, Response};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::UnixStream;
-
-    let args = Args::parse();
-
-    let command = match args.command {
+pub fn build_command(cli_command: CliCommand) -> multicast_relay::Command {
+    match cli_command {
         CliCommand::Add {
             rule_id,
             input_interface,
             input_group,
             input_port,
             outputs,
-        } => Command::AddRule {
+        } => multicast_relay::Command::AddRule {
             rule_id: rule_id.unwrap_or_default(),
             input_interface,
             input_group,
@@ -95,10 +86,21 @@ async fn main() -> Result<()> {
             outputs,
             dtls_enabled: false,
         },
-        CliCommand::Remove { rule_id } => Command::RemoveRule { rule_id },
-        CliCommand::List => Command::ListRules,
-        CliCommand::Stats => Command::GetStats,
-    };
+        CliCommand::Remove { rule_id } => multicast_relay::Command::RemoveRule { rule_id },
+        CliCommand::List => multicast_relay::Command::ListRules,
+        CliCommand::Stats => multicast_relay::Command::GetStats,
+    }
+}
+
+#[cfg(not(test))]
+#[tokio::main]
+async fn main() -> Result<()> {
+    use multicast_relay::Response;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::UnixStream;
+
+    let args = Args::parse();
+    let command = build_command(args.command);
 
     let mut stream = UnixStream::connect(args.socket_path).await?;
     let command_bytes = serde_json::to_vec(&command)?;
@@ -119,6 +121,7 @@ mod tests {
 
     #[test]
     fn test_parse_output_destination() {
+        // --- Success Cases ---
         let s = "224.0.0.1:5000:127.0.0.1";
         let dest = parse_output_destination(s).unwrap();
         assert_eq!(dest.group, "224.0.0.1".parse::<Ipv4Addr>().unwrap());
@@ -126,15 +129,74 @@ mod tests {
         assert_eq!(dest.interface, "127.0.0.1".to_string());
         assert!(!dest.dtls_enabled);
 
-        let s = "224.0.0.1:5000:127.0.0.1:true";
-        let dest = parse_output_destination(s).unwrap();
-        assert!(dest.dtls_enabled);
+        let s_dtls_true = "224.0.0.1:5000:127.0.0.1:true";
+        let dest_dtls_true = parse_output_destination(s_dtls_true).unwrap();
+        assert!(dest_dtls_true.dtls_enabled);
 
-        let s = "224.0.0.1:5000:127.0.0.1:false";
-        let dest = parse_output_destination(s).unwrap();
-        assert!(!dest.dtls_enabled);
+        let s_dtls_false = "224.0.0.1:5000:127.0.0.1:false";
+        let dest_dtls_false = parse_output_destination(s_dtls_false).unwrap();
+        assert!(!dest_dtls_false.dtls_enabled);
 
-        let s = "invalid";
-        assert!(parse_output_destination(s).is_err());
+        // --- Error Cases ---
+        let s_invalid_parts = "invalid";
+        assert!(parse_output_destination(s_invalid_parts).is_err());
+
+        let s_invalid_ip = "not-an-ip:5000:127.0.0.1";
+        assert!(parse_output_destination(s_invalid_ip).is_err());
+
+        let s_invalid_port = "224.0.0.1:not-a-port:127.0.0.1";
+        assert!(parse_output_destination(s_invalid_port).is_err());
+
+        let s_invalid_dtls = "224.0.0.1:5000:127.0.0.1:not-a-bool";
+        assert!(parse_output_destination(s_invalid_dtls).is_err());
+
+        let s_too_many_parts = "224.0.0.1:5000:127.0.0.1:true:extra";
+        assert!(parse_output_destination(s_too_many_parts).is_err());
+    }
+
+    #[test]
+    fn test_cli_command_parsing() {
+        use multicast_relay::Command;
+
+        // --- Test 'add' command ---
+        let add_args = Args::parse_from([
+            "control_client",
+            "add",
+            "--input-interface",
+            "eth0",
+            "--input-group",
+            "224.0.0.1",
+            "--input-port",
+            "5000",
+            "--outputs",
+            "224.0.0.2:5001:lo",
+        ]);
+        let command = build_command(add_args.command);
+        assert!(matches!(command, Command::AddRule { .. }));
+        if let Command::AddRule {
+            input_interface, ..
+        } = command
+        {
+            assert_eq!(input_interface, "eth0");
+        }
+
+        // --- Test 'remove' command ---
+        let remove_args =
+            Args::parse_from(["control_client", "remove", "--rule-id", "test-rule-123"]);
+        let command = build_command(remove_args.command);
+        assert!(matches!(command, Command::RemoveRule { .. }));
+        if let Command::RemoveRule { rule_id, .. } = command {
+            assert_eq!(rule_id, "test-rule-123");
+        }
+
+        // --- Test 'list' command ---
+        let list_args = Args::parse_from(["control_client", "list"]);
+        let command = build_command(list_args.command);
+        assert!(matches!(command, Command::ListRules));
+
+        // --- Test 'stats' command ---
+        let stats_args = Args::parse_from(["control_client", "stats"]);
+        let command = build_command(stats_args.command);
+        assert!(matches!(command, Command::GetStats));
     }
 }

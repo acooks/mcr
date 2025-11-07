@@ -50,7 +50,6 @@ pub async fn monitoring_task(shared_flows: SharedFlows, reporting_interval: u64)
 mod tests {
     use super::*;
     use crate::OutputDestination;
-    use std::net::Ipv4Addr;
     use tokio::time::timeout;
 
     #[tokio::test]
@@ -58,8 +57,7 @@ mod tests {
         let shared_flows: SharedFlows = Arc::new(Mutex::new(HashMap::new()));
         let (stats_tx, stats_rx) = mpsc::channel(10);
 
-        let aggregator_task =
-            tokio::spawn(stats_aggregator_task(stats_rx, shared_flows.clone()));
+        let aggregator_task = tokio::spawn(stats_aggregator_task(stats_rx, shared_flows.clone()));
 
         let rule = ForwardingRule {
             rule_id: "test-rule".to_string(),
@@ -98,7 +96,7 @@ mod tests {
 
         // Drop the sender to terminate the aggregator task
         drop(stats_tx);
-        timeout(Duration::from_secs(1), aggregator_task)
+        let _ = timeout(Duration::from_secs(1), aggregator_task)
             .await
             .expect("Aggregator task should terminate gracefully");
     }
