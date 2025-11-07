@@ -24,8 +24,44 @@ build:
 
 # Run all tests
 test:
-    @echo "--- Running Tests (cargo test) ---"
+    @echo "--- Running Unit and Integration Tests (cargo test) ---"
     cargo test --all-targets --features integration_test -- --nocapture
+
+# End-to-End Test
+test-e2e: build
+    @echo "--- Running End-to-End Test ---"
+    @# Define socket paths
+    @export CONTROL_SOCKET_PATH="/tmp/multicast_relay_control_e2e.sock"
+    @export RELAY_COMMAND_SOCKET_PATH="/tmp/mcr_relay_commands_e2e.sock"
+
+    @# Clean up old sockets
+    @rm -f $CONTROL_SOCKET_PATH $RELAY_COMMAND_SOCKET_PATH
+
+    @# Start supervisor in the background
+    @echo "Starting supervisor..."
+    @./target/debug/multicast_relay supervisor --relay-command-socket-path $RELAY_COMMAND_SOCKET_PATH &
+    @SUPERVISOR_PID=$!
+    @sleep 1 # Give it time to start
+
+    @# Run test sequence
+    @echo "Running test sequence..."
+    @set -e
+    @# Add a rule
+    @./target/debug/control_client --socket-path $CONTROL_SOCKET_PATH add --rule-id "e2e-test-rule" --input-interface "lo" --input-group "224.0.0.1" --input-port 5000 --outputs "224.0.0.2:5001:127.0.0.1"
+    @# List rules and verify
+    @./target/debug/control_client --socket-path $CONTROL_SOCKET_PATH list | grep "e2e-test-rule"
+    @# Remove the rule
+    @./target/debug/control_client --socket-path $CONTROL_SOCKET_PATH remove --rule-id "e2e-test-rule"
+    @# List again and verify removal
+    @! ./target/debug/control_client --socket-path $CONTROL_SOCKET_PATH list | grep "e2e-test-rule"
+    @set +e
+
+    @# Cleanup
+    @echo "Cleaning up supervisor process..."
+    @kill $SUPERVISOR_PID
+    @wait $SUPERVISOR_PID || true
+    @echo "✅ E2E Test Passed!"
+
 
 # Security audit
 audit:
