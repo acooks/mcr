@@ -64,6 +64,8 @@ When you use `rustup`, it will automatically detect this file and ensure you are
     ```
     This step is only needed once per session, as it will be configured in your shell's startup file automatically.
 
+    **Verification:** To ensure your `PATH` is set up correctly, open a **new** terminal and run `which cargo`. The output should be similar to `/home/your-username/.cargo/bin/cargo`. If the command returns "not found", you may need to log out and log back in, or manually add the line `source "$HOME/.cargo/env"` to your shell's startup file (e.g., `~/.bashrc`, `~/.zshrc`).
+
 ### Project-Specific Developer Tools
 
 This project uses the `just` command runner to simplify common development tasks. You need to install it once globally.

@@ -20,6 +20,8 @@ enum CliCommand {
     /// Add a new forwarding rule
     Add {
         #[arg(long)]
+        rule_id: Option<String>,
+        #[arg(long)]
         input_interface: String,
         #[arg(long)]
         input_group: Ipv4Addr,
@@ -31,9 +33,7 @@ enum CliCommand {
     /// Remove a forwarding rule
     Remove {
         #[arg(long)]
-        input_group: Ipv4Addr,
-        #[arg(long)]
-        input_port: u16,
+        rule_id: String,
     },
     /// List all forwarding rules
     List,
@@ -82,24 +82,20 @@ async fn main() -> Result<()> {
 
     let command = match args.command {
         CliCommand::Add {
+            rule_id,
             input_interface,
             input_group,
             input_port,
             outputs,
         } => Command::AddRule {
+            rule_id: rule_id.unwrap_or_default(),
             input_interface,
             input_group,
             input_port,
             outputs,
             dtls_enabled: false,
         },
-        CliCommand::Remove {
-            input_group,
-            input_port,
-        } => Command::RemoveRule {
-            input_group,
-            input_port,
-        },
+        CliCommand::Remove { rule_id } => Command::RemoveRule { rule_id },
         CliCommand::List => Command::ListRules,
         CliCommand::Stats => Command::GetStats,
     };

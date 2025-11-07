@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::net::Ipv4Addr;
+use uuid::Uuid;
 
 pub mod supervisor;
 pub mod worker;
@@ -15,6 +16,8 @@ pub struct OutputDestination {
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub enum Command {
     AddRule {
+        #[serde(default = "default_rule_id")]
+        rule_id: String,
         input_interface: String,
         input_group: Ipv4Addr,
         input_port: u16,
@@ -23,8 +26,7 @@ pub enum Command {
         dtls_enabled: bool,
     },
     RemoveRule {
-        input_group: Ipv4Addr,
-        input_port: u16,
+        rule_id: String,
     },
     ListRules,
     GetStats,
@@ -40,6 +42,7 @@ pub enum Response {
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Hash)]
 pub struct ForwardingRule {
+    pub rule_id: String,
     pub input_interface: String,
     pub input_group: Ipv4Addr,
     pub input_port: u16,
@@ -57,14 +60,16 @@ pub struct FlowStats {
     pub bits_per_second: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)] // Added Serialize and Deserialize
 pub enum RelayCommand {
     AddRule(ForwardingRule),
-    RemoveRule {
-        input_group: Ipv4Addr,
-        input_port: u16,
-    },
+    RemoveRule { rule_id: String },
 }
+
+fn default_rule_id() -> String {
+    Uuid::new_v4().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -72,6 +77,7 @@ mod tests {
     #[test]
     fn test_command_serialization() {
         let command = Command::AddRule {
+            rule_id: "test-uuid".to_string(),
             input_interface: "eth0".to_string(),
             input_group: "224.0.0.1".parse().unwrap(),
             input_port: 5000,

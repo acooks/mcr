@@ -1,16 +1,15 @@
 use anyhow::Result;
 use metrics::gauge;
 use std::collections::HashMap;
-use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::time::Duration;
 use sysinfo::{Pid, System};
-use tokio::sync::Mutex;
 use tokio::sync::mpsc;
+use tokio::sync::Mutex;
 
 use crate::{FlowStats, ForwardingRule};
 
-type SharedFlows = Arc<Mutex<HashMap<(Ipv4Addr, u16), (ForwardingRule, FlowStats)>>>;
+type SharedFlows = Arc<Mutex<HashMap<String, (ForwardingRule, FlowStats)>>>;
 
 pub async fn stats_aggregator_task(
     mut stats_rx: mpsc::Receiver<(ForwardingRule, FlowStats)>,
@@ -18,7 +17,7 @@ pub async fn stats_aggregator_task(
 ) -> Result<()> {
     while let Some((rule, stats)) = stats_rx.recv().await {
         let mut flows = shared_flows.lock().await;
-        flows.insert((rule.input_group, rule.input_port), (rule, stats));
+        flows.insert(rule.rule_id.clone(), (rule, stats));
     }
     Ok(())
 }

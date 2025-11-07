@@ -28,6 +28,10 @@ predicates = "3.1.0"
 integration_test = []
 
 [[bin]]
+name = "poc_closure_ownership"
+path = "experiments/poc_closure_ownership.rs"
+
+[[bin]]
 name = "closure_passing_test"
 path = "experiments/closure_passing_test.rs"
 required-features = ["integration_test"]

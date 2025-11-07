@@ -51,11 +51,11 @@ pub fn setup_ingress_socket(interface_name: &str) -> Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
-use pnet::packet::Packet;
 use pnet::packet::ethernet::{EtherTypes, EthernetPacket};
 use pnet::packet::ip::IpNextHeaderProtocols;
 use pnet::packet::ipv4::Ipv4Packet;
 use pnet::packet::udp::UdpPacket;
+use pnet::packet::Packet;
 
 // ... (imports and setup_ingress_socket remain the same) ...
 
