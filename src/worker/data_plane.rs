@@ -162,4 +162,94 @@ mod tests {
         let err = result.unwrap_err();
         assert!(err.to_string().contains("Interface 'nonexistent_interface123' not found"));
     }
+
+    use pnet::packet::ethernet::MutableEthernetPacket;
+    use pnet::packet::ipv4::MutableIpv4Packet;
+    use pnet::packet::udp::MutableUdpPacket;
+
+    fn build_test_packet(
+        src_ip: Ipv4Addr,
+        dst_ip: Ipv4Addr,
+        src_port: u16,
+        dst_port: u16,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let mut ethernet_buffer = vec![0u8; 14 + 20 + 8 + payload.len()];
+        {
+            let mut eth_packet = MutableEthernetPacket::new(&mut ethernet_buffer).unwrap();
+            eth_packet.set_ethertype(EtherTypes::Ipv4);
+        }
+
+        let mut ipv4_buffer = vec![0u8; 20 + 8 + payload.len()];
+        let mut ipv4_packet = MutableIpv4Packet::new(&mut ipv4_buffer).unwrap();
+        ipv4_packet.set_version(4);
+        ipv4_packet.set_header_length(5);
+        ipv4_packet.set_total_length((20 + 8 + payload.len()) as u16);
+        ipv4_packet.set_ttl(64);
+        ipv4_packet.set_next_level_protocol(IpNextHeaderProtocols::Udp);
+        ipv4_packet.set_source(src_ip);
+        ipv4_packet.set_destination(dst_ip);
+
+        let mut udp_buffer = vec![0u8; 8 + payload.len()];
+        let mut udp_packet = MutableUdpPacket::new(&mut udp_buffer).unwrap();
+        udp_packet.set_source(src_port);
+        udp_packet.set_destination(dst_port);
+        udp_packet.set_length((8 + payload.len()) as u16);
+        udp_packet.set_payload(payload);
+
+        ipv4_packet.set_payload(udp_packet.packet());
+        let mut eth_packet = MutableEthernetPacket::new(&mut ethernet_buffer).unwrap();
+        eth_packet.set_payload(ipv4_packet.packet());
+
+        ethernet_buffer
+    }
+
+    #[test]
+    fn test_parse_and_filter_packet_matching_rule() {
+        let payload = b"test payload";
+        let packet = build_test_packet(
+            "192.168.1.1".parse().unwrap(),
+            "224.0.0.1".parse().unwrap(),
+            1234,
+            5000,
+            payload,
+        );
+
+        let rule = ForwardingRule {
+            rule_id: "test-rule".to_string(),
+            input_interface: "eth0".to_string(),
+            input_group: "224.0.0.1".parse().unwrap(),
+            input_port: 5000,
+            outputs: vec![],
+            dtls_enabled: false,
+        };
+
+        let result = parse_and_filter_packet(&packet, &rule);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), payload);
+    }
+
+    #[test]
+    fn test_parse_and_filter_packet_non_matching_rule() {
+        let payload = b"test payload";
+        let packet = build_test_packet(
+            "192.168.1.1".parse().unwrap(),
+            "224.0.0.1".parse().unwrap(),
+            1234,
+            5000,
+            payload,
+        );
+
+        let rule = ForwardingRule {
+            rule_id: "test-rule".to_string(),
+            input_interface: "eth0".to_string(),
+            input_group: "224.0.0.2".parse().unwrap(), // Different group
+            input_port: 5001,                         // Different port
+            outputs: vec![],
+            dtls_enabled: false,
+        };
+
+        let result = parse_and_filter_packet(&packet, &rule);
+        assert!(result.is_none());
+    }
 }
