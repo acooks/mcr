@@ -70,7 +70,7 @@ fn parse_output_destination(s: &str) -> Result<OutputDestination, String> {
     })
 }
 
-pub fn build_command(cli_command: CliCommand) -> multicast_relay::Command {
+pub fn build_command(cli_command: CliCommand) -> multicast_relay::SupervisorCommand {
     match cli_command {
         CliCommand::Add {
             rule_id,
@@ -78,7 +78,7 @@ pub fn build_command(cli_command: CliCommand) -> multicast_relay::Command {
             input_group,
             input_port,
             outputs,
-        } => multicast_relay::Command::AddRule {
+        } => multicast_relay::SupervisorCommand::AddRule {
             rule_id: rule_id.unwrap_or_default(),
             input_interface,
             input_group,
@@ -86,9 +86,9 @@ pub fn build_command(cli_command: CliCommand) -> multicast_relay::Command {
             outputs,
             dtls_enabled: false,
         },
-        CliCommand::Remove { rule_id } => multicast_relay::Command::RemoveRule { rule_id },
-        CliCommand::List => multicast_relay::Command::ListRules,
-        CliCommand::Stats => multicast_relay::Command::GetStats,
+        CliCommand::Remove { rule_id } => multicast_relay::SupervisorCommand::RemoveRule { rule_id },
+        CliCommand::List => multicast_relay::SupervisorCommand::ListRules,
+        CliCommand::Stats => multicast_relay::SupervisorCommand::GetStats,
     }
 }
 
@@ -118,6 +118,7 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use multicast_relay::SupervisorCommand;
 
     #[test]
     fn test_parse_output_destination() {
@@ -156,7 +157,6 @@ mod tests {
 
     #[test]
     fn test_cli_command_parsing() {
-        use multicast_relay::Command;
 
         // --- Test 'add' command ---
         let add_args = Args::parse_from([
@@ -172,11 +172,16 @@ mod tests {
             "224.0.0.2:5001:lo",
         ]);
         let command = build_command(add_args.command);
-        assert!(matches!(command, Command::AddRule { .. }));
-        if let Command::AddRule {
-            input_interface, ..
-        } = command
-        {
+        assert!(matches!(command, SupervisorCommand::AddRule { .. }));
+                if let SupervisorCommand::AddRule {
+                    rule_id: _,
+                    input_interface,
+                    input_group: _,
+                    input_port: _,
+                    outputs: _,
+                    dtls_enabled: _,
+                } = command
+                {
             assert_eq!(input_interface, "eth0");
         }
 
@@ -184,19 +189,19 @@ mod tests {
         let remove_args =
             Args::parse_from(["control_client", "remove", "--rule-id", "test-rule-123"]);
         let command = build_command(remove_args.command);
-        assert!(matches!(command, Command::RemoveRule { .. }));
-        if let Command::RemoveRule { rule_id, .. } = command {
+        assert!(matches!(command, SupervisorCommand::RemoveRule { .. }));
+        if let SupervisorCommand::RemoveRule { rule_id, .. } = command {
             assert_eq!(rule_id, "test-rule-123");
         }
 
         // --- Test 'list' command ---
         let list_args = Args::parse_from(["control_client", "list"]);
         let command = build_command(list_args.command);
-        assert!(matches!(command, Command::ListRules));
+        assert!(matches!(command, SupervisorCommand::ListRules));
 
         // --- Test 'stats' command ---
         let stats_args = Args::parse_from(["control_client", "stats"]);
         let command = build_command(stats_args.command);
-        assert!(matches!(command, Command::GetStats));
+        assert!(matches!(command, SupervisorCommand::GetStats));
     }
 }

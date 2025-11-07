@@ -1,37 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
-use multicast_relay::{supervisor, worker};
-use std::path::PathBuf;
+use multicast_relay::{supervisor, worker, Args, Command};
 use tokio::sync::mpsc;
-
-#[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
-struct Args {
-    #[command(subcommand)]
-    command: Command,
-}
-
-#[derive(Parser, Debug, PartialEq)]
-enum Command {
-    /// Run the supervisor process
-    Supervisor {
-        #[arg(long, default_value = "/tmp/mcr_relay_commands.sock")]
-        relay_command_socket_path: PathBuf,
-    },
-    /// Run the worker process (intended to be called by the supervisor)
-    Worker {
-        #[arg(long, default_value = "nobody")]
-        user: String,
-        #[arg(long, default_value = "nogroup")]
-        group: String,
-        #[arg(long)]
-        relay_command_socket_path: PathBuf,
-        #[arg(long)]
-        data_plane: bool,
-        #[arg(long)]
-        core_id: Option<u32>,
-    },
-}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -60,23 +30,48 @@ async fn main() -> Result<()> {
             relay_command_socket_path,
             data_plane,
             core_id,
+            prometheus_addr,
+            input_interface_name,
+            input_group,
+            input_port,
+            output_group,
+            output_port,
+            output_interface,
+            reporting_interval,
         } => {
             if data_plane {
+                let config = multicast_relay::DataPlaneConfig {
+                    user,
+                    group,
+                    core_id: core_id.unwrap_or(0),
+                    prometheus_addr: prometheus_addr.unwrap_or("127.0.0.1:9000".parse().unwrap()),
+                    input_interface_name,
+                    input_group,
+                    input_port,
+                    output_group,
+                    output_port,
+                    output_interface,
+                    reporting_interval: reporting_interval.unwrap_or(1),
+                };
                 // D1, D7: The worker process uses a `tokio-uring` runtime
                 // to drive the high-performance data plane.
                 tokio_uring::start(async {
-                    if let Err(e) = worker::run_data_plane(user, group, core_id.unwrap_or(0)).await
-                    {
+                    if let Err(e) = worker::run_data_plane(config).await {
                         eprintln!("Data Plane worker process failed: {}", e);
                         std::process::exit(1);
                     }
                 });
             } else {
+                let config = multicast_relay::ControlPlaneConfig {
+                    user,
+                    group,
+                    relay_command_socket_path,
+                    prometheus_addr: prometheus_addr.unwrap_or("127.0.0.1:9000".parse().unwrap()),
+                    reporting_interval: reporting_interval.unwrap_or(1),
+                };
                 // Control Plane worker
                 tokio_uring::start(async {
-                    if let Err(e) =
-                        worker::run_control_plane(user, group, relay_command_socket_path).await
-                    {
+                    if let Err(e) = worker::run_control_plane(config).await {
                         eprintln!("Control Plane worker process failed: {}", e);
                         std::process::exit(1);
                     }
@@ -91,6 +86,7 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn test_arg_parsing() {
@@ -114,6 +110,22 @@ mod tests {
             "--data-plane",
             "--core-id",
             "0",
+            "--prometheus-addr",
+            "127.0.0.1:9000",
+            "--input-interface-name",
+            "eth0",
+            "--input-group",
+            "224.0.0.1",
+            "--input-port",
+            "5000",
+            "--output-group",
+            "224.0.0.2",
+            "--output-port",
+            "5001",
+            "--output-interface",
+            "eth1",
+            "--reporting-interval",
+            "5",
         ]);
         assert_eq!(
             args.command,
@@ -123,6 +135,14 @@ mod tests {
                 relay_command_socket_path: PathBuf::from("/tmp/worker_relay.sock"),
                 data_plane: true,
                 core_id: Some(0),
+                prometheus_addr: Some("127.0.0.1:9000".parse().unwrap()),
+                input_interface_name: Some("eth0".to_string()),
+                input_group: Some("224.0.0.1".parse().unwrap()),
+                input_port: Some(5000),
+                output_group: Some("224.0.0.2".parse().unwrap()),
+                output_port: Some(5001),
+                output_interface: Some("eth1".to_string()),
+                reporting_interval: Some(5),
             }
         );
 
@@ -144,6 +164,14 @@ mod tests {
                 relay_command_socket_path: PathBuf::from("/tmp/worker_relay.sock"),
                 data_plane: false,
                 core_id: None,
+                prometheus_addr: None,
+                input_interface_name: None,
+                input_group: None,
+                input_port: None,
+                output_group: None,
+                output_port: None,
+                output_interface: None,
+                reporting_interval: None,
             }
         );
     }

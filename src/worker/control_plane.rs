@@ -9,7 +9,7 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use super::UnixSocketRelayCommandSender;
-use crate::{Command, FlowStats, ForwardingRule, Response};
+use crate::{FlowStats, ForwardingRule, Response, SupervisorCommand};
 
 type SharedFlows = Arc<Mutex<HashMap<String, (ForwardingRule, FlowStats)>>>;
 
@@ -34,62 +34,60 @@ pub async fn control_plane_task(
                 let _ = stream.write_all(&response_bytes).await;
                 return;
             }
-            let command: Result<Command, _> = serde_json::from_slice(&buffer);
+            let command: Result<SupervisorCommand, _> = serde_json::from_slice(&buffer);
             let response = match command {
-                Ok(cmd) => match cmd {
-                    Command::AddRule {
-                        rule_id,
+                Ok(SupervisorCommand::AddRule {
+                    rule_id,
+                    input_interface,
+                    input_group,
+                    input_port,
+                    outputs,
+                    dtls_enabled,
+                }) => {
+                    let rule_id = if rule_id.is_empty() {
+                        Uuid::new_v4().to_string()
+                    } else {
+                        rule_id
+                    };
+                    let rule = ForwardingRule {
+                        rule_id: rule_id.clone(),
                         input_interface,
                         input_group,
                         input_port,
                         outputs,
                         dtls_enabled,
-                    } => {
-                        let rule_id = if rule_id.is_empty() {
-                            Uuid::new_v4().to_string()
-                        } else {
-                            rule_id
-                        };
-                        let rule = ForwardingRule {
+                    };
+                    if relay_command_tx
+                        .send(crate::RelayCommand::AddRule(rule))
+                        .await
+                        .is_ok()
+                    {
+                        Response::Success(format!("Rule added with ID: {}", rule_id))
+                    } else {
+                        Response::Error("Failed to add rule".to_string())
+                    }
+                }
+                Ok(SupervisorCommand::RemoveRule { rule_id }) => {
+                    if relay_command_tx
+                        .send(crate::RelayCommand::RemoveRule {
                             rule_id: rule_id.clone(),
-                            input_interface,
-                            input_group,
-                            input_port,
-                            outputs,
-                            dtls_enabled,
-                        };
-                        if relay_command_tx
-                            .send(crate::RelayCommand::AddRule(rule))
-                            .await
-                            .is_ok()
-                        {
-                            Response::Success(format!("Rule added with ID: {}", rule_id))
-                        } else {
-                            Response::Error("Failed to add rule".to_string())
-                        }
+                        })
+                        .await
+                        .is_ok()
+                    {
+                        Response::Success(format!("Rule {} removed", rule_id))
+                    } else {
+                        Response::Error(format!("Failed to remove rule {}", rule_id))
                     }
-                    Command::RemoveRule { rule_id } => {
-                        if relay_command_tx
-                            .send(crate::RelayCommand::RemoveRule {
-                                rule_id: rule_id.clone(),
-                            })
-                            .await
-                            .is_ok()
-                        {
-                            Response::Success(format!("Rule {} removed", rule_id))
-                        } else {
-                            Response::Error(format!("Failed to remove rule {}", rule_id))
-                        }
-                    }
-                    Command::ListRules => {
-                        let flows = shared_flows.lock().await;
-                        Response::Rules(flows.values().map(|(r, _)| r.clone()).collect())
-                    }
-                    Command::GetStats => {
-                        let flows = shared_flows.lock().await;
-                        Response::Stats(flows.values().map(|(_, s)| s.clone()).collect())
-                    }
-                },
+                }
+                Ok(SupervisorCommand::ListRules) => {
+                    let flows = shared_flows.lock().await;
+                    Response::Rules(flows.values().map(|(r, _)| r.clone()).collect())
+                }
+                Ok(SupervisorCommand::GetStats) => {
+                    let flows = shared_flows.lock().await;
+                    Response::Stats(flows.values().map(|(_, s)| s.clone()).collect())
+                }
                 Err(e) => Response::Error(e.to_string()),
             };
             let response_bytes = serde_json::to_vec(&response).unwrap();

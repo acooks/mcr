@@ -1,9 +1,78 @@
 use serde::{Deserialize, Serialize};
 use std::net::Ipv4Addr;
 use uuid::Uuid;
+use clap::Parser;
+use std::path::PathBuf;
 
 pub mod supervisor;
 pub mod worker;
+
+#[derive(Parser, Debug, PartialEq, serde::Deserialize)]
+#[command(author, version, about, long_about = None)]
+pub struct Args {
+    #[command(subcommand)]
+    pub command: Command,
+}
+
+#[derive(Parser, Debug, PartialEq, serde::Deserialize)]
+pub enum Command {
+    /// Run the supervisor process
+    Supervisor {
+        #[arg(long, default_value = "/tmp/mcr_relay_commands.sock")]
+        relay_command_socket_path: PathBuf,
+    },
+    /// Run the worker process (intended to be called by the supervisor)
+    Worker {
+        #[arg(long, default_value = "nobody")]
+        user: String,
+        #[arg(long, default_value = "nogroup")]
+        group: String,
+        #[arg(long)]
+        relay_command_socket_path: PathBuf,
+        #[arg(long)]
+        data_plane: bool,
+        #[arg(long)]
+        core_id: Option<u32>,
+        #[arg(long)]
+        prometheus_addr: Option<std::net::SocketAddr>,
+        #[arg(long)]
+        input_interface_name: Option<String>,
+        #[arg(long)]
+        input_group: Option<Ipv4Addr>,
+        #[arg(long)]
+        input_port: Option<u16>,
+        #[arg(long)]
+        output_group: Option<Ipv4Addr>,
+        #[arg(long)]
+        output_port: Option<u16>,
+        #[arg(long)]
+        output_interface: Option<String>,
+        #[arg(long)]
+        reporting_interval: Option<u64>,
+    },
+}
+
+pub struct ControlPlaneConfig {
+    pub user: String,
+    pub group: String,
+    pub relay_command_socket_path: PathBuf,
+    pub prometheus_addr: std::net::SocketAddr,
+    pub reporting_interval: u64,
+}
+
+pub struct DataPlaneConfig {
+    pub user: String,
+    pub group: String,
+    pub core_id: u32,
+    pub prometheus_addr: std::net::SocketAddr,
+    pub input_interface_name: Option<String>,
+    pub input_group: Option<Ipv4Addr>,
+    pub input_port: Option<u16>,
+    pub output_group: Option<Ipv4Addr>,
+    pub output_port: Option<u16>,
+    pub output_interface: Option<String>,
+    pub reporting_interval: u64,
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Hash)]
 pub struct OutputDestination {
@@ -14,7 +83,7 @@ pub struct OutputDestination {
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
-pub enum Command {
+pub enum SupervisorCommand {
     AddRule {
         #[serde(default = "default_rule_id")]
         rule_id: String,
@@ -75,8 +144,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_command_serialization() {
-        let add_command = Command::AddRule {
+    fn test_supervisor_command_serialization() {
+        let add_command = SupervisorCommand::AddRule {
             rule_id: "test-uuid".to_string(),
             input_interface: "eth0".to_string(),
             input_group: "224.0.0.1".parse().unwrap(),
@@ -90,24 +159,24 @@ mod tests {
             dtls_enabled: false,
         };
         let json = serde_json::to_string(&add_command).unwrap();
-        let deserialized: Command = serde_json::from_str(&json).unwrap();
+        let deserialized: SupervisorCommand = serde_json::from_str(&json).unwrap();
         assert_eq!(add_command, deserialized);
 
-        let remove_command = Command::RemoveRule {
+        let remove_command = SupervisorCommand::RemoveRule {
             rule_id: "test-uuid".to_string(),
         };
         let json = serde_json::to_string(&remove_command).unwrap();
-        let deserialized: Command = serde_json::from_str(&json).unwrap();
+        let deserialized: SupervisorCommand = serde_json::from_str(&json).unwrap();
         assert_eq!(remove_command, deserialized);
 
-        let list_command = Command::ListRules;
+        let list_command = SupervisorCommand::ListRules;
         let json = serde_json::to_string(&list_command).unwrap();
-        let deserialized: Command = serde_json::from_str(&json).unwrap();
+        let deserialized: SupervisorCommand = serde_json::from_str(&json).unwrap();
         assert_eq!(list_command, deserialized);
 
-        let stats_command = Command::GetStats;
+        let stats_command = SupervisorCommand::GetStats;
         let json = serde_json::to_string(&stats_command).unwrap();
-        let deserialized: Command = serde_json::from_str(&json).unwrap();
+        let deserialized: SupervisorCommand = serde_json::from_str(&json).unwrap();
         assert_eq!(stats_command, deserialized);
     }
 

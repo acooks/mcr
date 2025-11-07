@@ -59,6 +59,7 @@ use pnet::packet::Packet;
 
 // ... (imports and setup_ingress_socket remain the same) ...
 
+#[allow(dead_code)]
 pub async fn run_flow_task(
     rule: ForwardingRule,
     raw_fd: Arc<OwnedFd>,
