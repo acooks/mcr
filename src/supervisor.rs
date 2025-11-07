@@ -380,4 +380,70 @@ mod tests {
         stream.write_all(&command_bytes).await?;
         Ok(())
     }
+
+    fn spawn_once_gracefully_then_fail(spawn_count: Arc<Mutex<u32>>) -> Result<Child> {
+        let mut count = spawn_count.lock().unwrap();
+        *count += 1;
+        let mut command = Command::new("sh");
+        if *count == 1 {
+            // First spawn exits gracefully
+            command.arg("-c").arg("exit 0");
+        } else {
+            // Subsequent spawns fail
+            command.arg("-c").arg("exit 1");
+        }
+        command.spawn().map_err(anyhow::Error::from)
+    }
+
+    #[tokio::test]
+    async fn test_supervisor_resets_backoff_on_graceful_exit() {
+        let cp_spawn_count = Arc::new(Mutex::new(0));
+        let cp_spawn_times = Arc::new(Mutex::new(Vec::new()));
+
+        let cp_spawn_count_clone = cp_spawn_count.clone();
+        let cp_spawn_times_clone = cp_spawn_times.clone();
+        let spawn_cp = move || {
+            cp_spawn_times_clone.lock().unwrap().push(Instant::now());
+            spawn_once_gracefully_then_fail(cp_spawn_count_clone.clone())
+        };
+
+        let spawn_dp = || spawn_sleeping_worker();
+
+        let socket_path = PathBuf::from(format!("/tmp/test_supervisor_{}.sock", uuid::Uuid::new_v4()));
+        let (_tx, rx) = mpsc::channel(10);
+        let master_rules = Arc::new(Mutex::new(HashMap::new()));
+
+        let supervisor_task = tokio::spawn(run(
+            spawn_cp,
+            spawn_dp,
+            rx,
+            socket_path.clone(),
+            master_rules.clone(),
+        ));
+
+        // Allow time for the graceful exit, immediate restart, and one backoff failure
+        tokio::time::sleep(Duration::from_millis(INITIAL_BACKOFF_MS * 2)).await;
+
+        supervisor_task.abort();
+        let _ = std::fs::remove_file(&socket_path);
+
+        assert!(*cp_spawn_count.lock().unwrap() >= 3, "Should have spawned at least 3 times");
+
+        let cp_times = cp_spawn_times.lock().unwrap();
+        // Interval after graceful exit should be very short (immediate restart)
+        let immediate_restart_interval = cp_times[1].duration_since(cp_times[0]).as_millis() as u64;
+        assert!(
+            immediate_restart_interval < INITIAL_BACKOFF_MS,
+            "Restart after graceful exit should be immediate, but was {}ms",
+            immediate_restart_interval
+        );
+
+        // Interval after the first failure (following the graceful one) should be the initial backoff
+        let first_backoff_interval = cp_times[2].duration_since(cp_times[1]).as_millis() as u64;
+        assert!(
+            (INITIAL_BACKOFF_MS..INITIAL_BACKOFF_MS * 2).contains(&first_backoff_interval),
+            "First backoff interval after reset was incorrect: {}ms",
+            first_backoff_interval
+        );
+    }
 }
