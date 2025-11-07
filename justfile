@@ -78,8 +78,9 @@ outdated:
 # Generate test coverage report
 coverage:
     @echo "--- Generating Test Coverage Report (cargo tarpaulin) ---"
-    @command -v cargo-tarpaulin >/dev/null || cargo install cargo-tarpaulin
-    CARGO_INCREMENTAL=0 RUSTFLAGS="-Cinstrument-coverage" cargo tarpaulin --engine llvm --features integration_test --follow-exec --all-targets --exclude-files "nix-0.30.1/*"
+    @command -v cargo-tarpaulin >/dev/null || cargo install cargo-tarpaulin --version 0.27.0 --locked
+    cargo tarpaulin --out html --output-dir target/tarpaulin --features integration_test --exclude-files src/main.rs "experiments/*"
+
 
 # Clean the project
 clean:
