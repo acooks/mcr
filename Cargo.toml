@@ -23,6 +23,7 @@ uuid = { version = "1.9.1", features = ["v4"] }
 
 [dev-dependencies]
 predicates = "3.1.0"
+tempfile = "3.23.0"
 
 [features]
 integration_test = []
