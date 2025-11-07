@@ -78,20 +78,55 @@ All dependencies are managed through `Cargo.toml`. When adding a new dependency,
 
 This project does not prescribe specific developer environment setups or pin exact package versions beyond what is strictly necessary for `Cargo.toml`. Developers are free to configure their environments as they see fit. Compatibility issues that arise due to environment differences or dependency versions will be addressed on a case-by-case basis, either by fixing bugs or explicitly identifying compatibility requirements.
 
-## Testing
+## Local Development Workflow
 
-All new features and bug fixes must be accompanied by tests.
 
-- **Unit Tests:** Should be placed in the same file as the code they are testing, within a `#[cfg(test)]` module.
-- **Integration Tests:** Should be placed in the `tests/` directory.
 
-You can run all tests using:
+This project uses a set of standard Rust tools to ensure code quality and consistency. The workflow is designed to be simple and repeatable.
+
+
+
+### 1. One-Time Setup: Install Developer Tools
+
+
+
+The only prerequisite is the standard [Rust toolchain](https://rustup.rs).
+
+
+
+Once you have `cargo` installed, run the following command from the root of the repository to install all the necessary developer tools (like `just`, `cargo-audit`, etc.):
+
+
 
 ```bash
-cargo test --features integration_test
+
+cargo install --path ./tools
+
 ```
 
-**Note:** The `--features integration_test` flag is required to enable the helper functions used by the integration tests in the `tests/` directory.
+
+
+This command reads the tool manifest at `./tools/Cargo.toml` and installs the exact versions of the tools pinned there. You only need to do this once, or again if the tool manifest is updated.
+
+
+
+### 2. Day-to-Day: Run Checks
+
+
+
+After the one-time setup, you can run the full suite of quality checks using a single command:
+
+
+
+```bash
+
+just check
+
+```
+
+
+
+This command will format, lint, build, and test the project, mirroring the CI pipeline and ensuring your changes are ready for submission. You can see the `justfile` for other available commands like `just test`.
 
 ## Enforcement
 

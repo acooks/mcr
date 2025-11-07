@@ -1,0 +1,7 @@
+# This file pins the Rust toolchain version for the project.
+# `rustup` will automatically detect this file and use the specified toolchain.
+# See https://rust-lang.github.io/rustup/overrides.html for more details.
+
+[toolchain]
+channel = "1.90.0"
+components = ["rustfmt", "clippy"]

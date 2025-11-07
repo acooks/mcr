@@ -93,7 +93,7 @@ _Log continues from this point._
 - Recognized that the `tokio` runtime is the appropriate choice for asynchronous I/O in Rust.
 - `io_uring` was identified as the state-of-the-art Linux asynchronous I/O interface, capable of eliminating system call overhead and enabling native batching of I/O operations.
 
-\*\*Tentative Design Decisions Recorded (Continued):}
+**Tentative Design Decisions Recorded (Continued):**
 
 - **D7:** The application will be built using the `tokio-uring` runtime. The core packet receiving loop will submit multiple `recv` operations to the `io_uring` submission queue in batches and reap results from the completion queue. This is a fundamental architectural choice for peak performance.
 
@@ -104,7 +104,7 @@ _Log continues from this point._
 - Extended the `io_uring` strategy to the egress path to maintain consistent high performance.
 - Confirmed that `AF_INET` sockets are still appropriate for sending, as the kernel should handle Layer 2 and routing for outgoing packets.
 
-\*\*Tentative Design Decisions Recorded (Continued):
+**Tentative Design Decisions Recorded (Continued):**
 
 - **D8:** The egress path will leverage `io_uring`. Outgoing packets will be constructed in userspace and submitted to the `io_uring` submission queue via batched `sendto` operations on standard `AF_INET` `UdpSocket`s.
 
@@ -116,7 +116,7 @@ _Log continues from this point._
 - JSON was chosen for testability, convenience, and interoperability over raw performance for this non-data-plane interface.
 - A single, centralized Unix Domain Socket was chosen for simplicity and manageability.
 
-\*\*Tentative Design Decisions Recorded (Continued):
+**Tentative Design Decisions Recorded (Continued):**
 
 - **D9 (Revised and Finalized):** The control plane will use a **JSON** protocol for serializing commands and responses over the single Unix Domain Socket.
 
@@ -462,3 +462,25 @@ _Log continues from this point._
 **Design Decision Recorded:**
 
 - **D31 (Revised - Nuanced NIC Offloading):** For the application to function correctly, NIC offloading features that coalesce packets must be disabled on all ingress interfaces. Generic Receive Offload (GRO) and Large Receive Offload (LRO) **must be disabled** on all `input_interface`s. These features are fundamentally incompatible with the application's `AF_PACKET` processing model and can cause artificial jumbo frames, leading to unnecessary egress fragmentation. For egress offloads (GSO/TSO), the recommendation depends on the operator's goal: for handling MTU mismatches, it is **recommended to enable** GSO/TSO on the egress interface; for maximum predictability or performance testing, it is **recommended to disable** GSO/TSO. These explicit, nuanced recommendations will be a critical part of the operational documentation.
+
+### 2025-11-07 - Documentation and Test Process Stabilization
+
+**Topic:** Audit and Stabilization of Build and Test Processes.
+
+**Analysis:**
+An audit revealed several issues hindering a reliable build and test workflow:
+-   `README.md` contained typos in `cargo` commands (`car go`).
+-   The full test suite, particularly integration tests, required the `--features integration_test` flag, which was not documented in `CONTRIBUTING.md` or `TESTING.md`.
+-   A compilation error in `src/lib.rs` prevented `cargo test` from running successfully.
+-   `src/main.rs` had minor formatting inconsistencies.
+-   Markdown files were not consistently formatted.
+
+**Actions Taken:**
+-   Corrected `cargo` command typos in `README.md`.
+-   Updated `CONTRIBUTING.md` and `TESTING.md` to explicitly include the `--features integration_test` flag for running tests and added explanatory notes.
+-   Fixed the compilation error in `src/lib.rs` by adding the missing `input_interface` field to the `Command::AddRule` test case.
+-   Applied `cargo fmt` to `src/main.rs` to resolve formatting issues.
+-   Executed `npx prettier --write "**/*.md"` to ensure consistent formatting across all Markdown documentation.
+
+**Outcome:**
+The project's documented build and test processes are now stable, correct, and verified. All `cargo` commands (`fmt`, `clippy`, `test`) execute successfully, providing a reliable baseline for quality control.
