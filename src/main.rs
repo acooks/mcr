@@ -1,6 +1,8 @@
 use anyhow::Result;
 use clap::Parser;
 use multicast_relay::{supervisor, worker, Args, Command};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
 #[tokio::main]
@@ -11,12 +13,17 @@ async fn main() -> Result<()> {
         Command::Supervisor {
             relay_command_socket_path,
         } => {
+            // This channel is now unused, but we keep it for now to avoid breaking the build.
+            // It will be removed in a future commit.
             let (_relay_command_tx, relay_command_rx) = mpsc::channel(100);
+
+            // The supervisor now manages its own command socket
             if let Err(e) = supervisor::run(
                 || supervisor::spawn_control_plane_worker(relay_command_socket_path.clone()),
                 || supervisor::spawn_data_plane_worker(0, relay_command_socket_path.clone()),
                 relay_command_rx, // This is now unused, will be removed from supervisor::run
                 relay_command_socket_path.clone(),
+                Arc::new(Mutex::new(HashMap::new())),
             )
             .await
             {

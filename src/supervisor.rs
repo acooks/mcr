@@ -1,6 +1,7 @@
 use anyhow::Result;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use tokio::io::AsyncReadExt;
 use tokio::net::UnixListener;
 use tokio::process::{Child, Command};
@@ -59,24 +60,18 @@ pub fn spawn_data_plane_worker(core_id: u32, relay_command_socket_path: PathBuf)
 
 pub async fn run<F, G>(
     mut spawn_cp: F,
-
     mut spawn_dp: G,
-
     _relay_command_rx: mpsc::Receiver<RelayCommand>, // This is now unused, will be removed
-
     relay_command_socket_path: PathBuf,
+    master_rules: Arc<Mutex<HashMap<String, ForwardingRule>>>,
 ) -> Result<()>
 where
     F: FnMut() -> Result<Child>,
-
     G: FnMut() -> Result<Child>,
 {
     println!("[Supervisor] Starting.");
 
-    let mut master_rules: HashMap<String, ForwardingRule> = HashMap::new();
-
     // Clean up old socket if it exists
-
     if relay_command_socket_path.exists() {
         std::fs::remove_file(&relay_command_socket_path)?;
     }
@@ -169,23 +164,14 @@ where
                         match cmd {
 
                             RelayCommand::AddRule(rule) => {
-
                                 println!("[Supervisor] Adding rule: {}", rule.rule_id);
-
-                                master_rules.insert(rule.rule_id.clone(), rule);
-
+                                master_rules.lock().unwrap().insert(rule.rule_id.clone(), rule);
                                 // TODO: Dispatch rule to appropriate worker
-
                             }
-
                             RelayCommand::RemoveRule { rule_id } => {
-
                                 println!("[Supervisor] Removing rule: {}", rule_id);
-
-                                master_rules.remove(&rule_id);
-
+                                master_rules.lock().unwrap().remove(&rule_id);
                                 // TODO: Dispatch removal to appropriate worker
-
                             }
 
                         }
@@ -251,8 +237,15 @@ mod tests {
 
         let socket_path = PathBuf::from(format!("/tmp/test_supervisor_{}.sock", uuid::Uuid::new_v4()));
         let (_tx, rx) = mpsc::channel(10);
+        let master_rules = Arc::new(Mutex::new(HashMap::new()));
 
-        let supervisor_task = tokio::spawn(run(spawn_cp, spawn_dp, rx, socket_path.clone()));
+        let supervisor_task = tokio::spawn(run(
+            spawn_cp,
+            spawn_dp,
+            rx,
+            socket_path.clone(),
+            master_rules.clone(),
+        ));
 
         // Allow time for a few restarts
         tokio::time::sleep(Duration::from_millis(INITIAL_BACKOFF_MS * 4)).await;
@@ -290,8 +283,15 @@ mod tests {
 
         let socket_path = PathBuf::from(format!("/tmp/test_supervisor_{}.sock", uuid::Uuid::new_v4()));
         let (_tx, rx) = mpsc::channel(10);
+        let master_rules = Arc::new(Mutex::new(HashMap::new()));
 
-        let supervisor_task = tokio::spawn(run(spawn_cp, spawn_dp, rx, socket_path.clone()));
+        let supervisor_task = tokio::spawn(run(
+            spawn_cp,
+            spawn_dp,
+            rx,
+            socket_path.clone(),
+            master_rules.clone(),
+        ));
 
         // Allow time for a few restarts
         tokio::time::sleep(Duration::from_millis(INITIAL_BACKOFF_MS * 4)).await;
@@ -310,5 +310,74 @@ mod tests {
             "DP backoff interval1 was {}",
             dp_interval1
         );
+    }
+
+    #[tokio::test]
+    async fn test_supervisor_handles_relay_commands() {
+        let spawn_cp = || spawn_sleeping_worker();
+        let spawn_dp = || spawn_sleeping_worker();
+
+        let socket_path = PathBuf::from(format!("/tmp/test_supervisor_{}.sock", uuid::Uuid::new_v4()));
+        let (_tx, rx) = mpsc::channel(10);
+        let master_rules = Arc::new(Mutex::new(HashMap::new()));
+
+        let supervisor_task = tokio::spawn(run(
+            spawn_cp,
+            spawn_dp,
+            rx,
+            socket_path.clone(),
+            master_rules.clone(),
+        ));
+
+        // Allow the supervisor to start and bind the socket
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // --- Test AddRule ---
+        let add_rule_cmd = RelayCommand::AddRule(ForwardingRule {
+            rule_id: "test-rule".to_string(),
+            input_interface: "lo".to_string(),
+            input_group: "224.0.0.1".parse().unwrap(),
+            input_port: 5000,
+            outputs: vec![],
+            dtls_enabled: false,
+        });
+        send_command_to_supervisor(&socket_path, add_rule_cmd)
+            .await
+            .unwrap();
+
+        // Allow time for the supervisor to process the command
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Verify the rule was added
+        assert_eq!(master_rules.lock().unwrap().len(), 1);
+        assert!(master_rules.lock().unwrap().contains_key("test-rule"));
+
+        // --- Test RemoveRule ---
+        let remove_rule_cmd = RelayCommand::RemoveRule {
+            rule_id: "test-rule".to_string(),
+        };
+        send_command_to_supervisor(&socket_path, remove_rule_cmd)
+            .await
+            .unwrap();
+
+        // Allow time for the supervisor to process the command
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Verify the rule was removed
+        assert_eq!(master_rules.lock().unwrap().len(), 0);
+
+        // Cleanup
+        supervisor_task.abort();
+        let _ = std::fs::remove_file(&socket_path);
+    }
+
+    async fn send_command_to_supervisor(socket_path: &PathBuf, command: RelayCommand) -> anyhow::Result<()> {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::UnixStream;
+
+        let mut stream = UnixStream::connect(socket_path).await?;
+        let command_bytes = serde_json::to_vec(&command)?;
+        stream.write_all(&command_bytes).await?;
+        Ok(())
     }
 }

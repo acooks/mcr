@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use multicast_relay::{supervisor, RelayCommand};
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -42,8 +43,16 @@ async fn test_supervisor_restarts_failed_worker() -> Result<()> {
         Ok(child)
     };
 
+    let master_rules = Arc::new(Mutex::new(HashMap::new()));
+
     // Run the supervisor logic in the background.
-    let supervisor_task = tokio::spawn(supervisor::run(spawn_cp, spawn_dp, rx, socket_path.clone()));
+    let supervisor_task = tokio::spawn(supervisor::run(
+        spawn_cp,
+        spawn_dp,
+        rx,
+        socket_path.clone(),
+        master_rules.clone(),
+    ));
     sleep(Duration::from_millis(500)).await; // Give it time to spawn children.
 
     // The entire test is wrapped in a timeout to prevent hangs.
