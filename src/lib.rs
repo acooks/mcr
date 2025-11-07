@@ -114,4 +114,13 @@ mod tests {
         let deserialized: Response = serde_json::from_str(&json).unwrap();
         assert_eq!(response, deserialized);
     }
+
+    #[test]
+    fn test_default_rule_id_is_valid_uuid() {
+        let rule_id = default_rule_id();
+        assert!(
+            Uuid::parse_str(&rule_id).is_ok(),
+            "Generated rule_id should be a valid UUID"
+        );
+    }
 }
