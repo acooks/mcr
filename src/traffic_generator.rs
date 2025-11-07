@@ -23,6 +23,14 @@ struct Args {
     /// Packet size in bytes
     #[arg(long, default_value_t = 1024)]
     size: usize,
+
+    /// Number of packets to send (0 for infinite)
+    #[arg(long, default_value_t = 0)]
+    count: u64,
+
+    /// Payload to send as a string
+    #[arg(long)]
+    payload: Option<String>,
 }
 
 #[cfg(not(test))]
@@ -48,16 +56,30 @@ async fn main() -> anyhow::Result<()> {
         args.group, args.port, args.interface, args.rate, args.size
     );
 
-    let packet = vec![0u8; args.size];
+    let packet = if let Some(payload_str) = args.payload {
+        let mut p = payload_str.into_bytes();
+        p.resize(args.size, 0);
+        p
+    } else {
+        vec![0u8; args.size]
+    };
+
     let interval = Duration::from_secs_f64(1.0 / args.rate as f64);
     let mut interval_timer = time::interval(interval);
 
+    let mut packets_sent = 0;
     loop {
         interval_timer.tick().await;
         if let Err(e) = sender_socket.send_to(&packet, dest_addr).await {
             eprintln!("Error sending packet: {}", e);
         }
+        packets_sent += 1;
+        if args.count > 0 && packets_sent >= args.count {
+            break;
+        }
     }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -77,8 +99,10 @@ mod tests {
             "127.0.0.1".parse().unwrap(),
             receiver_addr.port(),
             "127.0.0.1".parse().unwrap(),
-            100, // 100 pps
-            64,  // 64 bytes
+            100,  // 100 pps
+            64,   // 64 bytes
+            0,    // infinite
+            None, // no payload
         ));
 
         // 3. Verification: Try to receive a few packets.
@@ -119,6 +143,8 @@ mod tests {
         interface: Ipv4Addr,
         rate: u64,
         size: usize,
+        count: u64,
+        payload: Option<String>,
     ) -> anyhow::Result<()> {
         use socket2::{Domain, Protocol, Socket, Type};
         use std::net::SocketAddrV4;
@@ -132,13 +158,26 @@ mod tests {
         sender_std_socket.set_nonblocking(true)?;
         let sender_socket = UdpSocket::from_std(sender_std_socket.into())?;
 
-        let packet = vec![0u8; size];
+        let packet = if let Some(payload_str) = payload {
+            let mut p = payload_str.into_bytes();
+            p.resize(size, 0);
+            p
+        } else {
+            vec![0u8; size]
+        };
+
         let interval = Duration::from_secs_f64(1.0 / rate as f64);
         let mut interval_timer = time::interval(interval);
 
+        let mut packets_sent = 0;
         loop {
             interval_timer.tick().await;
             sender_socket.send_to(&packet, dest_addr).await?;
+            packets_sent += 1;
+            if count > 0 && packets_sent >= count {
+                break;
+            }
         }
+        Ok(())
     }
 }

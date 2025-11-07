@@ -114,9 +114,10 @@ mod tests {
 
         // Spawn a task to connect to the relay command socket
         let relay_socket_path_clone = relay_socket_path.clone();
-        let relay_connection_task = tokio::spawn(async move {
-            UnixStream::connect(&relay_socket_path_clone).await.unwrap()
-        });
+        let relay_connection_task =
+            tokio::spawn(
+                async move { UnixStream::connect(&relay_socket_path_clone).await.unwrap() },
+            );
 
         // Accept the connection on the relay listener
         let (mut relay_stream, _) = relay_listener.accept().await.unwrap();
@@ -162,7 +163,8 @@ mod tests {
         // Verify the RelayCommand received by the mock sender
         let mut relay_buffer = [0; 1024];
         let n = relay_stream.read(&mut relay_buffer).await.unwrap();
-        let received_relay_command: RelayCommand = serde_json::from_slice(&relay_buffer[..n]).unwrap();
+        let received_relay_command: RelayCommand =
+            serde_json::from_slice(&relay_buffer[..n]).unwrap();
         if let RelayCommand::AddRule(rule) = received_relay_command {
             assert_eq!(rule.rule_id, "test-rule");
         } else {
@@ -171,7 +173,10 @@ mod tests {
 
         // Verify the Response received by the client
         let mut response_buffer = Vec::new();
-        client_stream.read_to_end(&mut response_buffer).await.unwrap();
+        client_stream
+            .read_to_end(&mut response_buffer)
+            .await
+            .unwrap();
         let response: Response = serde_json::from_slice(&response_buffer).unwrap();
         assert_eq!(
             response,

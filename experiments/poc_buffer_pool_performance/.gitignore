@@ -1,0 +1,6 @@
+target/
+Cargo.lock
+*.svg
+*.html
+perf.data
+perf.data.old

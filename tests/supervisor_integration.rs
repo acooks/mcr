@@ -32,12 +32,12 @@ async fn test_supervisor_restarts_failed_worker() -> Result<()> {
     let dp_socket_path = socket_path.clone();
 
     // Create FnMut closures that capture the necessary variables.
-    let spawn_cp = move || {
+    let spawn_cp = move || -> anyhow::Result<tokio::process::Child> {
         let child = supervisor::spawn_dummy_worker(cp_socket_path.clone())?;
         pids_clone_cp.lock().unwrap().push(child.id().unwrap());
         Ok(child)
     };
-    let spawn_dp = move || {
+    let spawn_dp = move || -> anyhow::Result<tokio::process::Child> {
         let child = supervisor::spawn_dummy_worker(dp_socket_path.clone())?;
         pids_clone_dp.lock().unwrap().push(child.id().unwrap());
         Ok(child)
@@ -46,7 +46,7 @@ async fn test_supervisor_restarts_failed_worker() -> Result<()> {
     let master_rules = Arc::new(Mutex::new(HashMap::new()));
 
     // Run the supervisor logic in the background.
-    let supervisor_task = tokio::spawn(supervisor::run(
+    let supervisor_task = tokio::spawn(supervisor::run_generic(
         spawn_cp,
         spawn_dp,
         rx,

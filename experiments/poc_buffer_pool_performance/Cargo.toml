@@ -1,0 +1,16 @@
+[package]
+name = "poc_buffer_pool_performance"
+version = "0.1.0"
+edition = "2021"
+
+[[bench]]
+name = "buffer_pool_bench"
+harness = false
+
+[dependencies]
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[profile.release]
+debug = true  # Enable debug symbols for perf analysis

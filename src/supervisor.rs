@@ -1,4 +1,5 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
+use nix::unistd::{Group, User};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -10,8 +11,6 @@ use tokio::time::{sleep, Duration};
 
 use crate::{ForwardingRule, RelayCommand};
 
-const WORKER_USER: &str = "nobody";
-const WORKER_GROUP: &str = "nogroup";
 const INITIAL_BACKOFF_MS: u64 = 250;
 const MAX_BACKOFF_MS: u64 = 16000; // 16 seconds
 
@@ -22,21 +21,36 @@ fn get_production_base_command() -> Command {
     Command::new(current_exe)
 }
 
-pub fn spawn_control_plane_worker(relay_command_socket_path: PathBuf) -> Result<Child> {
+pub fn spawn_control_plane_worker(
+    uid: u32,
+    gid: u32,
+    relay_command_socket_path: PathBuf,
+    prometheus_addr: Option<std::net::SocketAddr>,
+) -> Result<Child> {
     println!("[Supervisor] Spawning Control Plane worker.");
     let mut command = get_production_base_command();
     command
         .arg("worker")
-        .arg("--user")
-        .arg(WORKER_USER)
-        .arg("--group")
-        .arg(WORKER_GROUP)
+        .arg("--uid")
+        .arg(uid.to_string())
+        .arg("--gid")
+        .arg(gid.to_string())
         .arg("--relay-command-socket-path")
         .arg(relay_command_socket_path);
+
+    if let Some(addr) = prometheus_addr {
+        command.arg("--prometheus-addr").arg(addr.to_string());
+    }
+
     command.spawn().map_err(anyhow::Error::from)
 }
 
-pub fn spawn_data_plane_worker(core_id: u32, relay_command_socket_path: PathBuf) -> Result<Child> {
+pub fn spawn_data_plane_worker(
+    core_id: u32,
+    uid: u32,
+    gid: u32,
+    relay_command_socket_path: PathBuf,
+) -> Result<Child> {
     println!(
         "[Supervisor] Spawning Data Plane worker for core {}.",
         core_id
@@ -44,10 +58,10 @@ pub fn spawn_data_plane_worker(core_id: u32, relay_command_socket_path: PathBuf)
     let mut command = get_production_base_command();
     command
         .arg("worker")
-        .arg("--user")
-        .arg(WORKER_USER)
-        .arg("--group")
-        .arg(WORKER_GROUP)
+        .arg("--uid")
+        .arg(uid.to_string())
+        .arg("--gid")
+        .arg(gid.to_string())
         .arg("--core-id")
         .arg(core_id.to_string())
         .arg("--data-plane")
@@ -58,10 +72,40 @@ pub fn spawn_data_plane_worker(core_id: u32, relay_command_socket_path: PathBuf)
 
 // --- Supervisor Core Logic ---
 
-pub async fn run<F, G>(
+pub async fn run(
+    user: &str,
+    group: &str,
+    prometheus_addr: Option<std::net::SocketAddr>,
+    _relay_command_rx: mpsc::Receiver<RelayCommand>,
+    relay_command_socket_path: PathBuf,
+    master_rules: Arc<Mutex<HashMap<String, ForwardingRule>>>,
+) -> Result<()> {
+    let uid = User::from_name(user)
+        .with_context(|| format!("User '{}' not found", user))?
+        .map(|u| u.uid.as_raw())
+        .with_context(|| format!("User '{}' not found", user))?;
+    let gid = Group::from_name(group)
+        .with_context(|| format!("Group '{}' not found", group))?
+        .map(|g| g.gid.as_raw())
+        .with_context(|| format!("Group '{}' not found", group))?;
+
+    let cp_socket_path = relay_command_socket_path.clone();
+    let dp_socket_path = relay_command_socket_path.clone();
+
+    run_generic(
+        move || spawn_control_plane_worker(uid, gid, cp_socket_path.clone(), prometheus_addr),
+        move || spawn_data_plane_worker(0, uid, gid, dp_socket_path.clone()),
+        _relay_command_rx,
+        relay_command_socket_path,
+        master_rules,
+    )
+    .await
+}
+
+pub async fn run_generic<F, G>(
     mut spawn_cp: F,
     mut spawn_dp: G,
-    _relay_command_rx: mpsc::Receiver<RelayCommand>, // This is now unused, will be removed
+    _relay_command_rx: mpsc::Receiver<RelayCommand>,
     relay_command_socket_path: PathBuf,
     master_rules: Arc<Mutex<HashMap<String, ForwardingRule>>>,
 ) -> Result<()>
@@ -71,7 +115,6 @@ where
 {
     println!("[Supervisor] Starting.");
 
-    // Clean up old socket if it exists
     if relay_command_socket_path.exists() {
         std::fs::remove_file(&relay_command_socket_path)?;
     }
@@ -79,115 +122,62 @@ where
     let listener = UnixListener::bind(&relay_command_socket_path)?;
 
     let mut cp_child = spawn_cp()?;
-
     let mut dp_child = spawn_dp()?;
 
     let mut cp_backoff_ms = INITIAL_BACKOFF_MS;
-
     let mut dp_backoff_ms = INITIAL_BACKOFF_MS;
 
     loop {
         tokio::select! {
-
-            // Monitor the Control Plane worker
-
             Ok(status) = cp_child.wait() => {
-
                 if status.success() {
-
                     println!("[Supervisor] Control Plane worker exited gracefully. Restarting immediately.");
-
-                    cp_backoff_ms = INITIAL_BACKOFF_MS; // Reset backoff on success
-
+                    cp_backoff_ms = INITIAL_BACKOFF_MS;
                 } else {
-
                     println!("[Supervisor] Control Plane worker failed (status: {}). Restarting after {}ms.", status, cp_backoff_ms);
-
                     sleep(Duration::from_millis(cp_backoff_ms)).await;
-
-                    cp_backoff_ms = (cp_backoff_ms * 2).min(MAX_BACKOFF_MS); // Exponential backoff
-
+                    cp_backoff_ms = (cp_backoff_ms * 2).min(MAX_BACKOFF_MS);
                 }
-
                 cp_child = spawn_cp()?;
-
             }
-
-
-
-            // Monitor the Data Plane worker
 
             Ok(status) = dp_child.wait() => {
-
                 if status.success() {
-
                     println!("[Supervisor] Data Plane worker exited gracefully. Restarting immediately.");
-
-                    dp_backoff_ms = INITIAL_BACKOFF_MS; // Reset backoff on success
-
+                    dp_backoff_ms = INITIAL_BACKOFF_MS;
                 } else {
-
                     println!("[Supervisor] Data Plane worker failed (status: {}). Restarting after {}ms.", status, dp_backoff_ms);
-
                     sleep(Duration::from_millis(dp_backoff_ms)).await;
-
-                    dp_backoff_ms = (dp_backoff_ms * 2).min(MAX_BACKOFF_MS); // Exponential backoff
-
+                    dp_backoff_ms = (dp_backoff_ms * 2).min(MAX_BACKOFF_MS);
                 }
-
                 dp_child = spawn_dp()?;
-
             }
 
-
-
-            // Handle commands from the Control Plane worker via Unix socket
-
             Ok((mut stream, _)) = listener.accept() => {
-
                 let mut buffer = Vec::new();
-
                 if stream.read_to_end(&mut buffer).await.is_err() {
-
                     eprintln!("[Supervisor] Failed to read command from control plane worker.");
-
                     continue;
-
                 }
-
                 let command: Result<RelayCommand, _> = serde_json::from_slice(&buffer);
-
                 match command {
-
                     Ok(cmd) => {
-
                         match cmd {
-
                             RelayCommand::AddRule(rule) => {
                                 println!("[Supervisor] Adding rule: {}", rule.rule_id);
                                 master_rules.lock().unwrap().insert(rule.rule_id.clone(), rule);
-                                // TODO: Dispatch rule to appropriate worker
                             }
                             RelayCommand::RemoveRule { rule_id } => {
                                 println!("[Supervisor] Removing rule: {}", rule_id);
                                 master_rules.lock().unwrap().remove(&rule_id);
-                                // TODO: Dispatch removal to appropriate worker
                             }
-
                         }
-
                     }
-
                     Err(e) => {
-
                         eprintln!("[Supervisor] Failed to deserialize RelayCommand: {}", e);
-
                     }
-
                 }
-
             }
-
         }
     }
 }
@@ -200,7 +190,6 @@ pub fn spawn_dummy_worker(_relay_command_socket_path: PathBuf) -> Result<Child> 
     command.arg("30");
     command.spawn().map_err(anyhow::Error::from)
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -227,21 +216,24 @@ mod tests {
 
         let cp_spawn_count_clone = cp_spawn_count.clone();
         let cp_spawn_times_clone = cp_spawn_times.clone();
-        let spawn_cp = move || {
+        let _spawn_cp = move || {
             *cp_spawn_count_clone.lock().unwrap() += 1;
             cp_spawn_times_clone.lock().unwrap().push(Instant::now());
             spawn_failing_worker()
         };
 
-        let spawn_dp = || spawn_sleeping_worker();
+        let _spawn_dp = || spawn_sleeping_worker();
 
-        let socket_path = PathBuf::from(format!("/tmp/test_supervisor_{}.sock", uuid::Uuid::new_v4()));
+        let socket_path = PathBuf::from(format!(
+            "/tmp/test_supervisor_{}.sock",
+            uuid::Uuid::new_v4()
+        ));
         let (_tx, rx) = mpsc::channel(10);
         let master_rules = Arc::new(Mutex::new(HashMap::new()));
 
-        let supervisor_task = tokio::spawn(run(
-            spawn_cp,
-            spawn_dp,
+        let supervisor_task = tokio::spawn(run_generic(
+            _spawn_cp,
+            _spawn_dp,
             rx,
             socket_path.clone(),
             master_rules.clone(),
@@ -271,23 +263,26 @@ mod tests {
         let dp_spawn_count = Arc::new(Mutex::new(0));
         let dp_spawn_times = Arc::new(Mutex::new(Vec::new()));
 
-        let spawn_cp = || spawn_sleeping_worker();
+        let _spawn_cp = || spawn_sleeping_worker();
 
         let dp_spawn_count_clone = dp_spawn_count.clone();
         let dp_spawn_times_clone = dp_spawn_times.clone();
-        let spawn_dp = move || {
+        let _spawn_dp = move || {
             *dp_spawn_count_clone.lock().unwrap() += 1;
             dp_spawn_times_clone.lock().unwrap().push(Instant::now());
             spawn_failing_worker()
         };
 
-        let socket_path = PathBuf::from(format!("/tmp/test_supervisor_{}.sock", uuid::Uuid::new_v4()));
+        let socket_path = PathBuf::from(format!(
+            "/tmp/test_supervisor_{}.sock",
+            uuid::Uuid::new_v4()
+        ));
         let (_tx, rx) = mpsc::channel(10);
         let master_rules = Arc::new(Mutex::new(HashMap::new()));
 
-        let supervisor_task = tokio::spawn(run(
-            spawn_cp,
-            spawn_dp,
+        let supervisor_task = tokio::spawn(run_generic(
+            _spawn_cp,
+            _spawn_dp,
             rx,
             socket_path.clone(),
             master_rules.clone(),
@@ -314,23 +309,33 @@ mod tests {
 
     #[tokio::test]
     async fn test_supervisor_handles_relay_commands() {
-        let spawn_cp = || spawn_sleeping_worker();
-        let spawn_dp = || spawn_sleeping_worker();
+        let _spawn_cp = || spawn_sleeping_worker();
+        let _spawn_dp = || spawn_sleeping_worker();
 
-        let socket_path = PathBuf::from(format!("/tmp/test_supervisor_{}.sock", uuid::Uuid::new_v4()));
+        let socket_path = PathBuf::from(format!(
+            "/tmp/test_supervisor_{}.sock",
+            uuid::Uuid::new_v4()
+        ));
         let (_tx, rx) = mpsc::channel(10);
         let master_rules = Arc::new(Mutex::new(HashMap::new()));
 
-        let supervisor_task = tokio::spawn(run(
-            spawn_cp,
-            spawn_dp,
+        let supervisor_task = tokio::spawn(run_generic(
+            _spawn_cp,
+            _spawn_dp,
             rx,
             socket_path.clone(),
             master_rules.clone(),
         ));
 
-        // Allow the supervisor to start and bind the socket
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Wait for the supervisor to start and bind the socket by trying to connect in a loop.
+        let mut attempts = 0;
+        while tokio::net::UnixStream::connect(&socket_path).await.is_err() {
+            attempts += 1;
+            if attempts > 10 {
+                panic!("Supervisor did not start in time");
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
 
         // --- Test AddRule ---
         let add_rule_cmd = RelayCommand::AddRule(ForwardingRule {
@@ -371,7 +376,10 @@ mod tests {
         let _ = std::fs::remove_file(&socket_path);
     }
 
-    async fn send_command_to_supervisor(socket_path: &PathBuf, command: RelayCommand) -> anyhow::Result<()> {
+    async fn send_command_to_supervisor(
+        socket_path: &PathBuf,
+        command: RelayCommand,
+    ) -> anyhow::Result<()> {
         use tokio::io::AsyncWriteExt;
         use tokio::net::UnixStream;
 
@@ -402,20 +410,23 @@ mod tests {
 
         let cp_spawn_count_clone = cp_spawn_count.clone();
         let cp_spawn_times_clone = cp_spawn_times.clone();
-        let spawn_cp = move || {
+        let _spawn_cp = move || {
             cp_spawn_times_clone.lock().unwrap().push(Instant::now());
             spawn_once_gracefully_then_fail(cp_spawn_count_clone.clone())
         };
 
-        let spawn_dp = || spawn_sleeping_worker();
+        let _spawn_dp = || spawn_sleeping_worker();
 
-        let socket_path = PathBuf::from(format!("/tmp/test_supervisor_{}.sock", uuid::Uuid::new_v4()));
+        let socket_path = PathBuf::from(format!(
+            "/tmp/test_supervisor_{}.sock",
+            uuid::Uuid::new_v4()
+        ));
         let (_tx, rx) = mpsc::channel(10);
         let master_rules = Arc::new(Mutex::new(HashMap::new()));
 
-        let supervisor_task = tokio::spawn(run(
-            spawn_cp,
-            spawn_dp,
+        let supervisor_task = tokio::spawn(run_generic(
+            _spawn_cp,
+            _spawn_dp,
             rx,
             socket_path.clone(),
             master_rules.clone(),
@@ -427,7 +438,10 @@ mod tests {
         supervisor_task.abort();
         let _ = std::fs::remove_file(&socket_path);
 
-        assert!(*cp_spawn_count.lock().unwrap() >= 3, "Should have spawned at least 3 times");
+        assert!(
+            *cp_spawn_count.lock().unwrap() >= 3,
+            "Should have spawned at least 3 times"
+        );
 
         let cp_times = cp_spawn_times.lock().unwrap();
         // Interval after graceful exit should be very short (immediate restart)

@@ -1,8 +1,8 @@
+use clap::Parser;
 use serde::{Deserialize, Serialize};
 use std::net::Ipv4Addr;
-use uuid::Uuid;
-use clap::Parser;
 use std::path::PathBuf;
+use uuid::Uuid;
 
 pub mod supervisor;
 pub mod worker;
@@ -20,13 +20,19 @@ pub enum Command {
     Supervisor {
         #[arg(long, default_value = "/tmp/mcr_relay_commands.sock")]
         relay_command_socket_path: PathBuf,
+        #[arg(long, default_value = "nobody")]
+        user: String,
+        #[arg(long, default_value = "daemon")]
+        group: String,
+        #[arg(long)]
+        prometheus_addr: Option<std::net::SocketAddr>,
     },
     /// Run the worker process (intended to be called by the supervisor)
     Worker {
-        #[arg(long, default_value = "nobody")]
-        user: String,
-        #[arg(long, default_value = "nogroup")]
-        group: String,
+        #[arg(long)]
+        uid: u32,
+        #[arg(long)]
+        gid: u32,
         #[arg(long)]
         relay_command_socket_path: PathBuf,
         #[arg(long)]
@@ -53,16 +59,16 @@ pub enum Command {
 }
 
 pub struct ControlPlaneConfig {
-    pub user: String,
-    pub group: String,
+    pub uid: u32,
+    pub gid: u32,
     pub relay_command_socket_path: PathBuf,
-    pub prometheus_addr: std::net::SocketAddr,
+    pub prometheus_addr: Option<std::net::SocketAddr>,
     pub reporting_interval: u64,
 }
 
 pub struct DataPlaneConfig {
-    pub user: String,
-    pub group: String,
+    pub uid: u32,
+    pub gid: u32,
     pub core_id: u32,
     pub prometheus_addr: std::net::SocketAddr,
     pub input_interface_name: Option<String>,

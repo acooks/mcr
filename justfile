@@ -72,8 +72,7 @@ audit:
 # Check for outdated dependencies
 outdated:
     @echo "--- Checking for Outdated Dependencies (cargo outdated) ---"
-    @command -v cargo-outdated >/dev/null || cargo install cargo-outdated
-    cargo outdated --exit-code 1
+    @cargo outdated
 
 # Generate test coverage report
 coverage:

@@ -3,52 +3,12 @@ use anyhow::Result;
 use socket2::{Domain, Protocol, Socket, Type};
 use std::ffi::CString;
 use std::net::{Ipv4Addr, SocketAddrV4};
-use std::os::unix::io::{FromRawFd, OwnedFd};
+use std::os::unix::io::OwnedFd;
 use std::rc::Rc;
 use tokio::sync::mpsc;
 use tokio::task;
 use tokio_uring::fs::File;
 use tokio_uring::net::UdpSocket;
-
-pub fn setup_ingress_socket(interface_name: &str) -> Result<OwnedFd> {
-    let if_name = CString::new(interface_name)?;
-    let if_index = unsafe { libc::if_nametoindex(if_name.as_ptr()) };
-    if if_index == 0 {
-        return Err(anyhow::anyhow!("Interface '{}' not found", interface_name));
-    }
-
-    let fd = unsafe {
-        libc::socket(
-            libc::AF_PACKET,
-            libc::SOCK_RAW,
-            (libc::ETH_P_ALL as u16).to_be() as i32,
-        )
-    };
-    if fd < 0 {
-        return Err(anyhow::anyhow!("Failed to create AF_PACKET socket"));
-    }
-
-    let mut sockaddr_ll: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
-    sockaddr_ll.sll_family = libc::AF_PACKET as u16;
-    sockaddr_ll.sll_protocol = (libc::ETH_P_ALL as u16).to_be();
-    sockaddr_ll.sll_ifindex = if_index as i32;
-
-    let bind_result = unsafe {
-        libc::bind(
-            fd,
-            &sockaddr_ll as *const _ as *const libc::sockaddr,
-            std::mem::size_of::<libc::sockaddr_ll>() as u32,
-        )
-    };
-    if bind_result < 0 {
-        return Err(anyhow::anyhow!(
-            "Failed to bind to interface '{}'",
-            interface_name
-        ));
-    }
-
-    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
-}
 
 use pnet::packet::ethernet::{EtherTypes, EthernetPacket};
 use pnet::packet::ip::IpNextHeaderProtocols;
@@ -56,10 +16,7 @@ use pnet::packet::ipv4::Ipv4Packet;
 use pnet::packet::udp::UdpPacket;
 use pnet::packet::Packet;
 
-fn parse_and_filter_packet(
-    raw_packet: &[u8],
-    rule: &ForwardingRule,
-) -> Option<Vec<u8>> {
+fn parse_and_filter_packet(raw_packet: &[u8], rule: &ForwardingRule) -> Option<Vec<u8>> {
     let ethernet_packet = EthernetPacket::new(raw_packet)?;
     if ethernet_packet.get_ethertype() != EtherTypes::Ipv4 {
         return None;
@@ -140,29 +97,6 @@ pub async fn run_flow_task(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::io::AsRawFd;
-
-    #[test]
-    fn test_setup_ingress_socket_success() {
-        if unsafe { libc::getuid() } != 0 {
-            eprintln!("Skipping test_setup_ingress_socket_success: requires root privileges.");
-            return;
-        }
-        // Test with a valid interface (e.g., "lo" for loopback)
-        let result = setup_ingress_socket("lo");
-        assert!(result.is_ok(), "setup_ingress_socket should succeed for 'lo' interface");
-        let fd = result.unwrap();
-        assert!(fd.as_raw_fd() >= 0, "File descriptor should be valid");
-    }
-
-    #[test]
-    fn test_setup_ingress_socket_interface_not_found() {
-        // Test with a non-existent interface
-        let result = setup_ingress_socket("nonexistent_interface123");
-        assert!(result.is_err(), "setup_ingress_socket should fail for a non-existent interface");
-        let err = result.unwrap_err();
-        assert!(err.to_string().contains("Interface 'nonexistent_interface123' not found"));
-    }
 
     use pnet::packet::ethernet::MutableEthernetPacket;
     use pnet::packet::ipv4::MutableIpv4Packet;
@@ -245,7 +179,7 @@ mod tests {
             rule_id: "test-rule".to_string(),
             input_interface: "eth0".to_string(),
             input_group: "224.0.0.2".parse().unwrap(), // Different group
-            input_port: 5001,                         // Different port
+            input_port: 5001,                          // Different port
             outputs: vec![],
             dtls_enabled: false,
         };

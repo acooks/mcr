@@ -1,20 +1,73 @@
+//! # Worker Module
+//!
+//! This file, `mod.rs`, serves as the central hub for the `worker` module in the `multicast-relay`
+//! architecture. In Rust, `mod.rs` acts as the module declaration file for a directory, defining
+//! its structure and public interface.
+//!
+//! ## Architectural Role
+//!
+//! The `worker` module encapsulates all logic that runs in the unprivileged worker processes.
+//! This `mod.rs` file performs several key functions:
+//!
+//! 1.  **Module Definition and Re-exporting:** It declares the sub-modules that constitute the
+//!     worker's functionality (e.g., `control_plane`, `data_plane`, `stats`). It then uses `pub use`
+//!     to re-export essential types, creating a clean, unified public API. This allows other parts
+//!     of the application to access worker components through a single, consistent path.
+//!
+//! 2.  **Entry Point for Worker Processes:** It contains the main entry point functions for the
+//!     worker processes: `run_control_plane` and `run_data_plane`. When the `supervisor` spawns a
+//!     new worker, the `main` function calls one of these to start the worker's lifecycle.
+//!
+//! 3.  **Shared Worker Logic:** It centralizes logic common to all worker types. This includes:
+//!     - `setup_worker_environment`: Initializes the common environment for any worker, most
+//!       importantly handling the **privilege drop** to a less privileged user/group.
+//!     - `UnixSocketRelayCommandSender`: Provides a shared mechanism for workers to communicate
+//!       commands back to the supervisor over a Unix socket.
+//!
+//! In essence, this file acts as the **façade and coordinator** for the entire worker subsystem.
+//! It defines what a "worker" is, exposes its public components, and provides the common logic
+//! required to launch and manage any type of worker in a consistent and safe manner.
+
+mod buffer_pool;
 mod control_plane;
 mod data_plane;
+pub mod data_plane_integrated;
+mod egress;
+mod ingress;
+mod metrics;
+mod packet_parser;
 mod stats;
 
+// Re-export buffer pool types for convenience
+pub use buffer_pool::{AggregateStats, Buffer, BufferPool, BufferSize, PoolStats, SizeClassPool};
+
+// Re-export egress types for convenience
+pub use egress::{EgressConfig, EgressLoop, EgressPacket, EgressStats};
+
+// Re-export ingress types for convenience
+pub use ingress::{
+    setup_af_packet_socket, setup_helper_socket, IngressConfig, IngressLoop, IngressStats,
+};
+
+// Re-export packet parser types for convenience
+pub use packet_parser::{
+    parse_packet, EthernetHeader, Ipv4Header, PacketHeaders, ParseError, UdpHeader,
+};
+
+use ::metrics::{describe_counter, describe_gauge};
 use anyhow::Result;
-use metrics::{describe_counter, describe_gauge};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::net::UnixStream;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc as tokio_mpsc, Mutex};
 use uuid::Uuid;
 
 use crate::{
     worker::control_plane::control_plane_task,
     worker::stats::{monitoring_task, stats_aggregator_task},
-    ControlPlaneConfig, DataPlaneConfig, FlowStats, ForwardingRule, OutputDestination, RelayCommand,
+    ControlPlaneConfig, DataPlaneConfig, FlowStats, ForwardingRule, OutputDestination,
+    RelayCommand,
 };
 
 type SharedFlows = Arc<Mutex<HashMap<String, (ForwardingRule, FlowStats)>>>;
@@ -40,62 +93,47 @@ impl<S: tokio::io::AsyncWriteExt + Unpin> UnixSocketRelayCommandSender<S> {
 }
 
 #[cfg(not(test))]
-fn drop_privileges(user: &str, group: &str) -> Result<()> {
+fn drop_privileges(uid: u32, gid: u32) -> Result<()> {
     use privdrop::PrivDrop;
     PrivDrop::default()
-        .user(user)
-        .group(group)
+        .user(uid.to_string())
+        .group(gid.to_string())
+        .fallback_to_ids_if_names_are_numeric()
         .apply()
         .map_err(|e| anyhow::anyhow!("Failed to drop privileges: {}", e))
 }
 
 #[cfg(test)]
-fn drop_privileges(_user: &str, _group: &str) -> Result<()> {
+fn drop_privileges(_uid: u32, _gid: u32) -> Result<()> {
     // Do nothing in tests
     Ok(())
 }
 
-#[cfg(not(test))]
-fn install_prometheus_recorder(prometheus_addr: std::net::SocketAddr) -> Result<()> {
-    use metrics_exporter_prometheus::PrometheusBuilder;
-    let builder = PrometheusBuilder::new();
-    builder
-        .with_http_listener(prometheus_addr)
-        .install()
-        .map_err(anyhow::Error::from)
-}
-
-#[cfg(test)]
-fn install_prometheus_recorder(_prometheus_addr: std::net::SocketAddr) -> Result<()> {
-    // Do nothing in tests to avoid starting a server and hanging.
-    Ok(())
-}
-
-async fn setup_worker_environment(
-    user: String,
-    group: String,
-    prometheus_addr: std::net::SocketAddr,
-) -> Result<()> {
+async fn setup_worker_environment(uid: u32, gid: u32) -> Result<()> {
     println!(
-        "Worker process started. Attempting to drop privileges to user '{}' and group '{}'.",
-        user, group
+        "Worker process started. Attempting to drop privileges to UID '{}' and GID '{}'.",
+        uid, gid
     );
 
-    drop_privileges(&user, &group)?;
+    drop_privileges(uid, gid)?;
 
     println!("Successfully dropped privileges.");
 
-    install_prometheus_recorder(prometheus_addr)?;
     describe_counter!("packets_relayed_total", "Total packets relayed");
     describe_gauge!("memory_usage_bytes", "Current memory usage");
     Ok(())
 }
 
 pub async fn run_control_plane(config: ControlPlaneConfig) -> Result<()> {
-    setup_worker_environment(config.user, config.group, config.prometheus_addr).await?;
+    setup_worker_environment(config.uid, config.gid).await?;
+
+    // Install the Prometheus recorder only in the control plane, and only if an address is provided.
+    if let Some(addr) = config.prometheus_addr {
+        metrics::install_prometheus_recorder(addr)?;
+    }
 
     let shared_flows: SharedFlows = Arc::new(Mutex::new(HashMap::new()));
-    let (_stats_tx, stats_rx) = mpsc::channel(100);
+    let (_stats_tx, stats_rx) = tokio_mpsc::channel(100);
 
     let control_socket_path = Path::new("/tmp/multicast_relay_control.sock");
 
@@ -117,34 +155,26 @@ pub async fn run_control_plane(config: ControlPlaneConfig) -> Result<()> {
     ));
 
     // The control plane worker runs indefinitely, serving RPC requests.
-    // It doesn't have its own internal command loop like the data plane.
-    // We just need to keep the runtime alive.
     std::future::pending::<()>().await;
 
     Ok(())
 }
 
 pub async fn run_data_plane(config: DataPlaneConfig) -> Result<()> {
-    setup_worker_environment(config.user, config.group, config.prometheus_addr).await?;
+    setup_worker_environment(config.uid, config.gid).await?;
 
     let _ingress_socket_fd = if let Some(interface_name) = &config.input_interface_name {
-        Some(Arc::new(data_plane::setup_ingress_socket(interface_name)?))
+        Some(Arc::new(ingress::setup_af_packet_socket(interface_name)?))
     } else {
         None
     };
 
     let shared_flows: SharedFlows = Arc::new(Mutex::new(HashMap::new()));
     let (_internal_relay_command_tx, _internal_relay_command_rx) =
-        mpsc::channel::<RelayCommand>(100);
-    let (_stats_tx, stats_rx) = mpsc::channel(100);
+        tokio_mpsc::channel::<RelayCommand>(100);
+    let (_stats_tx, stats_rx) = tokio_mpsc::channel(100);
 
-    let _initial_rule = if let (
-        Some(ig),
-        Some(ip),
-        Some(og),
-        Some(op),
-        Some(oi),
-    ) = (
+    let _initial_rule = if let (Some(ig), Some(ip), Some(og), Some(op), Some(oi)) = (
         config.input_group,
         config.input_port,
         config.output_group,
@@ -222,11 +252,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_setup_worker_environment_success() {
-        let user = "nobody".to_string();
-        let group = "nogroup".to_string();
-        let prometheus_addr = "127.0.0.1:9000".parse().unwrap();
+        let uid = 65534;
+        let gid = 65534;
 
-        let result = setup_worker_environment(user, group, prometheus_addr).await;
+        let result = setup_worker_environment(uid, gid).await;
         assert!(result.is_ok(), "setup_worker_environment should succeed");
     }
 
@@ -240,10 +269,10 @@ mod tests {
                 let _listener = UnixListener::bind(&socket_path).unwrap();
 
                 let config = ControlPlaneConfig {
-                    user: "nobody".to_string(),
-                    group: "nogroup".to_string(),
+                    uid: 65534,
+                    gid: 65534,
                     relay_command_socket_path: socket_path.clone(),
-                    prometheus_addr: "127.0.0.1:9001".parse().unwrap(),
+                    prometheus_addr: None,
                     reporting_interval: 1,
                 };
 
@@ -269,8 +298,8 @@ mod tests {
         local
             .run_until(async {
                 let config = DataPlaneConfig {
-                    user: "nobody".to_string(),
-                    group: "nogroup".to_string(),
+                    uid: 65534,
+                    gid: 65534,
                     core_id: 0,
                     prometheus_addr: "127.0.0.1:9002".parse().unwrap(),
                     input_interface_name: None,

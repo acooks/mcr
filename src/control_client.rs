@@ -86,7 +86,9 @@ pub fn build_command(cli_command: CliCommand) -> multicast_relay::SupervisorComm
             outputs,
             dtls_enabled: false,
         },
-        CliCommand::Remove { rule_id } => multicast_relay::SupervisorCommand::RemoveRule { rule_id },
+        CliCommand::Remove { rule_id } => {
+            multicast_relay::SupervisorCommand::RemoveRule { rule_id }
+        }
         CliCommand::List => multicast_relay::SupervisorCommand::ListRules,
         CliCommand::Stats => multicast_relay::SupervisorCommand::GetStats,
     }
@@ -186,10 +188,7 @@ mod tests {
         });
 
         // 2. Action: Run the client's main logic.
-        let client_task = tokio::spawn(run_control_client(
-            CliCommand::List,
-            sock_path.clone(),
-        ));
+        let client_task = tokio::spawn(run_control_client(CliCommand::List, sock_path.clone()));
 
         // 3. Verification: Wait for both tasks to complete.
         server_task.await.unwrap();
