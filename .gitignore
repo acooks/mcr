@@ -1,2 +1,10 @@
+# Cargo build artifacts
 /target
+**/target/
+
+# Cargo.lock for library crates (keep root Cargo.lock for reproducible builds)
+experiments/**/Cargo.lock
+
+# Coverage reports
 tarpaulin-report.html
+target/tarpaulin/
