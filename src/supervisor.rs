@@ -31,7 +31,13 @@ pub async fn spawn_control_plane_worker(
 ) -> Result<(Child, UnixStream, UnixStream)> {
     println!("[Supervisor] Spawning Control Plane worker.");
 
-    let (supervisor_sock, _worker_sock) = UnixStream::pair()?;
+    // Create the supervisor-worker communication socket pair
+    // This will be passed as FD 3 to the worker
+    let (supervisor_sock, worker_sock) = UnixStream::pair()?;
+
+    // Keep worker_sock alive as FD 3 for the child process
+    let worker_sock_std = worker_sock.into_std()?;
+    let worker_fd = worker_sock_std.into_raw_fd();
 
     let mut command = Command::new(std::env::current_exe()?);
     command
@@ -47,9 +53,25 @@ pub async fn spawn_control_plane_worker(
         command.arg("--prometheus-addr").arg(addr.to_string());
     }
 
+    // Ensure worker_sock becomes FD 3 in the child
+    unsafe {
+        command.pre_exec(move || {
+            // Dup worker_fd to FD 3
+            if worker_fd != 3 {
+                if libc::dup2(worker_fd, 3) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::close(worker_fd) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
+    }
+
     let child = command.spawn()?;
 
-    // Send the request/response socket to the child process
+    // Send the request/response socket to the child process via SCM_RIGHTS
     let req_supervisor_stream = create_and_send_socketpair(&supervisor_sock).await?;
 
     Ok((child, supervisor_sock, req_supervisor_stream))
@@ -66,7 +88,13 @@ pub async fn spawn_data_plane_worker(
         core_id
     );
 
-    let (supervisor_sock, _worker_sock) = UnixStream::pair()?;
+    // Create the supervisor-worker communication socket pair
+    // This will be passed as FD 3 to the worker
+    let (supervisor_sock, worker_sock) = UnixStream::pair()?;
+
+    // Keep worker_sock alive as FD 3 for the child process
+    let worker_sock_std = worker_sock.into_std()?;
+    let worker_fd = worker_sock_std.into_raw_fd();
 
     let mut command = Command::new(std::env::current_exe()?);
     command
@@ -80,6 +108,22 @@ pub async fn spawn_data_plane_worker(
         .arg("--data-plane")
         .arg("--relay-command-socket-path")
         .arg(relay_command_socket_path);
+
+    // Ensure worker_sock becomes FD 3 in the child
+    unsafe {
+        command.pre_exec(move || {
+            // Dup worker_fd to FD 3
+            if worker_fd != 3 {
+                if libc::dup2(worker_fd, 3) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::close(worker_fd) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
+    }
 
     let child = command.spawn()?;
 

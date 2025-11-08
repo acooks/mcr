@@ -79,16 +79,15 @@ fn drop_privileges(uid: Uid, gid: Gid, caps_to_keep: Option<&HashSet<Capability>
     info!("Dropping privileges to uid={}, gid={}", uid, gid);
 
     // Get the username for initgroups
-    let user = nix::unistd::User::from_uid(uid)
-        .context("Failed to lookup user")?
+    let user = nix::unistd::User::from_uid(uid)?
         .ok_or_else(|| anyhow::anyhow!("User not found for uid {}", uid))?;
 
     // Initialize supplementary groups for the target user
     nix::unistd::initgroups(&std::ffi::CString::new(user.name.as_str())?, gid)
         .context("Failed to initialize supplementary groups")?;
 
-    nix::unistd::setgid(gid).context("Failed to set GID")?;
     nix::unistd::setuid(uid).context("Failed to set UID")?;
+    nix::unistd::setgid(gid).context("Failed to set GID")?;
     info!("Successfully dropped privileges.");
     Ok(())
 }
@@ -147,19 +146,25 @@ pub async fn run_control_plane(config: ControlPlaneConfig) -> Result<()> {
 
     drop_privileges(Uid::from_raw(config.uid), Gid::from_raw(config.gid), None)?;
 
-        let supervisor_sock =        UnixStream::from_std(unsafe { std::os::unix::net::UnixStream::from_raw_fd(3) })?;
+    // Get FD 3 from supervisor and set it to non-blocking before wrapping in tokio UnixStream
+    let supervisor_sock = unsafe {
+        let std_sock = std::os::unix::net::UnixStream::from_raw_fd(3);
+        std_sock.set_nonblocking(true)?;
+        UnixStream::from_std(std_sock)?
+    };
 
     let request_fd = recv_fd(&supervisor_sock).await?;
-
-
 
     let stream = supervisor_sock;
 
     let relay_stream = tokio::net::UnixStream::connect(&config.relay_command_socket_path).await?;
 
-    let request_stream =
-
-        UnixStream::from_std(unsafe { std::os::unix::net::UnixStream::from_raw_fd(request_fd) })?;
+    // Set request_fd to non-blocking before wrapping in tokio UnixStream
+    let request_stream = unsafe {
+        let std_sock = std::os::unix::net::UnixStream::from_raw_fd(request_fd);
+        std_sock.set_nonblocking(true)?;
+        UnixStream::from_std(std_sock)?
+    };
 
 
 
@@ -402,10 +407,58 @@ mod tests {
             reporting_interval: 1,
         };
 
-        // Create a dummy socket pair for the command FD
+        // Create socket pairs for the test
+        use std::os::unix::io::IntoRawFd;
+        use tokio::net::UnixStream as TokioUnixStream;
+
+        let (supervisor_sock, worker_sock) = TokioUnixStream::pair()?;
+        let (request_sock1, _request_sock2) = TokioUnixStream::pair()?;
+        let (command_sock1, _command_sock2) = TokioUnixStream::pair()?;
+
+        // Set up FD 3 for the worker
+        unsafe {
+            let worker_std = worker_sock.into_std()?;
+            let worker_fd = worker_std.into_raw_fd();
+            if worker_fd != 3 {
+                libc::dup2(worker_fd, 3);
+                libc::close(worker_fd);
+            }
+        }
+
+        // Send FDs via the supervisor socket
+        let supervisor_sock_std = supervisor_sock.into_std()?;
+        let request_fd = request_sock1.into_std()?.into_raw_fd();
+        let command_fd = command_sock1.into_std()?.into_raw_fd();
+
+        tokio::task::spawn(async move {
+            use nix::sys::socket::{sendmsg, MsgFlags, ControlMessage};
+            use std::io::IoSlice;
+            use std::os::unix::io::AsRawFd;
+
+            async fn send_fd_local(sock: &TokioUnixStream, fd: std::os::unix::io::RawFd) -> Result<()> {
+                let data = [0u8; 1];
+                let iov = [IoSlice::new(&data)];
+                let fds = [fd];
+                let cmsg = ControlMessage::ScmRights(&fds);
+
+                sock.ready(tokio::io::Interest::WRITABLE).await?;
+                sock.try_io(tokio::io::Interest::WRITABLE, || {
+                    sendmsg::<()>(sock.as_raw_fd(), &iov, &[cmsg], MsgFlags::empty(), None)
+                        .map(|_| ())
+                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+                })?;
+                Ok(())
+            }
+
+            let supervisor_sock = TokioUnixStream::from_std(supervisor_sock_std).unwrap();
+            // Send the request and command FDs
+            send_fd_local(&supervisor_sock, request_fd).await.ok();
+            send_fd_local(&supervisor_sock, command_fd).await.ok();
+        });
+
         let run_future = run_data_plane(config, MockWorkerLifecycle);
 
-        let result = tokio::time::timeout(std::time::Duration::from_millis(100), run_future).await;
+        let result = tokio::time::timeout(std::time::Duration::from_millis(200), run_future).await;
 
         assert!(
             result.is_err(),
