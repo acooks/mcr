@@ -3,7 +3,7 @@
 This document provides the concrete implementation plan for the testing philosophy outlined in `TESTING.md`. It defines the test suite's structure, the tools we will use, and a phased approach to restructuring existing tests and expanding coverage.
 
 **Last Updated**: 2025-11-08
-**Current Overall Progress**: 65% Complete
+**Current Overall Progress**: 70% Complete
 
 ## Current Status
 
@@ -11,13 +11,14 @@ This document provides the concrete implementation plan for the testing philosop
 |-------|--------|----------|----------|
 | Phase 1: Foundational Tooling | ✅ Complete | 100% | None |
 | Phase 2: Restructure & Document | 🟢 Nearly Complete | 85% | Test documentation incomplete (~40% of tests) |
-| Phase 3: Expand Test Coverage | 🟡 In Progress | 60% | Supervisor resilience tests stubbed, network monitor not started |
+| Phase 3: Expand Test Coverage | 🟢 Nearly Complete | 70% | 2 supervisor resilience tests remaining, network monitor Netlink integration needed |
 | Phase 4: E2E & Performance | 🟡 Started | 20% | Benchmarks templated but not implemented |
 | Phase 5: CI Integration | 🟢 Nearly Complete | 75% | Coverage enforcement needed |
 
 **Test Count**: 53 passing + 2 ignored (55 total)
 **Coverage**: Not yet measured (baseline needed)
-**Recent Progress**: Rule dispatcher fully implemented with 4 tests ✅
+**Recent Progress**: 3 supervisor resilience tests implemented ✅ (commit 7e49416), network monitor event handling complete ✅
+**Known Issues**: 2 doctest failures in data_plane_integrated.rs (box-drawing characters)
 
 ## 1. Proposed Test Directory Structure
 
@@ -137,19 +138,25 @@ mcr/
 2. Add Purpose/Method/Tier comments to ~20 undocumented tests
 3. Document test fixtures and shared constants
 
-### Phase 3: Expand Test Coverage 🟡 IN PROGRESS (60%)
+### Phase 3: Expand Test Coverage 🟢 NEARLY COMPLETE (70%)
 
 **Completion Criteria:**
 - ✅ IPC integration test created (tests/integration/ipc.rs)
 - ✅ Property-based test for packet_parser (tests/proptests/packet_parser.rs)
 - ✅ Rule dispatcher fully implemented with 4 tests (commit f34b64d)
-- ✅ Supervisor resilience tests stubbed (tests/integration/supervisor_resilience.rs)
-- 🟡 **STUBBED**: 5 integration tests for supervisor resilience (need implementation)
-- ❌ **NOT STARTED**: Network monitor module
+- ✅ Supervisor resilience test infrastructure created (tests/integration/supervisor_resilience.rs)
+- ✅ **IMPLEMENTED**: 3 of 5 supervisor resilience tests passing (commit 7e49416):
+  - `test_supervisor_restarts_control_plane_worker` ✅
+  - `test_supervisor_restarts_data_plane_worker` ✅
+  - `test_supervisor_resyncs_rules_on_restart` ✅
+- 🟡 **IN PROGRESS**: Network monitor module (event handling complete, Netlink integration needed)
 
 **Remaining Work:**
-1. **CRITICAL**: Implement 5 supervisor resilience integration tests (stubbed)
-2. **HIGH**: Implement network monitor module (src/supervisor/network_monitor.rs)
+1. **HIGH**: Complete 2 remaining supervisor resilience tests:
+   - `test_supervisor_applies_exponential_backoff()` - Complex timing test
+   - `test_supervisor_handles_multiple_failures()` - Stress test
+   - `test_supervisor_in_namespace()` - Network namespace isolation (requires root)
+2. **HIGH**: Complete network monitor Netlink integration in `start_monitoring()`
 3. Add integration tests for:
    - Configuration changes during runtime
    - Error handling and recovery scenarios
@@ -208,12 +215,15 @@ mcr/
    - ✅ Test cleanup helper: `cleanup_socket(path)`
    - ✅ Common constants and fixtures
 
-2. **Implement Supervisor Resilience Tests** [2-3 days] **← HIGHEST PRIORITY**
-   - See detailed implementation guide in tests/integration/supervisor_resilience.rs
-   - Remove `#[ignore]` from 5 test stubs
-   - Implement helper functions (start_supervisor, kill_worker, is_process_running)
-   - Validates core resilience promise (D18, D23)
-   - **Dependencies**: Requires `list-workers` command (✅ DONE in commit b12611d)
+2. **🟢 PARTIAL: Implement Supervisor Resilience Tests** [2-3 days]
+   - ✅ Helper functions implemented (start_supervisor, kill_worker, is_process_running)
+   - ✅ Control plane worker restart test passing (commit 7e49416)
+   - ✅ Data plane worker restart test passing (commit 7e49416)
+   - ✅ Rule resynchronization test passing (commit 7e49416)
+   - 🟡 **REMAINING**: 2 complex tests still marked with `#[ignore]`:
+     - `test_supervisor_applies_exponential_backoff()` - Requires timing measurements
+     - `test_supervisor_handles_multiple_failures()` - Concurrent failure stress test
+   - See implementation guide: tests/integration/IMPLEMENTATION_GUIDE.md
 
 3. **Measure and Document Coverage Baseline** [30 minutes] **← BLOCKING PHASE 5**
    - Run `just coverage`
@@ -226,10 +236,13 @@ mcr/
 
 ### Priority 2: Foundation Work (This Month)
 
-5. **Implement Network Monitor Module** [2-3 days]
-   - Complete `start_monitoring()` with Netlink socket setup
-   - Complete `handle_interface_event()` decision logic
-   - Add integration test with real Netlink (feature-gated)
+5. **🟢 PARTIAL: Implement Network Monitor Module** [1-2 days remaining]
+   - ✅ Event handling logic complete in `handle_interface_event()` (commit 88394d1)
+   - ✅ 6 unit tests passing for state transitions
+   - 🟡 **REMAINING**: Implement `start_monitoring()` with Netlink socket setup
+     - Two implementation approaches documented (rtnetlink or neli)
+     - Need to add rtnetlink dependency to Cargo.toml
+   - ❌ Add integration test with real Netlink (feature-gated)
    - Design references: D19-D21
 
 6. **Implement Benchmark Suite** [2-3 days]
