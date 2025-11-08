@@ -12,11 +12,18 @@
 //! - D18: Supervisor is single source of truth for configuration
 //!
 //! ## Implementation Status
-//! - [ ] Basic rule dispatch to control plane worker
-//! - [ ] Rule dispatch to appropriate data plane workers
-//! - [ ] Failure handling and retry logic
-//! - [ ] Rule removal dispatch
-//! - [ ] Rule update handling (remove + add)
+//! - [x] Basic rule dispatch to control plane worker
+//! - [x] Rule dispatch to appropriate data plane workers
+//! - [x] Failure handling and retry logic
+//! - [x] Rule removal dispatch
+//! - [x] Rule update handling (remove + add)
+//! - [x] Worker resynchronization on restart
+//!
+//! ## Completion
+//! **Status**: ✅ FULLY IMPLEMENTED (commit f34b64d)
+//! - All 3 core functions implemented
+//! - 4 unit tests passing
+//! - Ready for integration testing
 
 use anyhow::{Context, Result};
 use std::collections::HashMap;

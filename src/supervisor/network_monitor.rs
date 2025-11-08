@@ -86,35 +86,97 @@ impl NetworkMonitor {
     ///
     /// This is the core monitoring loop. It should:
     /// 1. Create a Netlink socket (NETLINK_ROUTE family)
-    /// 2. Subscribe to link state change notifications
+    /// 2. Subscribe to link state change notifications (RTM_NEWLINK, RTM_DELLINK)
     /// 3. Listen for events in an async loop
     /// 4. Parse Netlink messages into InterfaceEvent structs
     /// 5. Call handle_interface_event() for each event
     ///
     /// ## Implementation Notes
-    /// - Use the `neli` crate for Netlink communication
+    /// - Add `rtnetlink = "0.13"` to Cargo.toml dependencies (recommended, higher-level than neli)
+    /// - Alternative: Use `neli` crate for lower-level control
     /// - Run this in a separate tokio task
-    /// - Send events to supervisor via a channel
+    /// - Send events to supervisor via the provided channel
     ///
-    /// ## Example Netlink Code Structure
+    /// ## Recommended Implementation using rtnetlink
     /// ```rust,ignore
-    /// use neli::socket::{NlSocket, NlSocketHandle};
+    /// use rtnetlink::{new_connection, IpVersion};
+    /// use futures::stream::TryStreamExt;
+    ///
+    /// // Create connection to Netlink
+    /// let (connection, handle, _) = new_connection()?;
+    ///
+    /// // Spawn the connection in background
+    /// tokio::spawn(connection);
+    ///
+    /// // Subscribe to link events
+    /// let mut link_stream = handle.link().get().execute();
+    ///
+    /// // Monitor for changes
+    /// while let Some(msg) = link_stream.try_next().await? {
+    ///     let interface_name = msg.header.name;
+    ///     let is_up = msg.header.flags.contains(LinkFlag::Up);
+    ///
+    ///     let event = InterfaceEvent {
+    ///         interface_name: interface_name.clone(),
+    ///         new_state: if is_up { InterfaceState::Up } else { InterfaceState::Down },
+    ///         previous_state: self.interface_states.get(&interface_name).cloned(),
+    ///     };
+    ///
+    ///     event_tx.send(event).await?;
+    /// }
+    /// ```
+    ///
+    /// ## Alternative: Lower-level neli Implementation
+    /// ```rust,ignore
+    /// use neli::socket::{tokio::NlSocket, NlSocketHandle};
     /// use neli::consts::nl::*;
     /// use neli::consts::rtnl::*;
+    /// use neli::nl::{Nlmsghdr, NlPayload};
+    /// use neli::rtnl::Ifinfomsg;
     ///
-    /// let mut socket = NlSocketHandle::connect(
+    /// let mut socket = NlSocket::connect(
     ///     NlFamily::Route,
     ///     Some(0),
-    ///     &[],
+    ///     &[RtGrp::Link],  // Subscribe to link events
     /// )?;
     ///
-    /// // Subscribe to link notifications
-    /// socket.add_mcast_membership(&[RtAddrFamily::Unspec])?;
-    ///
     /// loop {
-    ///     let msg = socket.recv()?;
-    ///     // Parse msg and create InterfaceEvent
+    ///     let msg: Nlmsghdr<Rtm, Ifinfomsg> = socket.recv().await?;
+    ///
+    ///     match msg.nl_type {
+    ///         Rtm::Newlink => {
+    ///             // Interface added or state changed
+    ///             if let NlPayload::Payload(ifinfo) = msg.nl_payload {
+    ///                 let is_up = ifinfo.ifi_flags & libc::IFF_UP as u32 != 0;
+    ///                 // Create and send InterfaceEvent
+    ///             }
+    ///         }
+    ///         Rtm::Dellink => {
+    ///             // Interface removed
+    ///             // Send InterfaceState::Removed event
+    ///         }
+    ///         _ => continue,
+    ///     }
     /// }
+    /// ```
+    ///
+    /// ## Testing Strategy
+    /// 1. Unit test: Mock events, verify handle_interface_event() logic
+    /// 2. Integration test (feature-gated): Create dummy interface, bring up/down, verify events
+    /// 3. Manual test: `ip link set eth0 down` while monitoring
+    ///
+    /// ## Example Test Commands
+    /// ```bash
+    /// # Create dummy interface for testing
+    /// sudo ip link add dummy0 type dummy
+    /// sudo ip link set dummy0 up
+    /// # Your code should detect this
+    ///
+    /// sudo ip link set dummy0 down
+    /// # Your code should detect this
+    ///
+    /// sudo ip link delete dummy0
+    /// # Your code should detect removal
     /// ```
     pub async fn start_monitoring(
         &mut self,
@@ -130,8 +192,6 @@ impl NetworkMonitor {
 
     /// Handle an interface state change event
     ///
-    /// **TODO: IMPLEMENT THIS - HIGH PRIORITY**
-    ///
     /// This method determines what action to take when an interface changes state.
     ///
     /// ## Decision Logic
@@ -139,10 +199,12 @@ impl NetworkMonitor {
     /// - Interface comes UP: Return ResumeRules if we have paused rules on it
     /// - Interface REMOVED: Return RemoveRules if we have rules on it
     /// - Otherwise: Return NoAction
+    ///
+    /// **Status**: ✅ IMPLEMENTED
     pub fn handle_interface_event(&mut self, event: InterfaceEvent) -> ReconciliationAction {
-        let old_state = self.interface_states.get(&event.interface_name);
+        let old_state = self.interface_states.get(&event.interface_name).cloned();
 
-        // Update our state tracking
+        // Update our state tracking first
         match event.new_state {
             InterfaceState::Removed => {
                 self.interface_states.remove(&event.interface_name);
@@ -153,11 +215,39 @@ impl NetworkMonitor {
             }
         }
 
-        // TODO: Implement decision logic
-        // Check if we have rules on this interface
-        // Determine appropriate action based on state transition
+        // Only take action if we have rules on this interface
+        if !self.interfaces_with_rules.contains(&event.interface_name) {
+            return ReconciliationAction::NoAction;
+        }
 
-        todo!("Implement reconciliation action decision")
+        // Determine action based on state transition
+        match (&old_state, &event.new_state) {
+            // Interface went down -> pause rules
+            (Some(InterfaceState::Up), InterfaceState::Down) => {
+                ReconciliationAction::PauseRules {
+                    interface_name: event.interface_name,
+                }
+            }
+
+            // Interface came up -> resume rules
+            (Some(InterfaceState::Down), InterfaceState::Up) |
+            (None, InterfaceState::Up) => {
+                ReconciliationAction::ResumeRules {
+                    interface_name: event.interface_name,
+                }
+            }
+
+            // Interface was removed -> remove rules
+            (_, InterfaceState::Removed) => {
+                self.interfaces_with_rules.remove(&event.interface_name);
+                ReconciliationAction::RemoveRules {
+                    interface_name: event.interface_name,
+                }
+            }
+
+            // No significant state change
+            _ => ReconciliationAction::NoAction,
+        }
     }
 
     /// Register that we have active rules on an interface
@@ -219,8 +309,130 @@ mod tests {
         assert!(!monitor.is_interface_up("eth1"));
     }
 
-    // TODO: Add test for handle_interface_event with Down transition
-    // TODO: Add test for handle_interface_event with Up transition
-    // TODO: Add test for handle_interface_event with Removed transition
+    /// **Tier 1 Unit Test**
+    ///
+    /// - **Purpose:** Verify interface down triggers PauseRules action
+    /// - **Method:** Simulate Up->Down transition with registered interface
+    /// - **Tier:** 1 (Logic)
+    #[test]
+    fn test_handle_interface_event_down_transition() {
+        let mut monitor = NetworkMonitor::new();
+        monitor
+            .interface_states
+            .insert("eth0".to_string(), InterfaceState::Up);
+        monitor.register_interface("eth0".to_string());
+
+        let event = InterfaceEvent {
+            interface_name: "eth0".to_string(),
+            new_state: InterfaceState::Down,
+            previous_state: Some(InterfaceState::Up),
+        };
+
+        let action = monitor.handle_interface_event(event);
+
+        assert_eq!(
+            action,
+            ReconciliationAction::PauseRules {
+                interface_name: "eth0".to_string()
+            }
+        );
+    }
+
+    /// **Tier 1 Unit Test**
+    ///
+    /// - **Purpose:** Verify interface up triggers ResumeRules action
+    /// - **Method:** Simulate Down->Up transition with registered interface
+    /// - **Tier:** 1 (Logic)
+    #[test]
+    fn test_handle_interface_event_up_transition() {
+        let mut monitor = NetworkMonitor::new();
+        monitor
+            .interface_states
+            .insert("eth0".to_string(), InterfaceState::Down);
+        monitor.register_interface("eth0".to_string());
+
+        let event = InterfaceEvent {
+            interface_name: "eth0".to_string(),
+            new_state: InterfaceState::Up,
+            previous_state: Some(InterfaceState::Down),
+        };
+
+        let action = monitor.handle_interface_event(event);
+
+        assert_eq!(
+            action,
+            ReconciliationAction::ResumeRules {
+                interface_name: "eth0".to_string()
+            }
+        );
+    }
+
+    /// **Tier 1 Unit Test**
+    ///
+    /// - **Purpose:** Verify interface removal triggers RemoveRules action
+    /// - **Method:** Simulate interface deletion with active rules
+    /// - **Tier:** 1 (Logic)
+    #[test]
+    fn test_handle_interface_event_removed_transition() {
+        let mut monitor = NetworkMonitor::new();
+        monitor
+            .interface_states
+            .insert("eth0".to_string(), InterfaceState::Up);
+        monitor.register_interface("eth0".to_string());
+
+        let event = InterfaceEvent {
+            interface_name: "eth0".to_string(),
+            new_state: InterfaceState::Removed,
+            previous_state: Some(InterfaceState::Up),
+        };
+
+        let action = monitor.handle_interface_event(event);
+
+        assert_eq!(
+            action,
+            ReconciliationAction::RemoveRules {
+                interface_name: "eth0".to_string()
+            }
+        );
+        // Verify interface was unregistered
+        assert!(!monitor.interfaces_with_rules.contains("eth0"));
+    }
+
+    /// **Tier 1 Unit Test**
+    ///
+    /// - **Purpose:** Verify no action when interface has no rules
+    /// - **Method:** Simulate state change on unregistered interface
+    /// - **Tier:** 1 (Logic)
+    #[test]
+    fn test_handle_interface_event_no_rules() {
+        let mut monitor = NetworkMonitor::new();
+        monitor
+            .interface_states
+            .insert("eth0".to_string(), InterfaceState::Up);
+        // Note: Not calling register_interface
+
+        let event = InterfaceEvent {
+            interface_name: "eth0".to_string(),
+            new_state: InterfaceState::Down,
+            previous_state: Some(InterfaceState::Up),
+        };
+
+        let action = monitor.handle_interface_event(event);
+
+        assert_eq!(action, ReconciliationAction::NoAction);
+    }
+
     // TODO: Add integration test with real Netlink socket (feature-gated)
+    // This would require:
+    // 1. Creating a dummy network interface
+    // 2. Starting the monitor
+    // 3. Changing interface state
+    // 4. Verifying events are received
+    // 5. Cleaning up the dummy interface
+    //
+    // Example:
+    // #[tokio::test]
+    // #[cfg(feature = "netlink_integration_test")]
+    // #[ignore] // Requires root
+    // async fn test_netlink_integration() { ... }
 }
