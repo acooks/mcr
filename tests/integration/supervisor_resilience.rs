@@ -315,15 +315,24 @@ async fn test_supervisor_resyncs_rules_on_restart() -> Result<()> {
 #[tokio::test]
 #[ignore] // Remove when implemented
 async fn test_supervisor_applies_exponential_backoff() -> Result<()> {
-    // TODO: This test is complex because we need to:
-    // 1. Start supervisor
-    // 2. Somehow make a worker fail repeatedly
-    //    (maybe via special test mode or environment variable)
-    // 3. Measure restart intervals
-    // 4. Verify they follow exponential pattern:
-    //    100ms, 200ms, 400ms, 800ms, ... up to max
-
-    // HINT: Look at src/supervisor.rs for INITIAL_BACKOFF_MS and MAX_BACKOFF_MS constants
+    // Proposed Implementation:
+    // 1.  **Use `run_generic`:** Create a supervisor instance using the `run_generic`
+    //     function from `src/supervisor.rs`. This allows us to inject mock
+    //     worker-spawning logic.
+    // 2.  **Mock Spawner:** Create a mock `spawn_cp` closure that:
+    //     a.  Records the `Instant::now()` of each spawn attempt into a shared `Arc<Mutex<Vec<Instant>>>`.
+    //     b.  Spawns a process that is guaranteed to fail immediately (e.g., `sh -c 'exit 1'`).
+    // 3.  **Stable DP Workers:** Use a mock `spawn_dp` that spawns a long-lived, stable
+    //     process (e.g., `sleep 30`) to avoid interference.
+    // 4.  **Run Supervisor:** Run the supervisor for a limited duration (e.g., 2-3 seconds)
+    //     to allow for several restart attempts.
+    // 5.  **Assert Delays:** After the supervisor task is terminated, analyze the
+    //     recorded timestamps:
+    //     a.  Assert that at least 3-4 restarts occurred.
+    //     b.  Calculate the duration between each consecutive timestamp.
+    //     c.  Verify that each duration is approximately double the previous one, within a
+    //         reasonable margin of error, and respects the `INITIAL_BACKOFF_MS` and
+    //         `MAX_BACKOFF_MS` constants.
 
     todo!("Implement exponential backoff test")
 }
@@ -342,8 +351,19 @@ async fn test_supervisor_applies_exponential_backoff() -> Result<()> {
 #[tokio::test]
 #[ignore] // Remove when implemented
 async fn test_supervisor_handles_multiple_failures() -> Result<()> {
-    // TODO: Test simultaneous failure of multiple workers
-    // This stresses the supervisor's concurrent restart logic
+    // Proposed Implementation:
+    // 1.  **Start Supervisor:** Use the `start_supervisor` helper.
+    // 2.  **Get Worker PIDs:** Use the `control_client` to call `list-workers` and
+    //     collect the PIDs of all `DataPlane` workers into a Vec. Assert that
+    //     more than one data plane worker exists (the default should be the number
+    //     of CPU cores).
+    // 3.  **Kill All Workers:** Iterate through the collected PIDs and kill each
+    //     worker using the `kill_worker` helper.
+    // 4.  **Verify Restarts:** Poll the `list-workers` command in a loop for a
+    //     few seconds until the number of `DataPlane` workers matches the
+    //     original count.
+    // 5.  **Check PIDs:** Verify that all the new worker PIDs are different from the
+    //     original PIDs, confirming that they were all restarted.
 
     todo!("Implement multiple failure test")
 }
@@ -370,31 +390,25 @@ async fn test_supervisor_handles_multiple_failures() -> Result<()> {
 #[tokio::test]
 #[ignore] // Remove when implemented - requires root
 async fn test_supervisor_in_namespace() -> Result<()> {
-    // TODO: Check if running as root
-    // if unsafe { libc::getuid() } != 0 {
-    //     println!("Skipping namespace test - requires root");
-    //     return Ok(());
-    // }
-
-    // TODO: Create network namespace
-    // let ns_name = format!("test-mcr-{}", uuid::Uuid::new_v4());
-    // Command::new("ip")
-    //     .args(&["netns", "add", &ns_name])
-    //     .status()
-    //     .await?;
-
-    // TODO: Run supervisor inside namespace
-    // Command::new("ip")
-    //     .args(&["netns", "exec", &ns_name, "path/to/supervisor"])
-    //     .spawn()?;
-
-    // TODO: Perform tests
-
-    // TODO: Cleanup - delete namespace
-    // Command::new("ip")
-    //     .args(&["netns", "delete", &ns_name])
-    //     .status()
-    //     .await?;
+    // Proposed Implementation:
+    // 1.  **Check for Root:** Use `nix::unistd::getuid().is_root()` to check if the
+    //     test is running with root privileges. If not, print a message and return
+    //     `Ok(())` to skip the test.
+    // 2.  **Generate Namespace Name:** Create a unique name for the namespace to
+    //     avoid collisions, e.g., `mcr-test-ns-{uuid}`.
+    // 3.  **Create Namespace:** Use `tokio::process::Command` to run `ip netns add {ns_name}`.
+    //     Await its completion and check for errors.
+    // 4.  **Run Supervisor in Namespace:**
+    //     a.  Construct a `Command` to run the supervisor: `ip netns exec {ns_name} {path_to_binary} supervisor ...`.
+    //     b.  Use a temporary directory for socket paths.
+    //     c.  Spawn the command.
+    // 5.  **Perform a Simple Test:** Run a simplified version of the restart test
+    //     (e.g., `test_supervisor_restarts_control_plane_worker`) against the
+    //     supervisor running inside the namespace.
+    // 6.  **Cleanup:** Ensure the namespace is deleted at the end of the test, even
+    //     if it fails. An RAII guard or a `defer` block would be ideal, but a
+    //     simple `finally` block (e.g., using `tokio::spawn` and awaiting) will
+    //     work. The cleanup command is `ip netns delete {ns_name}`.
 
     todo!("Implement namespace isolation test")
 }

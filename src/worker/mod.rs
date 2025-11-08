@@ -203,6 +203,22 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn test_run_control_plane_starts_successfully() -> anyhow::Result<()> {
+        // Proposed Implementation:
+        // 1.  **Refactor `run_control_plane`:** Modify the `run_control_plane` function
+        //     to be generic over its `stream` argument, accepting any type that
+        //     implements `tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin`.
+        // 2.  **Use In-Memory Stream:** In this test, create an in-memory stream using
+        //     `tokio::io::duplex(1024)`. Pass one half to the `run_control_plane`
+        //     function.
+        // 3.  **Remove File System Dependency:** The `relay_command_socket_path` is also
+        //     a file system dependency. The `UnixSocketRelayCommandSender` should also be
+        //     made generic to accept any `AsyncWrite` sink. This test can then provide
+        //     another duplex stream for that.
+        // 4.  **Assert Timeout:** Keep the existing logic that runs the function with a
+        //     short timeout. The test passes if the future times out, which proves it
+        //     has entered its main loop without crashing. This change makes the test
+        //     fully self-contained and removes all side-effects.
+
         let socket_path = PathBuf::from(format!("/tmp/test_supervisor_{}.sock", Uuid::new_v4()));
         let _listener = UnixListener::bind(&socket_path)?;
 
@@ -246,6 +262,22 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn test_run_data_plane_starts_successfully() -> anyhow::Result<()> {
+        // Proposed Implementation:
+        // 1.  **Isolate `drop_privileges` and `set_cpu_affinity`:** These functions are the
+        //     primary reason this test requires root. They should be refactored into a
+        //     trait (e.g., `WorkerLifecycle`) that can be mocked.
+        // 2.  **Mock Dependencies:** The `run_data_plane` function should be made generic
+        //     over this new trait. In the test, a mock implementation of the trait would
+        //     be provided that simply logs the calls to `drop_privileges` and
+        //     `set_cpu_affinity` without actually executing them.
+        // 3.  **Isolate `data_plane_task`:** The core data plane logic, which requires
+        //     `CAP_NET_RAW`, should also be abstracted behind a trait so it can be
+        //     replaced with a mock that does nothing.
+        // 4.  **Assert Timeout:** With the privileged operations mocked out, the test can
+        //     run as a normal user. The existing timeout assertion remains valid to
+        //     ensure the main loop is entered. This change makes the test runnable in a
+        //     standard, non-privileged CI environment.
+
         // This test requires root or CAP_NET_RAW to run the privilege drop and socket setup logic.
         if unsafe { libc::getuid() } != 0 {
             println!("[TEST] Skipping test_run_data_plane_starts_successfully: requires root");

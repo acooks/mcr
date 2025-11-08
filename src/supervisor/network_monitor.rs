@@ -434,5 +434,19 @@ mod tests {
     // #[tokio::test]
     // #[cfg(feature = "netlink_integration_test")]
     // #[ignore] // Requires root
-    // async fn test_netlink_integration() { ... }
+    // async fn test_netlink_integration() {
+    //     // Proposed Implementation:
+    //     // 1.  **Check for Root:** Skip if not running as root.
+    //     // 2.  **Create Dummy Interface:** Use `tokio::process::Command` to run
+    //     //     `ip link add dev veth-test type dummy`.
+    //     // 3.  **Setup Monitor:** Create a `NetworkMonitor` and an MPSC channel.
+    //     // 4.  **Start Monitoring:** Spawn `monitor.start_monitoring(tx)` in a tokio task.
+    //     // 5.  **Bring Interface Up:** Run `ip link set dev veth-test up`.
+    //     // 6.  **Verify "Up" Event:** Receive from the channel and assert that an
+    //     //     `InterfaceEvent` for `veth-test` with state `Up` is received.
+    //     // 7.  **Bring Interface Down:** Run `ip link set dev veth-test down`.
+    //     // 8.  **Verify "Down" Event:** Assert a `Down` event is received.
+    //     // 9.  **Cleanup:** Run `ip link delete dev veth-test` to remove the
+    //     //     dummy interface. Ensure this runs even if the test fails.
+    // }
 }
