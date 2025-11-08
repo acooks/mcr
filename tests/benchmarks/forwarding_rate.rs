@@ -19,9 +19,9 @@
 //! These baselines were established on [DATE] using [HARDWARE SPECS]:
 //!
 //! - **Throughput**: TARGET packets/sec
-//! - **Latency (p50)**: TARGET 廣
-//! - **Latency (p99)**: TARGET 廣
-//! - **Control Plane Latency**: TARGET 廣
+//! - **Latency (p50)**: TARGET 翹s
+//! - **Latency (p99)**: TARGET 翹s
+//! - **Control Plane Latency**: TARGET 翹s
 //!
 //! Any regression >10% from these baselines should be investigated.
 
@@ -64,7 +64,7 @@ fn benchmark_forwarding_throughput(c: &mut Criterion) {
 /// 3. Timestamp at egress
 /// 4. Calculate delta
 ///
-/// **Expected Performance**: <100廣 p99 latency
+/// **Expected Performance**: <100翹s p99 latency
 fn benchmark_forwarding_latency(c: &mut Criterion) {
     let mut group = c.benchmark_group("forwarding_latency");
     group.measurement_time(Duration::from_secs(10));
