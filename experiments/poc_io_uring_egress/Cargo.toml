@@ -4,13 +4,13 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-io-uring = "0.7"
-socket2 = "0.5"
+io-uring = "0.7.11"
+socket2 = "0.6.1"
 libc = "0.2"
-anyhow = "1.0"
+anyhow = "1.0.100"
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.7.0", features = ["html_reports"] }
 
 [[bench]]
 name = "egress_throughput"
