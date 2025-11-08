@@ -77,7 +77,16 @@ fn drop_privileges(uid: Uid, gid: Gid, caps_to_keep: Option<&HashSet<Capability>
     }
 
     info!("Dropping privileges to uid={}, gid={}", uid, gid);
-    nix::unistd::setgroups(&[gid]).context("Failed to set supplementary groups")?;
+
+    // Get the username for initgroups
+    let user = nix::unistd::User::from_uid(uid)
+        .context("Failed to lookup user")?
+        .ok_or_else(|| anyhow::anyhow!("User not found for uid {}", uid))?;
+
+    // Initialize supplementary groups for the target user
+    nix::unistd::initgroups(&std::ffi::CString::new(user.name.as_str())?, gid)
+        .context("Failed to initialize supplementary groups")?;
+
     nix::unistd::setgid(gid).context("Failed to set GID")?;
     nix::unistd::setuid(uid).context("Failed to set UID")?;
     info!("Successfully dropped privileges.");
@@ -223,8 +232,12 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
         info!("Successfully set CPU affinity to core {}.", core_id);
     }
 
-    let supervisor_sock =
-        UnixStream::from_std(unsafe { std::os::unix::net::UnixStream::from_raw_fd(3) })?;
+    // Get FD 3 from supervisor and set it to non-blocking before wrapping in tokio UnixStream
+    let supervisor_sock = unsafe {
+        let std_sock = std::os::unix::net::UnixStream::from_raw_fd(3);
+        std_sock.set_nonblocking(true)?;
+        UnixStream::from_std(std_sock)?
+    };
     let _request_fd = recv_fd(&supervisor_sock).await?;
     let command_fd = recv_fd(&supervisor_sock).await?;
 
