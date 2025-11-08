@@ -100,6 +100,7 @@ pub async fn run(
     prometheus_addr: Option<std::net::SocketAddr>,
     _relay_command_rx: mpsc::Receiver<RelayCommand>,
     relay_command_socket_path: PathBuf,
+    control_socket_path: PathBuf, // New parameter
     master_rules: Arc<Mutex<HashMap<String, ForwardingRule>>>,
 ) -> Result<()> {
     let uid = User::from_name(user)
@@ -124,6 +125,7 @@ pub async fn run(
         num_cores,
         move |core_id| spawn_data_plane_worker(core_id, uid, gid, dp_socket_path.clone()),
         _relay_command_rx,
+        control_socket_path, // Pass down
         master_rules,
     )
     .await
@@ -134,6 +136,7 @@ pub async fn run_generic<F, G>(
     num_cores: usize,
     mut spawn_dp: G,
     _relay_command_rx: mpsc::Receiver<RelayCommand>,
+    control_socket_path: PathBuf, // New parameter
     _master_rules: Arc<Mutex<HashMap<String, ForwardingRule>>>,
 ) -> Result<()>
 where
@@ -145,7 +148,6 @@ where
         num_cores
     );
 
-    let control_socket_path = PathBuf::from("/tmp/multicast_relay_control.sock");
     if control_socket_path.exists() {
         std::fs::remove_file(&control_socket_path)?;
     }
@@ -249,6 +251,7 @@ where
 mod tests {
     use super::*;
     use std::time::Instant;
+    use tempfile::tempdir;
 
     // --- Test Helpers ---
 
@@ -293,20 +296,6 @@ mod tests {
     ///   The test runs the supervisor for a short period and then inspects a shared vector of spawn timestamps
     ///   to ensure at least two spawns occurred and that the time between them respects the initial backoff period.
     /// - **Tier:** 1 (Logic)
-    ///
-    /// **⚠️  Known Limitation - Socket Path Contention:**
-    ///
-    /// This test uses `run_generic()` which binds to a hardcoded socket path:
-    /// `/tmp/multicast_relay_control.sock`. When multiple supervisor tests run in parallel,
-    /// they compete for the same socket, causing binding failures and test failures.
-    ///
-    /// **Workaround:** Run tests sequentially:
-    /// ```
-    /// cargo test --lib -- --test-threads=1
-    /// ```
-    ///
-    /// **Long-term fix:** Refactor `run_generic()` to accept `socket_path` as a parameter,
-    /// then use unique paths per test (e.g., `/tmp/test_supervisor_{uuid}.sock`).
     #[tokio::test]
     async fn test_supervisor_restarts_cp_worker_with_backoff() {
         let cp_spawn_times = Arc::new(Mutex::new(Vec::new()));
@@ -321,8 +310,11 @@ mod tests {
 
         let (_tx, rx) = mpsc::channel(10);
         let master_rules = Arc::new(Mutex::new(HashMap::new()));
+        let temp_dir = tempdir().unwrap();
+        let socket_path = temp_dir.path().join("test.sock");
 
-        let supervisor_future = run_generic(spawn_cp, 1, spawn_dp, rx, master_rules.clone());
+        let supervisor_future =
+            run_generic(spawn_cp, 1, spawn_dp, rx, socket_path, master_rules.clone());
         let _ = tokio::time::timeout(Duration::from_millis(1000), supervisor_future).await;
 
         let spawn_times = cp_spawn_times.lock().unwrap();
@@ -354,8 +346,11 @@ mod tests {
 
         let (_tx, rx) = mpsc::channel(10);
         let master_rules = Arc::new(Mutex::new(HashMap::new()));
+        let temp_dir = tempdir().unwrap();
+        let socket_path = temp_dir.path().join("test.sock");
 
-        let supervisor_future = run_generic(spawn_cp, 1, spawn_dp, rx, master_rules.clone());
+        let supervisor_future =
+            run_generic(spawn_cp, 1, spawn_dp, rx, socket_path, master_rules.clone());
         let _ = tokio::time::timeout(Duration::from_millis(1000), supervisor_future).await;
 
         let spawn_times = dp_spawn_times.lock().unwrap();
@@ -372,20 +367,6 @@ mod tests {
     ///   supervisor for a very short duration. The test passes if the supervisor future doesn't complete and
     ///   can be successfully timed out, implying it has entered the main `loop` and is waiting for events.
     /// - **Tier:** 1 (Logic)
-    ///
-    /// **⚠️  Known Limitation - Socket Path Contention:**
-    ///
-    /// This test uses `run_generic()` which binds to a hardcoded socket path:
-    /// `/tmp/multicast_relay_control.sock`. When multiple supervisor tests run in parallel,
-    /// they compete for the same socket, causing binding failures and test failures.
-    ///
-    /// **Workaround:** Run tests sequentially:
-    /// ```
-    /// cargo test --lib -- --test-threads=1
-    /// ```
-    ///
-    /// **Long-term fix:** Refactor `run_generic()` to accept `socket_path` as a parameter,
-    /// then use unique paths per test (e.g., `/tmp/test_supervisor_{uuid}.sock`).
     #[tokio::test]
     async fn test_supervisor_spawns_workers() {
         let pids = Arc::new(Mutex::new(Vec::new()));
@@ -407,9 +388,17 @@ mod tests {
         let (_tx, rx) = mpsc::channel(10);
         let master_rules = Arc::new(Mutex::new(HashMap::new()));
         let num_cores = 2;
+        let temp_dir = tempdir().unwrap();
+        let socket_path = temp_dir.path().join("test.sock");
 
-        let supervisor_future =
-            run_generic(spawn_cp, num_cores, spawn_dp, rx, master_rules.clone());
+        let supervisor_future = run_generic(
+            spawn_cp,
+            num_cores,
+            spawn_dp,
+            rx,
+            socket_path,
+            master_rules.clone(),
+        );
         let _ = tokio::time::timeout(Duration::from_millis(200), supervisor_future).await;
 
         let spawned_pids = pids.lock().unwrap().clone();
@@ -452,8 +441,11 @@ mod tests {
 
         let (_tx, rx) = mpsc::channel(10);
         let master_rules = Arc::new(Mutex::new(HashMap::new()));
+        let temp_dir = tempdir().unwrap();
+        let socket_path = temp_dir.path().join("test.sock");
 
-        let supervisor_future = run_generic(spawn_cp, 1, spawn_dp, rx, master_rules.clone());
+        let supervisor_future =
+            run_generic(spawn_cp, 1, spawn_dp, rx, socket_path, master_rules.clone());
         let _ = tokio::time::timeout(Duration::from_millis(1000), supervisor_future).await;
 
         let spawn_times = cp_spawn_times.lock().unwrap();

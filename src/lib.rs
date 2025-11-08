@@ -18,9 +18,16 @@ pub struct Args {
 pub enum Command {
     /// Run the supervisor process
     Supervisor {
-        #[arg(long, default_value = "/tmp/mcr_relay_commands.sock")]
+        /// Path to the Unix socket for worker command and control.
+        #[clap(long, default_value = "/tmp/mcr_relay_commands.sock")]
         relay_command_socket_path: PathBuf,
-        #[arg(long, default_value = "nobody")]
+
+        /// Path to the Unix socket for client command and control.
+        #[clap(long, default_value = "/tmp/multicast_relay_control.sock")]
+        control_socket_path: PathBuf,
+
+        /// User to run worker processes as.
+        #[clap(long, default_value = "nobody")]
         user: String,
         #[arg(long, default_value = "daemon")]
         group: String,

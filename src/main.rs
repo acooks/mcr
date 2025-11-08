@@ -11,6 +11,7 @@ fn main() -> Result<()> {
     match args.command {
         Command::Supervisor {
             relay_command_socket_path,
+            control_socket_path,
             user,
             group,
             prometheus_addr,
@@ -28,6 +29,7 @@ fn main() -> Result<()> {
                     prometheus_addr,
                     relay_command_rx, // This is now unused, will be removed from supervisor::run
                     relay_command_socket_path.clone(),
+                    control_socket_path,
                     Arc::new(Mutex::new(HashMap::new())),
                 )
                 .await
@@ -112,6 +114,7 @@ mod tests {
             args.command,
             Command::Supervisor {
                 relay_command_socket_path: PathBuf::from("/tmp/mcr_relay_commands.sock"),
+                control_socket_path: PathBuf::from("/tmp/multicast_relay_control.sock"),
                 user: "nobody".to_string(),
                 group: "daemon".to_string(),
                 prometheus_addr: None,

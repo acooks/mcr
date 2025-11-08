@@ -7,34 +7,33 @@ mod tests {
     use anyhow::Result;
     use std::path::PathBuf;
     use std::time::Duration;
+    use tests::cleanup_socket;
+    use tests::unique_socket_path_with_prefix;
     use tokio::process::{Child, Command};
     use tokio::time::sleep;
 
     /// Spawns a supervisor process with a unique socket path and waits for the socket
     /// file to be created before returning.
-    async fn spawn_supervisor_and_wait_for_socket(
-        socket_path: &PathBuf,
-    ) -> Result<Child> {
+    async fn spawn_supervisor_and_wait_for_socket(socket_path: &PathBuf) -> Result<Child> {
         let current_exe =
             std::env::current_exe().expect("Failed to get current executable path");
 
         // Ensure the socket does not already exist
-        if socket_path.exists() {
-            std::fs::remove_file(socket_path)?;
-        }
+        cleanup_socket(socket_path);
 
         let mut supervisor_cmd = Command::new(current_exe);
         supervisor_cmd
             .arg("supervisor")
-            .arg("--relay-command-socket-path")
+            .arg("--control-socket-path") // Use the new argument
             .arg(socket_path.as_os_str());
 
-        let mut supervisor_process = supervisor_cmd.spawn()?;
+        let supervisor_process = supervisor_cmd.spawn()?;
 
         // Wait for the supervisor to create the socket file
         let mut wait_count = 0;
         while !socket_path.exists() {
-            if wait_count > 20 { // 2 seconds timeout
+            if wait_count > 20 {
+                // 2 seconds timeout
                 panic!("Supervisor did not create socket in time");
             }
             sleep(Duration::from_millis(100)).await;
@@ -46,8 +45,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ipc_happy_path_add_rule() -> Result<()> {
-        let temp_dir = tempfile::tempdir()?;
-        let socket_path = temp_dir.path().join("test_socket.sock");
+        let socket_path = unique_socket_path_with_prefix("ipc_happy_path");
 
         let mut supervisor_process =
             spawn_supervisor_and_wait_for_socket(&socket_path).await?;
@@ -88,6 +86,7 @@ mod tests {
         );
 
         supervisor_process.kill().await?;
+        cleanup_socket(&socket_path);
 
         Ok(())
     }
