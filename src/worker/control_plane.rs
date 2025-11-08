@@ -12,6 +12,28 @@ type SharedFlows = Arc<Mutex<HashMap<String, (ForwardingRule, FlowStats)>>>;
 
 use tokio::io::{AsyncRead, AsyncWrite};
 
+pub struct ControlPlane<S, R: AsyncRead + AsyncWrite + Unpin> {
+    stream: S,
+    relay_command_tx: Arc<UnixSocketRelayCommandSender<R>>,
+    shared_flows: SharedFlows,
+}
+
+impl<S: AsyncRead + AsyncWrite + Unpin, R: AsyncRead + AsyncWrite + Unpin> ControlPlane<S, R> {
+    pub fn new(stream: S, relay_stream: R) -> Self {
+        let shared_flows = Arc::new(Mutex::new(HashMap::new()));
+        let relay_command_tx = Arc::new(UnixSocketRelayCommandSender::new(relay_stream));
+        Self {
+            stream,
+            relay_command_tx,
+            shared_flows,
+        }
+    }
+
+    pub async fn run(self) -> Result<()> {
+        control_plane_task(self.stream, self.relay_command_tx, self.shared_flows).await
+    }
+}
+
 pub async fn control_plane_task<
     S: AsyncRead + AsyncWrite + Unpin,
     R: AsyncRead + AsyncWrite + Unpin,
@@ -106,13 +128,8 @@ pub async fn control_plane_task<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        worker::UnixSocketRelayCommandSender, OutputDestination, RelayCommand, Response,
-        SupervisorCommand,
-    };
-    use std::{collections::HashMap, sync::Arc};
+    use crate::{OutputDestination, RelayCommand, Response, SupervisorCommand};
     use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
-    use tokio::sync::Mutex;
 
     #[tokio::test]
     async fn test_control_plane_task_add_rule() {
@@ -122,16 +139,10 @@ mod tests {
         // Create a duplex stream for the relay command sender
         let (mut relay_rx, relay_tx) = duplex(1024);
 
-        // Create a mock UnixSocketRelayCommandSender
-        let relay_command_tx = Arc::new(UnixSocketRelayCommandSender::new(relay_tx));
-
-        let shared_flows: SharedFlows = Arc::new(Mutex::new(HashMap::new()));
-
-        // Spawn the control_plane_task
+        // Create and run the control plane
+        let control_plane = ControlPlane::new(task_stream, relay_tx);
         let task = tokio::spawn(async move {
-            control_plane_task(task_stream, relay_command_tx, shared_flows)
-                .await
-                .unwrap();
+            control_plane.run().await.unwrap();
         });
 
         // Send an AddRule command

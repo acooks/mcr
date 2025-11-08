@@ -3,9 +3,7 @@ use log::info;
 use nix::sched::{sched_setaffinity, CpuSet};
 use nix::unistd::{getpid, Gid, Uid};
 
-use std::collections::HashMap;
 use std::os::unix::io::FromRawFd;
-use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
@@ -20,8 +18,8 @@ pub mod metrics;
 pub mod packet_parser;
 pub mod stats;
 
-use crate::{ControlPlaneConfig, DataPlaneConfig, FlowStats, ForwardingRule, RelayCommand};
-use control_plane::control_plane_task;
+use crate::{ControlPlaneConfig, DataPlaneConfig, RelayCommand};
+use control_plane::ControlPlane;
 use data_plane_integrated::run_data_plane as data_plane_task;
 
 use caps::{CapSet, Capability};
@@ -96,11 +94,8 @@ pub async fn run_control_plane_generic<
     stream: S,
     relay_stream: R,
 ) -> Result<()> {
-    let shared_flows = Arc::new(Mutex::new(
-        HashMap::<String, (ForwardingRule, FlowStats)>::new(),
-    ));
-    let data_plane_command_tx = Arc::new(UnixSocketRelayCommandSender::new(relay_stream));
-    control_plane_task(stream, data_plane_command_tx, shared_flows).await
+    let control_plane = ControlPlane::new(stream, relay_stream);
+    control_plane.run().await
 }
 
 pub async fn run_control_plane(config: ControlPlaneConfig) -> Result<()> {
