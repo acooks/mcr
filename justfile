@@ -78,8 +78,8 @@ outdated:
 # Generate test coverage report
 # Note: Tests run sequentially (--test-threads=1) due to supervisor test socket contention
 coverage:
-    @echo "--- Generating Test Coverage Report (cargo tarpaulin) ---"
-    @command -v cargo-tarpaulin >/dev/null || cargo install cargo-tarpaulin --version 0.27.0 --locked
+    #!/usr/bin/env bash
+    set -euxo pipefail
     cargo tarpaulin --out html --output-dir target/tarpaulin --features integration_test --exclude-files src/main.rs "experiments/*" -- --test-threads=1
 
 

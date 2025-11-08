@@ -328,20 +328,6 @@ mod tests {
             .context("Failed to spawn sleeping worker")
     }
 
-    fn spawn_once_gracefully_then_fail(spawn_count: Arc<Mutex<u32>>) -> anyhow::Result<Child> {
-        let mut count = spawn_count.lock().unwrap();
-        *count += 1;
-        let mut command = tokio::process::Command::new("sh");
-        if *count == 1 {
-            // First spawn exits gracefully
-            command.arg("-c").arg("exit 0");
-        } else {
-            // Subsequent spawns fail
-            command.arg("-c").arg("exit 1");
-        }
-        command.spawn().map_err(anyhow::Error::from)
-    }
-
     // --- Tests ---
 
     /// **Tier 1 Unit Test**
@@ -482,17 +468,25 @@ mod tests {
         let cp_spawn_times = Arc::new(Mutex::new(Vec::new()));
         let cp_spawn_times_clone = cp_spawn_times.clone();
         let cp_spawn_count = Arc::new(Mutex::new(0));
-        let cp_spawn_count_clone = cp_spawn_count.clone();
 
         let spawn_cp = move || -> Result<(Child, UnixStream)> {
+            let mut count = cp_spawn_count.lock().unwrap();
+            *count += 1;
+            let mut command = tokio::process::Command::new("sh");
+
+            // Fail on the first two spawns to establish a backoff, then exit gracefully.
+            match *count {
+                1 => command.arg("-c").arg("exit 1"), // Fail
+                2 => command.arg("-c").arg("exit 0"), // Graceful exit
+                _ => command.arg("-c").arg("exit 1"), // Fail again
+            };
+
             cp_spawn_times_clone.lock().unwrap().push(Instant::now());
             let (stream, _) = UnixStream::pair()?;
-            Ok((
-                spawn_once_gracefully_then_fail(cp_spawn_count_clone.clone())?,
-                stream,
-            ))
+            Ok((command.spawn()?, stream))
         };
-        let spawn_dp = |_core_id: u32| spawn_failing_worker();
+
+        let spawn_dp = |_core_id: u32| spawn_sleeping_worker(); // Keep DP workers stable
 
         let (_tx, rx) = mpsc::channel(10);
         let master_rules = Arc::new(Mutex::new(HashMap::new()));
@@ -501,19 +495,26 @@ mod tests {
 
         let supervisor_future =
             run_generic(spawn_cp, 1, spawn_dp, rx, socket_path, master_rules.clone());
+
+        // Run long enough for three spawns: fail -> graceful -> fail
         let _ = tokio::time::timeout(Duration::from_millis(1000), supervisor_future).await;
 
         let spawn_times = cp_spawn_times.lock().unwrap();
-        assert!(spawn_times.len() > 1, "Should have restarted at least once");
+        assert!(
+            spawn_times.len() >= 3,
+            "Expected at least 3 spawns, but got {}",
+            spawn_times.len()
+        );
 
-        // The first restart (after graceful exit) should be immediate.
-        let backoff1 = spawn_times[1].duration_since(spawn_times[0]);
-        assert!(backoff1 < Duration::from_millis(50)); // Immediate restart
+        // Backoff after first failure should be >= INITIAL_BACKOFF_MS
+        let backoff_after_failure = spawn_times[1].duration_since(spawn_times[0]);
+        assert!(backoff_after_failure >= Duration::from_millis(INITIAL_BACKOFF_MS));
 
-        // If there was a second restart, check its backoff
-        if spawn_times.len() > 2 {
-            let backoff2 = spawn_times[2].duration_since(spawn_times[1]);
-            assert!(backoff2 >= Duration::from_millis(250));
-        }
+        // Backoff after graceful exit should be very short (i.e., reset)
+        let backoff_after_graceful = spawn_times[2].duration_since(spawn_times[1]);
+        assert!(
+            backoff_after_graceful < Duration::from_millis(50),
+            "Backoff was not reset after graceful exit"
+        );
     }
 }
