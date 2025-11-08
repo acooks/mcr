@@ -22,15 +22,20 @@
 
 use anyhow::{Context, Result};
 use io_uring::{opcode, types, IoUring};
+use nix::sys::eventfd::{EfdFlags, EventFd};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, UdpSocket as StdUdpSocket};
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Mutex};
 
 use crate::worker::buffer_pool::BufferSize;
 use crate::worker::{buffer_pool::BufferPool, egress::EgressPacket, packet_parser::parse_packet};
 use crate::{ForwardingRule, RelayCommand};
+
+// Userdata constants for io_uring
+const COMMAND_NOTIFY: u64 = 0;
+const PACKET_RECV_BASE: u64 = 1;  // Buffer indices start at 1, allowing up to u64::MAX-1 buffers
 
 /// Statistics for the ingress loop
 #[derive(Debug, Clone, Default)]
@@ -85,7 +90,8 @@ pub struct IngressLoop {
     ring: IoUring,
 
     /// Buffer pool for packet allocations
-    buffer_pool: BufferPool,
+    /// Wrapped in Arc<Mutex<>> for safe shared access with egress
+    buffer_pool: Arc<Mutex<BufferPool>>,
 
     /// Local rule table for packet demultiplexing
     /// Key: (dest_ip, dest_port)
@@ -103,6 +109,9 @@ pub struct IngressLoop {
 
     /// Channel for receiving commands from the supervisor
     command_rx: mpsc::Receiver<RelayCommand>,
+
+    /// EventFD for command notifications
+    command_event_fd: OwnedFd,
 }
 
 impl IngressLoop {
@@ -112,8 +121,10 @@ impl IngressLoop {
     ///
     /// * `interface_name` - Network interface to capture packets from (e.g., "eth0")
     /// * `config` - Ingress configuration
+    /// * `buffer_pool` - Shared buffer pool (must be the same pool used by egress)
     /// * `egress_tx` - Optional channel for sending packets to egress
     /// * `command_rx` - Channel for receiving commands from the supervisor
+    /// * `command_event_fd` - EventFD for command notifications (signaled when commands arrive)
     ///
     /// # Returns
     ///
@@ -121,12 +132,13 @@ impl IngressLoop {
     pub fn new(
         interface_name: &str,
         config: IngressConfig,
+        buffer_pool: Arc<Mutex<BufferPool>>,
         egress_tx: Option<mpsc::Sender<EgressPacket>>,
         command_rx: mpsc::Receiver<RelayCommand>,
+        command_event_fd: EventFd,
     ) -> Result<Self> {
         let af_packet_socket = setup_af_packet_socket(interface_name)?;
         let ring = IoUring::new(config.queue_depth)?;
-        let buffer_pool = BufferPool::new(config.track_stats);
 
         Ok(Self {
             af_packet_socket,
@@ -138,6 +150,7 @@ impl IngressLoop {
             stats: IngressStats::default(),
             egress_tx,
             command_rx,
+            command_event_fd: command_event_fd.into(),
         })
     }
 
@@ -198,13 +211,16 @@ impl IngressLoop {
     /// - No rule match: Drop packet (increment `no_rule_match`)
     /// - io_uring errors: Return error and exit loop
     pub fn run(&mut self) -> Result<()> {
-        use mpsc::RecvTimeoutError;
-        use std::time::Duration;
-
         // Allocate receive buffers (reused across iterations)
         let mut recv_buffers: Vec<Vec<u8>> = (0..self.config.batch_size)
             .map(|_| vec![0u8; 9000]) // Max jumbo frame size
             .collect();
+
+        // Buffer for reading from the eventfd
+        let mut command_notify_buf = [0u8; 8];
+
+        // Submit the initial command notification read
+        self.submit_command_read(&mut command_notify_buf)?;
 
         loop {
             // 1. Submit a batch of recv operations for all available buffers
@@ -216,7 +232,7 @@ impl IngressLoop {
                     buf.len() as u32,
                 )
                 .build()
-                .user_data(i as u64); // Use index as user_data
+                .user_data(PACKET_RECV_BASE + i as u64); // Encode buffer index in user_data
 
                 unsafe {
                     self.ring
@@ -225,58 +241,80 @@ impl IngressLoop {
                         .context("Failed to push recv operation to io_uring")?;
                 }
             }
-            self.ring.submit()?;
 
-            // 2. Wait for commands with a timeout, allowing us to poll for packets
-            match self.command_rx.recv_timeout(Duration::from_millis(10)) {
-                Ok(RelayCommand::AddRule(rule)) => {
-                    self.add_rule(Arc::new(rule))?;
-                }
-                Ok(RelayCommand::RemoveRule { rule_id }) => {
-                    self.remove_rule(&rule_id)?;
-                }
-                Err(RecvTimeoutError::Timeout) => {
-                    // This is the normal case when no commands are pending.
-                }
-                Err(RecvTimeoutError::Disconnected) => {
-                    log::info!("Command channel disconnected, shutting down ingress loop.");
-                    return Ok(());
-                }
-            }
+            // 2. Submit and wait for completions (both packets and commands)
+            self.ring.submit_and_wait(1)?;
 
-            // 3. Process all available packet completions without blocking
-            let mut completions = Vec::new();
-            {
-                let cq = self.ring.completion();
-                for cqe in cq {
-                    completions.push((cqe.result(), cqe.user_data()));
-                }
-            }
+            // 3. Process all available completions
+            let completions: Vec<_> = self.ring.completion().collect();
+            for cqe in completions {
+                let user_data = cqe.user_data();
+                match user_data {
+                    COMMAND_NOTIFY => {
+                        // Command notification received, process all pending commands
+                        self.process_commands()?;
+                        // Re-submit the command notification read
+                        self.submit_command_read(&mut command_notify_buf)?;
+                    }
+                    ud if ud >= PACKET_RECV_BASE && ud < PACKET_RECV_BASE + self.config.batch_size as u64 => {
+                        // Decode buffer index from user_data
+                        let buffer_idx = (ud - PACKET_RECV_BASE) as usize;
+                        let bytes_received = cqe.result();
 
-            for (bytes_received, buffer_index) in completions {
-                let buffer_index = buffer_index as usize;
-
-                if bytes_received < 0 {
-                    eprintln!("Error receiving packet: {}", bytes_received);
-                    continue;
-                }
-
-                if bytes_received == 0 {
-                    continue;
-                }
-
-                let bytes_received = bytes_received as usize;
-
-                if self.config.track_stats {
-                    self.stats.packets_received += 1;
-                    self.stats.bytes_received += bytes_received as u64;
-                }
-
-                if let Some(buf) = recv_buffers.get(buffer_index) {
-                    self.process_packet(&buf[..bytes_received])?;
+                        if bytes_received < 0 {
+                            log::error!("Error receiving packet: {}", bytes_received);
+                            continue;
+                        }
+                        let bytes_received = bytes_received as usize;
+                        if bytes_received > 0 {
+                            if self.config.track_stats {
+                                self.stats.packets_received += 1;
+                                self.stats.bytes_received += bytes_received as u64;
+                            }
+                            // Process the correct buffer based on decoded index
+                            self.process_packet(&recv_buffers[buffer_idx][..bytes_received])?;
+                        }
+                    }
+                    _ => {
+                        log::warn!("Unknown io_uring user_data: {}", user_data);
+                    }
                 }
             }
         }
+    }
+
+    /// Process all pending commands from the supervisor
+    fn process_commands(&mut self) -> Result<()> {
+        while let Ok(command) = self.command_rx.try_recv() {
+            match command {
+                RelayCommand::AddRule(rule) => {
+                    self.add_rule(Arc::new(rule))?;
+                }
+                RelayCommand::RemoveRule { rule_id } => {
+                    self.remove_rule(&rule_id)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Submit a read operation to io_uring for the command eventfd
+    fn submit_command_read(&mut self, buf: &mut [u8; 8]) -> Result<()> {
+        let read_op = opcode::Read::new(
+            types::Fd(self.command_event_fd.as_raw_fd()),
+            buf.as_mut_ptr(),
+            buf.len() as u32,
+        )
+        .build()
+        .user_data(COMMAND_NOTIFY);
+
+        unsafe {
+            self.ring
+                .submission()
+                .push(&read_op)
+                .context("Failed to push command read to io_uring")?;
+        }
+        Ok(())
     }
 
     /// Process a single received packet
@@ -338,15 +376,23 @@ impl IngressLoop {
             // Iterate through the outputs.
             for output in &rule.outputs {
                 println!("Processing output: {:?}", output);
-                println!(
-                    "Buffer pool state before alloc: small={}, standard={}, jumbo={}",
-                    self.buffer_pool.pool(BufferSize::Small).available(),
-                    self.buffer_pool.pool(BufferSize::Standard).available(),
-                    self.buffer_pool.pool(BufferSize::Jumbo).available()
-                );
+                {
+                    let pool = self.buffer_pool.lock().expect("BufferPool mutex poisoned");
+                    println!(
+                        "Buffer pool state before alloc: small={}, standard={}, jumbo={}",
+                        pool.pool(BufferSize::Small).available(),
+                        pool.pool(BufferSize::Standard).available(),
+                        pool.pool(BufferSize::Jumbo).available()
+                    );
+                }
 
                 // Allocate a buffer for each output destination.
-                let mut buffer = match self.buffer_pool.allocate(payload_len) {
+                let mut buffer = match self
+                    .buffer_pool
+                    .lock()
+                    .expect("BufferPool mutex poisoned")
+                    .allocate(payload_len)
+                {
                     Some(b) => {
                         println!("Buffer allocation successful");
                         b
@@ -418,13 +464,20 @@ impl IngressLoop {
 ///
 /// An `OwnedFd` for the AF_PACKET socket
 pub fn setup_af_packet_socket(interface_name: &str) -> Result<OwnedFd> {
+    println!("[Ingress] Setting up AF_PACKET socket for interface {}", interface_name);
     // Create AF_PACKET socket with ETH_P_IP filter (0x0800)
     let socket = Socket::new(Domain::PACKET, Type::RAW, Some(Protocol::from(0x0800)))
         .context("Failed to create AF_PACKET socket")?;
 
+    // Increase the receive buffer size
+    let rcvbuf_size = 32 * 1024 * 1024; // 32MB
+    socket.set_recv_buffer_size(rcvbuf_size)?;
+    println!("[Ingress] Set SO_RCVBUF to {}", rcvbuf_size);
+
     // Get interface index
     let iface_index = get_interface_index(interface_name)
         .with_context(|| format!("Failed to get interface index for {}", interface_name))?;
+    println!("[Ingress] Interface index for {}: {}", interface_name, iface_index);
 
     // Bind to the specific interface
     let mut addr_storage: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
@@ -443,6 +496,7 @@ pub fn setup_af_packet_socket(interface_name: &str) -> Result<OwnedFd> {
             ));
         }
     }
+    println!("[Ingress] AF_PACKET socket bound to interface {}", interface_name);
 
     // Convert Socket to OwnedFd
     // Socket::into_raw_fd() consumes the socket and returns RawFd
@@ -601,12 +655,12 @@ mod tests_unit {
     use crate::worker::egress::EgressPacket;
     use crate::ForwardingRule;
     use std::net::SocketAddr;
-    use std::os::unix::io::OwnedFd;
+    use std::os::unix::io::{IntoRawFd, OwnedFd};
     use std::sync::{mpsc, Arc};
 
     // Helper to create a test IngressLoop with mock components
     fn setup_test_ingress_loop(
-        buffer_pool: BufferPool,
+        buffer_pool: Arc<Mutex<BufferPool>>,
     ) -> (
         IngressLoop,
         mpsc::Receiver<EgressPacket>,
@@ -621,8 +675,12 @@ mod tests_unit {
 
         // Create dummy FDs and an empty ring for the test instance.
         // These are not used by process_packet, which is what we're testing.
-        let dummy_fd = unsafe { OwnedFd::from_raw_fd(0) };
+        // Use /dev/null to create a safe dummy FD that won't interfere with stdin/stdout/stderr
+        let dummy_file = std::fs::File::open("/dev/null").expect("Failed to open /dev/null");
+        let dummy_fd = unsafe { OwnedFd::from_raw_fd(dummy_file.into_raw_fd()) };
         let ring = IoUring::new(1).unwrap();
+        let command_event_fd = EventFd::from_value_and_flags(0, EfdFlags::EFD_NONBLOCK)
+            .expect("Failed to create eventfd for test");
 
         let ingress_loop = IngressLoop {
             af_packet_socket: dummy_fd,
@@ -634,6 +692,7 @@ mod tests_unit {
             stats: IngressStats::default(),
             egress_tx: Some(egress_tx.clone()),
             command_rx,
+            command_event_fd: command_event_fd.into(),
         };
 
         (ingress_loop, egress_rx, egress_tx)
@@ -684,7 +743,7 @@ mod tests_unit {
 
     #[test]
     fn test_process_packet_matching_rule() {
-        let buffer_pool = BufferPool::new(true);
+        let buffer_pool = Arc::new(Mutex::new(BufferPool::new(true)));
         let (mut ingress_loop, egress_rx, _) = setup_test_ingress_loop(buffer_pool);
 
         // Add a rule
@@ -728,7 +787,7 @@ mod tests_unit {
 
     #[test]
     fn test_process_packet_no_matching_rule() {
-        let buffer_pool = BufferPool::new(true);
+        let buffer_pool = Arc::new(Mutex::new(BufferPool::new(true)));
         let (mut ingress_loop, egress_rx, _) = setup_test_ingress_loop(buffer_pool);
 
         // No rules added
@@ -750,7 +809,7 @@ mod tests_unit {
 
     #[test]
     fn test_process_packet_parse_error() {
-        let buffer_pool = BufferPool::new(true);
+        let buffer_pool = Arc::new(Mutex::new(BufferPool::new(true)));
         let (mut ingress_loop, egress_rx, _) = setup_test_ingress_loop(buffer_pool);
 
         // Create a truncated packet (too short to be valid)
@@ -771,11 +830,14 @@ mod tests_unit {
     #[test]
     fn test_process_packet_buffer_exhaustion() {
         // Create a pool with stat tracking enabled.
-        let mut buffer_pool = BufferPool::new(true);
+        let buffer_pool = Arc::new(Mutex::new(BufferPool::new(true)));
         // Manually exhaust the pool by taking all available buffers.
         let mut allocated = Vec::new();
-        while let Some(buffer) = buffer_pool.allocate(100) {
-            allocated.push(buffer);
+        {
+            let mut pool = buffer_pool.lock().unwrap();
+            while let Some(buffer) = pool.allocate(100) {
+                allocated.push(buffer);
+            }
         }
 
         let (mut ingress_loop, egress_rx, _) = setup_test_ingress_loop(buffer_pool);
@@ -814,7 +876,7 @@ mod tests_unit {
 
     #[test]
     fn test_add_and_remove_rule() {
-        let buffer_pool = BufferPool::new(false);
+        let buffer_pool = Arc::new(Mutex::new(BufferPool::new(false)));
         let (mut ingress_loop, _, _) = setup_test_ingress_loop(buffer_pool);
 
         let rule = Arc::new(ForwardingRule {

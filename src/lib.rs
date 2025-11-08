@@ -74,12 +74,6 @@ pub enum Command {
         output_interface: Option<String>,
         #[arg(long)]
         reporting_interval: Option<u64>,
-        #[arg(long)]
-        socket_fd: Option<i32>,
-        #[arg(long)]
-        request_fd: Option<i32>,
-        #[arg(long)]
-        command_fd: Option<i32>,
     },
 }
 
@@ -90,8 +84,6 @@ pub struct ControlPlaneConfig {
     pub relay_command_socket_path: PathBuf,
     pub prometheus_addr: Option<std::net::SocketAddr>,
     pub reporting_interval: u64,
-    pub socket_fd: Option<i32>,
-    pub request_fd: Option<i32>,
 }
 
 pub struct DataPlaneConfig {

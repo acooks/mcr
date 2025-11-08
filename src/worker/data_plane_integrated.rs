@@ -72,6 +72,7 @@ use crate::{DataPlaneConfig, RelayCommand};
 pub fn run_data_plane(
     config: DataPlaneConfig,
     command_rx: mpsc::Receiver<RelayCommand>,
+    event_fd: nix::sys::eventfd::EventFd,
 ) -> Result<()> {
     println!(
         "[DataPlane] Starting integrated data plane on {}",
@@ -89,17 +90,25 @@ pub fn run_data_plane(
     // Create channel for ingress→egress communication
     let (egress_tx, egress_rx) = mpsc::channel::<EgressPacket>();
 
-    // Create shared buffer pool (Arc for shared ownership)
-    let buffer_pool = Arc::new(BufferPool::new(ingress_config.track_stats));
+    // Create shared buffer pool (Arc<Mutex<>> for thread-safe shared access)
+    let buffer_pool = Arc::new(std::sync::Mutex::new(BufferPool::new(ingress_config.track_stats)));
 
     // Clone config for threads
-    let interface_name = config.input_interface_name.clone().unwrap();
+    let interface_name = match config.input_interface_name.clone() {
+        Some(name) => name,
+        None => {
+            return Err(anyhow::anyhow!(
+                "input_interface_name must be specified for data plane worker"
+            ));
+        }
+    };
     let initial_rules = Vec::new(); // TODO: Pass rules from control plane
 
     // Spawn ingress thread
     let ingress_handle = {
         let interface_name = interface_name.clone();
         let egress_tx = egress_tx.clone();
+        let buffer_pool_for_ingress = buffer_pool.clone();
 
         thread::Builder::new()
             .name("ingress".to_string())
@@ -107,8 +116,14 @@ pub fn run_data_plane(
                 println!("[DataPlane] Ingress thread started");
 
                 // Create ingress loop
-                let mut ingress =
-                    IngressLoop::new(&interface_name, ingress_config, Some(egress_tx), command_rx)?;
+                let mut ingress = IngressLoop::new(
+                    &interface_name,
+                    ingress_config,
+                    buffer_pool_for_ingress,
+                    Some(egress_tx),
+                    command_rx,
+                    event_fd,
+                )?;
 
                 // Add initial rules
                 for rule in initial_rules {

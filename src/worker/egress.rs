@@ -26,7 +26,7 @@ use socket2::{Domain, Protocol, Socket, Type};
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::worker::buffer_pool::{Buffer, BufferPool};
 
@@ -89,7 +89,8 @@ pub struct EgressLoop {
     egress_queue: Vec<EgressPacket>,
 
     /// Buffer pool (for deallocation after send)
-    buffer_pool: Arc<BufferPool>,
+    /// Wrapped in Arc<Mutex<>> for safe shared access between ingress and egress
+    buffer_pool: Arc<Mutex<BufferPool>>,
 
     /// Configuration
     config: EgressConfig,
@@ -111,12 +112,12 @@ impl EgressLoop {
     /// # Arguments
     ///
     /// * `config` - Egress configuration
-    /// * `buffer_pool` - Shared buffer pool for deallocation
+    /// * `buffer_pool` - Shared buffer pool for deallocation (with mutex for thread-safe access)
     ///
     /// # Returns
     ///
     /// A new `EgressLoop` instance ready to send packets
-    pub fn new(config: EgressConfig, buffer_pool: Arc<BufferPool>) -> Result<Self> {
+    pub fn new(config: EgressConfig, buffer_pool: Arc<Mutex<BufferPool>>) -> Result<Self> {
         let ring = IoUring::new(config.queue_depth)?;
 
         Ok(Self {
@@ -259,20 +260,42 @@ impl EgressLoop {
         Ok(())
     }
 
-    /// Reap completions from io_uring
-    ///
     /// Processes completion queue entries, deallocates buffers, and updates statistics.
     fn reap_completions(&mut self, expected_count: usize) -> Result<usize> {
-        let mut sent_count = 0;
+        println!("[Egress] Reaping {} completions", expected_count);
+        let mut completions_processed = 0;
 
-        // Wait for at least one completion
-        self.ring.submit_and_wait(1)?;
+        // First, try to reap completions without blocking
+        let processed = self.process_cqe_batch()?;
+        println!("[Egress] Processed {} completions without blocking", processed);
+        completions_processed += processed;
 
-        // Process all available completions
+        // If we haven't processed all expected completions, wait for more
+        while completions_processed < expected_count {
+            println!("[Egress] Waiting for {} more completions", expected_count - completions_processed);
+            // The submit_and_wait call will block until at least one completion is ready.
+            // This is the correct way to wait for io_uring events.
+            self.ring.submit_and_wait(1)?;
+            let processed = self.process_cqe_batch()?;
+            println!("[Egress] Processed {} completions after blocking", processed);
+            completions_processed += processed;
+        }
+
+        println!("[Egress] Finished reaping {} completions", completions_processed);
+        Ok(completions_processed)
+    }
+
+    /// Helper to process a batch of completions from the CQ
+    fn process_cqe_batch(&mut self) -> Result<usize> {
+        let mut processed_count = 0;
         let cq = self.ring.completion();
+        println!("[Egress] CQ length: {}", cq.len());
+
         for cqe in cq {
+            processed_count += 1;
             let user_data = cqe.user_data();
             let result = cqe.result();
+            println!("[Egress] CQE: user_data={}, result={}", user_data, result);
 
             // Remove buffer from in-flight tracking
             let buffer = self
@@ -288,7 +311,6 @@ impl EgressLoop {
                 eprintln!("Error sending packet: {} (user_data={})", result, user_data);
             } else {
                 // Success
-                sent_count += 1;
                 if self.config.track_stats {
                     self.stats.packets_sent += 1;
                     self.stats.bytes_sent += result as u64;
@@ -296,48 +318,14 @@ impl EgressLoop {
             }
 
             // Deallocate buffer back to pool
-            // SAFETY: buffer_pool is Arc, so we can safely get a mutable reference
-            // through interior mutability (BufferPool uses RefCell internally)
-            let pool_ptr = Arc::as_ptr(&self.buffer_pool) as *mut BufferPool;
-            unsafe {
-                (*pool_ptr).deallocate(buffer);
-            }
+            // Use mutex to safely access the shared buffer pool
+            self.buffer_pool
+                .lock()
+                .expect("BufferPool mutex poisoned")
+                .deallocate(buffer);
         }
 
-        // If we didn't process all expected completions, keep waiting
-        while sent_count < expected_count {
-            self.ring.submit_and_wait(1)?;
-            let cq = self.ring.completion();
-            for cqe in cq {
-                let user_data = cqe.user_data();
-                let result = cqe.result();
-
-                let buffer = self
-                    .in_flight
-                    .remove(&user_data)
-                    .ok_or_else(|| anyhow::anyhow!("Unknown user_data: {}", user_data))?;
-
-                if result < 0 {
-                    if self.config.track_stats {
-                        self.stats.send_errors += 1;
-                    }
-                    eprintln!("Error sending packet: {}", result);
-                } else {
-                    sent_count += 1;
-                    if self.config.track_stats {
-                        self.stats.packets_sent += 1;
-                        self.stats.bytes_sent += result as u64;
-                    }
-                }
-
-                let pool_ptr = Arc::as_ptr(&self.buffer_pool) as *mut BufferPool;
-                unsafe {
-                    (*pool_ptr).deallocate(buffer);
-                }
-            }
-        }
-
-        Ok(sent_count)
+        Ok(processed_count)
     }
 
     /// Get current statistics
@@ -488,7 +476,7 @@ mod tests_unit {
             track_stats: true,
             ..Default::default()
         };
-        let buffer_pool = Arc::new(BufferPool::new(true));
+        let buffer_pool = Arc::new(std::sync::Mutex::new(BufferPool::new(true)));
         EgressLoop::new(config, buffer_pool).unwrap()
     }
 

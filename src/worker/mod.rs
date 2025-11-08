@@ -69,6 +69,20 @@ fn drop_privileges(uid: Uid, gid: Gid, caps_to_keep: Option<&HashSet<Capability>
         return Ok(());
     }
 
+    info!("Dropping privileges to uid={}, gid={}", uid, gid);
+
+    // Get the username for initgroups
+    let user = nix::unistd::User::from_uid(uid)?
+        .ok_or_else(|| anyhow::anyhow!("User not found for uid {}", uid))?;
+
+    // Initialize supplementary groups for the target user (requires CAP_SETGID)
+    nix::unistd::initgroups(&std::ffi::CString::new(user.name.as_str())?, gid)
+        .context("Failed to initialize supplementary groups")?;
+
+    // Set the GID (requires CAP_SETGID)
+    nix::unistd::setgid(gid).context("Failed to set GID")?;
+
+    // Set capabilities after group changes but before changing UID
     if let Some(caps) = caps_to_keep {
         caps::set(None, CapSet::Effective, caps)?;
         caps::set(None, CapSet::Permitted, caps)?;
@@ -76,18 +90,8 @@ fn drop_privileges(uid: Uid, gid: Gid, caps_to_keep: Option<&HashSet<Capability>
         info!("Successfully set capabilities.");
     }
 
-    info!("Dropping privileges to uid={}, gid={}", uid, gid);
-
-    // Get the username for initgroups
-    let user = nix::unistd::User::from_uid(uid)?
-        .ok_or_else(|| anyhow::anyhow!("User not found for uid {}", uid))?;
-
-    // Initialize supplementary groups for the target user
-    nix::unistd::initgroups(&std::ffi::CString::new(user.name.as_str())?, gid)
-        .context("Failed to initialize supplementary groups")?;
-
+    // Set the UID last (irreversible)
     nix::unistd::setuid(uid).context("Failed to set UID")?;
-    nix::unistd::setgid(gid).context("Failed to set GID")?;
     info!("Successfully dropped privileges.");
     Ok(())
 }
@@ -122,26 +126,18 @@ impl<T: AsyncWrite + Unpin> UnixSocketRelayCommandSender<T> {
 // --- Worker Entrypoints ---
 
 /// Generic control plane runner for testing purposes.
-pub async fn run_control_plane_generic<
-    S: AsyncRead + AsyncWrite + Unpin,
-    R: AsyncRead + AsyncWrite + Unpin,
->(
-    stream: S,
+pub async fn run_control_plane_generic<S: AsyncRead + AsyncWrite + Unpin>(
+    supervisor_stream: S,
     request_stream: UnixStream,
-    relay_stream: R,
 ) -> Result<()> {
-    let control_plane = ControlPlane::new(stream, request_stream, relay_stream);
+    let control_plane = ControlPlane::new(supervisor_stream, request_stream);
     control_plane.run().await
 }
 
 pub async fn run_control_plane(config: ControlPlaneConfig) -> Result<()> {
-
     info!(
-
         "Worker process started. Attempting to drop privileges to UID '{}' and GID '{}'.",
-
         config.uid, config.gid
-
     );
 
     drop_privileges(Uid::from_raw(config.uid), Gid::from_raw(config.gid), None)?;
@@ -155,10 +151,6 @@ pub async fn run_control_plane(config: ControlPlaneConfig) -> Result<()> {
 
     let request_fd = recv_fd(&supervisor_sock).await?;
 
-    let stream = supervisor_sock;
-
-    let relay_stream = tokio::net::UnixStream::connect(&config.relay_command_socket_path).await?;
-
     // Set request_fd to non-blocking before wrapping in tokio UnixStream
     let request_stream = unsafe {
         let std_sock = std::os::unix::net::UnixStream::from_raw_fd(request_fd);
@@ -166,10 +158,9 @@ pub async fn run_control_plane(config: ControlPlaneConfig) -> Result<()> {
         UnixStream::from_std(std_sock)?
     };
 
-
-
-    run_control_plane_generic(stream, request_stream, relay_stream).await
-
+    // Control plane no longer needs a separate relay stream connection
+    // All communication happens via supervisor_sock (FD 3)
+    run_control_plane_generic(supervisor_sock, request_stream).await
 }
 
 // --- Worker Lifecycle Abstraction for Testing ---
@@ -186,6 +177,7 @@ pub trait WorkerLifecycle: Send + 'static {
         &self,
         config: DataPlaneConfig,
         command_rx: std::sync::mpsc::Receiver<RelayCommand>,
+        event_fd: nix::sys::eventfd::EventFd,
     ) -> Result<()>;
 }
 
@@ -209,8 +201,9 @@ impl WorkerLifecycle for DefaultWorkerLifecycle {
         &self,
         config: DataPlaneConfig,
         command_rx: std::sync::mpsc::Receiver<RelayCommand>,
+        event_fd: nix::sys::eventfd::EventFd,
     ) -> Result<()> {
-        data_plane_task(config, command_rx)
+        data_plane_task(config, command_rx, event_fd)
     }
 }
 
@@ -218,8 +211,11 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
     config: DataPlaneConfig,
     lifecycle: T,
 ) -> Result<()> {
+    use nix::sys::eventfd::{EfdFlags, EventFd};
+
     let mut caps_to_keep = HashSet::new();
     caps_to_keep.insert(Capability::CAP_NET_RAW);
+    caps_to_keep.insert(Capability::CAP_SETUID);
 
     info!(
         "Worker process started. Attempting to drop privileges to UID '{}' and GID '{}'.",
@@ -246,6 +242,11 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
     let _request_fd = recv_fd(&supervisor_sock).await?;
     let command_fd = recv_fd(&supervisor_sock).await?;
 
+    // Create eventfd for command notifications to ingress
+    let event_fd = EventFd::from_value_and_flags(0, EfdFlags::EFD_NONBLOCK)
+        .context("Failed to create eventfd")?;
+    let event_fd_for_writer = event_fd.as_raw_fd();
+
     // Bridge from the async command stream (tokio) to the sync data plane task (std::thread)
     let (std_tx, std_rx) = std::sync::mpsc::channel::<RelayCommand>();
     let command_stream = unsafe { std::os::unix::net::UnixStream::from_raw_fd(command_fd) };
@@ -266,6 +267,19 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
                         error!("Data plane command channel disconnected. Worker thread likely panicked.");
                         break;
                     }
+                    // Signal the eventfd to wake up ingress io_uring loop
+                    // Use spawn_blocking to avoid blocking the async runtime
+                    let event_fd = event_fd_for_writer;
+                    tokio::task::spawn_blocking(move || {
+                        let value: u64 = 1;
+                        unsafe {
+                            libc::write(
+                                event_fd,
+                                &value as *const u64 as *const libc::c_void,
+                                8
+                            );
+                        }
+                    });
                 }
                 Err(e) => {
                     error!("Failed to deserialize RelayCommand: {}", e);
@@ -276,7 +290,7 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
 
     // The data plane task is synchronous and blocking.
     // We run it on a blocking thread to avoid starving the tokio scheduler.
-    tokio::task::spawn_blocking(move || lifecycle.run_data_plane_task(config, std_rx))
+    tokio::task::spawn_blocking(move || lifecycle.run_data_plane_task(config, std_rx, event_fd))
         .await?
         .context("Data plane task failed")
 }
@@ -345,10 +359,9 @@ mod tests {
             prometheus_addr: None,
             reporting_interval: 1000,
         };
-        let (task_stream, _) = UnixStream::pair().unwrap();
-        let (relay_task_stream, _) = UnixStream::pair().unwrap();
+        let (supervisor_stream, _) = UnixStream::pair().unwrap();
         let (req_stream, _) = UnixStream::pair().unwrap();
-        let run_future = run_control_plane_generic(task_stream, req_stream, relay_task_stream);
+        let run_future = run_control_plane_generic(supervisor_stream, req_stream);
         // The important part is that this doesn't panic.
         let _ = tokio::time::timeout(Duration::from_millis(100), run_future).await;
     }
@@ -381,6 +394,7 @@ mod tests {
                 &self,
                 _config: DataPlaneConfig,
                 _command_rx: std::sync::mpsc::Receiver<RelayCommand>,
+                _event_fd: nix::sys::eventfd::EventFd,
             ) -> Result<()> {
                 // In a real test, we might block here indefinitely,
                 // but for the timeout test, returning Ok is sufficient.

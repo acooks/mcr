@@ -3,7 +3,7 @@ use futures::stream::FuturesUnordered;
 use futures::Future;
 use log::error;
 use nix::sys::socket::{sendmsg, socketpair, AddressFamily, ControlMessage, MsgFlags, SockFlag, SockType};
-use nix::unistd::{Group, User};
+use nix::unistd::{Group, User, Gid, Uid};
 use std::collections::HashMap;
 use std::os::unix::io::{FromRawFd, IntoRawFd, RawFd, AsRawFd};
 use std::path::PathBuf;
@@ -163,6 +163,21 @@ pub async fn run(
 
     let cp_socket_path = relay_command_socket_path.clone();
     let dp_socket_path = relay_command_socket_path.clone();
+
+    // Create the relay command socket
+    if relay_command_socket_path.exists() {
+        std::fs::remove_file(&relay_command_socket_path)?;
+    }
+    let _relay_command_listener = {
+        let std_listener = std::os::unix::net::UnixListener::bind(&relay_command_socket_path)?;
+        std_listener.set_nonblocking(true)?;
+        tokio::net::UnixListener::from_std(std_listener)?
+    };
+    nix::unistd::chown(
+        &relay_command_socket_path,
+        Some(Uid::from_raw(uid)),
+        Some(Gid::from_raw(gid)),
+    )?;
 
     run_generic(
         move || {

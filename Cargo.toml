@@ -11,7 +11,7 @@ libc = "0.2.155"
 metrics = "0.23.0"
 metrics-exporter-prometheus = "0.14.0"
 log = "0.4"
-nix = { version = "0.30.1", features = ["sched", "process", "socket", "user", "fs", "signal"] }
+nix = { version = "0.30.1", features = ["sched", "process", "socket", "user", "fs", "signal", "event", "uio"] }
 num_cpus = "1.16.0"
 pnet = "0.34.0"
 

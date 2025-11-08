@@ -1,130 +1,126 @@
 #!/bin/bash
 
-# End-to-End Test for Data Plane Forwarding Correctness
+# End-to-End Data Plane Test
 #
-# This test verifies that the multicast_relay can successfully receive, forward,
-# and retransmit a multicast stream according to a dynamically configured rule.
-#
-# It uses network namespaces to create an isolated environment, ensuring the
-# test does not interfere with the host system's network configuration and can
-# be run without requiring root privileges for the main logic.
+# This script verifies the complete data flow of the multicast relay:
+# 1. Starts the relay supervisor.
+# 2. Starts a UDP listener to capture relayed traffic.
+# 3. Adds a forwarding rule via the control client.
+# 4. Sends a burst of test packets using the traffic generator.
+# 5. Verifies that the listener received the correct number of packets.
+# 6. Removes the forwarding rule.
+# 7. Sends another burst of packets.
+# 8. Verifies that no more packets are received.
 
 set -e
+set -u
 set -o pipefail
 
 # --- Configuration ---
-NS_NAME="mcr_e2e_test"
-VETH_HOST="veth-host"
-VETH_NS="veth-ns"
-IP_HOST="192.168.200.1/24"
-IP_NS="192.168.200.2/24"
+RELAY_BINARY="target/debug/multicast_relay"
+CONTROL_CLIENT_BINARY="target/debug/control_client"
+TRAFFIC_GENERATOR_BINARY="target/debug/traffic_generator"
 
-INPUT_GROUP="224.10.10.1"
+SUPERVISOR_SOCKET="/tmp/mcr_supervisor.sock"
+INPUT_INTERFACE="lo"
+INPUT_GROUP="239.1.1.1"
 INPUT_PORT="5001"
-OUTPUT_GROUP="225.10.10.1"
+OUTPUT_INTERFACE="lo"
+OUTPUT_GROUP="239.10.10.10"
 OUTPUT_PORT="6001"
-PACKET_COUNT=10
-PACKET_PAYLOAD="E2E-TEST-PACKET"
+PACKET_COUNT=100
+PAYLOAD="E2E_TEST_PACKET"
 
-RELAY_COMMAND_SOCKET="/tmp/mcr_relay_e2e.sock"
-OUTPUT_FILE="/tmp/mcr_e2e_output.txt"
-
-# --- Helper Functions ---
+# --- Cleanup ---
 cleanup() {
     echo "--- Cleaning up ---"
-    # Kill all background processes that were started by this script
-    # The '|| true' prevents the script from exiting if a process is already gone
-    pkill -P $$ || true
-    wait || true
-
-    # Remove the network namespace
-    sudo ip netns del "$NS_NAME" 2>/dev/null || true
-
-    # Clean up temporary files
-    rm -f "$RELAY_COMMAND_SOCKET" "$OUTPUT_FILE"
+    killall -q multicast_relay || true
+    killall -q nc || true
+    rm -f "$SUPERVISOR_SOCKET"
+    echo "Cleanup complete."
 }
-
-# --- Main Test Logic ---
-
-# Ensure cleanup runs on script exit
 trap cleanup EXIT
 
-echo "--- Setting up isolated network namespace ---"
-sudo ip netns add "$NS_NAME"
-sudo ip link add "$VETH_HOST" type veth peer name "$VETH_NS"
-sudo ip link set "$VETH_NS" netns "$NS_NAME"
-
-sudo ip addr add "$IP_HOST" dev "$VETH_HOST"
-sudo ip link set "$VETH_HOST" up
-
-sudo ip netns exec "$NS_NAME" ip addr add "$IP_NS" dev "$VETH_NS"
-sudo ip netns exec "$NS_NAME" ip link set "$VETH_NS" up
-sudo ip netns exec "$NS_NAME" ip link set lo up
-
-# Add routes for multicast traffic
-sudo ip route add 224.0.0.0/4 dev "$VETH_HOST"
-sudo ip netns exec "$NS_NAME" ip route add 224.0.0.0/4 dev "$VETH_NS"
-
-echo "Network namespace '$NS_NAME' created."
-
-echo "--- Building project ---"
+# --- Build ---
+echo "--- Building binaries ---"
 cargo build
 
-echo "--- Starting UDP listener (socat) in background ---"
-# Run socat inside the namespace to listen for the relayed packets
-# It will write the received payload to the output file
-sudo ip netns exec "$NS_NAME" \
-    socat -u UDP4-RECV:$OUTPUT_PORT,ip-add-membership=$OUTPUT_GROUP:$VETH_NS \
-    "OPEN:$OUTPUT_FILE,creat,append" &
+# --- Test ---
+echo "--- Starting Supervisor ---"
+sudo -E "$RELAY_BINARY" supervisor --control-socket-path "$SUPERVISOR_SOCKET" &
+SUPERVISOR_PID=$!
+
+echo "--- Waiting for supervisor socket to be created ---"
+WAIT_START_TIME=$(date +%s)
+while ! [ -S "$SUPERVISOR_SOCKET" ]; do
+    if [ "$(($(date +%s) - WAIT_START_TIME))" -gt 10 ]; then
+        echo "❌ FAILURE: Timed out waiting for supervisor socket."
+        exit 1
+    fi
+    sleep 0.1
+done
+sudo chown "$USER":"$USER" "$SUPERVISOR_SOCKET"
+echo "Supervisor socket found."
+sleep 2 # Give the supervisor time to start
+
+echo "--- Starting UDP Listener ---"
+LISTENER_OUTPUT_FILE=$(mktemp)
+nc -ul -w 5 "$OUTPUT_GROUP" "$OUTPUT_PORT" > "$LISTENER_OUTPUT_FILE" &
 LISTENER_PID=$!
-echo "Listener started with PID $LISTENER_PID."
-sleep 1 # Give socat time to start up
+sleep 1 # Give the listener time to bind
 
-echo "--- Starting multicast_relay in background ---"
-# Run the relay inside the namespace
-# Note: The relay needs to be run with sudo to have CAP_NET_RAW for AF_PACKET
-    sudo ip netns exec "$NS_NAME" \
-        ./target/debug/multicast_relay supervisor \
-        --relay-command-socket-path "$RELAY_COMMAND_SOCKET" \
-        --user root \
-        --group root &
-RELAY_PID=$!
-echo "Relay started with PID $RELAY_PID."
-sleep 5 # Give the relay time to initialize and for ports to clear
-
-echo "--- Adding forwarding rule ---"# The control client runs in the host namespace but communicates via the shared socket
-./target/debug/control_client --socket-path "$RELAY_COMMAND_SOCKET" add \
-    --rule-id "e2e-data-test" \
-    --input-interface "$VETH_NS" \
+echo "--- Adding Forwarding Rule ---"
+"$CONTROL_CLIENT_BINARY" --socket-path "$SUPERVISOR_SOCKET" add \
+    --input-interface "$INPUT_INTERFACE" \
     --input-group "$INPUT_GROUP" \
     --input-port "$INPUT_PORT" \
-    --outputs "$OUTPUT_GROUP:$OUTPUT_PORT:$VETH_NS"
+    --outputs "$OUTPUT_GROUP:$OUTPUT_PORT:$OUTPUT_INTERFACE"
 
-echo "Rule added."
-
-echo "--- Sending $PACKET_COUNT test packets ---"
-# The traffic generator also runs inside the namespace to send on the correct interface
-sudo ip netns exec "$NS_NAME" \
-    ./target/debug/traffic_generator \
+echo "--- Sending initial burst of packets (should be relayed) ---"
+"$TRAFFIC_GENERATOR_BINARY" \
+    --interface "127.0.0.1" \
     --group "$INPUT_GROUP" \
     --port "$INPUT_PORT" \
-    --interface "$VETH_NS" \
     --count "$PACKET_COUNT" \
-    --payload "$PACKET_PAYLOAD"
+    --payload "$PAYLOAD"
 
-echo "Packets sent. Waiting for relay..."
-sleep 2 # Allow time for packets to be relayed
+sleep 2 # Allow time for packets to be processed and received
 
-echo "--- Verifying results ---"
-RECEIVED_COUNT=$(grep -c "$PACKET_PAYLOAD" "$OUTPUT_FILE" || true)
-
+echo "--- Verifying initial burst ---"
+RECEIVED_COUNT=$(grep -c "$PAYLOAD" "$LISTENER_OUTPUT_FILE")
 if [ "$RECEIVED_COUNT" -eq "$PACKET_COUNT" ]; then
-    echo "✅ SUCCESS: Received exactly $PACKET_COUNT packets."
-    exit 0
+    echo "✅ SUCCESS: Received all $PACKET_COUNT packets."
 else
     echo "❌ FAILURE: Expected $PACKET_COUNT packets, but received $RECEIVED_COUNT."
-    echo "--- Listener Output ---"
-    cat "$OUTPUT_FILE"
-    echo "-----------------------"
     exit 1
 fi
+
+echo "--- Removing Forwarding Rule ---"
+# First, get the rule ID
+RULE_ID=$("$CONTROL_CLIENT_BINARY" --socket-path "$SUPERVISOR_SOCKET" list-rules | grep -o -E '[0-9a-f-]{36}')
+"$CONTROL_CLIENT_BINARY" --socket-path "$SUPERVISOR_SOCKET" remove --rule-id "$RULE_ID"
+
+# Clear the listener output file for the next check
+> "$LISTENER_OUTPUT_FILE"
+
+echo "--- Sending second burst of packets (should NOT be relayed) ---"
+"$TRAFFIC_GENERATOR_BINARY" \
+    --interface "127.0.0.1" \
+    --group "$INPUT_GROUP" \
+    --port "$INPUT_PORT" \
+    --count "$PACKET_COUNT" \
+    --payload "$PAYLOAD"
+
+sleep 2
+
+echo "--- Verifying second burst ---"
+RECEIVED_COUNT_AFTER_REMOVE=$(grep -c "$PAYLOAD" "$LISTENER_OUTPUT_FILE")
+if [ "$RECEIVED_COUNT_AFTER_REMOVE" -eq 0 ]; then
+    echo "✅ SUCCESS: Received 0 packets after rule removal."
+else
+    echo "❌ FAILURE: Expected 0 packets after rule removal, but received $RECEIVED_COUNT_AFTER_REMOVE."
+    exit 1
+fi
+
+echo "--- End-to-End Test Passed ---"
+exit 0
