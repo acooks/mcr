@@ -8,3 +8,4 @@ experiments/**/Cargo.lock
 # Coverage reports
 tarpaulin-report.html
 target/tarpaulin/
+.gemini
