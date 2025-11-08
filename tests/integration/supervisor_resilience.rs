@@ -376,26 +376,59 @@ async fn test_supervisor_applies_exponential_backoff() -> Result<()> {
 ///   3. Verify supervisor restarts all of them
 ///   4. Verify system returns to operational state
 /// - **Tier:** 2 (Integration)
-///
-/// **TODO: IMPLEMENT THIS - MEDIUM PRIORITY**
 #[tokio::test]
-#[ignore] // Remove when implemented
 async fn test_supervisor_handles_multiple_failures() -> Result<()> {
-    // Proposed Implementation:
-    // 1.  **Start Supervisor:** Use the `start_supervisor` helper.
-    // 2.  **Get Worker PIDs:** Use the `control_client` to call `list-workers` and
-    //     collect the PIDs of all `DataPlane` workers into a Vec. Assert that
-    //     more than one data plane worker exists (the default should be the number
-    //     of CPU cores).
-    // 3.  **Kill All Workers:** Iterate through the collected PIDs and kill each
-    //     worker using the `kill_worker` helper.
-    // 4.  **Verify Restarts:** Poll the `list-workers` command in a loop for a
-    //     few seconds until the number of `DataPlane` workers matches the
-    //     original count.
-    // 5.  **Check PIDs:** Verify that all the new worker PIDs are different from the
-    //     original PIDs, confirming that they were all restarted.
+    // 1. Start supervisor
+    let (mut supervisor, socket_path) = start_supervisor().await?;
+    let client = control_client::ControlClient::new(&socket_path);
 
-    todo!("Implement multiple failure test")
+    // 2. Get original worker PIDs
+    let original_workers = client.list_workers().await?;
+    let original_dp_workers: Vec<_> = original_workers
+        .into_iter()
+        .filter(|w| w.worker_type == "DataPlane")
+        .collect();
+    let original_dp_pids: std::collections::HashSet<u32> =
+        original_dp_workers.iter().map(|w| w.pid).collect();
+
+    assert!(
+        original_dp_pids.len() > 1,
+        "Expected more than one data plane worker for this test"
+    );
+    println!("[TEST] Original data plane PIDs: {:?}", original_dp_pids);
+
+    // 3. Kill all data plane workers
+    for pid in &original_dp_pids {
+        kill_worker(*pid).await?;
+    }
+    println!("[TEST] All data plane workers killed");
+
+    // 4. Wait for them all to be restarted
+    for _ in 0..50 { // 5 second timeout
+        if let Ok(current_workers) = client.list_workers().await {
+            let current_dp_workers: Vec<_> = current_workers
+                .into_iter()
+                .filter(|w| w.worker_type == "DataPlane")
+                .collect();
+            let current_dp_pids: std::collections::HashSet<u32> =
+                current_dp_workers.iter().map(|w| w.pid).collect();
+
+            // Check if all original PIDs have been replaced and all new workers are running
+            if current_dp_pids.len() == original_dp_pids.len()
+                && current_dp_pids.is_disjoint(&original_dp_pids)
+                && current_dp_workers.iter().all(|w| is_process_running(w.pid))
+            {
+                println!("[TEST] All workers restarted with new PIDs: {:?}", current_dp_pids);
+                // Success
+                supervisor.kill().await?;
+                cleanup_socket(&socket_path);
+                return Ok(());
+            }
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+
+    anyhow::bail!("Supervisor did not restart all workers within the timeout")
 }
 
 /// **Tier 2 Integration Test - Namespace Isolation**
