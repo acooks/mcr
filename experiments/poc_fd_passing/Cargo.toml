@@ -1,0 +1,12 @@
+[package]
+name = "poc_fd_passing"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libc = "0.2"
+nix = { version = "0.29", features = ["socket", "process", "uio"] }
+
+[[bin]]
+name = "fd_passing_demo"
+path = "src/main.rs"
