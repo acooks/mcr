@@ -119,7 +119,44 @@ pub async fn run_control_plane(config: ControlPlaneConfig) -> Result<()> {
     }
 }
 
-pub async fn run_data_plane(config: DataPlaneConfig) -> Result<()> {
+// --- Worker Lifecycle Abstraction for Testing ---
+
+pub trait WorkerLifecycle: Send + 'static {
+    fn drop_privileges(
+        &self,
+        uid: Uid,
+        gid: Gid,
+        caps_to_keep: Option<&HashSet<Capability>>,
+    ) -> Result<()>;
+    fn set_cpu_affinity(&self, core_id: usize) -> Result<()>;
+    fn run_data_plane_task(&self, config: DataPlaneConfig) -> Result<()>;
+}
+
+pub struct DefaultWorkerLifecycle;
+
+impl WorkerLifecycle for DefaultWorkerLifecycle {
+    fn drop_privileges(
+        &self,
+        uid: Uid,
+        gid: Gid,
+        caps_to_keep: Option<&HashSet<Capability>>,
+    ) -> Result<()> {
+        drop_privileges(uid, gid, caps_to_keep)
+    }
+
+    fn set_cpu_affinity(&self, core_id: usize) -> Result<()> {
+        set_cpu_affinity(core_id)
+    }
+
+    fn run_data_plane_task(&self, config: DataPlaneConfig) -> Result<()> {
+        data_plane_task(config)
+    }
+}
+
+pub async fn run_data_plane<T: WorkerLifecycle>(
+    config: DataPlaneConfig,
+    lifecycle: T,
+) -> Result<()> {
     let mut caps_to_keep = HashSet::new();
     caps_to_keep.insert(Capability::CAP_NET_RAW);
 
@@ -127,7 +164,7 @@ pub async fn run_data_plane(config: DataPlaneConfig) -> Result<()> {
         "Worker process started. Attempting to drop privileges to UID '{}' and GID '{}'.",
         config.uid, config.gid
     );
-    drop_privileges(
+    lifecycle.drop_privileges(
         Uid::from_raw(config.uid),
         Gid::from_raw(config.gid),
         Some(&caps_to_keep),
@@ -135,13 +172,13 @@ pub async fn run_data_plane(config: DataPlaneConfig) -> Result<()> {
     info!("Successfully dropped privileges and retained CAP_NET_RAW.");
 
     if let Some(core_id) = config.core_id {
-        set_cpu_affinity(core_id as usize)?;
+        lifecycle.set_cpu_affinity(core_id as usize)?;
         info!("Successfully set CPU affinity to core {}.", core_id);
     }
 
     // The data plane task is synchronous and blocking.
     // We run it on a blocking thread to avoid starving the tokio scheduler.
-    tokio::task::spawn_blocking(move || data_plane_task(config))
+    tokio::task::spawn_blocking(move || lifecycle.run_data_plane_task(config))
         .await?
         .context("Data plane task failed")?;
 
@@ -240,28 +277,26 @@ mod tests {
     ///   infinite loop and has not crashed during its complex initialization phase.
     /// - **Tier:** 1 (Logic)
     #[tokio::test]
-    #[ignore]
     async fn test_run_data_plane_starts_successfully() -> anyhow::Result<()> {
-        // Proposed Implementation:
-        // 1.  **Isolate `drop_privileges` and `set_cpu_affinity`:** These functions are the
-        //     primary reason this test requires root. They should be refactored into a
-        //     trait (e.g., `WorkerLifecycle`) that can be mocked.
-        // 2.  **Mock Dependencies:** The `run_data_plane` function should be made generic
-        //     over this new trait. In the test, a mock implementation of the trait would
-        //     be provided that simply logs the calls to `drop_privileges` and
-        //     `set_cpu_affinity` without actually executing them.
-        // 3.  **Isolate `data_plane_task`:** The core data plane logic, which requires
-        //     `CAP_NET_RAW`, should also be abstracted behind a trait so it can be
-        //     replaced with a mock that does nothing.
-        // 4.  **Assert Timeout:** With the privileged operations mocked out, the test can
-        //     run as a normal user. The existing timeout assertion remains valid to
-        //     ensure the main loop is entered. This change makes the test runnable in a
-        //     standard, non-privileged CI environment.
-
-        // This test requires root or CAP_NET_RAW to run the privilege drop and socket setup logic.
-        if unsafe { libc::getuid() } != 0 {
-            println!("[TEST] Skipping test_run_data_plane_starts_successfully: requires root");
-            return Ok(());
+        struct MockWorkerLifecycle;
+        impl WorkerLifecycle for MockWorkerLifecycle {
+            fn drop_privileges(
+                &self,
+                _uid: Uid,
+                _gid: Gid,
+                _caps_to_keep: Option<&HashSet<Capability>>,
+            ) -> Result<()> {
+                Ok(())
+            }
+            fn set_cpu_affinity(&self, _core_id: usize) -> Result<()> {
+                Ok(())
+            }
+            fn run_data_plane_task(&self, _config: DataPlaneConfig) -> Result<()> {
+                // In a real test, we might block here indefinitely,
+                // but for the timeout test, returning Ok is sufficient.
+                std::thread::sleep(std::time::Duration::from_secs(10));
+                Ok(())
+            }
         }
 
         // Use current process uid/gid to avoid permission errors when not running as root
@@ -282,7 +317,7 @@ mod tests {
             reporting_interval: 1,
         };
 
-        let run_future = run_data_plane(config);
+        let run_future = run_data_plane(config, MockWorkerLifecycle);
 
         let result = tokio::time::timeout(std::time::Duration::from_millis(100), run_future).await;
 

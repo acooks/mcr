@@ -73,7 +73,9 @@ fn main() -> Result<()> {
                 // D1, D7: The worker process uses a `tokio-uring` runtime
                 // to drive the high-performance data plane.
                 tokio_uring::start(async {
-                    if let Err(e) = worker::run_data_plane(config).await {
+                    if let Err(e) =
+                        worker::run_data_plane(config, worker::DefaultWorkerLifecycle).await
+                    {
                         eprintln!("Data Plane worker process failed: {}", e);
                         std::process::exit(1);
                     }
