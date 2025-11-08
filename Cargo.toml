@@ -27,10 +27,10 @@ caps = "0.5.6"
 futures = "0.3.31"
 
 [dev-dependencies]
-criterion = "0.5.1"
-proptest = "1.0"
-proptest-derive = "0.4"
-tempfile = "3.10.1"
+proptest = "1.9.0"
+rusty-fork = "0.3.1"
+tempfile = "3.23.0"
+wait-timeout = "0.2.1"
 
 [features]
 integration_test = []

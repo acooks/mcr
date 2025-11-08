@@ -15,7 +15,7 @@ fmt:
 # Linter check
 clippy:
     @echo "--- Running Linter (cargo clippy) ---"
-    cargo clippy --all-targets --features integration_test -- -D warnings
+    cargo clippy --all-targets --features integration_test,testing -- -D warnings
 
 # Build the project
 build:
