@@ -299,6 +299,10 @@ async fn test_supervisor_resyncs_rules_on_restart() -> Result<()> {
     Ok(())
 }
 
+use multicast_relay::supervisor::run_generic;
+use std::sync::{Arc, Mutex};
+use tokio::time::{Instant, sleep};
+
 /// **Tier 2 Integration Test**
 ///
 /// - **Purpose:** Verify exponential backoff on repeated worker failures
@@ -309,32 +313,58 @@ async fn test_supervisor_resyncs_rules_on_restart() -> Result<()> {
 ///   4. Verify maximum backoff is respected
 /// - **Tier:** 2 (Integration)
 ///
-/// **TODO: IMPLEMENT THIS - HIGH PRIORITY**
-///
 /// This validates the backoff logic prevents restart storms.
 #[tokio::test]
-#[ignore] // Remove when implemented
 async fn test_supervisor_applies_exponential_backoff() -> Result<()> {
-    // Proposed Implementation:
-    // 1.  **Use `run_generic`:** Create a supervisor instance using the `run_generic`
-    //     function from `src/supervisor.rs`. This allows us to inject mock
-    //     worker-spawning logic.
-    // 2.  **Mock Spawner:** Create a mock `spawn_cp` closure that:
-    //     a.  Records the `Instant::now()` of each spawn attempt into a shared `Arc<Mutex<Vec<Instant>>>`.
-    //     b.  Spawns a process that is guaranteed to fail immediately (e.g., `sh -c 'exit 1'`).
-    // 3.  **Stable DP Workers:** Use a mock `spawn_dp` that spawns a long-lived, stable
-    //     process (e.g., `sleep 30`) to avoid interference.
-    // 4.  **Run Supervisor:** Run the supervisor for a limited duration (e.g., 2-3 seconds)
-    //     to allow for several restart attempts.
-    // 5.  **Assert Delays:** After the supervisor task is terminated, analyze the
-    //     recorded timestamps:
-    //     a.  Assert that at least 3-4 restarts occurred.
-    //     b.  Calculate the duration between each consecutive timestamp.
-    //     c.  Verify that each duration is approximately double the previous one, within a
-    //         reasonable margin of error, and respects the `INITIAL_BACKOFF_MS` and
-    //         `MAX_BACKOFF_MS` constants.
+    let timestamps = Arc::new(Mutex::new(Vec::new()));
+    let timestamps_clone = timestamps.clone();
 
-    todo!("Implement exponential backoff test")
+    // Mock spawner that records the time and spawns a failing process
+    let spawn_cp = move || {
+        let mut locked_timestamps = timestamps_clone.lock().unwrap();
+        locked_timestamps.push(Instant::now());
+        Command::new("sh").arg("-c").arg("exit 1").spawn()
+    };
+
+    // Mock spawner for a stable data plane worker
+    let spawn_dp = || Command::new("sleep").arg("5").spawn();
+
+    let supervisor_future = run_generic(
+        "backoff_test".to_string(),
+        Box::new(spawn_cp),
+        Box::new(spawn_dp),
+    );
+
+    // Run the supervisor for a short period to observe a few restarts
+    let _ = tokio::time::timeout(Duration::from_millis(1500), supervisor_future).await;
+
+    // Analyze the timestamps
+    let locked_timestamps = timestamps.lock().unwrap();
+    assert!(locked_timestamps.len() >= 4, "Expected at least 4 restart attempts");
+
+    let delays: Vec<Duration> = locked_timestamps
+        .windows(2)
+        .map(|w| w[1].duration_since(w[0]))
+        .collect();
+
+    println!("Observed delays: {:?}", delays);
+
+    // Check that delays are exponentially increasing (within a margin of error)
+    // Expected: ~100ms, ~200ms, ~400ms, ~800ms
+    let expected_delays_ms = [100, 200, 400, 800];
+    for i in 0..delays.len() {
+        if i >= expected_delays_ms.len() { break; }
+        let delay_ms = delays[i].as_millis() as u64;
+        let expected = expected_delays_ms[i];
+        let tolerance = expected / 2; // 50% tolerance
+        assert!(
+            delay_ms >= expected - tolerance && delay_ms <= expected + tolerance,
+            "Delay {} ({}ms) is not close to expected {}ms",
+            i, delay_ms, expected
+        );
+    }
+
+    Ok(())
 }
 
 /// **Tier 2 Integration Test**

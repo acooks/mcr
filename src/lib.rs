@@ -11,6 +11,9 @@ pub struct WorkerInfo {
     pub core_id: Option<u32>,
 }
 
+#[cfg(feature = "testing")]
+pub use supervisor::run_generic;
+
 pub mod supervisor;
 pub mod worker;
 

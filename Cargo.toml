@@ -34,6 +34,7 @@ tempfile = "3.10.1"
 
 [features]
 integration_test = []
+testing = []
 
 [[bin]]
 name = "poc_closure_ownership"
