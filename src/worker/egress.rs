@@ -475,3 +475,70 @@ mod tests {
     // integration tests with actual network interfaces and receivers.
     // These are tested in the integration test suite.
 }
+
+#[cfg(test)]
+mod tests_unit {
+    use super::*;
+    use crate::worker::buffer_pool::BufferPool;
+    use std::sync::Arc;
+
+    // Helper to create a test EgressLoop
+    fn setup_test_egress_loop() -> EgressLoop {
+        let config = EgressConfig {
+            track_stats: true,
+            ..Default::default()
+        };
+        let buffer_pool = Arc::new(BufferPool::new(true));
+        EgressLoop::new(config, buffer_pool).unwrap()
+    }
+
+    // Helper to create a dummy EgressPacket
+    fn create_dummy_packet(interface_name: &str, dest_addr: SocketAddr) -> EgressPacket {
+        let mut buffer_pool = BufferPool::new(false);
+        let buffer = buffer_pool.allocate(100).unwrap();
+        EgressPacket {
+            buffer,
+            dest_addr,
+            interface_name: interface_name.to_string(),
+        }
+    }
+
+    #[test]
+    fn test_queue_packet() {
+        let mut egress_loop = setup_test_egress_loop();
+        assert_eq!(egress_loop.queue_len(), 0);
+        assert!(egress_loop.is_queue_empty());
+
+        let dest_addr = "127.0.0.1:1234".parse().unwrap();
+        let packet = create_dummy_packet("lo", dest_addr);
+
+        egress_loop.queue_packet(packet);
+
+        assert_eq!(egress_loop.queue_len(), 1);
+        assert!(!egress_loop.is_queue_empty());
+    }
+
+    #[test]
+    fn test_add_destination() {
+        let mut egress_loop = setup_test_egress_loop();
+        let dest_addr = "127.0.0.1:5000".parse().unwrap();
+
+        // Add a new destination
+        let result = egress_loop.add_destination("lo", dest_addr);
+        assert!(result.is_ok(), "Should add new destination");
+        let source_ip = result.unwrap();
+        assert_eq!(source_ip, Ipv4Addr::new(127, 0, 0, 1));
+
+        // Verify the socket was added
+        assert_eq!(egress_loop.sockets.len(), 1);
+        assert!(egress_loop
+            .sockets
+            .contains_key(&("lo".to_string(), dest_addr)));
+
+        // Add the same destination again (should be a no-op)
+        let result = egress_loop.add_destination("lo", dest_addr);
+        assert!(result.is_ok(), "Should handle duplicate destination");
+        assert_eq!(result.unwrap(), source_ip); // Should return the same IP
+        assert_eq!(egress_loop.sockets.len(), 1); // Should not add a new socket
+    }
+}
