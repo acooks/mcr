@@ -77,11 +77,15 @@ pub async fn spawn_data_plane_worker(
     uid: u32,
     gid: u32,
     relay_command_socket_path: PathBuf,
-) -> Result<(Child, UnixStream)> {
+) -> Result<(Child, UnixStream, UnixStream)> {
     println!(
         "[Supervisor] Spawning Data Plane worker for core {}.",
         core_id
     );
+
+    // Create a socket pair for command communication
+    let (cmd_supervisor_stream, cmd_worker_stream) = UnixStream::pair()?;
+    let cmd_worker_fd = cmd_worker_stream.into_std()?.into_raw_fd();
 
     // Create a socket pair for request-response communication
     let (req_supervisor_fd, req_worker_fd) = socketpair(
@@ -107,10 +111,12 @@ pub async fn spawn_data_plane_worker(
         .arg("--relay-command-socket-path")
         .arg(relay_command_socket_path)
         .arg("--request-fd")
-        .arg(req_worker_fd.into_raw_fd().to_string());
+        .arg(req_worker_fd.into_raw_fd().to_string())
+        .arg("--command-fd")
+        .arg(cmd_worker_fd.to_string());
     command
         .spawn()
-        .map(|child| (child, req_supervisor_stream))
+        .map(|child| (child, cmd_supervisor_stream, req_supervisor_stream))
         .map_err(anyhow::Error::from)
 }
 
@@ -167,11 +173,13 @@ pub async fn run_generic<F, G, Fut>(
 where
     F: FnMut() -> Result<(Child, UnixStream, UnixStream)>,
     G: FnMut(u32) -> Fut,
-    Fut: Future<Output = Result<(Child, UnixStream)>> + Send + 'static,
+    Fut: Future<Output = Result<(Child, UnixStream, UnixStream)>> + Send + 'static,
 {
     let worker_map: Arc<Mutex<HashMap<u32, crate::WorkerInfo>>> =
         Arc::new(Mutex::new(HashMap::new()));
     let worker_req_streams: Arc<Mutex<HashMap<u32, Arc<tokio::sync::Mutex<UnixStream>>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    let dp_cmd_streams: Arc<Mutex<HashMap<u32, Arc<tokio::sync::Mutex<UnixStream>>>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
     println!(
@@ -215,7 +223,7 @@ where
     let mut dp_backoffs = HashMap::new();
 
     for core_id in 0..num_cores as u32 {
-        let (mut child, dp_req_stream) = spawn_dp(core_id).await?;
+        let (mut child, dp_cmd_stream, dp_req_stream) = spawn_dp(core_id).await?;
         let pid = child.id().unwrap();
         worker_map.lock().unwrap().insert(
             pid,
@@ -229,6 +237,10 @@ where
             .lock()
             .unwrap()
             .insert(pid, Arc::new(tokio::sync::Mutex::new(dp_req_stream)));
+        dp_cmd_streams
+            .lock()
+            .unwrap()
+            .insert(pid, Arc::new(tokio::sync::Mutex::new(dp_cmd_stream)));
         dp_backoffs.insert(core_id, INITIAL_BACKOFF_MS);
         dp_futs.push(Box::pin(async move {
             let res = child.wait().await;
@@ -279,6 +291,7 @@ where
             // Branch 2: A data plane worker exited
             Some((core_id, pid, result)) = dp_futs.next() => {
                 worker_map.lock().unwrap().remove(&pid);
+                dp_cmd_streams.lock().unwrap().remove(&pid);
                 if let Ok(status) = result {
                     let backoff = dp_backoffs.entry(core_id).or_insert(INITIAL_BACKOFF_MS);
                     if status.success() {
@@ -290,7 +303,7 @@ where
                         *backoff = (*backoff * 2).min(MAX_BACKOFF_MS);
                     }
                     // Restart the worker for the specific core
-                    let (mut new_child, new_req_stream) = spawn_dp(core_id).await?;
+                    let (mut new_child, new_cmd_stream, new_req_stream) = spawn_dp(core_id).await?;
                     let new_pid = new_child.id().unwrap();
                     worker_map.lock().unwrap().insert(
                         new_pid,
@@ -304,6 +317,10 @@ where
                         .lock()
                         .unwrap()
                         .insert(new_pid, Arc::new(tokio::sync::Mutex::new(new_req_stream)));
+                    dp_cmd_streams
+                        .lock()
+                        .unwrap()
+                        .insert(new_pid, Arc::new(tokio::sync::Mutex::new(new_cmd_stream)));
                     dp_futs.push(Box::pin(async move {
                         let res = new_child.wait().await;
                         (core_id, new_pid, res)
@@ -315,6 +332,8 @@ where
                         Ok((mut client_stream, _)) = listener.accept() => {
                             let worker_map_clone = worker_map.clone();
                             let worker_req_streams_clone = worker_req_streams.clone();
+                            let dp_cmd_streams_clone = dp_cmd_streams.clone();
+                            let master_rules_clone = _master_rules.clone();
                             let mut current_cp_stream = std::mem::replace(&mut cp_stream, UnixStream::pair()?.0);
 
                             tokio::spawn(async move {
@@ -329,6 +348,53 @@ where
                                         Ok(SupervisorCommand::ListWorkers) => {
                                             let workers = worker_map_clone.lock().unwrap().values().cloned().collect();
                                             let response = Response::Workers(workers);
+                                            let response_bytes = serde_json::to_vec(&response).unwrap();
+                                            client_stream.write_all(&response_bytes).await.unwrap();
+                                        }
+                                        Ok(SupervisorCommand::AddRule { rule_id, input_interface, input_group, input_port, outputs, dtls_enabled }) => {
+                                            let rule = ForwardingRule { rule_id, input_interface, input_group, input_port, outputs, dtls_enabled };
+                                            master_rules_clone.lock().unwrap().insert(rule.rule_id.clone(), rule.clone());
+
+                                            let relay_cmd = RelayCommand::AddRule(rule.clone());
+                                            let cmd_bytes = serde_json::to_vec(&relay_cmd).unwrap();
+
+                                            let streams_to_send: Vec<_> = dp_cmd_streams_clone.lock().unwrap().values().cloned().collect();
+                                            for stream_mutex in streams_to_send {
+                                                let cmd_bytes_clone = cmd_bytes.clone();
+                                                tokio::spawn(async move {
+                                                    let mut stream = stream_mutex.lock().await;
+                                                    let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
+                                                    if let Err(e) = framed.send(cmd_bytes_clone.into()).await {
+                                                        error!("Failed to send AddRule to worker: {}", e);
+                                                    }
+                                                });
+                                            }
+
+                                            let response = Response::Success(format!("Rule {} added", rule.rule_id));
+                                            let response_bytes = serde_json::to_vec(&response).unwrap();
+                                            client_stream.write_all(&response_bytes).await.unwrap();
+                                        }
+                                        Ok(SupervisorCommand::RemoveRule { rule_id }) => {
+                                            let removed = master_rules_clone.lock().unwrap().remove(&rule_id).is_some();
+                                            let response = if removed {
+                                                let relay_cmd = RelayCommand::RemoveRule { rule_id: rule_id.clone() };
+                                                let cmd_bytes = serde_json::to_vec(&relay_cmd).unwrap();
+
+                                                let streams_to_send: Vec<_> = dp_cmd_streams_clone.lock().unwrap().values().cloned().collect();
+                                                for stream_mutex in streams_to_send {
+                                                    let cmd_bytes_clone = cmd_bytes.clone();
+                                                    tokio::spawn(async move {
+                                                        let mut stream = stream_mutex.lock().await;
+                                                        let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
+                                                        if let Err(e) = framed.send(cmd_bytes_clone.into()).await {
+                                                            error!("Failed to send RemoveRule to worker: {}", e);
+                                                        }
+                                                    });
+                                                }
+                                                Response::Success(format!("Rule {} removed", rule_id))
+                                            } else {
+                                                Response::Error(format!("Rule {} not found", rule_id))
+                                            };
                                             let response_bytes = serde_json::to_vec(&response).unwrap();
                                             client_stream.write_all(&response_bytes).await.unwrap();
                                         }
@@ -434,7 +500,8 @@ mod tests {
         };
         let spawn_dp = |_core_id: u32| async {
             let (req_stream, _) = UnixStream::pair()?;
-            Ok((spawn_sleeping_worker()?, req_stream))
+            let (cmd_stream, _) = UnixStream::pair()?;
+            Ok((spawn_sleeping_worker()?, cmd_stream, req_stream))
         };
 
         let (_tx, rx) = mpsc::channel(10);
@@ -473,7 +540,8 @@ mod tests {
             async move {
                 dp_spawn_times.lock().unwrap().push(Instant::now());
                 let (req_stream, _) = UnixStream::pair()?;
-                Ok((spawn_failing_worker()?, req_stream))
+                let (cmd_stream, _) = UnixStream::pair()?;
+                Ok((spawn_failing_worker()?, cmd_stream, req_stream))
             }
         };
 
@@ -518,7 +586,8 @@ mod tests {
                 let child = spawn_sleeping_worker()?;
                 pids.lock().unwrap().push(child.id().unwrap());
                 let (req_stream, _) = UnixStream::pair()?;
-                Ok((child, req_stream))
+                let (cmd_stream, _) = UnixStream::pair()?;
+                Ok((child, cmd_stream, req_stream))
             }
         };
 
@@ -585,7 +654,8 @@ mod tests {
 
         let spawn_dp = |_core_id: u32| async {
             let (req_stream, _) = UnixStream::pair()?;
-            Ok((spawn_sleeping_worker()?, req_stream))
+            let (cmd_stream, _) = UnixStream::pair()?;
+            Ok((spawn_sleeping_worker()?, cmd_stream, req_stream))
         };
 
         let (_tx, rx) = mpsc::channel(10);

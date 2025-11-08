@@ -55,6 +55,7 @@ fn main() -> Result<()> {
             reporting_interval,
             socket_fd,
             request_fd,
+            command_fd,
         } => {
             if data_plane {
                 let config = multicast_relay::DataPlaneConfig {
@@ -74,8 +75,16 @@ fn main() -> Result<()> {
                 // D1, D7: The worker process uses a `tokio-uring` runtime
                 // to drive the high-performance data plane.
                 tokio_uring::start(async {
+                    let command_fd = match command_fd {
+                        Some(fd) => fd,
+                        None => {
+                            eprintln!("--command-fd is required for data plane workers");
+                            std::process::exit(1);
+                        }
+                    };
                     if let Err(e) =
-                        worker::run_data_plane(config, worker::DefaultWorkerLifecycle).await
+                        worker::run_data_plane(config, worker::DefaultWorkerLifecycle, command_fd)
+                            .await
                     {
                         eprintln!("Data Plane worker process failed: {}", e);
                         std::process::exit(1);
@@ -172,6 +181,7 @@ mod tests {
                 reporting_interval: Some(5),
                 socket_fd: None,
                 request_fd: None,
+                command_fd: None,
             }
         );
 
@@ -203,6 +213,7 @@ mod tests {
                 reporting_interval: None,
                 socket_fd: None,
                 request_fd: None,
+                command_fd: None,
             }
         );
     }

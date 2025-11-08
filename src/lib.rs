@@ -78,6 +78,8 @@ pub enum Command {
         socket_fd: Option<i32>,
         #[arg(long)]
         request_fd: Option<i32>,
+        #[arg(long)]
+        command_fd: Option<i32>,
     },
 }
 

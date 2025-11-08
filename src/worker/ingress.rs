@@ -30,7 +30,7 @@ use std::sync::{mpsc, Arc};
 
 use crate::worker::buffer_pool::BufferSize;
 use crate::worker::{buffer_pool::BufferPool, egress::EgressPacket, packet_parser::parse_packet};
-use crate::ForwardingRule;
+use crate::{ForwardingRule, RelayCommand};
 
 /// Statistics for the ingress loop
 #[derive(Debug, Clone, Default)]
@@ -100,6 +100,9 @@ pub struct IngressLoop {
     /// Channel for sending packets to egress
     /// If None, packets are dropped after processing (for testing)
     egress_tx: Option<mpsc::Sender<EgressPacket>>,
+
+    /// Channel for receiving commands from the supervisor
+    command_rx: mpsc::Receiver<RelayCommand>,
 }
 
 impl IngressLoop {
@@ -110,6 +113,7 @@ impl IngressLoop {
     /// * `interface_name` - Network interface to capture packets from (e.g., "eth0")
     /// * `config` - Ingress configuration
     /// * `egress_tx` - Optional channel for sending packets to egress
+    /// * `command_rx` - Channel for receiving commands from the supervisor
     ///
     /// # Returns
     ///
@@ -118,6 +122,7 @@ impl IngressLoop {
         interface_name: &str,
         config: IngressConfig,
         egress_tx: Option<mpsc::Sender<EgressPacket>>,
+        command_rx: mpsc::Receiver<RelayCommand>,
     ) -> Result<Self> {
         let af_packet_socket = setup_af_packet_socket(interface_name)?;
         let ring = IoUring::new(config.queue_depth)?;
@@ -132,6 +137,7 @@ impl IngressLoop {
             config,
             stats: IngressStats::default(),
             egress_tx,
+            command_rx,
         })
     }
 
@@ -141,6 +147,7 @@ impl IngressLoop {
     /// for this (interface, group) pair.
     pub fn add_rule(&mut self, rule: Arc<ForwardingRule>) -> Result<()> {
         let key = (rule.input_group, rule.input_port);
+        println!("[Ingress] Adding rule: {:?}", key);
         self.rules.insert(key, rule.clone());
 
         // Ensure a helper socket exists for this rule's multicast group to maintain IGMP membership.
@@ -161,6 +168,7 @@ impl IngressLoop {
     /// (other rules might be using the same multicast group).
     pub fn remove_rule(&mut self, rule_id: &str) -> Result<()> {
         // Find and remove the rule
+        println!("[Ingress] Removing rule: {}", rule_id);
         self.rules.retain(|_key, rule| rule.rule_id != rule_id);
         Ok(())
     }
@@ -178,13 +186,10 @@ impl IngressLoop {
     /// # Packet Processing Flow
     ///
     /// 1. Submit batch of recv operations to io_uring
-    /// 2. Wait for completions
-    /// 3. For each received packet:
-    ///    a. Parse Ethernet/IPv4/UDP headers
-    ///    b. Match (dest_ip, dest_port) against rule table
-    ///    c. If match: allocate buffer, copy payload, queue for egress
-    ///    d. If no match: drop packet (increment stats)
-    /// 4. Repeat
+    /// 2. Wait for completions with a timeout
+    /// 3. Process any received packets
+    /// 4. Check for and process any commands from the supervisor
+    /// 5. Repeat
     ///
     /// # Error Handling
     ///
@@ -193,68 +198,81 @@ impl IngressLoop {
     /// - No rule match: Drop packet (increment `no_rule_match`)
     /// - io_uring errors: Return error and exit loop
     pub fn run(&mut self) -> Result<()> {
+        use mpsc::RecvTimeoutError;
+        use std::time::Duration;
+
         // Allocate receive buffers (reused across iterations)
         let mut recv_buffers: Vec<Vec<u8>> = (0..self.config.batch_size)
             .map(|_| vec![0u8; 9000]) // Max jumbo frame size
             .collect();
 
         loop {
-            // Submit batch of recv operations
-            for buf in recv_buffers.iter_mut() {
+            // 1. Submit a batch of recv operations for all available buffers
+            let available_buffers = self.config.batch_size - self.ring.submission().len();
+            for (i, buf) in recv_buffers.iter_mut().enumerate().take(available_buffers) {
                 let recv_op = opcode::Recv::new(
                     types::Fd(self.af_packet_socket.as_raw_fd()),
                     buf.as_mut_ptr(),
                     buf.len() as u32,
-                );
+                )
+                .build()
+                .user_data(i as u64); // Use index as user_data
 
                 unsafe {
                     self.ring
                         .submission()
-                        .push(&recv_op.build())
+                        .push(&recv_op)
                         .context("Failed to push recv operation to io_uring")?;
                 }
             }
+            self.ring.submit()?;
 
-            // Submit all operations
-            self.ring
-                .submit_and_wait(1)
-                .context("Failed to submit recv operations")?;
-
-            // Collect completion results before processing
-            // (This avoids holding a mutable borrow of self.ring while calling self.process_packet)
-            let mut completions = Vec::with_capacity(self.config.batch_size);
-            {
-                let cq = self.ring.completion();
-                for cqe in cq {
-                    completions.push(cqe.result());
+            // 2. Wait for commands with a timeout, allowing us to poll for packets
+            match self.command_rx.recv_timeout(Duration::from_millis(10)) {
+                Ok(RelayCommand::AddRule(rule)) => {
+                    self.add_rule(Arc::new(rule))?;
+                }
+                Ok(RelayCommand::RemoveRule { rule_id }) => {
+                    self.remove_rule(&rule_id)?;
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    // This is the normal case when no commands are pending.
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    log::info!("Command channel disconnected, shutting down ingress loop.");
+                    return Ok(());
                 }
             }
 
-            // Process each completion
-            for (idx, bytes_received) in completions.iter().enumerate() {
-                let bytes_received = *bytes_received;
+            // 3. Process all available packet completions without blocking
+            let mut completions = Vec::new();
+            {
+                let cq = self.ring.completion();
+                for cqe in cq {
+                    completions.push((cqe.result(), cqe.user_data()));
+                }
+            }
+
+            for (bytes_received, buffer_index) in completions {
+                let buffer_index = buffer_index as usize;
 
                 if bytes_received < 0 {
-                    // Error receiving packet - log and continue
                     eprintln!("Error receiving packet: {}", bytes_received);
                     continue;
                 }
 
                 if bytes_received == 0 {
-                    // Connection closed (shouldn't happen with AF_PACKET)
                     continue;
                 }
 
                 let bytes_received = bytes_received as usize;
 
-                // Update stats
                 if self.config.track_stats {
                     self.stats.packets_received += 1;
                     self.stats.bytes_received += bytes_received as u64;
                 }
 
-                // Process the packet from the corresponding buffer
-                if let Some(buf) = recv_buffers.get(idx) {
+                if let Some(buf) = recv_buffers.get(buffer_index) {
                     self.process_packet(&buf[..bytes_received])?;
                 }
             }
@@ -595,6 +613,7 @@ mod tests_unit {
         mpsc::Sender<EgressPacket>,
     ) {
         let (egress_tx, egress_rx) = mpsc::channel();
+        let (_command_tx, command_rx) = mpsc::channel();
         let config = IngressConfig {
             track_stats: true,
             ..Default::default()
@@ -614,6 +633,7 @@ mod tests_unit {
             config,
             stats: IngressStats::default(),
             egress_tx: Some(egress_tx.clone()),
+            command_rx,
         };
 
         (ingress_loop, egress_rx, egress_tx)

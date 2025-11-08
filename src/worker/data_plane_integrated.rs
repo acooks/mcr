@@ -30,7 +30,7 @@ use crate::worker::{
     egress::{EgressConfig, EgressLoop, EgressPacket},
     ingress::{IngressConfig, IngressLoop},
 };
-use crate::DataPlaneConfig;
+use crate::{DataPlaneConfig, RelayCommand};
 
 /// Integrated data plane runner
 ///
@@ -69,7 +69,10 @@ use crate::DataPlaneConfig;
 /// // Run the data plane (blocks indefinitely)
 /// run_data_plane(config).expect("Data plane failed");
 /// ```
-pub fn run_data_plane(config: DataPlaneConfig) -> Result<()> {
+pub fn run_data_plane(
+    config: DataPlaneConfig,
+    command_rx: mpsc::Receiver<RelayCommand>,
+) -> Result<()> {
     println!(
         "[DataPlane] Starting integrated data plane on {}",
         config.input_interface_name.as_deref().unwrap_or("default")
@@ -105,7 +108,7 @@ pub fn run_data_plane(config: DataPlaneConfig) -> Result<()> {
 
                 // Create ingress loop
                 let mut ingress =
-                    IngressLoop::new(&interface_name, ingress_config, Some(egress_tx))?;
+                    IngressLoop::new(&interface_name, ingress_config, Some(egress_tx), command_rx)?;
 
                 // Add initial rules
                 for rule in initial_rules {

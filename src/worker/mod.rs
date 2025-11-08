@@ -133,7 +133,11 @@ pub trait WorkerLifecycle: Send + 'static {
         caps_to_keep: Option<&HashSet<Capability>>,
     ) -> Result<()>;
     fn set_cpu_affinity(&self, core_id: usize) -> Result<()>;
-    fn run_data_plane_task(&self, config: DataPlaneConfig) -> Result<()>;
+    fn run_data_plane_task(
+        &self,
+        config: DataPlaneConfig,
+        command_rx: std::sync::mpsc::Receiver<RelayCommand>,
+    ) -> Result<()>;
 }
 
 pub struct DefaultWorkerLifecycle;
@@ -152,14 +156,19 @@ impl WorkerLifecycle for DefaultWorkerLifecycle {
         set_cpu_affinity(core_id)
     }
 
-    fn run_data_plane_task(&self, config: DataPlaneConfig) -> Result<()> {
-        data_plane_task(config)
+    fn run_data_plane_task(
+        &self,
+        config: DataPlaneConfig,
+        command_rx: std::sync::mpsc::Receiver<RelayCommand>,
+    ) -> Result<()> {
+        data_plane_task(config, command_rx)
     }
 }
 
 pub async fn run_data_plane<T: WorkerLifecycle>(
     config: DataPlaneConfig,
     lifecycle: T,
+    command_fd: i32,
 ) -> Result<()> {
     let mut caps_to_keep = HashSet::new();
     caps_to_keep.insert(Capability::CAP_NET_RAW);
@@ -180,9 +189,37 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
         info!("Successfully set CPU affinity to core {}.", core_id);
     }
 
+    // Bridge from the async command stream (tokio) to the sync data plane task (std::thread)
+    let (std_tx, std_rx) = std::sync::mpsc::channel::<RelayCommand>();
+    let command_stream = unsafe { std::os::unix::net::UnixStream::from_raw_fd(command_fd) };
+    command_stream.set_nonblocking(true)?;
+    let command_stream = UnixStream::from_std(command_stream)?;
+    let mut framed = tokio_util::codec::Framed::new(
+        command_stream,
+        tokio_util::codec::LengthDelimitedCodec::new(),
+    );
+
+    tokio::spawn(async move {
+        use futures::StreamExt;
+        use log::error;
+        while let Some(Ok(bytes)) = framed.next().await {
+            match serde_json::from_slice::<RelayCommand>(&bytes) {
+                Ok(command) => {
+                    if std_tx.send(command).is_err() {
+                        error!("Data plane command channel disconnected. Worker thread likely panicked.");
+                        break;
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to deserialize RelayCommand: {}", e);
+                }
+            }
+        }
+    });
+
     // The data plane task is synchronous and blocking.
     // We run it on a blocking thread to avoid starving the tokio scheduler.
-    tokio::task::spawn_blocking(move || lifecycle.run_data_plane_task(config))
+    tokio::task::spawn_blocking(move || lifecycle.run_data_plane_task(config, std_rx))
         .await?
         .context("Data plane task failed")?;
 
@@ -196,6 +233,7 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
 mod tests {
     use super::*;
     use crate::{ControlPlaneConfig, DataPlaneConfig, ForwardingRule, RelayCommand};
+    use std::os::fd::IntoRawFd;
     use std::time::Duration;
     use tempfile::tempdir;
     use tokio::net::UnixStream;
@@ -290,7 +328,11 @@ mod tests {
             fn set_cpu_affinity(&self, _core_id: usize) -> Result<()> {
                 Ok(())
             }
-            fn run_data_plane_task(&self, _config: DataPlaneConfig) -> Result<()> {
+            fn run_data_plane_task(
+                &self,
+                _config: DataPlaneConfig,
+                _command_rx: std::sync::mpsc::Receiver<RelayCommand>,
+            ) -> Result<()> {
                 // In a real test, we might block here indefinitely,
                 // but for the timeout test, returning Ok is sufficient.
                 std::thread::sleep(std::time::Duration::from_secs(10));
@@ -316,7 +358,10 @@ mod tests {
             reporting_interval: 1,
         };
 
-        let run_future = run_data_plane(config, MockWorkerLifecycle);
+        // Create a dummy socket pair for the command FD
+        let (fd1, _) = std::os::unix::net::UnixStream::pair()?;
+
+        let run_future = run_data_plane(config, MockWorkerLifecycle, fd1.into_raw_fd());
 
         let result = tokio::time::timeout(std::time::Duration::from_millis(100), run_future).await;
 
