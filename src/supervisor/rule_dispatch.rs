@@ -296,10 +296,11 @@ mod tests {
     fn dummy_rule(id: &str) -> ForwardingRule {
         ForwardingRule {
             rule_id: id.to_string(),
-            ingress_iface: "eth0".to_string(),
-            egress_iface: "eth1".to_string(),
-            source_addr: "224.0.0.1:5001".parse().unwrap(),
-            destination_addr: "127.0.0.1:6001".parse().unwrap(),
+            input_interface: "eth0".to_string(),
+            input_group: "224.0.0.1".parse().unwrap(),
+            input_port: 5001,
+            outputs: vec![],
+            dtls_enabled: false,
         }
     }
 

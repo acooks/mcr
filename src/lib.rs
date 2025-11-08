@@ -163,6 +163,15 @@ pub enum RelayCommand {
     RemoveRule { rule_id: String },
 }
 
+impl RelayCommand {
+    pub fn rule_id(&self) -> Option<String> {
+        match self {
+            RelayCommand::AddRule(rule) => Some(rule.rule_id.clone()),
+            RelayCommand::RemoveRule { rule_id } => Some(rule_id.clone()),
+        }
+    }
+}
+
 fn default_rule_id() -> String {
     Uuid::new_v4().to_string()
 }
