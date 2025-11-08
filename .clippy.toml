@@ -1,0 +1,8 @@
+# Clippy configuration for multicast_relay
+# Focus on catching unsafe code issues and other quality concerns
+
+# Warn about missing safety documentation on unsafe functions
+# This helps ensure all unsafe code is properly documented
+# warn-on-missing-safety-doc = true # Disabled pending toolchain update to support this lint
+
+# Additional configuration can be added here as needed

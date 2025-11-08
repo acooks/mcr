@@ -4,7 +4,7 @@
 default: check
 
 # Run all quality gates, mirroring the CI pipeline
-check: fmt clippy build test audit outdated coverage
+check: fmt clippy build test audit outdated coverage unsafe-check
     @echo "\n✅ All checks passed!"
 
 # Format check
@@ -82,6 +82,18 @@ coverage:
     set -euxo pipefail
     cargo tarpaulin --out html --output-dir target/tarpaulin --features integration_test --exclude-files src/main.rs "experiments/*" -- --test-threads=1
 
+
+# Check unsafe code usage
+unsafe-check:
+    @echo "--- Checking Unsafe Code Usage ---"
+    @./scripts/check_unsafe.sh
+
+# Generate detailed unsafe code report (runs cargo-geiger)
+unsafe-report:
+    @echo "--- Generating Unsafe Code Report (cargo-geiger) ---"
+    @command -v cargo-geiger >/dev/null || cargo install cargo-geiger
+    @cargo geiger --all-features 2>&1 | tee target/geiger-report.txt || true
+    @echo "Report saved to target/geiger-report.txt"
 
 # Clean the project
 clean:

@@ -9,3 +9,6 @@ experiments/**/Cargo.lock
 tarpaulin-report.html
 target/tarpaulin/
 .gemini
+
+# Unsafe code tracking baseline (local development file)
+.unsafe_baseline

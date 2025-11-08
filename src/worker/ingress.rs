@@ -28,6 +28,7 @@ use std::net::{Ipv4Addr, UdpSocket as StdUdpSocket};
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::sync::{mpsc, Arc};
 
+use crate::worker::buffer_pool::BufferSize;
 use crate::worker::{buffer_pool::BufferPool, egress::EgressPacket, packet_parser::parse_packet};
 use crate::ForwardingRule;
 
@@ -262,10 +263,17 @@ impl IngressLoop {
 
     /// Process a single received packet
     fn process_packet(&mut self, packet_data: &[u8]) -> Result<()> {
+        println!("\n--- process_packet start ---");
+        println!("Packet data len: {}", packet_data.len());
+
         // Parse packet headers
         let headers = match parse_packet(packet_data, false) {
-            Ok(h) => h,
+            Ok(h) => {
+                println!("Parse successful: {:?}", h);
+                h
+            }
             Err(_e) => {
+                println!("Parse failed");
                 if self.config.track_stats {
                     self.stats.parse_errors += 1;
                 }
@@ -276,9 +284,14 @@ impl IngressLoop {
 
         // Match against rules (userspace demux by dest_ip, dest_port)
         let key = (headers.ipv4.dst_ip, headers.udp.dst_port);
+        println!("Matching rule for key: {:?}", key);
         let rule = match self.rules.get(&key) {
-            Some(r) => r.clone(),
+            Some(r) => {
+                println!("Rule matched: {}", r.rule_id);
+                r.clone()
+            }
             None => {
+                println!("No rule matched");
                 if self.config.track_stats {
                     self.stats.no_rule_match += 1;
                 }
@@ -287,57 +300,89 @@ impl IngressLoop {
             }
         };
 
-        // Allocate buffer for payload
-        let payload_len = headers.payload_len;
-        let mut buffer = match self.buffer_pool.allocate(payload_len) {
-            Some(b) => b,
-            None => {
-                if self.config.track_stats {
-                    self.stats.buffer_exhaustion += 1;
-                }
-                // Drop packet due to buffer exhaustion
-                return Ok(());
-            }
-        };
-
-        // Copy payload to buffer
-        let payload_start = headers.payload_offset;
-        let payload_end = payload_start + payload_len;
-        buffer.as_mut_slice()[..payload_len]
-            .copy_from_slice(&packet_data[payload_start..payload_end]);
-
-        // Update stats
-        if self.config.track_stats {
-            self.stats.packets_matched += 1;
+        // If there are no outputs, we are done with this packet.
+        if rule.outputs.is_empty() {
+            println!("Rule has no outputs, returning.");
+            return Ok(());
         }
 
         // Forward to egress (if channel is available)
         if let Some(ref tx) = self.egress_tx {
-            // Create egress packets for each output destination
+            let payload_len = headers.payload_len;
+            println!("Payload len: {}", payload_len);
+            let payload_start = headers.payload_offset;
+            let payload_end = payload_start + payload_len;
+
+            // A packet is considered "matched" once we successfully allocate a buffer
+            // for its first destination. We only increment the counter once per packet.
+            let mut matched_stat_incremented = false;
+
+            // Iterate through the outputs.
             for output in &rule.outputs {
+                println!("Processing output: {:?}", output);
+                println!(
+                    "Buffer pool state before alloc: small={}, standard={}, jumbo={}",
+                    self.buffer_pool.pool(BufferSize::Small).available(),
+                    self.buffer_pool.pool(BufferSize::Standard).available(),
+                    self.buffer_pool.pool(BufferSize::Jumbo).available()
+                );
+
+                // Allocate a buffer for each output destination.
+                let mut buffer = match self.buffer_pool.allocate(payload_len) {
+                    Some(b) => {
+                        println!("Buffer allocation successful");
+                        b
+                    }
+                    None => {
+                        println!("Buffer allocation failed (pool exhausted)");
+                        // Pool is exhausted, increment stat and stop processing this packet.
+                        if self.config.track_stats {
+                            println!(
+                                "Incrementing buffer_exhaustion. Old value: {}",
+                                self.stats.buffer_exhaustion
+                            );
+                            self.stats.buffer_exhaustion += 1;
+                        }
+                        return Ok(());
+                    }
+                };
+
+                // If this is the first successful allocation, increment the matched stat.
+                if !matched_stat_incremented {
+                    if self.config.track_stats {
+                        println!(
+                            "Incrementing packets_matched. Old value: {}",
+                            self.stats.packets_matched
+                        );
+                        self.stats.packets_matched += 1;
+                    }
+                    matched_stat_incremented = true;
+                }
+
+                // Copy payload into the newly allocated buffer.
+                buffer.as_mut_slice()[..payload_len]
+                    .copy_from_slice(&packet_data[payload_start..payload_end]);
+
                 let dest_addr =
                     std::net::SocketAddr::new(std::net::IpAddr::V4(output.group), output.port);
 
                 let egress_packet = EgressPacket {
-                    buffer: buffer.clone_data(), // Clone buffer data for each output
+                    buffer, // Move ownership of the buffer to the egress packet
                     interface_name: output.interface.clone(),
                     dest_addr,
                 };
 
-                if tx.send(egress_packet).is_err() {
-                    // This can happen if the egress channel is full or closed.
-                    // In a real-world scenario, we might want to log this or increment a counter.
-                    // For now, we just drop the packet.
-                    if self.config.track_stats {
-                        self.stats.egress_channel_errors += 1;
-                    }
+                if tx.send(egress_packet).is_err() && self.config.track_stats {
+                    println!(
+                        "Egress send failed, incrementing egress_channel_errors. Old value: {}",
+                        self.stats.egress_channel_errors
+                    );
+                    self.stats.egress_channel_errors += 1;
                 }
             }
         }
 
-        // Deallocate buffer back to pool
-        self.buffer_pool.deallocate(buffer);
-
+        println!("--- process_packet end ---");
         Ok(())
     }
 }
@@ -530,4 +575,247 @@ mod tests {
 
     // Note: IngressLoop::run() is an infinite loop, so we'll test it in integration
     // tests with a timeout and controlled shutdown mechanism.
+}
+
+#[cfg(test)]
+mod tests_unit {
+    use super::*;
+    use crate::worker::egress::EgressPacket;
+    use crate::ForwardingRule;
+    use std::net::SocketAddr;
+    use std::os::unix::io::OwnedFd;
+    use std::sync::{mpsc, Arc};
+
+    // Helper to create a test IngressLoop with mock components
+    fn setup_test_ingress_loop(
+        buffer_pool: BufferPool,
+    ) -> (
+        IngressLoop,
+        mpsc::Receiver<EgressPacket>,
+        mpsc::Sender<EgressPacket>,
+    ) {
+        let (egress_tx, egress_rx) = mpsc::channel();
+        let config = IngressConfig {
+            track_stats: true,
+            ..Default::default()
+        };
+
+        // Create dummy FDs and an empty ring for the test instance.
+        // These are not used by process_packet, which is what we're testing.
+        let dummy_fd = unsafe { OwnedFd::from_raw_fd(0) };
+        let ring = IoUring::new(1).unwrap();
+
+        let ingress_loop = IngressLoop {
+            af_packet_socket: dummy_fd,
+            helper_sockets: HashMap::new(),
+            ring,
+            buffer_pool,
+            rules: HashMap::new(),
+            config,
+            stats: IngressStats::default(),
+            egress_tx: Some(egress_tx.clone()),
+        };
+
+        (ingress_loop, egress_rx, egress_tx)
+    }
+
+    // Helper to create a simple test packet (Ethernet/IPv4/UDP)
+    fn create_test_packet(dst_ip: Ipv4Addr, dst_port: u16, payload: &[u8]) -> Vec<u8> {
+        let mut packet = Vec::new();
+        // Ethernet header (dummy, but with correct EtherType for IPv4)
+        packet.extend_from_slice(&[0u8; 12]);
+        packet.extend_from_slice(&[0x08, 0x00]); // EtherType: IPv4
+
+        // IPv4 header (dummy, with correct destination IP and length)
+        let total_len = (20 + 8 + payload.len()) as u16;
+        packet.extend_from_slice(&[
+            0x45,
+            0,
+            (total_len >> 8) as u8,
+            total_len as u8,
+            0,
+            0,
+            0,
+            0,
+            64,
+            17,
+            0,
+            0,
+        ]);
+        packet.extend_from_slice(&[127, 0, 0, 1]); // Src IP
+        packet.extend_from_slice(&dst_ip.octets()); // Dst IP
+
+        // UDP header (dummy, with correct destination port and length)
+        let udp_len = (8 + payload.len()) as u16;
+        packet.extend_from_slice(&[
+            0, // Src port (dummy)
+            0,
+            (dst_port >> 8) as u8,
+            dst_port as u8,
+            (udp_len >> 8) as u8,
+            udp_len as u8,
+            0,
+            0, // Checksum (dummy)
+        ]);
+        // Payload
+        packet.extend_from_slice(payload);
+        packet
+    }
+
+    #[test]
+    fn test_process_packet_matching_rule() {
+        let buffer_pool = BufferPool::new(true);
+        let (mut ingress_loop, egress_rx, _) = setup_test_ingress_loop(buffer_pool);
+
+        // Add a rule
+        let rule = Arc::new(ForwardingRule {
+            rule_id: "test-rule".to_string(),
+            input_interface: "lo".to_string(),
+            input_group: Ipv4Addr::new(239, 1, 1, 1),
+            input_port: 1234,
+            outputs: vec![crate::OutputDestination {
+                interface: "lo".to_string(),
+                group: Ipv4Addr::new(239, 10, 10, 10),
+                port: 5678,
+                dtls_enabled: false,
+            }],
+            dtls_enabled: false,
+        });
+        ingress_loop
+            .rules
+            .insert((rule.input_group, rule.input_port), rule.clone());
+
+        // Create a matching packet
+        let payload = b"hello";
+        let packet = create_test_packet(rule.input_group, rule.input_port, payload);
+
+        // Process the packet
+        ingress_loop.process_packet(&packet).unwrap();
+
+        // Check stats
+        assert_eq!(ingress_loop.stats.packets_matched, 1);
+        assert_eq!(ingress_loop.stats.no_rule_match, 0);
+        assert_eq!(ingress_loop.stats.parse_errors, 0);
+
+        // Check that the packet was sent to egress
+        let egress_packet = egress_rx.try_recv().unwrap();
+        assert_eq!(&egress_packet.buffer.as_slice()[..payload.len()], payload);
+        assert_eq!(
+            egress_packet.dest_addr,
+            SocketAddr::new(rule.outputs[0].group.into(), rule.outputs[0].port)
+        );
+    }
+
+    #[test]
+    fn test_process_packet_no_matching_rule() {
+        let buffer_pool = BufferPool::new(true);
+        let (mut ingress_loop, egress_rx, _) = setup_test_ingress_loop(buffer_pool);
+
+        // No rules added
+
+        // Create a packet
+        let packet = create_test_packet(Ipv4Addr::new(239, 1, 1, 1), 1234, b"hello");
+
+        // Process the packet
+        ingress_loop.process_packet(&packet).unwrap();
+
+        // Check stats
+        assert_eq!(ingress_loop.stats.packets_matched, 0);
+        assert_eq!(ingress_loop.stats.no_rule_match, 1);
+        assert_eq!(ingress_loop.stats.parse_errors, 0);
+
+        // Check that no packet was sent to egress
+        assert!(egress_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn test_process_packet_parse_error() {
+        let buffer_pool = BufferPool::new(true);
+        let (mut ingress_loop, egress_rx, _) = setup_test_ingress_loop(buffer_pool);
+
+        // Create a truncated packet (too short to be valid)
+        let packet = &[0u8; 10];
+
+        // Process the packet
+        ingress_loop.process_packet(packet).unwrap();
+
+        // Check stats
+        assert_eq!(ingress_loop.stats.packets_matched, 0);
+        assert_eq!(ingress_loop.stats.no_rule_match, 0);
+        assert_eq!(ingress_loop.stats.parse_errors, 1);
+
+        // Check that no packet was sent to egress
+        assert!(egress_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn test_process_packet_buffer_exhaustion() {
+        // Create a pool with stat tracking enabled.
+        let mut buffer_pool = BufferPool::new(true);
+        // Manually exhaust the pool by taking all available buffers.
+        let mut allocated = Vec::new();
+        while let Some(buffer) = buffer_pool.allocate(100) {
+            allocated.push(buffer);
+        }
+
+        let (mut ingress_loop, egress_rx, _) = setup_test_ingress_loop(buffer_pool);
+
+        // Add a rule
+        let rule = Arc::new(ForwardingRule {
+            rule_id: "test-rule".to_string(),
+            input_interface: "lo".to_string(),
+            input_group: Ipv4Addr::new(239, 1, 1, 1),
+            input_port: 1234,
+            outputs: vec![crate::OutputDestination {
+                interface: "lo".to_string(),
+                group: Ipv4Addr::new(239, 10, 10, 10),
+                port: 5678,
+                dtls_enabled: false,
+            }],
+            dtls_enabled: false,
+        });
+        ingress_loop
+            .rules
+            .insert((rule.input_group, rule.input_port), rule.clone());
+
+        // Create a matching packet
+        let packet = create_test_packet(rule.input_group, rule.input_port, b"hello");
+
+        // Process the packet
+        ingress_loop.process_packet(&packet).unwrap();
+
+        // Check stats
+        assert_eq!(ingress_loop.stats.buffer_exhaustion, 1);
+        assert_eq!(ingress_loop.stats.packets_matched, 0); // Not matched because no buffer
+
+        // Check that no packet was sent to egress
+        assert!(egress_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn test_add_and_remove_rule() {
+        let buffer_pool = BufferPool::new(false);
+        let (mut ingress_loop, _, _) = setup_test_ingress_loop(buffer_pool);
+
+        let rule = Arc::new(ForwardingRule {
+            rule_id: "rule-to-remove".to_string(),
+            input_interface: "lo".to_string(),
+            input_group: Ipv4Addr::new(239, 2, 2, 2),
+            input_port: 5555,
+            outputs: vec![],
+            dtls_enabled: false,
+        });
+
+        // Add the rule and verify it's there
+        // Note: We are not testing the helper socket side-effect here.
+        ingress_loop.add_rule(rule.clone()).unwrap();
+        assert_eq!(ingress_loop.rules.len(), 1);
+        assert!(ingress_loop
+            .rules
+            .contains_key(&(rule.input_group, rule.input_port)));
+
+        // Remove the rule and verify it's gone
+        ingress_loop.remove_rule("rule-to-remove").unwrap();
+        assert_eq!(ingress_loop.rules.len(), 0);
+    }
 }
