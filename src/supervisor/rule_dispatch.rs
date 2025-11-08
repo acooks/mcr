@@ -39,6 +39,9 @@ pub struct WorkerHandle {
     /// Channel for sending commands to this worker
     pub command_tx: mpsc::Sender<RelayCommand>,
 
+    /// Channel for sending requests to this worker
+    pub request_tx: mpsc::Sender<WorkerRequest>,
+
     /// Worker type (control plane or data plane)
     pub worker_type: WorkerType,
 
@@ -76,11 +79,13 @@ impl RuleDispatcher {
     /// # Arguments
     /// * `worker_id` - Unique identifier for the worker (typically PID)
     /// * `command_tx` - Channel for sending commands to the worker
+    /// * `request_tx` - Channel for sending requests to the worker
     /// * `worker_type` - Type of worker (control plane or data plane)
     pub fn register_worker(
         &mut self,
         worker_id: u32,
         command_tx: mpsc::Sender<RelayCommand>,
+        request_tx: mpsc::Sender<WorkerRequest>,
         worker_type: WorkerType,
     ) -> Result<()> {
         let core_id = match worker_type {
@@ -91,6 +96,7 @@ impl RuleDispatcher {
         let handle = WorkerHandle {
             pid: worker_id,
             command_tx,
+            request_tx,
             worker_type,
             core_id,
         };
@@ -105,24 +111,6 @@ impl RuleDispatcher {
     }
 
     /// Dispatch a new forwarding rule to all appropriate workers
-    ///
-    /// **TODO: IMPLEMENT THIS - CRITICAL**
-    ///
-    /// This is the core dispatch logic. It must:
-    /// 1. Add the rule to active_rules (supervisor is source of truth)
-    /// 2. Send AddRule command to control plane worker
-    /// 3. Determine which data plane workers need this rule
-    /// 4. Send AddRule command to those data plane workers
-    /// 5. Handle any send failures gracefully
-    ///
-    /// ## Error Handling Strategy
-    /// - If control plane send fails: Return error (critical failure)
-    /// - If data plane send fails: Log warning, continue (worker will be restarted)
-    /// - Use non-blocking sends with timeout
-    ///
-    /// ## Determining Data Plane Workers
-    /// For now, send to ALL data plane workers. Future optimization: only send
-    /// to workers handling the specific interface/core.
     pub async fn dispatch_add_rule(&mut self, rule: ForwardingRule) -> Result<()> {
         self.active_rules
             .insert(rule.rule_id.clone(), rule.clone());
@@ -158,14 +146,6 @@ impl RuleDispatcher {
     }
 
     /// Dispatch a rule removal to all workers
-    ///
-    /// **TODO: IMPLEMENT THIS - CRITICAL**
-    ///
-    /// Similar to dispatch_add_rule but for removal:
-    /// 1. Verify rule exists in active_rules
-    /// 2. Send RemoveRule to control plane
-    /// 3. Send RemoveRule to all data plane workers
-    /// 4. Remove from active_rules only after successful dispatch
     pub async fn dispatch_remove_rule(&mut self, rule_id: &str) -> Result<()> {
         if !self.has_rule(rule_id) {
             return Ok(()); // Rule already removed, idempotent success

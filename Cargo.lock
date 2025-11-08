@@ -760,6 +760,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-uring",
+ "tokio-util",
  "uuid",
  "wait-timeout",
 ]

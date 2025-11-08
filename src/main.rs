@@ -54,6 +54,7 @@ fn main() -> Result<()> {
             output_interface,
             reporting_interval,
             socket_fd,
+            request_fd,
         } => {
             if data_plane {
                 let config = multicast_relay::DataPlaneConfig {
@@ -88,6 +89,7 @@ fn main() -> Result<()> {
                     prometheus_addr,
                     reporting_interval: reporting_interval.unwrap_or(1),
                     socket_fd,
+                    request_fd,
                 };
                 // Control Plane worker - uses standard tokio runtime (no packet I/O)
                 let runtime = tokio::runtime::Runtime::new()?;
@@ -169,6 +171,7 @@ mod tests {
                 output_interface: Some("eth1".to_string()),
                 reporting_interval: Some(5),
                 socket_fd: None,
+                request_fd: None,
             }
         );
 
@@ -199,6 +202,7 @@ mod tests {
                 output_interface: None,
                 reporting_interval: None,
                 socket_fd: None,
+                request_fd: None,
             }
         );
     }

@@ -1,10 +1,11 @@
 use anyhow::{Context, Result};
 use futures::stream::{FuturesUnordered, StreamExt};
-use nix::fcntl::{fcntl, FcntlArg, FdFlag};
+use futures::SinkExt;
+use nix::sys::socket::{socketpair, AddressFamily, SockFlag, SockType};
 use nix::unistd::{Group, User};
 use std::collections::HashMap;
 use std::future::Future;
-use std::os::unix::io::IntoRawFd;
+use std::os::unix::io::{FromRawFd, IntoRawFd};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -12,8 +13,10 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
+use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 use crate::{ForwardingRule, RelayCommand};
+use log::error;
 
 const INITIAL_BACKOFF_MS: u64 = 250;
 const MAX_BACKOFF_MS: u64 = 16000; // 16 seconds
@@ -30,22 +33,23 @@ pub fn spawn_control_plane_worker(
     gid: u32,
     relay_command_socket_path: PathBuf,
     prometheus_addr: Option<std::net::SocketAddr>,
-) -> Result<(Child, UnixStream)> {
+) -> Result<(Child, UnixStream, UnixStream)> {
     println!("[Supervisor] Spawning Control Plane worker.");
 
-    // Create a private socket pair for communication.
+    // Create a private socket pair for command communication.
     let (supervisor_stream, worker_stream) = UnixStream::pair()?;
+    let _ = worker_stream.into_std()?.into_raw_fd();
 
-    // Remove the CLO_EXEC flag to allow inheritance.
-    let flags = fcntl(&worker_stream, FcntlArg::F_GETFD)?;
-    let mut new_flags = FdFlag::from_bits_truncate(flags);
-    new_flags.remove(FdFlag::FD_CLOEXEC);
-    fcntl(&worker_stream, FcntlArg::F_SETFD(new_flags))
-        .context("Failed to remove CLO_EXEC flag from worker FD")?;
-
-    // The worker no longer needs the listener object, just the FD.
-    // We must convert to std stream to get ownership of the FD.
-    let owned_worker_fd = worker_stream.into_std()?.into_raw_fd();
+    // Create a socket pair for request-response communication
+    let (req_supervisor_fd, req_worker_fd) = socketpair(
+        AddressFamily::Unix,
+        SockType::Stream,
+        None,
+        SockFlag::SOCK_CLOEXEC,
+    )?;
+    let req_supervisor_stream = UnixStream::from_std(unsafe {
+        std::os::unix::net::UnixStream::from_raw_fd(req_supervisor_fd.into_raw_fd())
+    })?;
 
     let mut command = get_production_base_command();
     command
@@ -56,27 +60,40 @@ pub fn spawn_control_plane_worker(
         .arg(gid.to_string())
         .arg("--relay-command-socket-path")
         .arg(relay_command_socket_path)
-        .arg("--socket-fd") // Tell the worker to use the passed FD
-        .arg(owned_worker_fd.to_string());
+        .arg("--socket-fd")
+        .arg("--request-fd")
+        .arg(req_worker_fd.into_raw_fd().to_string());
 
     if let Some(addr) = prometheus_addr {
         command.arg("--prometheus-addr").arg(addr.to_string());
     }
 
     let child = command.spawn()?;
-    Ok((child, supervisor_stream))
+    Ok((child, supervisor_stream, req_supervisor_stream))
 }
 
-pub fn spawn_data_plane_worker(
+pub async fn spawn_data_plane_worker(
     core_id: u32,
     uid: u32,
     gid: u32,
     relay_command_socket_path: PathBuf,
-) -> Result<Child> {
+) -> Result<(Child, UnixStream)> {
     println!(
         "[Supervisor] Spawning Data Plane worker for core {}.",
         core_id
     );
+
+    // Create a socket pair for request-response communication
+    let (req_supervisor_fd, req_worker_fd) = socketpair(
+        AddressFamily::Unix,
+        SockType::Stream,
+        None,
+        SockFlag::SOCK_CLOEXEC,
+    )?;
+    let req_supervisor_stream = UnixStream::from_std(unsafe {
+        std::os::unix::net::UnixStream::from_raw_fd(req_supervisor_fd.into_raw_fd())
+    })?;
+
     let mut command = get_production_base_command();
     command
         .arg("worker")
@@ -88,8 +105,13 @@ pub fn spawn_data_plane_worker(
         .arg(core_id.to_string())
         .arg("--data-plane")
         .arg("--relay-command-socket-path")
-        .arg(relay_command_socket_path);
-    command.spawn().map_err(anyhow::Error::from)
+        .arg(relay_command_socket_path)
+        .arg("--request-fd")
+        .arg(req_worker_fd.into_raw_fd().to_string());
+    command
+        .spawn()
+        .map(|child| (child, req_supervisor_stream))
+        .map_err(anyhow::Error::from)
 }
 
 // --- Supervisor Core Logic ---
@@ -123,7 +145,10 @@ pub async fn run(
     run_generic(
         move || spawn_control_plane_worker(uid, gid, cp_socket_path.clone(), prometheus_addr),
         num_cores,
-        move |core_id| spawn_data_plane_worker(core_id, uid, gid, dp_socket_path.clone()),
+        move |core_id| {
+            let dp_socket_path = dp_socket_path.clone();
+            async move { spawn_data_plane_worker(core_id, uid, gid, dp_socket_path).await }
+        },
         _relay_command_rx,
         control_socket_path, // Pass down
         master_rules,
@@ -131,7 +156,7 @@ pub async fn run(
     .await
 }
 
-pub async fn run_generic<F, G>(
+pub async fn run_generic<F, G, Fut>(
     mut spawn_cp: F,
     num_cores: usize,
     mut spawn_dp: G,
@@ -140,10 +165,13 @@ pub async fn run_generic<F, G>(
     _master_rules: Arc<Mutex<HashMap<String, ForwardingRule>>>,
 ) -> Result<()>
 where
-    F: FnMut() -> Result<(Child, UnixStream)>,
-    G: FnMut(u32) -> Result<Child>,
+    F: FnMut() -> Result<(Child, UnixStream, UnixStream)>,
+    G: FnMut(u32) -> Fut,
+    Fut: Future<Output = Result<(Child, UnixStream)>> + Send + 'static,
 {
     let worker_map: Arc<Mutex<HashMap<u32, crate::WorkerInfo>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    let worker_req_streams: Arc<Mutex<HashMap<u32, Arc<tokio::sync::Mutex<UnixStream>>>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
     println!(
@@ -156,7 +184,7 @@ where
     }
     let listener = UnixListener::bind(&control_socket_path)?;
 
-    let (mut cp_child, mut cp_stream) = spawn_cp()?;
+    let (mut cp_child, mut cp_stream, cp_req_stream) = spawn_cp()?;
     let mut cp_pid = cp_child.id().unwrap();
     worker_map.lock().unwrap().insert(
         cp_pid,
@@ -166,6 +194,10 @@ where
             core_id: None,
         },
     );
+    worker_req_streams
+        .lock()
+        .unwrap()
+        .insert(cp_pid, Arc::new(tokio::sync::Mutex::new(cp_req_stream)));
 
     #[allow(clippy::type_complexity)]
     let mut cp_child_future: Pin<
@@ -183,7 +215,7 @@ where
     let mut dp_backoffs = HashMap::new();
 
     for core_id in 0..num_cores as u32 {
-        let mut child = spawn_dp(core_id)?;
+        let (mut child, dp_req_stream) = spawn_dp(core_id).await?;
         let pid = child.id().unwrap();
         worker_map.lock().unwrap().insert(
             pid,
@@ -193,6 +225,10 @@ where
                 core_id: Some(core_id),
             },
         );
+        worker_req_streams
+            .lock()
+            .unwrap()
+            .insert(pid, Arc::new(tokio::sync::Mutex::new(dp_req_stream)));
         dp_backoffs.insert(core_id, INITIAL_BACKOFF_MS);
         dp_futs.push(Box::pin(async move {
             let res = child.wait().await;
@@ -218,7 +254,9 @@ where
                         cp_backoff_ms = (cp_backoff_ms * 2).min(MAX_BACKOFF_MS);
                     }
                 }
-                (cp_child, cp_stream) = spawn_cp()?;
+                let (cp_child_new, cp_stream_new, cp_req_stream_new) = spawn_cp()?;
+                cp_child = cp_child_new;
+                cp_stream = cp_stream_new;
                 cp_pid = cp_child.id().unwrap();
                 worker_map.lock().unwrap().insert(
                     cp_pid,
@@ -228,6 +266,10 @@ where
                         core_id: None,
                     },
                 );
+                worker_req_streams
+                    .lock()
+                    .unwrap()
+                    .insert(cp_pid, Arc::new(tokio::sync::Mutex::new(cp_req_stream_new)));
                 cp_child_future = Box::pin(async move {
                     let res = cp_child.wait().await;
                     (cp_pid, res, cp_child)
@@ -248,7 +290,7 @@ where
                         *backoff = (*backoff * 2).min(MAX_BACKOFF_MS);
                     }
                     // Restart the worker for the specific core
-                    let mut new_child = spawn_dp(core_id)?;
+                    let (mut new_child, new_req_stream) = spawn_dp(core_id).await?;
                     let new_pid = new_child.id().unwrap();
                     worker_map.lock().unwrap().insert(
                         new_pid,
@@ -258,6 +300,10 @@ where
                             core_id: Some(core_id),
                         },
                     );
+                    worker_req_streams
+                        .lock()
+                        .unwrap()
+                        .insert(new_pid, Arc::new(tokio::sync::Mutex::new(new_req_stream)));
                     dp_futs.push(Box::pin(async move {
                         let res = new_child.wait().await;
                         (core_id, new_pid, res)
@@ -266,33 +312,71 @@ where
             }
 
             // Branch 3: A new client connected to the control socket
-            Ok((mut client_stream, _)) = listener.accept() => {
-                let worker_map_clone = worker_map.clone();
-                let mut current_cp_stream = std::mem::replace(&mut cp_stream, UnixStream::pair()?.0);
+                        Ok((mut client_stream, _)) = listener.accept() => {
+                            let worker_map_clone = worker_map.clone();
+                            let worker_req_streams_clone = worker_req_streams.clone();
+                            let mut current_cp_stream = std::mem::replace(&mut cp_stream, UnixStream::pair()?.0);
 
-                tokio::spawn(async move {
-                    use crate::{Response, SupervisorCommand};
-                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                            tokio::spawn(async move {
+                                use crate::{Response, SupervisorCommand};
+                                use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-                    let mut buffer = Vec::new();
-                    if let Ok(Ok(_)) = tokio::time::timeout(Duration::from_millis(100), client_stream.read_to_end(&mut buffer)).await {
-                        let command: Result<SupervisorCommand, _> = serde_json::from_slice(&buffer);
+                                let mut buffer = Vec::new();
+                                if let Ok(Ok(_)) = tokio::time::timeout(Duration::from_millis(100), client_stream.read_to_end(&mut buffer)).await {
+                                    let command: Result<SupervisorCommand, _> = serde_json::from_slice(&buffer);
 
-                        if let Ok(SupervisorCommand::ListWorkers) = command {
-                            let workers = worker_map_clone.lock().unwrap().values().cloned().collect();
-                            let response = Response::Workers(workers);
-                            let response_bytes = serde_json::to_vec(&response).unwrap();
-                            client_stream.write_all(&response_bytes).await.unwrap();
-                        } else {
-                            // Forward to control plane worker
-                            let (_, mut client_writer) = client_stream.split();
-                            let (mut cp_reader, mut cp_writer) = current_cp_stream.split();
+                                    match command {
+                                        Ok(SupervisorCommand::ListWorkers) => {
+                                            let workers = worker_map_clone.lock().unwrap().values().cloned().collect();
+                                            let response = Response::Workers(workers);
+                                            let response_bytes = serde_json::to_vec(&response).unwrap();
+                                            client_stream.write_all(&response_bytes).await.unwrap();
+                                        }
+                                                                    Ok(SupervisorCommand::GetWorkerRules { worker_pid }) => {
+                                                                        let stream_mutex = {
+                                                                            let req_streams = worker_req_streams_clone.lock().unwrap();
+                                                                            req_streams.get(&worker_pid).cloned()
+                                                                        };
 
-                            cp_writer.write_all(&buffer).await.unwrap();
+                                                                        if let Some(stream_mutex) = stream_mutex {
+                                                                            tokio::spawn(async move {
+                                                                                let mut stream = stream_mutex.lock().await;
+                                                                                let mut framed =
+                                                                                    Framed::new(&mut *stream, LengthDelimitedCodec::new());
+                                                                                let request = crate::ipc::Request::ListRules;
+                                                                                let bytes = serde_json::to_vec(&request).unwrap();
+                                                                                if framed.send(bytes.into()).await.is_ok() {
+                                                                                    if let Some(Ok(bytes)) = framed.next().await {
+                                                                                        let response: crate::ipc::Response =
+                                                                                            serde_json::from_slice(&bytes).unwrap();
+                                                                                        if let crate::ipc::Response::Rules(rules) = response
+                                                                                        {
+                                                                                            let response = Response::Rules(rules);
+                                                                                            let response_bytes =
+                                                                                                serde_json::to_vec(&response).unwrap();
+                                                                                            if client_stream
+                                                                                                .write_all(&response_bytes)
+                                                                                                .await
+                                                                                                .is_err()
+                                                                                            {
+                                                                                                error!("Failed to send response to client");
+                                                                                            }
+                                                                                        }
+                                                                                    }
+                                                                                }
+                                                                            });
+                                                                        }
+                                                                    }                            _ => {
+                                // Forward to control plane worker
+                                let (_, mut client_writer) = client_stream.split();
+                                let (mut cp_reader, mut cp_writer) = current_cp_stream.split();
 
-                            let worker_to_client = tokio::io::copy(&mut cp_reader, &mut client_writer);
-                            tokio::select! {
-                                _ = worker_to_client => {},
+                                cp_writer.write_all(&buffer).await.unwrap();
+
+                                let worker_to_client = tokio::io::copy(&mut cp_reader, &mut client_writer);
+                                tokio::select! {
+                                    _ = worker_to_client => {},
+                                }
                             }
                         }
                     }
@@ -342,12 +426,16 @@ mod tests {
         let cp_spawn_times = Arc::new(Mutex::new(Vec::new()));
         let cp_spawn_times_clone = cp_spawn_times.clone();
 
-        let spawn_cp = move || -> Result<(Child, UnixStream)> {
+        let spawn_cp = move || -> Result<(Child, UnixStream, UnixStream)> {
             cp_spawn_times_clone.lock().unwrap().push(Instant::now());
             let (stream, _) = UnixStream::pair()?;
-            Ok((spawn_failing_worker()?, stream))
+            let (req_stream, _) = UnixStream::pair()?;
+            Ok((spawn_failing_worker()?, stream, req_stream))
         };
-        let spawn_dp = |_core_id: u32| spawn_failing_worker();
+        let spawn_dp = |_core_id: u32| async {
+            let (req_stream, _) = UnixStream::pair()?;
+            Ok((spawn_sleeping_worker()?, req_stream))
+        };
 
         let (_tx, rx) = mpsc::channel(10);
         let master_rules = Arc::new(Mutex::new(HashMap::new()));
@@ -374,15 +462,19 @@ mod tests {
     #[tokio::test]
     async fn test_supervisor_restarts_dp_worker_with_backoff() {
         let dp_spawn_times = Arc::new(Mutex::new(Vec::new()));
-        let dp_spawn_times_clone = dp_spawn_times.clone();
-
-        let spawn_cp = || -> Result<(Child, UnixStream)> {
+        let spawn_cp = move || -> Result<(Child, UnixStream, UnixStream)> {
             let (stream, _) = UnixStream::pair()?;
-            Ok((spawn_sleeping_worker()?, stream))
+            let (req_stream, _) = UnixStream::pair()?;
+            Ok((spawn_sleeping_worker()?, stream, req_stream))
         };
+        let dp_spawn_times_clone = dp_spawn_times.clone();
         let spawn_dp = move |_core_id: u32| {
-            dp_spawn_times_clone.lock().unwrap().push(Instant::now());
-            spawn_failing_worker()
+            let dp_spawn_times = dp_spawn_times_clone.clone();
+            async move {
+                dp_spawn_times.lock().unwrap().push(Instant::now());
+                let (req_stream, _) = UnixStream::pair()?;
+                Ok((spawn_failing_worker()?, req_stream))
+            }
         };
 
         let (_tx, rx) = mpsc::channel(10);
@@ -411,19 +503,23 @@ mod tests {
     #[tokio::test]
     async fn test_supervisor_spawns_workers() {
         let pids = Arc::new(Mutex::new(Vec::new()));
-        let pids_clone_cp = pids.clone();
-        let pids_clone_dp = pids.clone();
-
-        let spawn_cp = move || -> Result<(Child, UnixStream)> {
+        let pids_clone = pids.clone();
+        let spawn_cp = move || -> Result<(Child, UnixStream, UnixStream)> {
             let child = spawn_sleeping_worker()?;
-            pids_clone_cp.lock().unwrap().push(child.id().unwrap());
+            pids_clone.lock().unwrap().push(child.id().unwrap());
             let (stream, _) = UnixStream::pair()?;
-            Ok((child, stream))
+            let (req_stream, _) = UnixStream::pair()?;
+            Ok((child, stream, req_stream))
         };
+        let pids_clone2 = pids.clone();
         let spawn_dp = move |_core_id: u32| {
-            let child = spawn_sleeping_worker()?;
-            pids_clone_dp.lock().unwrap().push(child.id().unwrap());
-            Ok(child)
+            let pids = pids_clone2.clone();
+            async move {
+                let child = spawn_sleeping_worker()?;
+                pids.lock().unwrap().push(child.id().unwrap());
+                let (req_stream, _) = UnixStream::pair()?;
+                Ok((child, req_stream))
+            }
         };
 
         let (_tx, rx) = mpsc::channel(10);
@@ -469,7 +565,7 @@ mod tests {
         let cp_spawn_times_clone = cp_spawn_times.clone();
         let cp_spawn_count = Arc::new(Mutex::new(0));
 
-        let spawn_cp = move || -> Result<(Child, UnixStream)> {
+        let spawn_cp = move || -> Result<(Child, UnixStream, UnixStream)> {
             let mut count = cp_spawn_count.lock().unwrap();
             *count += 1;
             let mut command = tokio::process::Command::new("sh");
@@ -483,10 +579,14 @@ mod tests {
 
             cp_spawn_times_clone.lock().unwrap().push(Instant::now());
             let (stream, _) = UnixStream::pair()?;
-            Ok((command.spawn()?, stream))
+            let (req_stream, _) = UnixStream::pair()?;
+            Ok((command.spawn()?, stream, req_stream))
         };
 
-        let spawn_dp = |_core_id: u32| spawn_sleeping_worker(); // Keep DP workers stable
+        let spawn_dp = |_core_id: u32| async {
+            let (req_stream, _) = UnixStream::pair()?;
+            Ok((spawn_sleeping_worker()?, req_stream))
+        };
 
         let (_tx, rx) = mpsc::channel(10);
         let master_rules = Arc::new(Mutex::new(HashMap::new()));

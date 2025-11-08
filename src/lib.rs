@@ -1,4 +1,6 @@
 use clap::Parser;
+pub mod ipc;
+
 use serde::{Deserialize, Serialize};
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
@@ -74,9 +76,12 @@ pub enum Command {
         reporting_interval: Option<u64>,
         #[arg(long)]
         socket_fd: Option<i32>,
+        #[arg(long)]
+        request_fd: Option<i32>,
     },
 }
 
+#[derive(Debug, Clone)]
 pub struct ControlPlaneConfig {
     pub uid: u32,
     pub gid: u32,
@@ -84,6 +89,7 @@ pub struct ControlPlaneConfig {
     pub prometheus_addr: Option<std::net::SocketAddr>,
     pub reporting_interval: u64,
     pub socket_fd: Option<i32>,
+    pub request_fd: Option<i32>,
 }
 
 pub struct DataPlaneConfig {
@@ -126,6 +132,9 @@ pub enum SupervisorCommand {
     ListRules,
     GetStats,
     ListWorkers,
+    GetWorkerRules {
+        worker_pid: u32,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
