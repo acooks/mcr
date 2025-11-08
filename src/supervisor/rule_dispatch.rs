@@ -117,23 +117,37 @@ impl RuleDispatcher {
     /// For now, send to ALL data plane workers. Future optimization: only send
     /// to workers handling the specific interface/core.
     pub async fn dispatch_add_rule(&mut self, rule: ForwardingRule) -> Result<()> {
-        // TODO: Step 1 - Add to active_rules
-        // self.active_rules.insert(rule.rule_id.clone(), rule.clone());
+        self.active_rules
+            .insert(rule.rule_id.clone(), rule.clone());
 
-        // TODO: Step 2 - Send to control plane worker
-        // Find control plane worker in self.workers
-        // Send RelayCommand::AddRule(rule.clone())
-        // Handle error if send fails
+        let mut cp_sent = false;
+        for handle in self.workers.values() {
+            let command = RelayCommand::AddRule(rule.clone());
+            match handle.worker_type {
+                WorkerType::ControlPlane => {
+                    handle
+                        .command_tx
+                        .send(command)
+                        .await
+                        .context("Failed to send AddRule to control plane worker")?;
+                    cp_sent = true;
+                }
+                WorkerType::DataPlane { .. } => {
+                    if let Err(e) = handle.command_tx.try_send(command) {
+                        eprintln!(
+                            "[Supervisor] Warning: Failed to send AddRule to DP worker {}: {}. Worker may be busy or restarting.",
+                            handle.pid, e
+                        );
+                    }
+                }
+            }
+        }
 
-        // TODO: Step 3 - Send to all data plane workers
-        // for (worker_id, handle) in &self.workers {
-        //     if matches!(handle.worker_type, WorkerType::DataPlane { .. }) {
-        //         // Send command with timeout
-        //         // Log warning if send fails, but continue
-        //     }
-        // }
+        if !cp_sent {
+            anyhow::bail!("Control plane worker not found, cannot dispatch rule.");
+        }
 
-        todo!("Implement rule dispatch - see comments above")
+        Ok(())
     }
 
     /// Dispatch a rule removal to all workers
@@ -146,8 +160,41 @@ impl RuleDispatcher {
     /// 3. Send RemoveRule to all data plane workers
     /// 4. Remove from active_rules only after successful dispatch
     pub async fn dispatch_remove_rule(&mut self, rule_id: &str) -> Result<()> {
-        // TODO: Implement
-        todo!("Implement rule removal dispatch")
+        if !self.has_rule(rule_id) {
+            return Ok(()); // Rule already removed, idempotent success
+        }
+
+        let command = RelayCommand::RemoveRule(rule_id.to_string());
+        let mut cp_sent = false;
+
+        for handle in self.workers.values() {
+            match handle.worker_type {
+                WorkerType::ControlPlane => {
+                    handle
+                        .command_tx
+                        .send(command.clone())
+                        .await
+                        .context("Failed to send RemoveRule to control plane worker")?;
+                    cp_sent = true;
+                }
+                WorkerType::DataPlane { .. } => {
+                    if let Err(e) = handle.command_tx.try_send(command.clone()) {
+                        eprintln!(
+                            "[Supervisor] Warning: Failed to send RemoveRule to DP worker {}: {}. Worker may be busy or restarting.",
+                            handle.pid, e
+                        );
+                    }
+                }
+            }
+        }
+
+        if !cp_sent {
+            anyhow::bail!("Control plane worker not found, cannot dispatch rule removal.");
+        }
+
+        self.active_rules.remove(rule_id);
+
+        Ok(())
     }
 
     /// Re-dispatch all active rules to a newly started worker
@@ -159,18 +206,27 @@ impl RuleDispatcher {
     ///
     /// This is critical for the supervisor's resilience model (D18).
     pub async fn resync_worker(&self, worker_id: u32) -> Result<()> {
-        // TODO: Step 1 - Find the worker handle
-        // let handle = self.workers.get(&worker_id)
-        //     .context("Worker not found")?;
+        let handle = self
+            .workers
+            .get(&worker_id)
+            .context(format!("Worker {} not found for resync", worker_id))?;
 
-        // TODO: Step 2 - Send all active rules to this worker
-        // for rule in self.active_rules.values() {
-        //     handle.command_tx.send(RelayCommand::AddRule(rule.clone()))
-        //         .await
-        //         .context("Failed to resync rule")?;
-        // }
+        println!(
+            "[Supervisor] Resyncing {} active rules to worker {}",
+            self.active_rules.len(),
+            worker_id
+        );
 
-        todo!("Implement worker resynchronization")
+        for rule in self.active_rules.values() {
+            let command = RelayCommand::AddRule(rule.clone());
+            handle
+                .command_tx
+                .send(command)
+                .await
+                .context(format!("Failed to resync rule to worker {}", worker_id))?;
+        }
+
+        Ok(())
     }
 
     /// Get the current count of active rules
@@ -228,8 +284,105 @@ mod tests {
         assert_eq!(dispatcher.worker_count(), 0);
     }
 
-    // TODO: Add test for dispatch_add_rule
-    // TODO: Add test for dispatch_remove_rule
-    // TODO: Add test for resync_worker
     // TODO: Add test for handling send failures
+
+    fn dummy_rule(id: &str) -> ForwardingRule {
+        ForwardingRule {
+            rule_id: id.to_string(),
+            ingress_iface: "eth0".to_string(),
+            egress_iface: "eth1".to_string(),
+            source_addr: "224.0.0.1:5001".parse().unwrap(),
+            destination_addr: "127.0.0.1:6001".parse().unwrap(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_add_rule() {
+        let mut dispatcher = RuleDispatcher::new();
+        let (cp_tx, mut cp_rx) = mpsc::channel(10);
+        let (dp_tx, mut dp_rx) = mpsc::channel(10);
+
+        dispatcher
+            .register_worker(1, cp_tx, WorkerType::ControlPlane)
+            .unwrap();
+        dispatcher
+            .register_worker(2, dp_tx, WorkerType::DataPlane { core_id: 0 })
+            .unwrap();
+
+        let rule = dummy_rule("rule1");
+        dispatcher.dispatch_add_rule(rule.clone()).await.unwrap();
+
+        assert!(dispatcher.has_rule("rule1"));
+        assert_eq!(dispatcher.active_rule_count(), 1);
+
+        // Verify CP worker received the command
+        let cp_cmd = cp_rx.recv().await.unwrap();
+        assert!(matches!(cp_cmd, RelayCommand::AddRule(r) if r == rule));
+
+        // Verify DP worker received the command
+        let dp_cmd = dp_rx.recv().await.unwrap();
+        assert!(matches!(dp_cmd, RelayCommand::AddRule(r) if r == rule));
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_remove_rule() {
+        let mut dispatcher = RuleDispatcher::new();
+        let (cp_tx, mut cp_rx) = mpsc::channel(10);
+        let (dp_tx, mut dp_rx) = mpsc::channel(10);
+
+        dispatcher
+            .register_worker(1, cp_tx, WorkerType::ControlPlane)
+            .unwrap();
+        dispatcher
+            .register_worker(2, dp_tx, WorkerType::DataPlane { core_id: 0 })
+            .unwrap();
+
+        let rule = dummy_rule("rule1");
+        dispatcher.dispatch_add_rule(rule).await.unwrap();
+        dispatcher.dispatch_remove_rule("rule1").await.unwrap();
+
+        assert!(!dispatcher.has_rule("rule1"));
+        assert_eq!(dispatcher.active_rule_count(), 0);
+
+        // Verify CP worker received the command
+        cp_rx.recv().await; // Consume the add
+        let cp_cmd = cp_rx.recv().await.unwrap();
+        assert!(matches!(cp_cmd, RelayCommand::RemoveRule(id) if id == "rule1"));
+
+        // Verify DP worker received the command
+        dp_rx.recv().await; // Consume the add
+        let dp_cmd = dp_rx.recv().await.unwrap();
+        assert!(matches!(dp_cmd, RelayCommand::RemoveRule(id) if id == "rule1"));
+    }
+
+    #[tokio::test]
+    async fn test_resync_worker() {
+        let mut dispatcher = RuleDispatcher::new();
+        let (worker1_tx, mut worker1_rx) = mpsc::channel(10);
+
+        // Pre-populate with rules
+        dispatcher
+            .active_rules
+            .insert("rule1".to_string(), dummy_rule("rule1"));
+        dispatcher
+            .active_rules
+            .insert("rule2".to_string(), dummy_rule("rule2"));
+
+        // Register a new worker
+        dispatcher
+            .register_worker(1, worker1_tx, WorkerType::DataPlane { core_id: 0 })
+            .unwrap();
+
+        // Resync the new worker
+        dispatcher.resync_worker(1).await.unwrap();
+
+        // Verify the worker received all active rules
+        let mut received_rules = std::collections::HashSet::new();
+        received_rules.insert(worker1_rx.recv().await.unwrap().rule_id().unwrap());
+        received_rules.insert(worker1_rx.recv().await.unwrap().rule_id().unwrap());
+
+        assert!(received_rules.contains("rule1"));
+        assert!(received_rules.contains("rule2"));
+        assert_eq!(received_rules.len(), 2);
+    }
 }
