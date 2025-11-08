@@ -4,6 +4,13 @@ use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use uuid::Uuid;
 
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct WorkerInfo {
+    pub pid: u32,
+    pub worker_type: String,
+    pub core_id: Option<u32>,
+}
+
 pub mod supervisor;
 pub mod worker;
 
@@ -115,6 +122,7 @@ pub enum SupervisorCommand {
     },
     ListRules,
     GetStats,
+    ListWorkers,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -123,6 +131,7 @@ pub enum Response {
     Error(String),
     Rules(Vec<ForwardingRule>),
     Stats(Vec<FlowStats>),
+    Workers(Vec<WorkerInfo>),
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Hash)]

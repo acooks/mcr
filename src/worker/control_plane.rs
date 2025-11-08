@@ -78,6 +78,9 @@ pub async fn control_plane_task(
                         let flows = shared_flows.lock().await;
                         Response::Stats(flows.values().map(|(_, s)| s.clone()).collect())
                     }
+                    Ok(SupervisorCommand::ListWorkers) => Response::Error(
+                        "ListWorkers command should be handled by the supervisor".to_string(),
+                    ),
                     Err(e) => Response::Error(e.to_string()),
                 };
                 let response_bytes = serde_json::to_vec(&response).unwrap();

@@ -37,8 +37,12 @@ pub enum CliCommand {
     },
     /// List all forwarding rules
     List,
-    /// Get statistics for all flows
+    /// List all active forwarding rules
+    ListRules,
+    /// Get statistics from the supervisor
     Stats,
+    /// List all worker processes
+    ListWorkers,
 }
 
 fn parse_output_destination(s: &str) -> Result<OutputDestination, String> {
@@ -90,7 +94,9 @@ pub fn build_command(cli_command: CliCommand) -> multicast_relay::SupervisorComm
             multicast_relay::SupervisorCommand::RemoveRule { rule_id }
         }
         CliCommand::List => multicast_relay::SupervisorCommand::ListRules,
+        CliCommand::ListRules => multicast_relay::SupervisorCommand::ListRules,
         CliCommand::Stats => multicast_relay::SupervisorCommand::GetStats,
+        CliCommand::ListWorkers => multicast_relay::SupervisorCommand::ListWorkers,
     }
 }
 

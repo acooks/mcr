@@ -143,6 +143,9 @@ where
     F: FnMut() -> Result<(Child, UnixStream)>,
     G: FnMut(u32) -> Result<Child>,
 {
+    let worker_map: Arc<Mutex<HashMap<u32, crate::WorkerInfo>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+
     println!(
         "[Supervisor] Starting with {} data plane workers.",
         num_cores
@@ -154,27 +157,46 @@ where
     let listener = UnixListener::bind(&control_socket_path)?;
 
     let (mut cp_child, mut cp_stream) = spawn_cp()?;
+    let mut cp_pid = cp_child.id().unwrap();
+    worker_map.lock().unwrap().insert(
+        cp_pid,
+        crate::WorkerInfo {
+            pid: cp_pid,
+            worker_type: "ControlPlane".to_string(),
+            core_id: None,
+        },
+    );
+
     #[allow(clippy::type_complexity)]
     let mut cp_child_future: Pin<
-        Box<dyn Future<Output = (Result<std::process::ExitStatus, std::io::Error>, Child)>>,
+        Box<dyn Future<Output = (u32, Result<std::process::ExitStatus, std::io::Error>, Child)>>,
     > = Box::pin(async move {
         let res = cp_child.wait().await;
-        (res, cp_child)
+        (cp_pid, res, cp_child)
     });
 
     // Use FuturesUnordered to manage all data plane worker futures
     #[allow(clippy::type_complexity)]
     let mut dp_futs: FuturesUnordered<
-        Pin<Box<dyn Future<Output = (u32, Result<std::process::ExitStatus, std::io::Error>)>>>,
+        Pin<Box<dyn Future<Output = (u32, u32, Result<std::process::ExitStatus, std::io::Error>)>>>,
     > = FuturesUnordered::new();
     let mut dp_backoffs = HashMap::new();
 
     for core_id in 0..num_cores as u32 {
         let mut child = spawn_dp(core_id)?;
+        let pid = child.id().unwrap();
+        worker_map.lock().unwrap().insert(
+            pid,
+            crate::WorkerInfo {
+                pid,
+                worker_type: "DataPlane".to_string(),
+                core_id: Some(core_id),
+            },
+        );
         dp_backoffs.insert(core_id, INITIAL_BACKOFF_MS);
         dp_futs.push(Box::pin(async move {
             let res = child.wait().await;
-            (core_id, res)
+            (core_id, pid, res)
         }));
     }
 
@@ -183,11 +205,9 @@ where
     loop {
         tokio::select! {
             // Branch 1: A control plane worker exited
-            (result, child) = &mut cp_child_future => {
-                #[allow(unused_assignments)]
-                {
-                    cp_child = child; // Move the child back
-                }
+            (pid, result, mut cp_child) = &mut cp_child_future => {
+                worker_map.lock().unwrap().remove(&pid);
+
                 if let Ok(status) = result {
                     if status.success() {
                         println!("[Supervisor] Control Plane worker exited gracefully. Restarting immediately.");
@@ -199,14 +219,24 @@ where
                     }
                 }
                 (cp_child, cp_stream) = spawn_cp()?;
+                cp_pid = cp_child.id().unwrap();
+                worker_map.lock().unwrap().insert(
+                    cp_pid,
+                    crate::WorkerInfo {
+                        pid: cp_pid,
+                        worker_type: "ControlPlane".to_string(),
+                        core_id: None,
+                    },
+                );
                 cp_child_future = Box::pin(async move {
                     let res = cp_child.wait().await;
-                    (res, cp_child)
+                    (cp_pid, res, cp_child)
                 });
             }
 
             // Branch 2: A data plane worker exited
-            Some((core_id, result)) = dp_futs.next() => {
+            Some((core_id, pid, result)) = dp_futs.next() => {
+                worker_map.lock().unwrap().remove(&pid);
                 if let Ok(status) = result {
                     let backoff = dp_backoffs.entry(core_id).or_insert(INITIAL_BACKOFF_MS);
                     if status.success() {
@@ -219,27 +249,52 @@ where
                     }
                     // Restart the worker for the specific core
                     let mut new_child = spawn_dp(core_id)?;
+                    let new_pid = new_child.id().unwrap();
+                    worker_map.lock().unwrap().insert(
+                        new_pid,
+                        crate::WorkerInfo {
+                            pid: new_pid,
+                            worker_type: "DataPlane".to_string(),
+                            core_id: Some(core_id),
+                        },
+                    );
                     dp_futs.push(Box::pin(async move {
                         let res = new_child.wait().await;
-                        (core_id, res)
+                        (core_id, new_pid, res)
                     }));
                 }
             }
 
             // Branch 3: A new client connected to the control socket
             Ok((mut client_stream, _)) = listener.accept() => {
+                let worker_map_clone = worker_map.clone();
                 let mut current_cp_stream = std::mem::replace(&mut cp_stream, UnixStream::pair()?.0);
 
                 tokio::spawn(async move {
-                    let (mut client_reader, mut client_writer) = client_stream.split();
-                    let (mut cp_reader, mut cp_writer) = current_cp_stream.split();
+                    use crate::{Response, SupervisorCommand};
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-                    let client_to_worker = tokio::io::copy(&mut client_reader, &mut cp_writer);
-                    let worker_to_client = tokio::io::copy(&mut cp_reader, &mut client_writer);
+                    let mut buffer = Vec::new();
+                    if let Ok(Ok(_)) = tokio::time::timeout(Duration::from_millis(100), client_stream.read_to_end(&mut buffer)).await {
+                        let command: Result<SupervisorCommand, _> = serde_json::from_slice(&buffer);
 
-                    tokio::select! {
-                        _ = client_to_worker => {},
-                        _ = worker_to_client => {},
+                        if let Ok(SupervisorCommand::ListWorkers) = command {
+                            let workers = worker_map_clone.lock().unwrap().values().cloned().collect();
+                            let response = Response::Workers(workers);
+                            let response_bytes = serde_json::to_vec(&response).unwrap();
+                            client_stream.write_all(&response_bytes).await.unwrap();
+                        } else {
+                            // Forward to control plane worker
+                            let (_, mut client_writer) = client_stream.split();
+                            let (mut cp_reader, mut cp_writer) = current_cp_stream.split();
+
+                            cp_writer.write_all(&buffer).await.unwrap();
+
+                            let worker_to_client = tokio::io::copy(&mut cp_reader, &mut client_writer);
+                            tokio::select! {
+                                _ = worker_to_client => {},
+                            }
+                        }
                     }
                 });
             }
