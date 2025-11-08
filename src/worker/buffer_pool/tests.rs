@@ -59,6 +59,7 @@ fn test_pool_exhaustion() {
 
 #[test]
 #[should_panic(expected = "Buffer size class mismatch")]
+#[cfg(not(tarpaulin))]
 fn test_wrong_pool_deallocation() {
     let mut pool = BufferPool::with_capacities(1, 1, 0, false);
     let small_buffer = pool.allocate(100).unwrap(); // Small
