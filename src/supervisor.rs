@@ -1,34 +1,29 @@
 use anyhow::{Context, Result};
-use futures::stream::{FuturesUnordered, StreamExt};
-use futures::SinkExt;
-use nix::sys::socket::{socketpair, AddressFamily, SockFlag, SockType};
+use futures::stream::FuturesUnordered;
+use futures::Future;
+use log::error;
+use nix::sys::socket::{sendmsg, socketpair, AddressFamily, ControlMessage, MsgFlags, SockFlag, SockType};
 use nix::unistd::{Group, User};
 use std::collections::HashMap;
-use std::future::Future;
-use std::os::unix::io::{FromRawFd, IntoRawFd};
+use std::os::unix::io::{FromRawFd, IntoRawFd, RawFd, AsRawFd};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::net::UnixStream;
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
-use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 use crate::{ForwardingRule, RelayCommand};
-use log::error;
+use futures::{stream::StreamExt, SinkExt};
+use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 const INITIAL_BACKOFF_MS: u64 = 250;
 const MAX_BACKOFF_MS: u64 = 16000; // 16 seconds
 
-// --- Production Spawning Logic ---
 
-fn get_production_base_command() -> Command {
-    let current_exe = std::env::current_exe().expect("Failed to get current executable path");
-    Command::new(current_exe)
-}
 
-pub fn spawn_control_plane_worker(
+pub async fn spawn_control_plane_worker(
     uid: u32,
     gid: u32,
     relay_command_socket_path: PathBuf,
@@ -36,22 +31,9 @@ pub fn spawn_control_plane_worker(
 ) -> Result<(Child, UnixStream, UnixStream)> {
     println!("[Supervisor] Spawning Control Plane worker.");
 
-    // Create a private socket pair for command communication.
-    let (supervisor_stream, worker_stream) = UnixStream::pair()?;
-    let _ = worker_stream.into_std()?.into_raw_fd();
+    let (supervisor_sock, _worker_sock) = UnixStream::pair()?;
 
-    // Create a socket pair for request-response communication
-    let (req_supervisor_fd, req_worker_fd) = socketpair(
-        AddressFamily::Unix,
-        SockType::Stream,
-        None,
-        SockFlag::SOCK_CLOEXEC,
-    )?;
-    let req_supervisor_stream = UnixStream::from_std(unsafe {
-        std::os::unix::net::UnixStream::from_raw_fd(req_supervisor_fd.into_raw_fd())
-    })?;
-
-    let mut command = get_production_base_command();
+    let mut command = Command::new(std::env::current_exe()?);
     command
         .arg("worker")
         .arg("--uid")
@@ -59,17 +41,18 @@ pub fn spawn_control_plane_worker(
         .arg("--gid")
         .arg(gid.to_string())
         .arg("--relay-command-socket-path")
-        .arg(relay_command_socket_path)
-        .arg("--socket-fd")
-        .arg("--request-fd")
-        .arg(req_worker_fd.into_raw_fd().to_string());
+        .arg(relay_command_socket_path);
 
     if let Some(addr) = prometheus_addr {
         command.arg("--prometheus-addr").arg(addr.to_string());
     }
 
     let child = command.spawn()?;
-    Ok((child, supervisor_stream, req_supervisor_stream))
+
+    // Send the request/response socket to the child process
+    let req_supervisor_stream = create_and_send_socketpair(&supervisor_sock).await?;
+
+    Ok((child, supervisor_sock, req_supervisor_stream))
 }
 
 pub async fn spawn_data_plane_worker(
@@ -83,22 +66,9 @@ pub async fn spawn_data_plane_worker(
         core_id
     );
 
-    // Create a socket pair for command communication
-    let (cmd_supervisor_stream, cmd_worker_stream) = UnixStream::pair()?;
-    let cmd_worker_fd = cmd_worker_stream.into_std()?.into_raw_fd();
+    let (supervisor_sock, _worker_sock) = UnixStream::pair()?;
 
-    // Create a socket pair for request-response communication
-    let (req_supervisor_fd, req_worker_fd) = socketpair(
-        AddressFamily::Unix,
-        SockType::Stream,
-        None,
-        SockFlag::SOCK_CLOEXEC,
-    )?;
-    let req_supervisor_stream = UnixStream::from_std(unsafe {
-        std::os::unix::net::UnixStream::from_raw_fd(req_supervisor_fd.into_raw_fd())
-    })?;
-
-    let mut command = get_production_base_command();
+    let mut command = Command::new(std::env::current_exe()?);
     command
         .arg("worker")
         .arg("--uid")
@@ -109,15 +79,17 @@ pub async fn spawn_data_plane_worker(
         .arg(core_id.to_string())
         .arg("--data-plane")
         .arg("--relay-command-socket-path")
-        .arg(relay_command_socket_path)
-        .arg("--request-fd")
-        .arg(req_worker_fd.into_raw_fd().to_string())
-        .arg("--command-fd")
-        .arg(cmd_worker_fd.to_string());
-    command
-        .spawn()
-        .map(|child| (child, cmd_supervisor_stream, req_supervisor_stream))
-        .map_err(anyhow::Error::from)
+        .arg(relay_command_socket_path);
+
+    let child = command.spawn()?;
+
+    // Send the request/response socket to the child process
+    let req_supervisor_stream = create_and_send_socketpair(&supervisor_sock).await?;
+
+    // Send the command socket to the child process
+    let cmd_supervisor_stream = create_and_send_socketpair(&supervisor_sock).await?;
+
+    Ok((child, cmd_supervisor_stream, req_supervisor_stream))
 }
 
 // --- Supervisor Core Logic ---
@@ -149,7 +121,12 @@ pub async fn run(
     let dp_socket_path = relay_command_socket_path.clone();
 
     run_generic(
-        move || spawn_control_plane_worker(uid, gid, cp_socket_path.clone(), prometheus_addr),
+        move || {
+            let cp_socket_path = cp_socket_path.clone();
+            async move {
+                spawn_control_plane_worker(uid, gid, cp_socket_path, prometheus_addr).await
+            }
+        },
         num_cores,
         move |core_id| {
             let dp_socket_path = dp_socket_path.clone();
@@ -162,18 +139,19 @@ pub async fn run(
     .await
 }
 
-pub async fn run_generic<F, G, Fut>(
+pub async fn run_generic<F, G, FutCp, FutDp>(
     mut spawn_cp: F,
     num_cores: usize,
     mut spawn_dp: G,
     _relay_command_rx: mpsc::Receiver<RelayCommand>,
     control_socket_path: PathBuf, // New parameter
-    _master_rules: Arc<Mutex<HashMap<String, ForwardingRule>>>,
+    master_rules: Arc<Mutex<HashMap<String, ForwardingRule>>>,
 ) -> Result<()>
 where
-    F: FnMut() -> Result<(Child, UnixStream, UnixStream)>,
-    G: FnMut(u32) -> Fut,
-    Fut: Future<Output = Result<(Child, UnixStream, UnixStream)>> + Send + 'static,
+    F: FnMut() -> FutCp,
+    G: FnMut(u32) -> FutDp,
+    FutCp: Future<Output = Result<(Child, UnixStream, UnixStream)>> + Send + 'static,
+    FutDp: Future<Output = Result<(Child, UnixStream, UnixStream)>> + Send + 'static,
 {
     let worker_map: Arc<Mutex<HashMap<u32, crate::WorkerInfo>>> =
         Arc::new(Mutex::new(HashMap::new()));
@@ -190,9 +168,17 @@ where
     if control_socket_path.exists() {
         std::fs::remove_file(&control_socket_path)?;
     }
-    let listener = UnixListener::bind(&control_socket_path)?;
+    let listener = {
+        let std_listener = std::os::unix::net::UnixListener::bind(&control_socket_path)?;
+        std_listener.set_nonblocking(true)?;
+        tokio::net::UnixListener::from_std(std_listener)?
+    };
+    println!(
+        "[Supervisor] Control socket listening on {:?}",
+        &control_socket_path
+    );
 
-    let (mut cp_child, mut cp_stream, cp_req_stream) = spawn_cp()?;
+    let (mut cp_child, mut cp_stream, cp_req_stream) = spawn_cp().await?;
     let mut cp_pid = cp_child.id().unwrap();
     worker_map.lock().unwrap().insert(
         cp_pid,
@@ -266,7 +252,7 @@ where
                         cp_backoff_ms = (cp_backoff_ms * 2).min(MAX_BACKOFF_MS);
                     }
                 }
-                let (cp_child_new, cp_stream_new, cp_req_stream_new) = spawn_cp()?;
+                let (cp_child_new, cp_stream_new, cp_req_stream_new) = spawn_cp().await?;
                 cp_child = cp_child_new;
                 cp_stream = cp_stream_new;
                 cp_pid = cp_child.id().unwrap();
@@ -333,7 +319,7 @@ where
                             let worker_map_clone = worker_map.clone();
                             let worker_req_streams_clone = worker_req_streams.clone();
                             let dp_cmd_streams_clone = dp_cmd_streams.clone();
-                            let master_rules_clone = _master_rules.clone();
+                            let master_rules_clone = master_rules.clone();
                             let mut current_cp_stream = std::mem::replace(&mut cp_stream, UnixStream::pair()?.0);
 
                             tokio::spawn(async move {
@@ -452,6 +438,53 @@ where
     }
 }
 
+/// Send a file descriptor to a worker process via SCM_RIGHTS
+///
+/// # Safety
+/// This function uses unsafe FFI to send file descriptors. The caller must ensure:
+/// - `sock` is a valid Unix domain socket
+/// - `fd` is a valid open file descriptor
+async fn send_fd(sock: &UnixStream, fd: RawFd) -> Result<()> {
+    let data = [0u8; 1];
+    let iov = [std::io::IoSlice::new(&data)];
+    let fds = [fd];
+    let cmsg = [ControlMessage::ScmRights(&fds)];
+
+    sock.ready(tokio::io::Interest::WRITABLE).await?;
+    sock.try_io(tokio::io::Interest::WRITABLE, || {
+        sendmsg::<()>(
+            sock.as_raw_fd(),
+            &iov,
+            &cmsg,
+            MsgFlags::empty(),
+            None,
+        )
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+    })?;
+
+    Ok(())
+}
+
+/// Create a socketpair and send one end to the worker, returning the supervisor's end
+///
+/// This helper reduces duplication when setting up IPC channels with workers.
+/// Creates a Unix domain socket pair with CLOEXEC and NONBLOCK flags, then
+/// sends the worker's end via file descriptor passing.
+async fn create_and_send_socketpair(supervisor_sock: &UnixStream) -> Result<UnixStream> {
+    let (supervisor_fd, worker_fd) = socketpair(
+        AddressFamily::Unix,
+        SockType::Stream,
+        None,
+        SockFlag::SOCK_CLOEXEC | SockFlag::SOCK_NONBLOCK,
+    )?;
+
+    send_fd(supervisor_sock, worker_fd.into_raw_fd()).await?;
+
+    Ok(UnixStream::from_std(unsafe {
+        std::os::unix::net::UnixStream::from_raw_fd(supervisor_fd.into_raw_fd())
+    })?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -492,11 +525,14 @@ mod tests {
         let cp_spawn_times = Arc::new(Mutex::new(Vec::new()));
         let cp_spawn_times_clone = cp_spawn_times.clone();
 
-        let spawn_cp = move || -> Result<(Child, UnixStream, UnixStream)> {
-            cp_spawn_times_clone.lock().unwrap().push(Instant::now());
-            let (stream, _) = UnixStream::pair()?;
-            let (req_stream, _) = UnixStream::pair()?;
-            Ok((spawn_failing_worker()?, stream, req_stream))
+        let spawn_cp = move || {
+            let cp_spawn_times = cp_spawn_times_clone.clone();
+            async move {
+                cp_spawn_times.lock().unwrap().push(Instant::now());
+                let (stream, _) = UnixStream::pair()?;
+                let (req_stream, _) = UnixStream::pair()?;
+                Ok((spawn_failing_worker()?, stream, req_stream))
+            }
         };
         let spawn_dp = |_core_id: u32| async {
             let (req_stream, _) = UnixStream::pair()?;
@@ -529,7 +565,7 @@ mod tests {
     #[tokio::test]
     async fn test_supervisor_restarts_dp_worker_with_backoff() {
         let dp_spawn_times = Arc::new(Mutex::new(Vec::new()));
-        let spawn_cp = move || -> Result<(Child, UnixStream, UnixStream)> {
+        let spawn_cp = move || async {
             let (stream, _) = UnixStream::pair()?;
             let (req_stream, _) = UnixStream::pair()?;
             Ok((spawn_sleeping_worker()?, stream, req_stream))
@@ -572,12 +608,15 @@ mod tests {
     async fn test_supervisor_spawns_workers() {
         let pids = Arc::new(Mutex::new(Vec::new()));
         let pids_clone = pids.clone();
-        let spawn_cp = move || -> Result<(Child, UnixStream, UnixStream)> {
-            let child = spawn_sleeping_worker()?;
-            pids_clone.lock().unwrap().push(child.id().unwrap());
-            let (stream, _) = UnixStream::pair()?;
-            let (req_stream, _) = UnixStream::pair()?;
-            Ok((child, stream, req_stream))
+        let spawn_cp = move || {
+            let pids = pids_clone.clone();
+            async move {
+                let child = spawn_sleeping_worker()?;
+                pids.lock().unwrap().push(child.id().unwrap());
+                let (stream, _) = UnixStream::pair()?;
+                let (req_stream, _) = UnixStream::pair()?;
+                Ok((child, stream, req_stream))
+            }
         };
         let pids_clone2 = pids.clone();
         let spawn_dp = move |_core_id: u32| {
@@ -634,22 +673,27 @@ mod tests {
         let cp_spawn_times_clone = cp_spawn_times.clone();
         let cp_spawn_count = Arc::new(Mutex::new(0));
 
-        let spawn_cp = move || -> Result<(Child, UnixStream, UnixStream)> {
-            let mut count = cp_spawn_count.lock().unwrap();
-            *count += 1;
-            let mut command = tokio::process::Command::new("sh");
+        let spawn_cp = move || {
+            let cp_spawn_times = cp_spawn_times_clone.clone();
+            let cp_spawn_count = cp_spawn_count.clone();
+            async move {
+                let mut count = cp_spawn_count.lock().unwrap();
+                *count += 1;
+                let mut command = tokio::process::Command::new("sh");
 
-            // Fail on the first two spawns to establish a backoff, then exit gracefully.
-            match *count {
-                1 => command.arg("-c").arg("exit 1"), // Fail
-                2 => command.arg("-c").arg("exit 0"), // Graceful exit
-                _ => command.arg("-c").arg("exit 1"), // Fail again
-            };
+                // Fail on the first two spawns to establish a backoff, then exit gracefully.
+                match *count {
+                    1 => command.arg("-c").arg("exit 1"), // Fail
+                    2 => command.arg("-c").arg("exit 0"), // Graceful exit
+                    _ => command.arg("-c").arg("exit 1"), // Fail again
+                };
+                drop(count); // Release the lock before awaiting
 
-            cp_spawn_times_clone.lock().unwrap().push(Instant::now());
-            let (stream, _) = UnixStream::pair()?;
-            let (req_stream, _) = UnixStream::pair()?;
-            Ok((command.spawn()?, stream, req_stream))
+                cp_spawn_times.lock().unwrap().push(Instant::now());
+                let (stream, _) = UnixStream::pair()?;
+                let (req_stream, _) = UnixStream::pair()?;
+                Ok((command.spawn()?, stream, req_stream))
+            }
         };
 
         let spawn_dp = |_core_id: u32| async {

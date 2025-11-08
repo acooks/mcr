@@ -2,8 +2,7 @@ use anyhow::{Context, Result};
 use log::info;
 use nix::sched::{sched_setaffinity, CpuSet};
 use nix::unistd::{getpid, Gid, Uid};
-
-use std::os::unix::io::FromRawFd;
+use std::os::unix::io::{FromRawFd, RawFd};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
@@ -24,9 +23,37 @@ use data_plane_integrated::run_data_plane as data_plane_task;
 
 use caps::{CapSet, Capability};
 use std::collections::HashSet;
+use nix::sys::socket::{recvmsg, MsgFlags};
+use std::os::unix::io::AsRawFd;
 
-// --- Common Worker Logic ---
+// ... other code ...
 
+async fn recv_fd(sock: &UnixStream) -> Result<RawFd> {
+    let mut data = [0u8; 1];
+    let mut iov = [std::io::IoSliceMut::new(&mut data)];
+    let mut cmsg_buf = nix::cmsg_space!([RawFd; 2]);
+
+    sock.ready(tokio::io::Interest::READABLE).await?;
+    let msg = sock.try_io(tokio::io::Interest::READABLE, || {
+        recvmsg::<()>(
+            sock.as_raw_fd(),
+            &mut iov,
+            Some(&mut cmsg_buf),
+            MsgFlags::empty(),
+        )
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+    })?;
+
+    for cmsg in msg.cmsgs()? {
+        if let nix::sys::socket::ControlMessageOwned::ScmRights(fds) = cmsg {
+            if let Some(&fd) = fds.first() {
+                return Ok(fd);
+            }
+        }
+    }
+
+    anyhow::bail!("No file descriptor received in SCM_RIGHTS message");
+}
 fn drop_privileges(uid: Uid, gid: Gid, caps_to_keep: Option<&HashSet<Capability>>) -> Result<()> {
     let current_uid = nix::unistd::getuid();
     let current_gid = nix::unistd::getgid();
@@ -100,27 +127,35 @@ pub async fn run_control_plane_generic<
 }
 
 pub async fn run_control_plane(config: ControlPlaneConfig) -> Result<()> {
+
     info!(
+
         "Worker process started. Attempting to drop privileges to UID '{}' and GID '{}'.",
+
         config.uid, config.gid
+
     );
+
     drop_privileges(Uid::from_raw(config.uid), Gid::from_raw(config.gid), None)?;
-    info!("Successfully dropped privileges.");
 
-    let stream = UnixStream::from_std(unsafe {
-        std::os::unix::net::UnixStream::from_raw_fd(config.socket_fd.unwrap())
-    })?;
+        let supervisor_sock =        UnixStream::from_std(unsafe { std::os::unix::net::UnixStream::from_raw_fd(3) })?;
+
+    let request_fd = recv_fd(&supervisor_sock).await?;
+
+
+
+    let stream = supervisor_sock;
+
     let relay_stream = tokio::net::UnixStream::connect(&config.relay_command_socket_path).await?;
-    let request_stream = UnixStream::from_std(unsafe {
-        std::os::unix::net::UnixStream::from_raw_fd(config.request_fd.unwrap())
-    })?;
 
-    run_control_plane_generic(stream, request_stream, relay_stream).await?;
+    let request_stream =
 
-    // Loop indefinitely to keep the worker alive.
-    loop {
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-    }
+        UnixStream::from_std(unsafe { std::os::unix::net::UnixStream::from_raw_fd(request_fd) })?;
+
+
+
+    run_control_plane_generic(stream, request_stream, relay_stream).await
+
 }
 
 // --- Worker Lifecycle Abstraction for Testing ---
@@ -168,7 +203,6 @@ impl WorkerLifecycle for DefaultWorkerLifecycle {
 pub async fn run_data_plane<T: WorkerLifecycle>(
     config: DataPlaneConfig,
     lifecycle: T,
-    command_fd: i32,
 ) -> Result<()> {
     let mut caps_to_keep = HashSet::new();
     caps_to_keep.insert(Capability::CAP_NET_RAW);
@@ -188,6 +222,11 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
         lifecycle.set_cpu_affinity(core_id as usize)?;
         info!("Successfully set CPU affinity to core {}.", core_id);
     }
+
+    let supervisor_sock =
+        UnixStream::from_std(unsafe { std::os::unix::net::UnixStream::from_raw_fd(3) })?;
+    let _request_fd = recv_fd(&supervisor_sock).await?;
+    let command_fd = recv_fd(&supervisor_sock).await?;
 
     // Bridge from the async command stream (tokio) to the sync data plane task (std::thread)
     let (std_tx, std_rx) = std::sync::mpsc::channel::<RelayCommand>();
@@ -221,19 +260,13 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
     // We run it on a blocking thread to avoid starving the tokio scheduler.
     tokio::task::spawn_blocking(move || lifecycle.run_data_plane_task(config, std_rx))
         .await?
-        .context("Data plane task failed")?;
-
-    // Loop indefinitely to keep the worker alive.
-    loop {
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-    }
+        .context("Data plane task failed")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{ControlPlaneConfig, DataPlaneConfig, ForwardingRule, RelayCommand};
-    use std::os::fd::IntoRawFd;
     use std::time::Duration;
     use tempfile::tempdir;
     use tokio::net::UnixStream;
@@ -293,8 +326,6 @@ mod tests {
             relay_command_socket_path: socket_path.clone(),
             prometheus_addr: None,
             reporting_interval: 1000,
-            socket_fd: None,
-            request_fd: Some(0),
         };
         let (task_stream, _) = UnixStream::pair().unwrap();
         let (relay_task_stream, _) = UnixStream::pair().unwrap();
@@ -359,9 +390,7 @@ mod tests {
         };
 
         // Create a dummy socket pair for the command FD
-        let (fd1, _) = std::os::unix::net::UnixStream::pair()?;
-
-        let run_future = run_data_plane(config, MockWorkerLifecycle, fd1.into_raw_fd());
+        let run_future = run_data_plane(config, MockWorkerLifecycle);
 
         let result = tokio::time::timeout(std::time::Duration::from_millis(100), run_future).await;
 
