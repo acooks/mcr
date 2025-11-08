@@ -52,11 +52,11 @@ mcr/
 ### Phase 3: Expand Test Coverage
 
 1.  **Implement Tier 2 Integration Tests:**
-    -   Create a full integration test for the Supervisor-Worker IPC, using the `nix` crate to programmatically create Unix socket pairs and verify command/response serialization.
+    -   **DONE:** Create a full integration test for the Supervisor-Worker IPC, using the `nix` crate to programmatically create Unix socket pairs and verify command/response serialization.
     -   Build a namespace-based test in `tests/integration/supervisor.rs` to verify that the supervisor can correctly restart workers after a failure.
     -   Un-ignore the existing tests in `supervisor_logic.rs` and fix them within their new home as unit tests.
 2.  **Implement Property-Based Tests:**
-    -   Create a property-based test suite in `tests/proptests/packet_parser.rs` that generates arbitrary byte streams and asserts that the `packet_parser` either correctly parses them or returns a `ParseError`, but never panics.
+    -   **DONE:** Create a property-based test suite in `tests/proptests/packet_parser.rs` that generates arbitrary byte streams and asserts that the `packet_parser` either correctly parses them or returns a `ParseError`, but never panics.
 
 ### Phase 4: Formalize E2E & Performance Testing
 
