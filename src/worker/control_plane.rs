@@ -10,9 +10,14 @@ use crate::{FlowStats, ForwardingRule, Response, SupervisorCommand};
 
 type SharedFlows = Arc<Mutex<HashMap<String, (ForwardingRule, FlowStats)>>>;
 
-pub async fn control_plane_task(
-    mut stream: tokio::net::UnixStream,
-    relay_command_tx: Arc<UnixSocketRelayCommandSender<tokio::net::UnixStream>>,
+use tokio::io::{AsyncRead, AsyncWrite};
+
+pub async fn control_plane_task<
+    S: AsyncRead + AsyncWrite + Unpin,
+    R: AsyncRead + AsyncWrite + Unpin,
+>(
+    mut stream: S,
+    relay_command_tx: Arc<UnixSocketRelayCommandSender<R>>,
     shared_flows: SharedFlows,
 ) -> Result<()> {
     loop {
@@ -101,36 +106,24 @@ pub async fn control_plane_task(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{OutputDestination, RelayCommand};
-    use std::fs;
-    use std::path::PathBuf;
-    use tokio::net::UnixListener;
-    use tokio::net::UnixStream;
+    use crate::{
+        worker::UnixSocketRelayCommandSender, OutputDestination, RelayCommand, Response,
+        SupervisorCommand,
+    };
+    use std::{collections::HashMap, sync::Arc};
+    use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
+    use tokio::sync::Mutex;
 
     #[tokio::test]
     async fn test_control_plane_task_add_rule() {
-        // Create a socket pair for the test client and the task to communicate on.
-        let (mut client_stream, task_stream) = UnixStream::pair().unwrap();
+        // Create a duplex stream for the test client and the task to communicate on.
+        let (mut client_stream, task_stream) = duplex(1024);
 
-        let relay_socket_path =
-            PathBuf::from(format!("/tmp/test_relay_command_{}.sock", Uuid::new_v4()));
-
-        // Create a listener for the relay command socket
-        let relay_listener = UnixListener::bind(&relay_socket_path).unwrap();
-
-        // Spawn a task to connect to the relay command socket
-        let relay_socket_path_clone = relay_socket_path.clone();
-        let relay_connection_task =
-            tokio::spawn(
-                async move { UnixStream::connect(&relay_socket_path_clone).await.unwrap() },
-            );
-
-        // Accept the connection on the relay listener
-        let (mut relay_stream, _) = relay_listener.accept().await.unwrap();
-        let server_relay_stream = relay_connection_task.await.unwrap();
+        // Create a duplex stream for the relay command sender
+        let (mut relay_rx, relay_tx) = duplex(1024);
 
         // Create a mock UnixSocketRelayCommandSender
-        let relay_command_tx = Arc::new(UnixSocketRelayCommandSender::new(server_relay_stream));
+        let relay_command_tx = Arc::new(UnixSocketRelayCommandSender::new(relay_tx));
 
         let shared_flows: SharedFlows = Arc::new(Mutex::new(HashMap::new()));
 
@@ -161,7 +154,7 @@ mod tests {
 
         // Verify the RelayCommand received by the mock sender
         let mut relay_buffer = [0; 1024];
-        let n = relay_stream.read(&mut relay_buffer).await.unwrap();
+        let n = relay_rx.read(&mut relay_buffer).await.unwrap();
         let received_relay_command: RelayCommand =
             serde_json::from_slice(&relay_buffer[..n]).unwrap();
         if let RelayCommand::AddRule(rule) = received_relay_command {
@@ -184,6 +177,5 @@ mod tests {
 
         // Clean up
         task.abort();
-        fs::remove_file(&relay_socket_path).unwrap();
     }
 }

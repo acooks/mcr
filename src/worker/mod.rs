@@ -6,7 +6,7 @@ use nix::unistd::{getpid, Gid, Uid};
 use std::collections::HashMap;
 use std::os::unix::io::FromRawFd;
 use std::sync::Arc;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
 
@@ -67,11 +67,11 @@ fn set_cpu_affinity(core_id: usize) -> Result<()> {
 
 // --- Relay Command Sender ---
 
-pub struct UnixSocketRelayCommandSender<T> {
+pub struct UnixSocketRelayCommandSender<T: AsyncWrite + Unpin> {
     stream: Mutex<T>,
 }
 
-impl<T: tokio::io::AsyncWrite + Unpin> UnixSocketRelayCommandSender<T> {
+impl<T: AsyncWrite + Unpin> UnixSocketRelayCommandSender<T> {
     pub fn new(stream: T) -> Self {
         Self {
             stream: Mutex::new(stream),
@@ -88,6 +88,21 @@ impl<T: tokio::io::AsyncWrite + Unpin> UnixSocketRelayCommandSender<T> {
 
 // --- Worker Entrypoints ---
 
+/// Generic control plane runner for testing purposes.
+pub async fn run_control_plane_generic<
+    S: AsyncRead + AsyncWrite + Unpin,
+    R: AsyncRead + AsyncWrite + Unpin,
+>(
+    stream: S,
+    relay_stream: R,
+) -> Result<()> {
+    let shared_flows = Arc::new(Mutex::new(
+        HashMap::<String, (ForwardingRule, FlowStats)>::new(),
+    ));
+    let data_plane_command_tx = Arc::new(UnixSocketRelayCommandSender::new(relay_stream));
+    control_plane_task(stream, data_plane_command_tx, shared_flows).await
+}
+
 pub async fn run_control_plane(config: ControlPlaneConfig) -> Result<()> {
     info!(
         "Worker process started. Attempting to drop privileges to UID '{}' and GID '{}'.",
@@ -99,16 +114,9 @@ pub async fn run_control_plane(config: ControlPlaneConfig) -> Result<()> {
     let stream = UnixStream::from_std(unsafe {
         std::os::unix::net::UnixStream::from_raw_fd(config.socket_fd.unwrap())
     })?;
-    let shared_flows = Arc::new(Mutex::new(
-        HashMap::<String, (ForwardingRule, FlowStats)>::new(),
-    ));
+    let relay_stream = tokio::net::UnixStream::connect(&config.relay_command_socket_path).await?;
 
-    // This sender is for relaying commands to the data plane.
-    let data_plane_command_tx = Arc::new(UnixSocketRelayCommandSender::new(
-        tokio::net::UnixStream::connect(&config.relay_command_socket_path).await?,
-    ));
-
-    control_plane_task(stream, data_plane_command_tx, shared_flows).await?;
+    run_control_plane_generic(stream, relay_stream).await?;
 
     // Loop indefinitely to keep the worker alive.
     loop {
@@ -152,11 +160,8 @@ pub async fn run_data_plane(config: DataPlaneConfig) -> Result<()> {
 mod tests {
     use super::*;
     use crate::{ControlPlaneConfig, DataPlaneConfig, ForwardingRule, RelayCommand};
-    use std::os::unix::io::IntoRawFd;
     use std::path::PathBuf;
     use tokio::io::AsyncReadExt;
-    use tokio::net::UnixListener;
-    use uuid::Uuid;
 
     /// **Tier 1 Unit Test**
     ///
@@ -201,52 +206,32 @@ mod tests {
     ///   and has not crashed.
     /// - **Tier:** 1 (Logic)
     #[tokio::test]
-    #[ignore]
     async fn test_run_control_plane_starts_successfully() -> anyhow::Result<()> {
-        // Proposed Implementation:
-        // 1.  **Refactor `run_control_plane`:** Modify the `run_control_plane` function
-        //     to be generic over its `stream` argument, accepting any type that
-        //     implements `tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin`.
-        // 2.  **Use In-Memory Stream:** In this test, create an in-memory stream using
-        //     `tokio::io::duplex(1024)`. Pass one half to the `run_control_plane`
-        //     function.
-        // 3.  **Remove File System Dependency:** The `relay_command_socket_path` is also
-        //     a file system dependency. The `UnixSocketRelayCommandSender` should also be
-        //     made generic to accept any `AsyncWrite` sink. This test can then provide
-        //     another duplex stream for that.
-        // 4.  **Assert Timeout:** Keep the existing logic that runs the function with a
-        //     short timeout. The test passes if the future times out, which proves it
-        //     has entered its main loop without crashing. This change makes the test
-        //     fully self-contained and removes all side-effects.
-
-        let socket_path = PathBuf::from(format!("/tmp/test_supervisor_{}.sock", Uuid::new_v4()));
-        let _listener = UnixListener::bind(&socket_path)?;
-
-        let (_client_stream, task_stream) = tokio::net::UnixStream::pair()?;
-
         // Use current process uid/gid to avoid permission errors when not running as root
         let current_uid = unsafe { libc::getuid() };
         let current_gid = unsafe { libc::getgid() };
 
-        let config = ControlPlaneConfig {
+        let _config = ControlPlaneConfig {
             uid: current_uid,
             gid: current_gid,
-            relay_command_socket_path: socket_path.clone(),
+            relay_command_socket_path: PathBuf::new(), // Not used in this test
             prometheus_addr: None,
             reporting_interval: 1,
-            socket_fd: Some(task_stream.into_std()?.into_raw_fd()),
+            socket_fd: None, // Not used in this test
         };
 
-        let run_future = run_control_plane(config);
+        let (_client_stream, task_stream) = tokio::io::duplex(1024);
+        let (_relay_client_stream, relay_task_stream) = tokio::io::duplex(1024);
+
+        let run_future = run_control_plane_generic(task_stream, relay_task_stream);
 
         let result = tokio::time::timeout(std::time::Duration::from_millis(100), run_future).await;
 
         assert!(
             result.is_err(),
-            "run_control_plane should not exit and should time out"
+            "run_control_plane_generic should not exit and should time out"
         );
 
-        std::fs::remove_file(&socket_path)?;
         Ok(())
     }
 
