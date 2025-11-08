@@ -23,9 +23,10 @@ build:
     cargo build --all-targets --features integration_test
 
 # Run all tests
+# Note: Tests run sequentially (--test-threads=1) due to supervisor test socket contention
 test:
     @echo "--- Running Unit and Integration Tests (cargo test) ---"
-    cargo test --all-targets --features integration_test -- --nocapture
+    cargo test --all-targets --features integration_test -- --test-threads=1 --nocapture
 
 # End-to-End Test
 test-e2e: build
@@ -75,10 +76,11 @@ outdated:
     @cargo outdated
 
 # Generate test coverage report
+# Note: Tests run sequentially (--test-threads=1) due to supervisor test socket contention
 coverage:
     @echo "--- Generating Test Coverage Report (cargo tarpaulin) ---"
     @command -v cargo-tarpaulin >/dev/null || cargo install cargo-tarpaulin --version 0.27.0 --locked
-    cargo tarpaulin --out html --output-dir target/tarpaulin --features integration_test --exclude-files src/main.rs "experiments/*"
+    cargo tarpaulin --out html --output-dir target/tarpaulin --features integration_test --exclude-files src/main.rs "experiments/*" -- --test-threads=1
 
 
 # Clean the project

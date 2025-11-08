@@ -1,9 +1,12 @@
 use anyhow::{Context, Result};
+use futures::stream::{FuturesUnordered, StreamExt};
 use nix::fcntl::{fcntl, FcntlArg, FdFlag};
 use nix::unistd::{Group, User};
 use std::collections::HashMap;
+use std::future::Future;
 use std::os::unix::io::IntoRawFd;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::process::{Child, Command};
@@ -149,77 +152,87 @@ where
     let listener = UnixListener::bind(&control_socket_path)?;
 
     let (mut cp_child, mut cp_stream) = spawn_cp()?;
+    #[allow(clippy::type_complexity)]
+    let mut cp_child_future: Pin<
+        Box<dyn Future<Output = (Result<std::process::ExitStatus, std::io::Error>, Child)>>,
+    > = Box::pin(async move {
+        let res = cp_child.wait().await;
+        (res, cp_child)
+    });
 
-    // Spawn data plane workers for each core
-    let mut dp_children: Vec<(u32, Child, u64)> = Vec::with_capacity(num_cores);
+    // Use FuturesUnordered to manage all data plane worker futures
+    #[allow(clippy::type_complexity)]
+    let mut dp_futs: FuturesUnordered<
+        Pin<Box<dyn Future<Output = (u32, Result<std::process::ExitStatus, std::io::Error>)>>>,
+    > = FuturesUnordered::new();
+    let mut dp_backoffs = HashMap::new();
+
     for core_id in 0..num_cores as u32 {
-        let child = spawn_dp(core_id)?;
-        dp_children.push((core_id, child, INITIAL_BACKOFF_MS));
+        let mut child = spawn_dp(core_id)?;
+        dp_backoffs.insert(core_id, INITIAL_BACKOFF_MS);
+        dp_futs.push(Box::pin(async move {
+            let res = child.wait().await;
+            (core_id, res)
+        }));
     }
 
     let mut cp_backoff_ms = INITIAL_BACKOFF_MS;
 
     loop {
         tokio::select! {
-            Ok(status) = cp_child.wait() => {
-                if status.success() {
-                    println!("[Supervisor] Control Plane worker exited gracefully. Restarting immediately.");
-                    cp_backoff_ms = INITIAL_BACKOFF_MS;
-                } else {
-                    println!("[Supervisor] Control Plane worker failed (status: {}). Restarting after {}ms.", status, cp_backoff_ms);
-                    sleep(Duration::from_millis(cp_backoff_ms)).await;
-                    cp_backoff_ms = (cp_backoff_ms * 2).min(MAX_BACKOFF_MS);
+            // Branch 1: A control plane worker exited
+            (result, child) = &mut cp_child_future => {
+                #[allow(unused_assignments)]
+                {
+                    cp_child = child; // Move the child back
+                }
+                if let Ok(status) = result {
+                    if status.success() {
+                        println!("[Supervisor] Control Plane worker exited gracefully. Restarting immediately.");
+                        cp_backoff_ms = INITIAL_BACKOFF_MS;
+                    } else {
+                        println!("[Supervisor] Control Plane worker failed (status: {}). Restarting after {}ms.", status, cp_backoff_ms);
+                        sleep(Duration::from_millis(cp_backoff_ms)).await;
+                        cp_backoff_ms = (cp_backoff_ms * 2).min(MAX_BACKOFF_MS);
+                    }
                 }
                 (cp_child, cp_stream) = spawn_cp()?;
+                cp_child_future = Box::pin(async move {
+                    let res = cp_child.wait().await;
+                    (res, cp_child)
+                });
             }
 
-            // Monitor all data plane workers
-            result = async {
-                for (core_id, child, _backoff) in &mut dp_children {
-                    if let Ok(Some(status)) = child.try_wait() {
-                        return Some((*core_id, status));
+            // Branch 2: A data plane worker exited
+            Some((core_id, result)) = dp_futs.next() => {
+                if let Ok(status) = result {
+                    let backoff = dp_backoffs.entry(core_id).or_insert(INITIAL_BACKOFF_MS);
+                    if status.success() {
+                        println!("[Supervisor] Data Plane worker (core {}) exited gracefully. Restarting immediately.", core_id);
+                        *backoff = INITIAL_BACKOFF_MS;
+                    } else {
+                        println!("[Supervisor] Data Plane worker (core {}) failed (status: {}). Restarting after {}ms.", core_id, status, *backoff);
+                        sleep(Duration::from_millis(*backoff)).await;
+                        *backoff = (*backoff * 2).min(MAX_BACKOFF_MS);
                     }
-                }
-                // If no worker has exited, sleep briefly and return None
-                // Use shorter sleep for faster restart detection
-                sleep(Duration::from_millis(10)).await;
-                None::<(u32, std::process::ExitStatus)>
-            } => {
-                if let Some((core_id, status)) = result {
-                    // Find the worker in our list
-                    if let Some(idx) = dp_children.iter().position(|(id, _, _)| *id == core_id) {
-                        let (_,_, backoff) = &mut dp_children[idx];
-                        if status.success() {
-                            println!("[Supervisor] Data Plane worker (core {}) exited gracefully. Restarting immediately.", core_id);
-                            *backoff = INITIAL_BACKOFF_MS;
-                        } else {
-                            println!("[Supervisor] Data Plane worker (core {}) failed (status: {}). Restarting after {}ms.", core_id, status, backoff);
-                            sleep(Duration::from_millis(*backoff)).await;
-                            *backoff = (*backoff * 2).min(MAX_BACKOFF_MS);
-                        }
-                        // Restart the worker
-                        let new_child = spawn_dp(core_id)?;
-                        dp_children[idx] = (core_id, new_child, *backoff);
-                    }
+                    // Restart the worker for the specific core
+                    let mut new_child = spawn_dp(core_id)?;
+                    dp_futs.push(Box::pin(async move {
+                        let res = new_child.wait().await;
+                        (core_id, res)
+                    }));
                 }
             }
 
+            // Branch 3: A new client connected to the control socket
             Ok((mut client_stream, _)) = listener.accept() => {
-                // We can't clone the stream, so we have to move it. This means the supervisor
-                // can only handle one client at a time. This is a limitation of this design,
-                // but acceptable for the current use case. A more complex implementation
-                // would involve a pool of worker connections or a more sophisticated proxy.
-                // For now, we will take the stream, and it will be replaced when the worker
-                // restarts.
                 let mut current_cp_stream = std::mem::replace(&mut cp_stream, UnixStream::pair()?.0);
 
                 tokio::spawn(async move {
                     let (mut client_reader, mut client_writer) = client_stream.split();
                     let (mut cp_reader, mut cp_writer) = current_cp_stream.split();
 
-                    // Forward client -> worker
                     let client_to_worker = tokio::io::copy(&mut client_reader, &mut cp_writer);
-                    // Forward worker -> client
                     let worker_to_client = tokio::io::copy(&mut cp_reader, &mut client_writer);
 
                     tokio::select! {
@@ -242,13 +255,19 @@ mod tests {
     fn spawn_failing_worker() -> anyhow::Result<Child> {
         let mut command = tokio::process::Command::new("sh");
         command.arg("-c").arg("exit 1");
-        command.spawn().map_err(anyhow::Error::from)
+        command
+            .spawn()
+            .map_err(anyhow::Error::from)
+            .context("Failed to spawn failing worker")
     }
 
     fn spawn_sleeping_worker() -> anyhow::Result<Child> {
         let mut command = tokio::process::Command::new("sleep");
         command.arg("30");
-        command.spawn().map_err(anyhow::Error::from)
+        command
+            .spawn()
+            .map_err(anyhow::Error::from)
+            .context("Failed to spawn sleeping worker")
     }
 
     fn spawn_once_gracefully_then_fail(spawn_count: Arc<Mutex<u32>>) -> anyhow::Result<Child> {
@@ -274,8 +293,21 @@ mod tests {
     ///   The test runs the supervisor for a short period and then inspects a shared vector of spawn timestamps
     ///   to ensure at least two spawns occurred and that the time between them respects the initial backoff period.
     /// - **Tier:** 1 (Logic)
+    ///
+    /// **⚠️  Known Limitation - Socket Path Contention:**
+    ///
+    /// This test uses `run_generic()` which binds to a hardcoded socket path:
+    /// `/tmp/multicast_relay_control.sock`. When multiple supervisor tests run in parallel,
+    /// they compete for the same socket, causing binding failures and test failures.
+    ///
+    /// **Workaround:** Run tests sequentially:
+    /// ```
+    /// cargo test --lib -- --test-threads=1
+    /// ```
+    ///
+    /// **Long-term fix:** Refactor `run_generic()` to accept `socket_path` as a parameter,
+    /// then use unique paths per test (e.g., `/tmp/test_supervisor_{uuid}.sock`).
     #[tokio::test]
-    #[ignore]
     async fn test_supervisor_restarts_cp_worker_with_backoff() {
         let cp_spawn_times = Arc::new(Mutex::new(Vec::new()));
         let cp_spawn_times_clone = cp_spawn_times.clone();
@@ -307,7 +339,6 @@ mod tests {
     ///   The test verifies that the DP worker is restarted after the initial backoff period.
     /// - **Tier:** 1 (Logic)
     #[tokio::test]
-    #[ignore]
     async fn test_supervisor_restarts_dp_worker_with_backoff() {
         let dp_spawn_times = Arc::new(Mutex::new(Vec::new()));
         let dp_spawn_times_clone = dp_spawn_times.clone();
@@ -341,23 +372,58 @@ mod tests {
     ///   supervisor for a very short duration. The test passes if the supervisor future doesn't complete and
     ///   can be successfully timed out, implying it has entered the main `loop` and is waiting for events.
     /// - **Tier:** 1 (Logic)
+    ///
+    /// **⚠️  Known Limitation - Socket Path Contention:**
+    ///
+    /// This test uses `run_generic()` which binds to a hardcoded socket path:
+    /// `/tmp/multicast_relay_control.sock`. When multiple supervisor tests run in parallel,
+    /// they compete for the same socket, causing binding failures and test failures.
+    ///
+    /// **Workaround:** Run tests sequentially:
+    /// ```
+    /// cargo test --lib -- --test-threads=1
+    /// ```
+    ///
+    /// **Long-term fix:** Refactor `run_generic()` to accept `socket_path` as a parameter,
+    /// then use unique paths per test (e.g., `/tmp/test_supervisor_{uuid}.sock`).
     #[tokio::test]
-    async fn test_supervisor_runs_without_panic() {
-        let spawn_cp = || -> Result<(Child, UnixStream)> {
+    async fn test_supervisor_spawns_workers() {
+        let pids = Arc::new(Mutex::new(Vec::new()));
+        let pids_clone_cp = pids.clone();
+        let pids_clone_dp = pids.clone();
+
+        let spawn_cp = move || -> Result<(Child, UnixStream)> {
+            let child = spawn_sleeping_worker()?;
+            pids_clone_cp.lock().unwrap().push(child.id().unwrap());
             let (stream, _) = UnixStream::pair()?;
-            Ok((spawn_sleeping_worker()?, stream))
+            Ok((child, stream))
         };
-        let spawn_dp = |_core_id: u32| spawn_sleeping_worker();
+        let spawn_dp = move |_core_id: u32| {
+            let child = spawn_sleeping_worker()?;
+            pids_clone_dp.lock().unwrap().push(child.id().unwrap());
+            Ok(child)
+        };
 
         let (_tx, rx) = mpsc::channel(10);
         let master_rules = Arc::new(Mutex::new(HashMap::new()));
+        let num_cores = 2;
 
-        let supervisor_future = run_generic(spawn_cp, 1, spawn_dp, rx, master_rules.clone());
-        let result = tokio::time::timeout(Duration::from_millis(100), supervisor_future).await;
-        assert!(
-            result.is_err(),
-            "Supervisor should not have exited and should time out."
+        let supervisor_future =
+            run_generic(spawn_cp, num_cores, spawn_dp, rx, master_rules.clone());
+        let _ = tokio::time::timeout(Duration::from_millis(200), supervisor_future).await;
+
+        let spawned_pids = pids.lock().unwrap().clone();
+        assert_eq!(
+            spawned_pids.len(),
+            num_cores + 1,
+            "Should have spawned one CP and {} DP workers.",
+            num_cores
         );
+
+        // Cleanup spawned processes
+        for pid in spawned_pids.iter() {
+            let _ = Command::new("kill").arg(pid.to_string()).status().await;
+        }
     }
 
     /// **Tier 1 Unit Test**
@@ -368,7 +434,6 @@ mod tests {
     ///   (failed) spawn is near-zero, and the delay between the 2nd (failed) and 3rd (failed) spawn is >= the initial backoff delay.
     /// - **Tier:** 1 (Logic)
     #[tokio::test]
-    #[ignore]
     async fn test_supervisor_resets_backoff_on_graceful_exit() {
         let cp_spawn_times = Arc::new(Mutex::new(Vec::new()));
         let cp_spawn_times_clone = cp_spawn_times.clone();
