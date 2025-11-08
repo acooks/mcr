@@ -26,33 +26,11 @@ use std::thread;
 use std::time::Duration;
 
 use crate::worker::{
-    BufferPool, EgressConfig, EgressLoop, EgressPacket, IngressConfig, IngressLoop,
+    buffer_pool::BufferPool,
+    egress::{EgressConfig, EgressLoop, EgressPacket},
+    ingress::{IngressConfig, IngressLoop},
 };
-use crate::ForwardingRule;
-
-/// Configuration for the integrated data plane
-#[derive(Debug, Clone)]
-pub struct DataPlaneConfig {
-    /// Network interface to capture packets from
-    pub interface_name: String,
-    /// Ingress configuration
-    pub ingress_config: IngressConfig,
-    /// Egress configuration
-    pub egress_config: EgressConfig,
-    /// Initial forwarding rules to install
-    pub initial_rules: Vec<ForwardingRule>,
-}
-
-impl Default for DataPlaneConfig {
-    fn default() -> Self {
-        Self {
-            interface_name: "lo".to_string(),
-            ingress_config: IngressConfig::default(),
-            egress_config: EgressConfig::default(),
-            initial_rules: Vec::new(),
-        }
-    }
-}
+use crate::DataPlaneConfig;
 
 /// Integrated data plane runner
 ///
@@ -94,20 +72,26 @@ impl Default for DataPlaneConfig {
 pub fn run_data_plane(config: DataPlaneConfig) -> Result<()> {
     println!(
         "[DataPlane] Starting integrated data plane on {}",
-        config.interface_name
+        config.input_interface_name.as_deref().unwrap_or("default")
     );
+
+    let ingress_config = IngressConfig {
+        ..Default::default()
+    };
+
+    let egress_config = EgressConfig {
+        ..Default::default()
+    };
 
     // Create channel for ingress→egress communication
     let (egress_tx, egress_rx) = mpsc::channel::<EgressPacket>();
 
     // Create shared buffer pool (Arc for shared ownership)
-    let buffer_pool = Arc::new(BufferPool::new(config.ingress_config.track_stats));
+    let buffer_pool = Arc::new(BufferPool::new(ingress_config.track_stats));
 
     // Clone config for threads
-    let interface_name = config.interface_name.clone();
-    let ingress_config = config.ingress_config.clone();
-    let egress_config = config.egress_config.clone();
-    let initial_rules = config.initial_rules.clone();
+    let interface_name = config.input_interface_name.clone().unwrap();
+    let initial_rules = Vec::new(); // TODO: Pass rules from control plane
 
     // Spawn ingress thread
     let ingress_handle = {
@@ -207,21 +191,4 @@ pub fn run_data_plane(config: DataPlaneConfig) -> Result<()> {
     egress_result?;
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_data_plane_config_default() {
-        let config = DataPlaneConfig::default();
-        assert_eq!(config.interface_name, "lo");
-        assert_eq!(config.ingress_config.batch_size, 32);
-        assert_eq!(config.egress_config.batch_size, 32);
-        assert!(config.initial_rules.is_empty());
-    }
-
-    // Note: Full end-to-end data plane tests require root privileges
-    // and actual network interfaces. These are tested in integration tests.
 }

@@ -2,7 +2,6 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::UnixListener;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -12,82 +11,88 @@ use crate::{FlowStats, ForwardingRule, Response, SupervisorCommand};
 type SharedFlows = Arc<Mutex<HashMap<String, (ForwardingRule, FlowStats)>>>;
 
 pub async fn control_plane_task(
-    listener: UnixListener,
+    mut stream: tokio::net::UnixStream,
     relay_command_tx: Arc<UnixSocketRelayCommandSender<tokio::net::UnixStream>>,
     shared_flows: SharedFlows,
 ) -> Result<()> {
     loop {
-        let (mut stream, _) = listener.accept().await?;
-        let relay_command_tx = relay_command_tx.clone();
-        let shared_flows = shared_flows.clone();
-        tokio::spawn(async move {
-            let mut buffer = Vec::new();
-            if stream.read_to_end(&mut buffer).await.is_err() {
-                let response = Response::Error("Failed to read command".to_string());
-                let response_bytes = serde_json::to_vec(&response).unwrap();
-                let _ = stream.write_all(&response_bytes).await;
-                return;
+        let mut buffer = vec![0; 4096]; // Read into a pre-allocated buffer
+        match stream.read(&mut buffer).await {
+            Ok(0) => {
+                // Stream closed
+                println!("[Worker] Supervisor stream closed.");
+                break;
             }
-            let command: Result<SupervisorCommand, _> = serde_json::from_slice(&buffer);
-            let response = match command {
-                Ok(SupervisorCommand::AddRule {
-                    rule_id,
-                    input_interface,
-                    input_group,
-                    input_port,
-                    outputs,
-                    dtls_enabled,
-                }) => {
-                    let rule_id = if rule_id.is_empty() {
-                        Uuid::new_v4().to_string()
-                    } else {
-                        rule_id
-                    };
-                    let rule = ForwardingRule {
-                        rule_id: rule_id.clone(),
+            Ok(n) => {
+                let command: Result<SupervisorCommand, _> = serde_json::from_slice(&buffer[..n]);
+                let response = match command {
+                    Ok(SupervisorCommand::AddRule {
+                        rule_id,
                         input_interface,
                         input_group,
                         input_port,
                         outputs,
                         dtls_enabled,
-                    };
-                    if relay_command_tx
-                        .send(crate::RelayCommand::AddRule(rule))
-                        .await
-                        .is_ok()
-                    {
-                        Response::Success(format!("Rule added with ID: {}", rule_id))
-                    } else {
-                        Response::Error("Failed to add rule".to_string())
-                    }
-                }
-                Ok(SupervisorCommand::RemoveRule { rule_id }) => {
-                    if relay_command_tx
-                        .send(crate::RelayCommand::RemoveRule {
+                    }) => {
+                        let rule_id = if rule_id.is_empty() {
+                            Uuid::new_v4().to_string()
+                        } else {
+                            rule_id
+                        };
+                        let rule = ForwardingRule {
                             rule_id: rule_id.clone(),
-                        })
-                        .await
-                        .is_ok()
-                    {
-                        Response::Success(format!("Rule {} removed", rule_id))
-                    } else {
-                        Response::Error(format!("Failed to remove rule {}", rule_id))
+                            input_interface,
+                            input_group,
+                            input_port,
+                            outputs,
+                            dtls_enabled,
+                        };
+                        if relay_command_tx
+                            .send(crate::RelayCommand::AddRule(rule))
+                            .await
+                            .is_ok()
+                        {
+                            Response::Success(format!("Rule added with ID: {}", rule_id))
+                        } else {
+                            Response::Error("Failed to add rule".to_string())
+                        }
                     }
+                    Ok(SupervisorCommand::RemoveRule { rule_id }) => {
+                        if relay_command_tx
+                            .send(crate::RelayCommand::RemoveRule {
+                                rule_id: rule_id.clone(),
+                            })
+                            .await
+                            .is_ok()
+                        {
+                            Response::Success(format!("Rule {} removed", rule_id))
+                        } else {
+                            Response::Error(format!("Failed to remove rule {}", rule_id))
+                        }
+                    }
+                    Ok(SupervisorCommand::ListRules) => {
+                        let flows = shared_flows.lock().await;
+                        Response::Rules(flows.values().map(|(r, _)| r.clone()).collect())
+                    }
+                    Ok(SupervisorCommand::GetStats) => {
+                        let flows = shared_flows.lock().await;
+                        Response::Stats(flows.values().map(|(_, s)| s.clone()).collect())
+                    }
+                    Err(e) => Response::Error(e.to_string()),
+                };
+                let response_bytes = serde_json::to_vec(&response).unwrap();
+                if stream.write_all(&response_bytes).await.is_err() {
+                    eprintln!("[Worker] Failed to write response to supervisor.");
+                    break;
                 }
-                Ok(SupervisorCommand::ListRules) => {
-                    let flows = shared_flows.lock().await;
-                    Response::Rules(flows.values().map(|(r, _)| r.clone()).collect())
-                }
-                Ok(SupervisorCommand::GetStats) => {
-                    let flows = shared_flows.lock().await;
-                    Response::Stats(flows.values().map(|(_, s)| s.clone()).collect())
-                }
-                Err(e) => Response::Error(e.to_string()),
-            };
-            let response_bytes = serde_json::to_vec(&response).unwrap();
-            let _ = stream.write_all(&response_bytes).await;
-        });
+            }
+            Err(e) => {
+                eprintln!("[Worker] Failed to read from supervisor stream: {}", e);
+                break;
+            }
+        }
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -96,12 +101,14 @@ mod tests {
     use crate::{OutputDestination, RelayCommand};
     use std::fs;
     use std::path::PathBuf;
+    use tokio::net::UnixListener;
     use tokio::net::UnixStream;
 
     #[tokio::test]
     async fn test_control_plane_task_add_rule() {
-        let socket_path = PathBuf::from(format!("/tmp/test_control_plane_{}.sock", Uuid::new_v4()));
-        let listener = UnixListener::bind(&socket_path).unwrap();
+        // Create a socket pair for the test client and the task to communicate on.
+        let (mut client_stream, task_stream) = UnixStream::pair().unwrap();
+
         let relay_socket_path =
             PathBuf::from(format!("/tmp/test_relay_command_{}.sock", Uuid::new_v4()));
 
@@ -126,16 +133,10 @@ mod tests {
 
         // Spawn the control_plane_task
         let task = tokio::spawn(async move {
-            control_plane_task(listener, relay_command_tx, shared_flows)
+            control_plane_task(task_stream, relay_command_tx, shared_flows)
                 .await
                 .unwrap();
         });
-
-        // Wait for the control plane task to start and create the socket
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        // Connect a client to the control plane socket
-        let mut client_stream = UnixStream::connect(&socket_path).await.unwrap();
 
         // Send an AddRule command
         let command = SupervisorCommand::AddRule {
@@ -180,7 +181,6 @@ mod tests {
 
         // Clean up
         task.abort();
-        fs::remove_file(&socket_path).unwrap();
         fs::remove_file(&relay_socket_path).unwrap();
     }
 }

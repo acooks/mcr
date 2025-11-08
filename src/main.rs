@@ -57,7 +57,7 @@ fn main() -> Result<()> {
                 let config = multicast_relay::DataPlaneConfig {
                     uid,
                     gid,
-                    core_id: core_id.unwrap_or(0),
+                    core_id,
                     // Data plane workers do not expose prometheus, so we can safely unwrap here.
                     prometheus_addr: prometheus_addr.unwrap_or("0.0.0.0:0".parse().unwrap()),
                     input_interface_name,

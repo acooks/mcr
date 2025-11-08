@@ -516,7 +516,7 @@ mod tests {
 
     #[test]
     fn test_buffer_size_for_payload() {
-        use crate::worker::BufferSize;
+        use crate::worker::buffer_pool::BufferSize;
 
         let packet = create_test_packet();
         let headers = parse_packet(&packet, false).unwrap();

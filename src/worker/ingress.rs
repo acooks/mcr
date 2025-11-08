@@ -28,7 +28,7 @@ use std::net::{Ipv4Addr, UdpSocket as StdUdpSocket};
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::sync::{mpsc, Arc};
 
-use crate::worker::{parse_packet, BufferPool, EgressPacket};
+use crate::worker::{buffer_pool::BufferPool, egress::EgressPacket, packet_parser::parse_packet};
 use crate::ForwardingRule;
 
 /// Statistics for the ingress loop

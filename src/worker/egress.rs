@@ -28,7 +28,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::sync::Arc;
 
-use crate::worker::{Buffer, BufferPool};
+use crate::worker::buffer_pool::{Buffer, BufferPool};
 
 /// Statistics for the egress loop
 #[derive(Debug, Clone, Default)]

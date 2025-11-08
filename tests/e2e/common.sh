@@ -7,9 +7,10 @@ NS_NAME="mcr_e2e_test_$$" # Unique namespace name per script run
 VETH_HOST="vh-$$"
 VETH_NS="vn-$$"
 IP_HOST="192.168.200.1/24"
-IP_NS="192.168.200.2/24"
+IP_NS="192.18.0.2/24"
 
 RELAY_COMMAND_SOCKET="/tmp/mcr_relay_e2e_$$.sock"
+WORKER_CONTROL_SOCKET="/tmp/multicast_relay_control.sock"
 OUTPUT_FILE="/tmp/mcr_e2e_output_$$.txt"
 
 # --- Helper Functions ---
@@ -26,7 +27,7 @@ cleanup() {
     sudo ip netns del "$NS_NAME" 2>/dev/null || true
 
     # Clean up temporary files
-    rm -f "$RELAY_COMMAND_SOCKET" "$OUTPUT_FILE"
+    rm -f "$RELAY_COMMAND_SOCKET" "$WORKER_CONTROL_SOCKET" "$OUTPUT_FILE"
 }
 
 # Function to set up an isolated network namespace
@@ -44,8 +45,8 @@ setup_namespace() {
     sudo ip netns exec "$NS_NAME" ip link set lo up
 
     # Add routes for multicast traffic
-    sudo ip route add 224.0.0.0/4 dev "$VETH_HOST" src "${IP_HOST%/*}"
-    sudo ip netns exec "$NS_NAME" ip route add 224.0.0.0/4 dev "$VETH_NS" src "${IP_NS%/*}"
+    sudo ip route add 224.0.0.0/4 dev "$VETH_HOST"
+    sudo ip netns exec "$NS_NAME" ip route add 224.0.0.0/4 dev "$VETH_NS"
 
     echo "Network namespace '$NS_NAME' created."
 }
@@ -75,11 +76,10 @@ start_relay() {
     RELAY_PID=$!
     echo "Relay started with PID $RELAY_PID."
 
-    # The socket is created by a root process, so we need to change its ownership
-    # to allow the non-root control_client to connect.
-    # We need to wait a moment for the socket to be created.
+    # The worker's control socket is created by the supervisor (as root),
+    # so we need to change its ownership to allow the control_client (as user) to connect.
     sleep 1
-    sudo chown "$(id -u):$(id -g)" "$RELAY_COMMAND_SOCKET"
+    sudo chown "$(id -u):$(id -g)" "$WORKER_CONTROL_SOCKET"
 
     sleep 1 # Give the relay time to fully initialize
 }
@@ -112,7 +112,7 @@ add_rule() {
     local output_port="$6"
     local output_interface="$7"
     echo "--- Adding forwarding rule ($rule_id) ---"
-    ./target/debug/control_client --socket-path "$RELAY_COMMAND_SOCKET" add \
+    ./target/debug/control_client --socket-path "$WORKER_CONTROL_SOCKET" add \
         --rule-id "$rule_id" \
         --input-interface "$input_interface" \
         --input-group "$input_group" \
@@ -125,7 +125,7 @@ add_rule() {
 remove_rule() {
     local rule_id="$1"
     echo "--- Removing forwarding rule ($rule_id) ---"
-    ./target/debug/control_client --socket-path "$RELAY_COMMAND_SOCKET" remove \
+    ./target/debug/control_client --socket-path "$WORKER_CONTROL_SOCKET" remove \
         --rule-id "$rule_id"
     echo "Rule removed."
 }
@@ -133,13 +133,13 @@ remove_rule() {
 # Function to list forwarding rules
 list_rules() {
     echo "--- Listing forwarding rules ---"
-    ./target/debug/control_client --socket-path "$RELAY_COMMAND_SOCKET" list
+    ./target/debug/control_client --socket-path "$WORKER_CONTROL_SOCKET" list
 }
 
 # Function to get flow statistics
 get_stats() {
     echo "--- Getting flow statistics ---"
-    ./target/debug/control_client --socket-path "$RELAY_COMMAND_SOCKET" stats
+    ./target/debug/control_client --socket-path "$WORKER_CONTROL_SOCKET" stats
 }
 
 # Function to assert the number of packets received

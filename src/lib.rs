@@ -72,7 +72,7 @@ pub struct ControlPlaneConfig {
 pub struct DataPlaneConfig {
     pub uid: u32,
     pub gid: u32,
-    pub core_id: u32,
+    pub core_id: Option<u32>,
     pub prometheus_addr: std::net::SocketAddr,
     pub input_interface_name: Option<String>,
     pub input_group: Option<Ipv4Addr>,

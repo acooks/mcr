@@ -10,7 +10,8 @@ io-uring = "0.6.4"
 libc = "0.2.155"
 metrics = "0.23.0"
 metrics-exporter-prometheus = "0.14.0"
-nix = { version = "0.30.1", features = ["socket", "user"] }
+log = "0.4"
+nix = { version = "0.30.1", features = ["sched", "process", "socket"] }
 pnet = "0.34.0"
 privdrop = "0.5.1"
 serde = { version = "1.0.209", features = ["derive"] }

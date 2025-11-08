@@ -782,6 +782,7 @@ dependencies = [
  "criterion",
  "io-uring",
  "libc",
+ "log",
  "metrics 0.23.1",
  "metrics-exporter-prometheus",
  "nix",
