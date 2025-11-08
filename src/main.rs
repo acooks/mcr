@@ -85,8 +85,9 @@ fn main() -> Result<()> {
                     reporting_interval: reporting_interval.unwrap_or(1),
                     socket_fd,
                 };
-                // Control Plane worker
-                tokio_uring::start(async {
+                // Control Plane worker - uses standard tokio runtime (no packet I/O)
+                let runtime = tokio::runtime::Runtime::new()?;
+                runtime.block_on(async {
                     if let Err(e) = worker::run_control_plane(config).await {
                         eprintln!("Control Plane worker process failed: {}", e);
                         std::process::exit(1);

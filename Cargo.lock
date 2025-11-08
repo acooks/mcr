@@ -128,6 +128,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d71b6127be86fdcfddb610f7182ac57211d4b18a3e9c82eb2d17662f2227ad6a"
 
 [[package]]
+name = "caps"
+version = "0.5.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fd1ddba47aba30b6a889298ad0109c3b8dcb0e8fc993b459daa7067d46f865e0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "cast"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -778,6 +787,7 @@ name = "multicast_relay"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "caps",
  "clap",
  "criterion",
  "io-uring",
@@ -786,8 +796,8 @@ dependencies = [
  "metrics 0.23.1",
  "metrics-exporter-prometheus",
  "nix",
+ "num_cpus",
  "pnet",
- "privdrop",
  "serde",
  "serde_json",
  "socket2 0.5.10",
@@ -1090,16 +1100,6 @@ name = "portable-atomic"
 version = "1.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f84267b20a16ea918e43c6a88433c2d54fa145c92a811b5b047ccbe153674483"
-
-[[package]]
-name = "privdrop"
-version = "0.5.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "70722a5a3728c9603c8d9469b64b8d1ee54dae6d74e24146da7f501b4c76540f"
-dependencies = [
- "libc",
- "nix",
-]
 
 [[package]]
 name = "proc-macro2"

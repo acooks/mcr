@@ -49,6 +49,13 @@ setup_namespace() {
     sudo ip netns exec "$NS_NAME" ip route add 224.0.0.0/4 dev "$VETH_NS"
 
     echo "Network namespace '$NS_NAME' created."
+
+    echo "--- Verifying user 'nobody' in namespace ---"
+    if sudo ip netns exec "$NS_NAME" id nobody; then
+        echo "User 'nobody' found in namespace."
+    else
+        echo "WARNING: User 'nobody' not found in namespace. This might be the cause of the test failure."
+    fi
 }
 
 # Function to start the UDP listener (socat) in the namespace

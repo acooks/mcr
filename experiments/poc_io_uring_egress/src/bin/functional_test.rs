@@ -52,8 +52,7 @@ fn test_basic_send_receive() -> Result<()> {
 
     // Create sender
     let config = EgressConfig::default();
-    let mut sender =
-        ConnectedEgressSender::new(config, "127.0.0.1:18000".parse().unwrap())?;
+    let mut sender = ConnectedEgressSender::new(config, "127.0.0.1:18000".parse().unwrap())?;
 
     // Send a packet
     let data = b"Hello, io_uring!";
@@ -82,8 +81,7 @@ fn test_batched_send() -> Result<()> {
         queue_depth: 128,
         ..Default::default()
     };
-    let mut sender =
-        ConnectedEgressSender::new(config, "127.0.0.1:18001".parse().unwrap())?;
+    let mut sender = ConnectedEgressSender::new(config, "127.0.0.1:18001".parse().unwrap())?;
 
     // Send 10 packets in a batch
     let data = b"Batch packet";
@@ -112,8 +110,7 @@ fn test_source_binding() -> Result<()> {
         ..Default::default()
     };
 
-    let sender =
-        ConnectedEgressSender::new(config, "127.0.0.1:18002".parse().unwrap())?;
+    let sender = ConnectedEgressSender::new(config, "127.0.0.1:18002".parse().unwrap())?;
 
     let local_addr = sender.local_addr()?;
 
@@ -133,8 +130,7 @@ fn test_statistics() -> Result<()> {
         track_stats: true,
         ..Default::default()
     };
-    let mut sender =
-        ConnectedEgressSender::new(config, "127.0.0.1:18003".parse().unwrap())?;
+    let mut sender = ConnectedEgressSender::new(config, "127.0.0.1:18003".parse().unwrap())?;
 
     // Send 5 packets
     let data = b"Stats test packet";
@@ -166,8 +162,7 @@ fn test_packet_sizes() -> Result<()> {
     receiver.set_read_timeout(Some(Duration::from_secs(1)))?;
 
     let config = EgressConfig::default();
-    let mut sender =
-        ConnectedEgressSender::new(config, "127.0.0.1:18004".parse().unwrap())?;
+    let mut sender = ConnectedEgressSender::new(config, "127.0.0.1:18004".parse().unwrap())?;
 
     let sizes = [100, 500, 1000, 1500, 4000, 8000];
 

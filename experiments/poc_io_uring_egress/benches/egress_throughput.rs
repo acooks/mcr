@@ -21,7 +21,6 @@ fn throughput_batch_sizes(c: &mut Criterion) {
 
     // Start a receiver on a port
     let receiver_port = 19000;
-    let _receiver = create_receiver(receiver_port);
 
     // Spawn a thread to drain the receiver socket
     thread::spawn(move || {
@@ -80,7 +79,6 @@ fn throughput_queue_depths(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(10));
 
     let receiver_port = 19001;
-    let _receiver = create_receiver(receiver_port);
 
     // Spawn drain thread
     thread::spawn(move || {
@@ -133,7 +131,6 @@ fn throughput_packet_sizes(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(10));
 
     let receiver_port = 19002;
-    let _receiver = create_receiver(receiver_port);
 
     thread::spawn(move || {
         let receiver = UdpSocket::bind(format!("127.0.0.1:{}", receiver_port))
@@ -184,7 +181,6 @@ fn stats_overhead(c: &mut Criterion) {
     let mut group = c.benchmark_group("stats_overhead");
 
     let receiver_port = 19003;
-    let _receiver = create_receiver(receiver_port);
 
     thread::spawn(move || {
         let receiver = UdpSocket::bind(format!("127.0.0.1:{}", receiver_port))

@@ -94,13 +94,15 @@ impl EgressSender {
         }
 
         // Set socket to non-blocking mode (required for io_uring)
-        socket.set_nonblocking(true).context("Failed to set non-blocking")?;
+        socket
+            .set_nonblocking(true)
+            .context("Failed to set non-blocking")?;
 
         let udp_socket: UdpSocket = socket.into();
 
         // Create io_uring instance
-        let ring = IoUring::new(config.queue_depth)
-            .context("Failed to create io_uring instance")?;
+        let ring =
+            IoUring::new(config.queue_depth).context("Failed to create io_uring instance")?;
 
         Ok(Self {
             ring,
@@ -227,7 +229,9 @@ impl EgressSender {
 
     /// Get the local address the socket is bound to
     pub fn local_addr(&self) -> Result<SocketAddr> {
-        self.socket.local_addr().context("Failed to get local address")
+        self.socket
+            .local_addr()
+            .context("Failed to get local address")
     }
 }
 
@@ -268,13 +272,15 @@ impl ConnectedEgressSender {
             .context("Failed to connect to destination")?;
 
         // Set socket to non-blocking mode
-        socket.set_nonblocking(true).context("Failed to set non-blocking")?;
+        socket
+            .set_nonblocking(true)
+            .context("Failed to set non-blocking")?;
 
         let udp_socket: UdpSocket = socket.into();
 
         // Create io_uring instance
-        let ring = IoUring::new(config.queue_depth)
-            .context("Failed to create io_uring instance")?;
+        let ring =
+            IoUring::new(config.queue_depth).context("Failed to create io_uring instance")?;
 
         Ok(Self {
             ring,
@@ -294,8 +300,7 @@ impl ConnectedEgressSender {
 
         // Submit all packets to submission queue
         for data in packets {
-            self.submit_send(data)
-                .context("Failed to submit packet")?;
+            self.submit_send(data).context("Failed to submit packet")?;
         }
 
         // Submit the batch to the kernel
@@ -390,7 +395,9 @@ impl ConnectedEgressSender {
 
     /// Get the local address the socket is bound to
     pub fn local_addr(&self) -> Result<SocketAddr> {
-        self.socket.local_addr().context("Failed to get local address")
+        self.socket
+            .local_addr()
+            .context("Failed to get local address")
     }
 }
 

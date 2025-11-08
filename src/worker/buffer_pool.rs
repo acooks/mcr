@@ -504,6 +504,7 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "Buffer size class mismatch")]
+    #[cfg(not(tarpaulin))]
     fn test_wrong_pool_deallocation() {
         let mut pool = BufferPool::new(false);
 
