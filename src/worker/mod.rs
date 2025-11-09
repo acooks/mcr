@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use log::info;
 use nix::sched::{sched_setaffinity, CpuSet};
 use nix::unistd::{getpid, Gid, Uid};
 use std::os::unix::io::{FromRawFd, RawFd};
@@ -62,14 +61,14 @@ fn drop_privileges(uid: Uid, gid: Gid, caps_to_keep: Option<&HashSet<Capability>
     // In this case, we're not actually dropping privileges, so don't try to set capabilities
     // (which requires root privileges)
     if current_uid == uid && current_gid == gid {
-        info!(
-            "Already running as uid={}, gid={}, skipping privilege drop",
+        eprintln!(
+            "[Worker] Already running as uid={}, gid={}, skipping privilege drop",
             uid, gid
         );
         return Ok(());
     }
 
-    info!("Dropping privileges to uid={}, gid={}", uid, gid);
+    eprintln!("[Worker] Dropping privileges to uid={}, gid={}", uid, gid);
 
     // Get the username for initgroups
     let user = nix::unistd::User::from_uid(uid)?
@@ -94,12 +93,12 @@ fn drop_privileges(uid: Uid, gid: Gid, caps_to_keep: Option<&HashSet<Capability>
             caps::raise(None, CapSet::Ambient, *cap)
                 .with_context(|| format!("Failed to raise {:?} in Ambient set", cap))?;
         }
-        info!("Successfully set capabilities (including Ambient for thread inheritance).");
+        eprintln!("[Worker] Successfully set capabilities (including Ambient for thread inheritance)");
     }
 
     // Set the UID last (irreversible)
     nix::unistd::setuid(uid).context("Failed to set UID")?;
-    info!("Successfully dropped privileges.");
+    eprintln!("[Worker] Successfully dropped privileges");
     Ok(())
 }
 
@@ -142,8 +141,8 @@ pub async fn run_control_plane_generic<S: AsyncRead + AsyncWrite + Unpin>(
 }
 
 pub async fn run_control_plane(config: ControlPlaneConfig) -> Result<()> {
-    info!(
-        "Worker process started. Attempting to drop privileges to UID '{}' and GID '{}'.",
+    eprintln!(
+        "[ControlPlane] Worker process started, dropping privileges to UID {} and GID {}",
         config.uid, config.gid
     );
 
@@ -230,8 +229,8 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
     // Temporary workaround: Don't drop privileges for data plane workers.
     // They need CAP_NET_RAW anyway, so running as root is acceptable until FD passing is implemented.
 
-    info!("Worker process started (keeping root privileges - CAP_NET_RAW required).");
-    info!("TODO: Implement AF_PACKET FD passing from supervisor for proper privilege separation.");
+    eprintln!("[DataPlane] Worker process started (keeping root privileges - CAP_NET_RAW required)");
+    eprintln!("[DataPlane] TODO: Implement AF_PACKET FD passing from supervisor for proper privilege separation");
 
     // Skip privilege drop for now
     // let mut caps_to_keep = HashSet::new();
@@ -245,7 +244,7 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
 
     if let Some(core_id) = config.core_id {
         lifecycle.set_cpu_affinity(core_id as usize)?;
-        info!("Successfully set CPU affinity to core {}.", core_id);
+        eprintln!("[DataPlane] Successfully set CPU affinity to core {}", core_id);
     }
 
     // Get FD 3 from supervisor and set it to non-blocking before wrapping in tokio UnixStream
@@ -274,7 +273,6 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
 
     tokio::spawn(async move {
         use futures::StreamExt;
-        use log::error;
         while let Some(Ok(bytes)) = framed.next().await {
             match serde_json::from_slice::<RelayCommand>(&bytes) {
                 Ok(command) => {
@@ -303,7 +301,7 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
                     });
                 }
                 Err(e) => {
-                    error!("Failed to deserialize RelayCommand: {}", e);
+                    eprintln!("[DataPlane Worker] Error: Failed to deserialize RelayCommand: {}", e);
                 }
             }
         }

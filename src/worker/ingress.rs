@@ -266,7 +266,7 @@ impl IngressLoop {
                         let bytes_received = cqe.result();
 
                         if bytes_received < 0 {
-                            log::error!("Error receiving packet: {}", bytes_received);
+                            eprintln!("[Ingress] Error receiving packet: {}", bytes_received);
                             continue;
                         }
                         let bytes_received = bytes_received as usize;
@@ -280,7 +280,7 @@ impl IngressLoop {
                         }
                     }
                     _ => {
-                        log::warn!("Unknown io_uring user_data: {}", user_data);
+                        eprintln!("[Ingress] Warning: Unknown io_uring user_data: {}", user_data);
                     }
                 }
             }
