@@ -239,3 +239,310 @@ pub fn run_data_plane(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::worker::packet_parser::parse_packet;
+    use crate::{ForwardingRule, OutputDestination};
+    use std::net::Ipv4Addr;
+
+    /// Helper function to create a valid Ethernet/IPv4/UDP packet
+    fn create_test_packet(
+        src_ip: Ipv4Addr,
+        dst_ip: Ipv4Addr,
+        src_port: u16,
+        dst_port: u16,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let mut packet = Vec::new();
+
+        // Ethernet header (14 bytes)
+        packet.extend_from_slice(&[0xFF; 6]); // Destination MAC
+        packet.extend_from_slice(&[0x00; 6]); // Source MAC
+        packet.extend_from_slice(&[0x08, 0x00]); // EtherType: IPv4
+
+        // IPv4 header (20 bytes)
+        let ip_total_len = 20 + 8 + payload.len() as u16;
+        packet.push(0x45); // Version 4, IHL 5
+        packet.push(0x00); // DSCP/ECN
+        packet.extend_from_slice(&ip_total_len.to_be_bytes());
+        packet.extend_from_slice(&[0x00, 0x01]); // Identification
+        packet.extend_from_slice(&[0x00, 0x00]); // Flags/Fragment
+        packet.push(64); // TTL
+        packet.push(17); // Protocol: UDP
+        packet.extend_from_slice(&[0x00, 0x00]); // Checksum placeholder
+
+        // IP addresses
+        packet.extend_from_slice(&src_ip.octets());
+        packet.extend_from_slice(&dst_ip.octets());
+
+        // Calculate and insert IP checksum
+        let checksum = calculate_ip_checksum(&packet[14..14 + 20]);
+        packet[24..26].copy_from_slice(&checksum.to_be_bytes());
+
+        // UDP header (8 bytes)
+        let udp_len = 8 + payload.len() as u16;
+        packet.extend_from_slice(&src_port.to_be_bytes());
+        packet.extend_from_slice(&dst_port.to_be_bytes());
+        packet.extend_from_slice(&udp_len.to_be_bytes());
+        packet.extend_from_slice(&[0x00, 0x00]); // UDP checksum
+
+        // Payload
+        packet.extend_from_slice(payload);
+
+        packet
+    }
+
+    fn calculate_ip_checksum(header: &[u8]) -> u16 {
+        let mut sum: u32 = 0;
+        for i in (0..header.len()).step_by(2) {
+            if i == 10 {
+                continue; // Skip checksum field
+            }
+            let word = if i + 1 < header.len() {
+                u16::from_be_bytes([header[i], header[i + 1]])
+            } else {
+                u16::from_be_bytes([header[i], 0])
+            };
+            sum += word as u32;
+        }
+        while sum >> 16 != 0 {
+            sum = (sum & 0xFFFF) + (sum >> 16);
+        }
+        !sum as u16
+    }
+
+    #[test]
+    fn test_packet_creation_and_parsing() {
+        let packet = create_test_packet(
+            Ipv4Addr::new(192, 168, 1, 1),
+            Ipv4Addr::new(224, 1, 1, 1),
+            5000,
+            5001,
+            b"TEST",
+        );
+
+        let parsed = parse_packet(&packet, false).expect("Should parse valid packet");
+        assert_eq!(parsed.ipv4.src_ip, Ipv4Addr::new(192, 168, 1, 1));
+        assert_eq!(parsed.ipv4.dst_ip, Ipv4Addr::new(224, 1, 1, 1));
+        assert_eq!(parsed.udp.src_port, 5000);
+        assert_eq!(parsed.udp.dst_port, 5001);
+        assert_eq!(parsed.payload_len, 4);
+        assert_eq!(&packet[parsed.payload_offset..parsed.payload_offset + parsed.payload_len], b"TEST");
+    }
+
+    #[test]
+    fn test_buffer_pool_allocation_with_packets() {
+        let mut pool = BufferPool::with_capacities(10, 5, 2, true);
+
+        // Test different packet sizes
+        let small_buf = pool.allocate(100).expect("Should allocate small");
+        assert!(small_buf.capacity() >= 100);
+
+        let standard_buf = pool.allocate(1500).expect("Should allocate standard");
+        assert!(standard_buf.capacity() >= 1500);
+
+        pool.deallocate(small_buf);
+        pool.deallocate(standard_buf);
+
+        let stats = pool.aggregate_stats();
+        assert_eq!(stats.total_allocations(), 2);
+        assert_eq!(stats.small.deallocations_total + stats.standard.deallocations_total, 2);
+    }
+
+    #[test]
+    fn test_rule_matching() {
+        let rule = ForwardingRule {
+            rule_id: "test-001".to_string(),
+            input_interface: "lo".to_string(),
+            input_group: Ipv4Addr::new(224, 1, 1, 1),
+            input_port: 5001,
+            outputs: vec![OutputDestination {
+                group: Ipv4Addr::new(239, 1, 1, 1),
+                port: 6001,
+                interface: "127.0.0.1".to_string(),
+                dtls_enabled: false,
+            }],
+            dtls_enabled: false,
+        };
+
+        // Matching packet
+        let matching_packet = create_test_packet(
+            Ipv4Addr::new(192, 168, 1, 1),
+            Ipv4Addr::new(224, 1, 1, 1),
+            5000,
+            5001,
+            b"MATCH",
+        );
+        let parsed = parse_packet(&matching_packet, false).expect("Should parse");
+        assert!(parsed.matches(rule.input_group, rule.input_port));
+
+        // Non-matching packet
+        let non_matching = create_test_packet(
+            Ipv4Addr::new(192, 168, 1, 1),
+            Ipv4Addr::new(224, 1, 1, 1),
+            5000,
+            9999, // Wrong port
+            b"NO_MATCH",
+        );
+        let parsed_no_match = parse_packet(&non_matching, false).expect("Should parse");
+        assert!(!parsed_no_match.matches(rule.input_group, rule.input_port));
+    }
+
+    #[test]
+    fn test_multi_destination_forwarding() {
+        let rule = ForwardingRule {
+            rule_id: "multi-dest".to_string(),
+            input_interface: "lo".to_string(),
+            input_group: Ipv4Addr::new(224, 1, 1, 1),
+            input_port: 5001,
+            outputs: vec![
+                OutputDestination {
+                    group: Ipv4Addr::new(239, 1, 1, 1),
+                    port: 6001,
+                    interface: "127.0.0.1".to_string(),
+                    dtls_enabled: false,
+                },
+                OutputDestination {
+                    group: Ipv4Addr::new(239, 2, 2, 2),
+                    port: 6002,
+                    interface: "127.0.0.1".to_string(),
+                    dtls_enabled: false,
+                },
+                OutputDestination {
+                    group: Ipv4Addr::new(239, 3, 3, 3),
+                    port: 6003,
+                    interface: "127.0.0.1".to_string(),
+                    dtls_enabled: false,
+                },
+            ],
+            dtls_enabled: false,
+        };
+
+        // Verify 1:3 amplification
+        assert_eq!(rule.outputs.len(), 3);
+
+        // Verify all destinations are unique
+        let mut seen = std::collections::HashSet::new();
+        for output in &rule.outputs {
+            let key = (output.group, output.port);
+            assert!(seen.insert(key), "Duplicate destination");
+        }
+    }
+
+    #[test]
+    fn test_fragmented_packet_detection() {
+        let mut packet = create_test_packet(
+            Ipv4Addr::new(192, 168, 1, 1),
+            Ipv4Addr::new(224, 1, 1, 1),
+            5000,
+            5001,
+            b"FRAG",
+        );
+
+        // Set More Fragments flag
+        packet[14 + 6] = 0x20; // MF flag
+
+        // Fragmented packets should be rejected (D30)
+        let result = parse_packet(&packet, false);
+        assert!(result.is_err());
+        assert!(matches!(result, Err(crate::worker::packet_parser::ParseError::FragmentedPacket)));
+    }
+
+    #[test]
+    fn test_error_handling_malformed_packets() {
+        // Too short
+        assert!(parse_packet(&vec![0u8; 10], false).is_err());
+
+        // Invalid EtherType
+        let mut invalid = vec![0u8; 42];
+        invalid[12] = 0x86;
+        invalid[13] = 0xDD;
+        assert!(parse_packet(&invalid, false).is_err());
+
+        // Invalid IP version
+        let mut invalid_ip = vec![0u8; 42];
+        invalid_ip[12] = 0x08;
+        invalid_ip[13] = 0x00;
+        invalid_ip[14] = 0x35; // Version 3
+        assert!(parse_packet(&invalid_ip, false).is_err());
+    }
+
+    #[test]
+    fn test_packet_size_classes() {
+        let mut pool = BufferPool::with_capacities(10, 10, 10, false);
+
+        // Small packet
+        let small = create_test_packet(
+            Ipv4Addr::new(192, 168, 1, 1),
+            Ipv4Addr::new(224, 1, 1, 1),
+            5000,
+            5001,
+            &[0u8; 100],
+        );
+        assert!(pool.allocate(small.len()).is_some());
+
+        // Standard packet (typical MTU)
+        let standard = create_test_packet(
+            Ipv4Addr::new(192, 168, 1, 1),
+            Ipv4Addr::new(224, 1, 1, 1),
+            5000,
+            5001,
+            &[0u8; 1400],
+        );
+        assert!(pool.allocate(standard.len()).is_some());
+
+        // Jumbo packet
+        let jumbo = create_test_packet(
+            Ipv4Addr::new(192, 168, 1, 1),
+            Ipv4Addr::new(224, 1, 1, 1),
+            5000,
+            5001,
+            &[0u8; 8000],
+        );
+        assert!(pool.allocate(jumbo.len()).is_some());
+    }
+
+    #[test]
+    fn test_rule_lookup_table() {
+        use std::collections::HashMap;
+
+        let mut rules = HashMap::new();
+
+        // Create 100 rules
+        for i in 0..100 {
+            let rule = ForwardingRule {
+                rule_id: format!("rule-{:03}", i),
+                input_interface: "lo".to_string(),
+                input_group: Ipv4Addr::new(224, 1, (i / 256) as u8, (i % 256) as u8),
+                input_port: 5000 + i as u16,
+                outputs: vec![OutputDestination {
+                    group: Ipv4Addr::new(239, 1, 1, 1),
+                    port: 6000 + i as u16,
+                    interface: "127.0.0.1".to_string(),
+                    dtls_enabled: false,
+                }],
+                dtls_enabled: false,
+            };
+            let key = (rule.input_group, rule.input_port);
+            rules.insert(key, rule);
+        }
+
+        // Test lookup
+        let packet = create_test_packet(
+            Ipv4Addr::new(192, 168, 1, 1),
+            Ipv4Addr::new(224, 1, 0, 50),
+            5000,
+            5050,
+            b"LOOKUP",
+        );
+
+        let parsed = parse_packet(&packet, false).expect("Should parse");
+        let key = (parsed.ipv4.dst_ip, parsed.udp.dst_port);
+
+        let found = rules.get(&key);
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().rule_id, "rule-050");
+    }
+}
