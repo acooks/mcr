@@ -1,5 +1,6 @@
 use clap::Parser;
 pub mod ipc;
+pub mod logging;
 
 use serde::{Deserialize, Serialize};
 use std::net::Ipv4Addr;
