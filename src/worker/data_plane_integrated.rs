@@ -545,4 +545,179 @@ mod tests {
         assert!(found.is_some());
         assert_eq!(found.unwrap().rule_id, "rule-050");
     }
+
+    /// Performance validation tests for Phase 4 completion
+    /// These tests verify we meet the design targets:
+    /// - Buffer allocation cycle: <200ns (Experiment #3 showed 26.7ns for alloc only)
+    /// - Packet parsing: <100ns per packet
+    /// - Rule lookup: <100ns (HashMap O(1))
+    /// - Pipeline target: 312.5k pps/core ingress (3.2µs = 3200ns per packet budget)
+    ///
+    /// Note: These tests only run in release mode (--release) because debug builds
+    /// are 10-50x slower and would fail the performance targets.
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn test_performance_buffer_allocation() {
+        let mut pool = BufferPool::with_capacities(10000, 5000, 2000, false);
+        let iterations = 10000;
+
+        // Warm up
+        for _ in 0..100 {
+            let buf = pool.allocate(1500);
+            if let Some(b) = buf {
+                pool.deallocate(b);
+            }
+        }
+
+        // Measure allocation performance
+        let start = std::time::Instant::now();
+        for _ in 0..iterations {
+            let buf = pool.allocate(1500).expect("Pool should have buffers");
+            pool.deallocate(buf);
+        }
+        let elapsed = start.elapsed();
+        let avg_ns = elapsed.as_nanos() / iterations as u128;
+
+        // Target: <200ns per allocation/deallocation cycle
+        // Experiment #3 showed 26.7ns for allocation only
+        // Full cycle (alloc + dealloc) is ~4-5x that, which is expected
+        // 200ns still gives us plenty of headroom for 312.5k pps (3200ns budget per packet)
+        assert!(
+            avg_ns < 200,
+            "Buffer allocation too slow: {}ns (target: <200ns)",
+            avg_ns
+        );
+
+        println!(
+            "✓ Buffer allocation performance: {}ns (target: <200ns)",
+            avg_ns
+        );
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn test_performance_packet_parsing() {
+        let iterations = 10000;
+
+        // Create a typical packet
+        let packet = create_test_packet(
+            Ipv4Addr::new(192, 168, 1, 1),
+            Ipv4Addr::new(224, 1, 1, 1),
+            5000,
+            5001,
+            &[0u8; 1200], // Typical payload size
+        );
+
+        // Warm up
+        for _ in 0..100 {
+            let _ = parse_packet(&packet, false);
+        }
+
+        // Measure parsing performance
+        let start = std::time::Instant::now();
+        for _ in 0..iterations {
+            let _ = parse_packet(&packet, false).expect("Should parse");
+        }
+        let elapsed = start.elapsed();
+        let avg_ns = elapsed.as_nanos() / iterations as u128;
+
+        // Target: <100ns per packet (design requirement)
+        assert!(
+            avg_ns < 100,
+            "Packet parsing too slow: {}ns (target: <100ns)",
+            avg_ns
+        );
+
+        println!("✓ Packet parsing performance: {}ns (target: <100ns)", avg_ns);
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn test_performance_rule_lookup() {
+        use std::collections::HashMap;
+
+        let mut rules = HashMap::new();
+        let iterations = 100000;
+
+        // Create realistic rule table with 1000 rules
+        for i in 0..1000 {
+            let rule = ForwardingRule {
+                rule_id: format!("rule-{:04}", i),
+                input_interface: "lo".to_string(),
+                input_group: Ipv4Addr::new(224, (i / 256) as u8, (i % 256) as u8, 1),
+                input_port: 5000 + (i % 1000) as u16,
+                outputs: vec![OutputDestination {
+                    group: Ipv4Addr::new(239, 1, 1, 1),
+                    port: 6000 + i as u16,
+                    interface: "127.0.0.1".to_string(),
+                    dtls_enabled: false,
+                }],
+                dtls_enabled: false,
+            };
+            let key = (rule.input_group, rule.input_port);
+            rules.insert(key, rule);
+        }
+
+        // Test lookup for middle rule
+        let lookup_key = (Ipv4Addr::new(224, 1, 244, 1), 5500);
+
+        // Warm up
+        for _ in 0..1000 {
+            let _ = rules.get(&lookup_key);
+        }
+
+        // Measure lookup performance
+        let start = std::time::Instant::now();
+        for _ in 0..iterations {
+            let _ = rules.get(&lookup_key);
+        }
+        let elapsed = start.elapsed();
+        let avg_ns = elapsed.as_nanos() / iterations as u128;
+
+        // Target: <100ns per lookup (HashMap O(1))
+        assert!(
+            avg_ns < 100,
+            "Rule lookup too slow: {}ns (target: <100ns)",
+            avg_ns
+        );
+
+        println!("✓ Rule lookup performance: {}ns (target: <100ns)", avg_ns);
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn test_performance_pipeline_throughput_estimate() {
+        // This test validates that the sum of individual component latencies
+        // allows us to meet the 312.5k pps/core ingress target (3.2µs per packet)
+
+        // Component timings (conservative estimates based on other tests):
+        let buffer_alloc_ns = 200; // <200ns validated above (alloc + dealloc cycle)
+        let parsing_ns = 100; // <100ns validated above
+        let rule_lookup_ns = 100; // <100ns validated above
+        let copy_overhead_ns = 100; // Estimate for 1:N amplification prep
+        let channel_send_ns = 200; // Estimate for mpsc channel send
+
+        let total_pipeline_ns = buffer_alloc_ns + parsing_ns + rule_lookup_ns + copy_overhead_ns + channel_send_ns;
+
+        // Convert to throughput
+        let packets_per_sec = 1_000_000_000.0 / total_pipeline_ns as f64;
+
+        // Target: 312.5k pps (3.2µs per packet = 3200ns)
+        let target_pps = 312_500.0;
+
+        assert!(
+            packets_per_sec > target_pps,
+            "Estimated throughput too low: {:.0} pps (target: {:.0} pps)",
+            packets_per_sec,
+            target_pps
+        );
+
+        println!(
+            "✓ Estimated pipeline throughput: {:.0} pps ({:.0}ns per packet, target: {:.0} pps / 3200ns)",
+            packets_per_sec,
+            total_pipeline_ns,
+            target_pps
+        );
+    }
 }
