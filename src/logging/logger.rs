@@ -65,21 +65,17 @@ impl Logger {
     /// Check if a log message should be written based on severity filtering
     #[inline]
     fn should_log(&self, severity: Severity, facility: Facility) -> bool {
-        // Fast path: Check global minimum level first (atomic load ~5ns)
-        let global_min = self.global_min_level.load(Ordering::Relaxed);
-        if (severity as u8) > global_min {
-            return false; // Severity is lower priority than global minimum
-        }
-
-        // Slow path: Check facility-specific level (RwLock read + hash ~20-50ns)
+        // Check facility-specific level first (if set, it overrides global)
         let levels = self.facility_min_levels.read().unwrap();
         if let Some(&min_level) = levels.get(&facility) {
-            if severity > min_level {
-                return false; // Severity is lower priority than facility minimum
-            }
+            // Facility-specific level is set - use it
+            return severity <= min_level;
         }
+        drop(levels); // Release lock before atomic load
 
-        true
+        // No facility-specific level - use global minimum level
+        let global_min = self.global_min_level.load(Ordering::Relaxed);
+        (severity as u8) <= global_min
     }
 
     /// Write a log entry
@@ -402,5 +398,203 @@ mod tests {
         logger.notice(Facility::Test, "Notice");
         logger.info(Facility::Test, "Info");
         logger.debug(Facility::Test, "Debug");
+    }
+
+    #[test]
+    fn test_global_log_level_filtering() {
+        let ringbuffer = Arc::new(MPSCRingBuffer::new(16));
+        let global_min_level = Arc::new(AtomicU8::new(Severity::Warning as u8));
+        let facility_min_levels = Arc::new(RwLock::new(std::collections::HashMap::new()));
+        let logger = Logger::from_mpsc(
+            Arc::clone(&ringbuffer),
+            global_min_level,
+            facility_min_levels,
+        );
+
+        // These should be written (Warning and above)
+        logger.emergency(Facility::Test, "Emergency");
+        logger.alert(Facility::Test, "Alert");
+        logger.critical(Facility::Test, "Critical");
+        logger.error(Facility::Test, "Error");
+        logger.warning(Facility::Test, "Warning");
+
+        // These should be filtered out (below Warning)
+        logger.notice(Facility::Test, "Notice");
+        logger.info(Facility::Test, "Info");
+        logger.debug(Facility::Test, "Debug");
+
+        // Read all entries from the ring buffer
+        let mut count = 0;
+        while ringbuffer.read().is_some() {
+            count += 1;
+        }
+
+        // Should have exactly 5 entries (Emergency through Warning)
+        assert_eq!(count, 5, "Expected 5 log entries to pass the filter");
+    }
+
+    #[test]
+    fn test_facility_specific_log_level() {
+        let ringbuffer = Arc::new(MPSCRingBuffer::new(16));
+        let global_min_level = Arc::new(AtomicU8::new(Severity::Warning as u8));
+        let facility_min_levels = Arc::new(RwLock::new(std::collections::HashMap::new()));
+
+        // Set facility-specific level for Test facility to Debug
+        {
+            let mut levels = facility_min_levels.write().unwrap();
+            levels.insert(Facility::Test, Severity::Debug);
+        }
+
+        let logger = Logger::from_mpsc(
+            Arc::clone(&ringbuffer),
+            global_min_level,
+            facility_min_levels,
+        );
+
+        // All of these should be written because Test facility allows Debug and above
+        logger.emergency(Facility::Test, "Emergency");
+        logger.alert(Facility::Test, "Alert");
+        logger.critical(Facility::Test, "Critical");
+        logger.error(Facility::Test, "Error");
+        logger.warning(Facility::Test, "Warning");
+        logger.notice(Facility::Test, "Notice");
+        logger.info(Facility::Test, "Info");
+        logger.debug(Facility::Test, "Debug");
+
+        // Count entries
+        let mut count = 0;
+        while ringbuffer.read().is_some() {
+            count += 1;
+        }
+
+        // Should have all 8 entries
+        assert_eq!(
+            count, 8,
+            "Expected all 8 log entries to pass with facility-specific Debug level"
+        );
+    }
+
+    #[test]
+    fn test_facility_level_overrides_global() {
+        let ringbuffer_test = Arc::new(MPSCRingBuffer::new(16));
+        let ringbuffer_supervisor = Arc::new(MPSCRingBuffer::new(16));
+        let global_min_level = Arc::new(AtomicU8::new(Severity::Error as u8));
+        let facility_min_levels = Arc::new(RwLock::new(std::collections::HashMap::new()));
+
+        // Set Test facility to Info (more permissive than global Error)
+        {
+            let mut levels = facility_min_levels.write().unwrap();
+            levels.insert(Facility::Test, Severity::Info);
+        }
+
+        let logger_test = Logger::from_mpsc(
+            Arc::clone(&ringbuffer_test),
+            Arc::clone(&global_min_level),
+            Arc::clone(&facility_min_levels),
+        );
+        let logger_supervisor = Logger::from_mpsc(
+            Arc::clone(&ringbuffer_supervisor),
+            Arc::clone(&global_min_level),
+            Arc::clone(&facility_min_levels),
+        );
+
+        // Test facility should allow Info
+        logger_test.info(Facility::Test, "Info from Test");
+        logger_test.warning(Facility::Test, "Warning from Test");
+        logger_test.error(Facility::Test, "Error from Test");
+
+        // Supervisor facility should use global level (Error)
+        logger_supervisor.info(Facility::Supervisor, "Info from Supervisor");
+        logger_supervisor.warning(Facility::Supervisor, "Warning from Supervisor");
+        logger_supervisor.error(Facility::Supervisor, "Error from Supervisor");
+
+        // Count Test facility entries (should have all 3)
+        let mut test_count = 0;
+        while ringbuffer_test.read().is_some() {
+            test_count += 1;
+        }
+        assert_eq!(
+            test_count, 3,
+            "Test facility should have 3 entries with Info level"
+        );
+
+        // Count Supervisor facility entries (should have only 1 - Error)
+        let mut supervisor_count = 0;
+        while ringbuffer_supervisor.read().is_some() {
+            supervisor_count += 1;
+        }
+        assert_eq!(
+            supervisor_count, 1,
+            "Supervisor facility should have 1 entry with global Error level"
+        );
+    }
+
+    #[test]
+    fn test_set_and_get_log_levels() {
+        let registry = LogRegistry::new_mpsc();
+
+        // Default global level should be Info
+        assert_eq!(registry.get_global_level(), Severity::Info);
+
+        // Set global level to Warning
+        registry.set_global_level(Severity::Warning);
+        assert_eq!(registry.get_global_level(), Severity::Warning);
+
+        // Set facility-specific level
+        registry.set_facility_level(Facility::Ingress, Severity::Debug);
+        assert_eq!(
+            registry.get_facility_level(Facility::Ingress),
+            Severity::Debug
+        );
+
+        // Facility without override should return global level
+        assert_eq!(
+            registry.get_facility_level(Facility::Egress),
+            Severity::Warning
+        );
+
+        // Clear facility level
+        registry.clear_facility_level(Facility::Ingress);
+        assert_eq!(
+            registry.get_facility_level(Facility::Ingress),
+            Severity::Warning
+        );
+
+        // Get all facility levels
+        registry.set_facility_level(Facility::Ingress, Severity::Error);
+        registry.set_facility_level(Facility::Egress, Severity::Critical);
+        let all_levels = registry.get_all_facility_levels();
+        assert_eq!(all_levels.len(), 2);
+        assert_eq!(all_levels.get(&Facility::Ingress), Some(&Severity::Error));
+        assert_eq!(all_levels.get(&Facility::Egress), Some(&Severity::Critical));
+    }
+
+    #[test]
+    fn test_log_level_filtering_edge_cases() {
+        let ringbuffer = Arc::new(MPSCRingBuffer::new(16));
+        let global_min_level = Arc::new(AtomicU8::new(Severity::Info as u8));
+        let facility_min_levels = Arc::new(RwLock::new(std::collections::HashMap::new()));
+        let logger = Logger::from_mpsc(
+            Arc::clone(&ringbuffer),
+            global_min_level,
+            facility_min_levels,
+        );
+
+        // Log exactly at the threshold (should be included)
+        logger.info(Facility::Test, "Info at threshold");
+
+        // Log just above threshold (should be included)
+        logger.notice(Facility::Test, "Notice above threshold");
+
+        // Log just below threshold (should be filtered)
+        logger.debug(Facility::Test, "Debug below threshold");
+
+        let mut count = 0;
+        while ringbuffer.read().is_some() {
+            count += 1;
+        }
+
+        // Should have 2 entries (Info and Notice, but not Debug)
+        assert_eq!(count, 2, "Expected 2 log entries at and above Info level");
     }
 }

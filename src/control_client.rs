@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
+use multicast_relay::logging::{Facility, Severity};
 use multicast_relay::OutputDestination;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
@@ -43,6 +44,29 @@ pub enum CliCommand {
     Stats,
     /// List all worker processes
     ListWorkers,
+    /// Log level control
+    LogLevel {
+        #[clap(subcommand)]
+        action: LogLevelAction,
+    },
+}
+
+#[derive(Parser, Debug)]
+pub enum LogLevelAction {
+    /// Get current log levels
+    Get,
+    /// Set log level
+    Set {
+        /// Set global log level
+        #[arg(long, conflicts_with = "facility")]
+        global: Option<String>,
+        /// Set log level for specific facility
+        #[arg(long, requires = "level")]
+        facility: Option<String>,
+        /// Log level to set
+        #[arg(long)]
+        level: Option<String>,
+    },
 }
 
 fn parse_output_destination(s: &str) -> Result<OutputDestination, String> {
@@ -74,8 +98,47 @@ fn parse_output_destination(s: &str) -> Result<OutputDestination, String> {
     })
 }
 
-pub fn build_command(cli_command: CliCommand) -> multicast_relay::SupervisorCommand {
-    match cli_command {
+fn parse_severity(s: &str) -> Result<Severity, String> {
+    match s.to_lowercase().as_str() {
+        "emergency" | "emerg" => Ok(Severity::Emergency),
+        "alert" => Ok(Severity::Alert),
+        "critical" | "crit" => Ok(Severity::Critical),
+        "error" | "err" => Ok(Severity::Error),
+        "warning" | "warn" => Ok(Severity::Warning),
+        "notice" => Ok(Severity::Notice),
+        "info" | "informational" => Ok(Severity::Info),
+        "debug" => Ok(Severity::Debug),
+        _ => Err(format!(
+            "Invalid severity level: {}. Valid values: emergency, alert, critical, error, warning, notice, info, debug",
+            s
+        )),
+    }
+}
+
+fn parse_facility(s: &str) -> Result<Facility, String> {
+    match s {
+        "Supervisor" => Ok(Facility::Supervisor),
+        "RuleDispatch" => Ok(Facility::RuleDispatch),
+        "ControlSocket" => Ok(Facility::ControlSocket),
+        "ControlPlane" => Ok(Facility::ControlPlane),
+        "DataPlane" => Ok(Facility::DataPlane),
+        "Ingress" => Ok(Facility::Ingress),
+        "Egress" => Ok(Facility::Egress),
+        "BufferPool" => Ok(Facility::BufferPool),
+        "PacketParser" => Ok(Facility::PacketParser),
+        "Stats" => Ok(Facility::Stats),
+        "Security" => Ok(Facility::Security),
+        "Network" => Ok(Facility::Network),
+        "Test" => Ok(Facility::Test),
+        _ => Err(format!(
+            "Invalid facility: {}. Valid values: Supervisor, RuleDispatch, ControlSocket, ControlPlane, DataPlane, Ingress, Egress, BufferPool, PacketParser, Stats, Security, Network, Test",
+            s
+        )),
+    }
+}
+
+pub fn build_command(cli_command: CliCommand) -> Result<multicast_relay::SupervisorCommand> {
+    Ok(match cli_command {
         CliCommand::Add {
             rule_id,
             input_interface,
@@ -97,7 +160,31 @@ pub fn build_command(cli_command: CliCommand) -> multicast_relay::SupervisorComm
         CliCommand::ListRules => multicast_relay::SupervisorCommand::ListRules,
         CliCommand::Stats => multicast_relay::SupervisorCommand::GetStats,
         CliCommand::ListWorkers => multicast_relay::SupervisorCommand::ListWorkers,
-    }
+        CliCommand::LogLevel { action } => match action {
+            LogLevelAction::Get => multicast_relay::SupervisorCommand::GetLogLevels,
+            LogLevelAction::Set {
+                global,
+                facility,
+                level,
+            } => {
+                if let Some(level_str) = global {
+                    let level = parse_severity(&level_str)
+                        .map_err(|e| anyhow::anyhow!("{}", e))?;
+                    multicast_relay::SupervisorCommand::SetGlobalLogLevel { level }
+                } else if let (Some(facility_str), Some(level_str)) = (facility, level) {
+                    let facility = parse_facility(&facility_str)
+                        .map_err(|e| anyhow::anyhow!("{}", e))?;
+                    let level = parse_severity(&level_str)
+                        .map_err(|e| anyhow::anyhow!("{}", e))?;
+                    multicast_relay::SupervisorCommand::SetFacilityLogLevel { facility, level }
+                } else {
+                    return Err(anyhow::anyhow!(
+                        "Must specify either --global <LEVEL> or --facility <FACILITY> --level <LEVEL>"
+                    ));
+                }
+            }
+        },
+    })
 }
 
 #[cfg(not(test))]
@@ -108,7 +195,7 @@ async fn main() -> Result<()> {
     use tokio::net::UnixStream;
 
     let args = Args::parse();
-    let command = build_command(args.command);
+    let command = build_command(args.command)?;
 
     let mut stream = UnixStream::connect(args.socket_path).await?;
     let command_bytes = serde_json::to_vec(&command)?;
@@ -209,7 +296,7 @@ mod tests {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::UnixStream;
 
-        let command = build_command(command);
+        let command = build_command(command)?;
 
         let mut stream = UnixStream::connect(socket_path).await?;
         let command_bytes = serde_json::to_vec(&command)?;
@@ -224,5 +311,93 @@ mod tests {
         let _ = serde_json::to_string_pretty(&response)?;
 
         Ok(())
+    }
+
+    #[test]
+    fn test_parse_severity() {
+        // Valid values
+        assert_eq!(parse_severity("emergency").unwrap(), Severity::Emergency);
+        assert_eq!(parse_severity("emerg").unwrap(), Severity::Emergency);
+        assert_eq!(parse_severity("EMERGENCY").unwrap(), Severity::Emergency);
+        assert_eq!(parse_severity("alert").unwrap(), Severity::Alert);
+        assert_eq!(parse_severity("critical").unwrap(), Severity::Critical);
+        assert_eq!(parse_severity("crit").unwrap(), Severity::Critical);
+        assert_eq!(parse_severity("error").unwrap(), Severity::Error);
+        assert_eq!(parse_severity("err").unwrap(), Severity::Error);
+        assert_eq!(parse_severity("warning").unwrap(), Severity::Warning);
+        assert_eq!(parse_severity("warn").unwrap(), Severity::Warning);
+        assert_eq!(parse_severity("notice").unwrap(), Severity::Notice);
+        assert_eq!(parse_severity("info").unwrap(), Severity::Info);
+        assert_eq!(parse_severity("informational").unwrap(), Severity::Info);
+        assert_eq!(parse_severity("debug").unwrap(), Severity::Debug);
+
+        // Invalid value
+        assert!(parse_severity("invalid").is_err());
+    }
+
+    #[test]
+    fn test_parse_facility() {
+        // Valid values
+        assert_eq!(parse_facility("Supervisor").unwrap(), Facility::Supervisor);
+        assert_eq!(parse_facility("Ingress").unwrap(), Facility::Ingress);
+        assert_eq!(parse_facility("Egress").unwrap(), Facility::Egress);
+        assert_eq!(parse_facility("DataPlane").unwrap(), Facility::DataPlane);
+
+        // Invalid value
+        assert!(parse_facility("InvalidFacility").is_err());
+    }
+
+    #[test]
+    fn test_build_log_level_commands() {
+        // Test GetLogLevels
+        let cmd = CliCommand::LogLevel {
+            action: LogLevelAction::Get,
+        };
+        let supervisor_cmd = build_command(cmd).unwrap();
+        assert!(matches!(
+            supervisor_cmd,
+            multicast_relay::SupervisorCommand::GetLogLevels
+        ));
+
+        // Test SetGlobalLogLevel
+        let cmd = CliCommand::LogLevel {
+            action: LogLevelAction::Set {
+                global: Some("info".to_string()),
+                facility: None,
+                level: None,
+            },
+        };
+        let supervisor_cmd = build_command(cmd).unwrap();
+        assert!(matches!(
+            supervisor_cmd,
+            multicast_relay::SupervisorCommand::SetGlobalLogLevel { level: Severity::Info }
+        ));
+
+        // Test SetFacilityLogLevel
+        let cmd = CliCommand::LogLevel {
+            action: LogLevelAction::Set {
+                global: None,
+                facility: Some("Ingress".to_string()),
+                level: Some("debug".to_string()),
+            },
+        };
+        let supervisor_cmd = build_command(cmd).unwrap();
+        assert!(matches!(
+            supervisor_cmd,
+            multicast_relay::SupervisorCommand::SetFacilityLogLevel {
+                facility: Facility::Ingress,
+                level: Severity::Debug
+            }
+        ));
+
+        // Test error case: neither global nor facility specified
+        let cmd = CliCommand::LogLevel {
+            action: LogLevelAction::Set {
+                global: None,
+                facility: None,
+                level: None,
+            },
+        };
+        assert!(build_command(cmd).is_err());
     }
 }

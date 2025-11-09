@@ -4,7 +4,9 @@
 
 use multicast_relay::logging::*;
 use multicast_relay::{log_info, log_kv, log_warning};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::atomic::AtomicU8;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 #[tokio::main]
@@ -15,9 +17,22 @@ async fn main() {
     let supervisor_ringbuffer = Arc::new(MPSCRingBuffer::new(Facility::Supervisor.buffer_size()));
     let ingress_ringbuffer = Arc::new(MPSCRingBuffer::new(Facility::Ingress.buffer_size()));
 
+    // Create log level filtering structures
+    let global_min_level = Arc::new(AtomicU8::new(Severity::Info as u8));
+    let facility_min_levels: Arc<RwLock<HashMap<Facility, Severity>>> =
+        Arc::new(RwLock::new(HashMap::new()));
+
     // Create loggers from the ring buffers
-    let supervisor_logger = Logger::from_mpsc(Arc::clone(&supervisor_ringbuffer));
-    let ingress_logger = Logger::from_mpsc(Arc::clone(&ingress_ringbuffer));
+    let supervisor_logger = Logger::from_mpsc(
+        Arc::clone(&supervisor_ringbuffer),
+        Arc::clone(&global_min_level),
+        Arc::clone(&facility_min_levels),
+    );
+    let ingress_logger = Logger::from_mpsc(
+        Arc::clone(&ingress_ringbuffer),
+        Arc::clone(&global_min_level),
+        Arc::clone(&facility_min_levels),
+    );
 
     // Set up ring buffers for the consumer task
     let ringbuffers_for_consumer = vec![
