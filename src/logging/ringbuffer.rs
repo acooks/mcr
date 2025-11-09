@@ -63,8 +63,8 @@ impl SPSCRingBuffer {
 
     /// Write entry to ring buffer (lock-free, single producer)
     ///
-    /// Returns Ok(()) on success. Never blocks - drops old messages on overflow.
-    pub fn write(&self, mut entry: LogEntry) -> Result<(), ()> {
+    /// Never blocks - drops old messages on overflow.
+    pub fn write(&self, mut entry: LogEntry) {
         // 1. Reserve sequence number (no contention, use Relaxed)
         let seq = self.write_seq.0.fetch_add(1, Ordering::Relaxed);
         let pos = (seq as usize) & (self.capacity - 1); // Fast modulo for power of 2
@@ -97,7 +97,8 @@ impl SPSCRingBuffer {
             slot.process_id = entry.process_id;
             slot.thread_id = entry.thread_id;
             slot.message_len = entry.message_len;
-            slot.message = entry.message;
+            slot.message_start = entry.message_start;
+            slot.message_cont = entry.message_cont;
             slot.kv_count = entry.kv_count;
             slot.kvs = entry.kvs;
         }
@@ -108,8 +109,6 @@ impl SPSCRingBuffer {
                 .state
                 .store(READY, Ordering::Release);
         }
-
-        Ok(())
     }
 
     /// Read entry from ring buffer (lock-free, single consumer)
@@ -223,8 +222,8 @@ impl MPSCRingBuffer {
 
     /// Write entry to ring buffer (lock-free via CAS, multiple producers)
     ///
-    /// Returns Ok(()) on success. Never blocks - drops old messages on overflow.
-    pub fn write(&self, mut entry: LogEntry) -> Result<(), ()> {
+    /// Never blocks - drops old messages on overflow.
+    pub fn write(&self, mut entry: LogEntry) {
         // 1. Reserve sequence number via CAS (contention possible)
         let seq = loop {
             let current = self.write_seq.0.load(Ordering::Relaxed);
@@ -272,7 +271,8 @@ impl MPSCRingBuffer {
             slot.process_id = entry.process_id;
             slot.thread_id = entry.thread_id;
             slot.message_len = entry.message_len;
-            slot.message = entry.message;
+            slot.message_start = entry.message_start;
+            slot.message_cont = entry.message_cont;
             slot.kv_count = entry.kv_count;
             slot.kvs = entry.kvs;
         }
@@ -283,8 +283,6 @@ impl MPSCRingBuffer {
                 .state
                 .store(READY, Ordering::Release);
         }
-
-        Ok(())
     }
 
     /// Read entry from ring buffer (same as SPSC - single consumer)
@@ -360,8 +358,8 @@ mod tests {
         let entry1 = LogEntry::new(Severity::Info, Facility::Test, "test1");
         let entry2 = LogEntry::new(Severity::Info, Facility::Test, "test2");
 
-        buffer.write(entry1).unwrap();
-        buffer.write(entry2).unwrap();
+        buffer.write(entry1);
+        buffer.write(entry2);
 
         assert_eq!(buffer.len(), 2);
 
@@ -381,7 +379,7 @@ mod tests {
         // Fill buffer
         for i in 0..4 {
             let entry = LogEntry::new(Severity::Info, Facility::Test, &format!("msg{}", i));
-            buffer.write(entry).unwrap();
+            buffer.write(entry);
         }
 
         // Read all
@@ -392,7 +390,7 @@ mod tests {
 
         // Write again (should wrap around)
         let entry = LogEntry::new(Severity::Info, Facility::Test, "wrap");
-        buffer.write(entry).unwrap();
+        buffer.write(entry);
 
         let read = buffer.read().unwrap();
         assert_eq!(read.get_message(), "wrap");
@@ -405,7 +403,7 @@ mod tests {
         // Overfill buffer (write 8, capacity 4)
         for i in 0..8 {
             let entry = LogEntry::new(Severity::Info, Facility::Test, &format!("msg{}", i));
-            buffer.write(entry).unwrap();
+            buffer.write(entry);
         }
 
         assert_eq!(buffer.overruns(), 4);
@@ -418,8 +416,8 @@ mod tests {
         let entry1 = LogEntry::new(Severity::Info, Facility::Test, "test1");
         let entry2 = LogEntry::new(Severity::Info, Facility::Test, "test2");
 
-        buffer.write(entry1).unwrap();
-        buffer.write(entry2).unwrap();
+        buffer.write(entry1);
+        buffer.write(entry2);
 
         assert_eq!(buffer.len(), 2);
 
@@ -442,12 +440,9 @@ mod tests {
             let buffer_clone = buffer.clone();
             let handle = thread::spawn(move || {
                 for j in 0..100 {
-                    let entry = LogEntry::new(
-                        Severity::Info,
-                        Facility::Test,
-                        &format!("t{}m{}", i, j),
-                    );
-                    buffer_clone.write(entry).unwrap();
+                    let entry =
+                        LogEntry::new(Severity::Info, Facility::Test, &format!("t{}m{}", i, j));
+                    buffer_clone.write(entry);
                 }
             });
             handles.push(handle);

@@ -100,15 +100,18 @@ impl Facility {
     }
 
     /// Get recommended buffer size for this facility
+    ///
+    /// Buffer sizes optimized for small systems (1-2 CPUs) with 256-byte entries.
+    /// Total memory footprint for 2-core system: ~12.5 MB
     pub const fn buffer_size(self) -> usize {
         match self {
-            Facility::Ingress => 65536,      // 32 MB - highest frequency
-            Facility::Egress => 16384,       // 8 MB
-            Facility::PacketParser => 16384, // 8 MB
-            Facility::DataPlane => 8192,     // 4 MB
-            Facility::Supervisor => 4096,    // 2 MB
-            Facility::ControlPlane => 4096,  // 2 MB
-            _ => 2048,                       // 1 MB default
+            Facility::Ingress => 16384,     // 4 MB per worker - highest frequency
+            Facility::Egress => 4096,       // 1 MB per worker
+            Facility::PacketParser => 4096, // 1 MB per worker
+            Facility::DataPlane => 2048,    // 512 KB
+            Facility::Supervisor => 1024,   // 256 KB
+            Facility::ControlPlane => 1024, // 256 KB
+            _ => 512,                       // 128 KB default
         }
     }
 }
@@ -155,8 +158,8 @@ mod tests {
 
     #[test]
     fn test_buffer_sizes() {
-        assert_eq!(Facility::Ingress.buffer_size(), 65536);
-        assert_eq!(Facility::Supervisor.buffer_size(), 4096);
-        assert_eq!(Facility::Unknown.buffer_size(), 2048);
+        assert_eq!(Facility::Ingress.buffer_size(), 16384);
+        assert_eq!(Facility::Supervisor.buffer_size(), 1024);
+        assert_eq!(Facility::Unknown.buffer_size(), 512);
     }
 }
