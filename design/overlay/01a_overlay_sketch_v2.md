@@ -1,80 +1,60 @@
-# Sketch v3: MCR/GEM Overlay Network
+# Sketch v3: MCR/GEM Overlay Network (Decoupled Architecture)
 
 ## 1. High-Level Vision
 
-To create a unified software service (`mcr-overlay`) that provides a comprehensive toolkit for multicast networking, including normalization, source discovery, and secure transport over diverse underlying networks.
+To create a toolkit of two complementary, composable daemons that solve key problems in multicast networking. This decoupled architecture prioritizes flexibility and integration with standard Linux networking tools.
 
-## 2. Core Daemon Functions
+1.  **`mcr-normalizer`:** A daemon that makes multicast streams from legacy, unroutable sources compatible with modern, routed networks.
+2.  **`gem-gateway`:** A daemon that provides a secure overlay network for transporting multicast and unicast traffic over complex underlay networks (like the Internet).
 
-The `mcr-overlay` daemon is a modular system that can be configured to perform several distinct functions.
+## 2. The Common Control Plane
 
-### 2.1. Function A: MCR Normalizer (RPF Solver)
+Both daemons are peers in a common control plane, which allows them to discover each other and share necessary state.
 
-*   **Problem Solved:** Makes multicast streams from legacy, unroutable sources compatible with standard, routed multicast networks.
+*   **Foundation:** The control plane is built on **IPsec ESP tunnels** using a shared **Bootstrap Key (BK)**.
+*   **Routing & State:** The **Babel routing protocol** runs over these tunnels to reliably synchronize network state via custom TLVs (Public Keys, SA, Subscription, SEK).
+
+## 3. The Daemons
+
+### 3.1. Daemon 1: `mcr-normalizer`
+
+*   **Purpose:** To solve the RPF-check problem for unroutable multicast sources.
 *   **Mechanism:**
     1.  Creates a virtual loopback interface with a routable IP address.
-    2.  Captures the unroutable multicast stream.
-    3.  Re-sources the stream by replacing the original source IP with its own routable virtual IP, solving the RPF-check problem for downstream routers.
+    2.  Captures an unroutable multicast stream from a physical interface.
+    3.  Re-sources the stream by replacing the source IP with its own routable virtual IP.
+    4.  Outputs the now-routable, plain-text multicast stream onto a user-specified `veth` interface.
+    5.  Announces the availability of this new, routable stream to the control plane using a **Source Active (SA) TLV**.
 
-### 2.2. Function B: Source Discovery Announcer (MSDP Replacement)
+### 3.2. Daemon 2: `gem-gateway`
 
-*   **Problem Solved:** Provides a decentralized, near-real-time mechanism for all nodes to learn about active multicast sources across the network.
+*   **Purpose:** To provide a secure transport fabric for multicast and unicast traffic.
 *   **Mechanism:**
-    1.  Leverages the **Babel-over-IPsec control plane**.
-    2.  When a source becomes active (either via the MCR Normalizer or a native routed source), the local daemon injects a custom **Source Active (SA) TLV** into Babel.
-    3.  This `SA-TLV(Source, Group)` is reliably propagated to all other daemons, creating a shared, eventually consistent view of the multicast network state.
+    1.  **Ingress:** Can be configured to read plain-text traffic from a `veth` interface (for chaining with `mcr-normalizer`) or a physical interface.
+    2.  **Subscription:** For multicast, it sends **Subscription TLVs** to request streams announced by other nodes.
+    3.  **Processing:** Encrypts payloads with the appropriate **SEK** and signs packets with the **GAK**.
+    4.  **Egress (Flexible):** The **Forwarding Policy Engine** dynamically selects the egress mode based on Babel metrics:
+        *   **Unicast ESP Tunnel:** For transport over WANs. The daemon configures kernel ESP tunnels using the shared **BK** as a PSK.
+        *   **Bridged Encrypted Multicast:** For transport over private, multicast-enabled networks, outputting via a `veth` interface.
 
-### 2.4. Function D: Forwarding Policy Engine (New Component)
+## 4. A Complete End-to-End Workflow
 
-*   **Problem Solved:** Dynamically selects the optimal egress path for encrypted multicast traffic based on network conditions and peer reachability.
-*   **Mechanism:**
-    1.  Resides on the source `mcr-overlay` daemon.
-    2.  Leverages **Babel's link quality metrics** to assess the path quality to each known peer.
-    3.  Applies configurable policy rules (e.g., metric thresholds) to decide whether to use the Unicast ESP Tunnel egress (for high-latency/unicast-only paths) or the Bridged Encrypted Multicast egress (for low-latency/multicast-capable paths).
-    4.  A single source can simultaneously use both egress paths to reach different sets of receivers.
+This workflow shows how the two daemons are composed to solve the full problem.
 
-### 2.3. Function C: GEM Gateway (Secure Transport)
+1.  **Setup:** An administrator creates a `veth` pair: `veth-norm-out` <-> `veth-gem-in`.
 
-*   **Problem Solved:** Secures multicast traffic for transport over untrusted or multicast-incapable networks.
-*   **Mechanism:**
-    1.  **Ingress:** Subscribes to a routable multicast stream on its local network.
-    2.  **Processing:** Encrypts the packet payload with a **Source Encryption Key (SEK)** and appends a signature (HMAC) created with the **Group Authorization Key (GAK)**.
-    3.  **Egress (Dynamically Selected):** The **Forwarding Policy Engine** dynamically determines the appropriate egress mode for the encrypted traffic based on the destination peer's reachability and link quality.
+2.  **`mcr-normalizer` Daemon (Studio A):**
+    *   Configured to read from `eth0` and write its normalized output to `veth-norm-out`.
+    *   It captures `10.1.1.50 -> 239.1.1.1`, re-sources it as `192.168.100.1 -> 239.1.1.1`, and sends it into `veth-norm-out`.
+    *   It also sends an `SA-TLV(192.168.100.1, 239.1.1.1)` to the control plane.
 
-#### 2.3.1. GEM Egress Mode 1: Unicast ESP Tunnel
+3.  **`gem-gateway` Daemon (Studio A):**
+    *   Configured to read from `veth-gem-in`.
+    *   It sees the packet from the normalizer, encrypts/signs it, and (based on its Forwarding Policy Engine) encapsulates it in a Unicast ESP tunnel to Studio B.
 
-*   **Use Case:** Transporting multicast over the public internet or other unicast-only WANs.
-*   **Mechanism:**
-    1.  The encrypted GEM packet is encapsulated within a **point-to-point unicast IPsec ESP tunnel**.
-    2.  This tunnel is established between the public, routable IP addresses of the source and destination GEM Gateways. Keys for this tunnel can be negotiated via the Babel control plane.
-    3.  The daemon writes the resulting ESP packet to a virtual tunnel interface (e.g., `ipsec0`) for the OS to route.
+4.  **`gem-gateway` Daemon (Studio B):**
+    *   Receives the ESP traffic, decrypts it, and outputs the plain-text, normalized stream (`192.168.100.1 -> 239.1.1.1`) onto its local network.
 
-#### 2.3.2. GEM Egress Mode 2: Bridged Encrypted Multicast
-
-*   **Use Case:** Securing multicast traffic across a private network that already has multicast routing enabled.
-*   **Mechanism:**
-    1.  The encrypted GEM packet (with its multicast destination IP preserved) is **not** put in a unicast tunnel.
-    2.  Instead, it is written to a **`veth` pair interface**.
-    3.  The user can then bridge this `veth` interface to the appropriate physical interface, directing the encrypted multicast traffic onto the desired underlay network.
-
-## 3. A Complete End-to-End Workflow (Internet Transport)
-
-1.  **Studio A (Daemon 1 - MCR Normalizer):**
-    *   Captures unroutable stream `10.1.1.50 -> 239.1.1.1`.
-    *   Re-sources it as `192.168.100.1 -> 239.1.1.1`.
-    *   Injects an `SA-TLV(192.168.100.1, 239.1.1.1)` into Babel.
-
-2.  **Studio A (Daemon 2 - GEM Gateway, Unicast Mode):**
-    *   Subscribes to the normalized stream `192.168.100.1 -> 239.1.1.1`.
-    *   Encrypts/signs the packets.
-    *   Encapsulates the resulting GEM packets into a unicast ESP tunnel destined for Studio B's public IP.
-
-3.  **Studio B (Daemon 3 - GEM Gateway, Unicast Mode):**
-    *   Receives the ESP traffic, decapsulates it.
-    *   Verifies the GAK signature and decrypts with the SEK.
-    *   Outputs the plain-text, normalized stream `192.168.100.1 -> 239.1.1.1` onto the local Studio B network.
-
-4.  **Studio B (Local PIM Router):**
-    *   Receives the stream. The RPF check for source `192.168.100.1` passes (because its route was learned via standard unicast routing protocols from the `mcr-overlay` network). The stream is forwarded to local receivers.
+5.  **Result:** The stream is delivered securely and is now compatible with the local PIM routers in Studio B. The `veth` pair allows an administrator to insert `tcpdump` or `nftables` rules between the two stages for debugging and policy enforcement.
 
 ---

@@ -61,7 +61,7 @@ To run the main relay application:
 
 ## Using the Control Client
 
-The `control_client` is used to manage forwarding rules at runtime.
+The `control_client` is used to manage forwarding rules and log levels at runtime.
 
 **Add a Rule:**
 
@@ -92,6 +92,23 @@ The `control_client` is used to manage forwarding rules at runtime.
 ```bash
 ./target/release/control_client stats
 ```
+
+**Control Log Levels:**
+
+```bash
+# Get current log levels
+./target/release/control_client log-level get
+
+# Set global log level (affects all facilities)
+./target/release/control_client log-level set --global info
+
+# Set facility-specific log level (overrides global)
+./target/release/control_client log-level set --facility Ingress --level debug
+```
+
+Available log levels: `emergency`, `alert`, `critical`, `error`, `warning`, `notice`, `info`, `debug`
+
+Available facilities: `Supervisor`, `RuleDispatch`, `ControlSocket`, `ControlPlane`, `DataPlane`, `Ingress`, `Egress`, `BufferPool`, `PacketParser`, `Stats`, `Security`, `Network`, `Test`
 
 ## Using the Traffic Generator
 

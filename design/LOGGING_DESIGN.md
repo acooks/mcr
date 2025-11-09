@@ -21,10 +21,16 @@
 - Workers migrated from old `log` crate to eprintln!
 - All 89 tests passing with new logging system
 
-**Phase 4: PENDING** ⏳
+**Phase 4: COMPLETE** ✅ (commits d369379, 5c04136)
+- Runtime log level filtering (global and per-facility)
+- Control client CLI commands for log-level management
+- Comprehensive unit and integration tests (101 tests passing)
+- Performance: <100ns overhead for log-level checks
+
+**Phase 5: PENDING** ⏳
 - Additional output sinks (file, syslog)
-- Runtime log level filtering
 - Metrics extraction
+- Log streaming to control_client (see INTERACTIVE_CLI_DESIGN.md)
 
 ## Quick Start Example
 

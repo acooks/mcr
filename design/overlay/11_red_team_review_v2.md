@@ -64,6 +64,16 @@ This document contains adversarial questions and challenges for the `01a_overlay
 
 *   **Challenge:** The internal mechanism for passing a packet from the Normalizer function to the Gateway function is unclear. Is it a slow trip through the kernel stack or a fast in-memory handoff?
 
+*   **Response & Mitigation:**
+    *   **Architectural Decision:** The MCR Normalizer and the GEM Gateway will be developed as **two separate, composable daemons**. They are not two functions within a single monolithic application.
+    *   **Handoff Mechanism:** The connection between the two daemons will be a standard Linux **`veth` pair**. The `mcr-normalizer` daemon will write its plain-text, normalized multicast output to one end of the pair, and the `gem-gateway` daemon will read that traffic from the other end.
+    *   **Performance Trade-off:** This design choice means the handoff is a trip through the kernel's network stack, which incurs more overhead than a purely in-memory handoff. This is a **deliberate architectural trade-off**.
+    *   **Justification:** The performance cost is accepted in order to gain immense and critical advantages in flexibility and composability. By exposing the normalized traffic on a standard kernel interface, users can insert other standard Linux networking functions (e.g., `nftables` firewall rules, QoS policies, `tcpdump` for debugging) between the two components. This makes the entire system more powerful, transparent, and easier to integrate into complex environments. It prioritizes robust, future-proof design over micro-optimization.
+
+### 6. Performance of Chained Functions
+
+*   **Challenge:** What is the performance impact of the multi-stage processing pipeline (normalize, encrypt, encapsulate)?
+
 
 ## Category 3: Security & Trust Model
 
