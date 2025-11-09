@@ -2,10 +2,12 @@ use anyhow::{Context, Result};
 use futures::stream::FuturesUnordered;
 use futures::Future;
 use log::error;
-use nix::sys::socket::{sendmsg, socketpair, AddressFamily, ControlMessage, MsgFlags, SockFlag, SockType};
-use nix::unistd::{Group, User, Gid, Uid};
+use nix::sys::socket::{
+    sendmsg, socketpair, AddressFamily, ControlMessage, MsgFlags, SockFlag, SockType,
+};
+use nix::unistd::{Gid, Group, Uid, User};
 use std::collections::HashMap;
-use std::os::unix::io::{FromRawFd, IntoRawFd, RawFd, AsRawFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -20,8 +22,6 @@ use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 const INITIAL_BACKOFF_MS: u64 = 250;
 const MAX_BACKOFF_MS: u64 = 16000; // 16 seconds
-
-
 
 pub async fn spawn_control_plane_worker(
     uid: u32,
@@ -141,6 +141,7 @@ pub async fn spawn_data_plane_worker(
 
 // --- Supervisor Core Logic ---
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     user: &str,
     group: &str,
@@ -168,7 +169,10 @@ pub async fn run(
     // until lazy socket creation is implemented.
     let detected_cores = num_cpus::get();
     let num_cores = num_workers.unwrap_or(detected_cores);
-    println!("[Supervisor] Detected {} CPU cores, using {} data plane workers", detected_cores, num_cores);
+    println!(
+        "[Supervisor] Detected {} CPU cores, using {} data plane workers",
+        detected_cores, num_cores
+    );
 
     let cp_socket_path = relay_command_socket_path.clone();
     let dp_socket_path = relay_command_socket_path.clone();
@@ -250,7 +254,7 @@ where
         &control_socket_path
     );
 
-    let (mut cp_child, mut cp_stream, cp_req_stream) = spawn_cp().await?;
+    let (mut cp_child, mut _cp_stream, cp_req_stream) = spawn_cp().await?;
     let mut cp_pid = cp_child.id().unwrap();
     worker_map.lock().unwrap().insert(
         cp_pid,
@@ -324,9 +328,9 @@ where
                         cp_backoff_ms = (cp_backoff_ms * 2).min(MAX_BACKOFF_MS);
                     }
                 }
-                let (cp_child_new, cp_stream_new, cp_req_stream_new) = spawn_cp().await?;
+                let (cp_child_new, _cp_stream_new, cp_req_stream_new) = spawn_cp().await?;
                 cp_child = cp_child_new;
-                cp_stream = cp_stream_new;
+                _cp_stream = _cp_stream_new;
                 cp_pid = cp_child.id().unwrap();
                 worker_map.lock().unwrap().insert(
                     cp_pid,
@@ -531,14 +535,8 @@ async fn send_fd(sock: &UnixStream, fd: RawFd) -> Result<()> {
 
     sock.ready(tokio::io::Interest::WRITABLE).await?;
     sock.try_io(tokio::io::Interest::WRITABLE, || {
-        sendmsg::<()>(
-            sock.as_raw_fd(),
-            &iov,
-            &cmsg,
-            MsgFlags::empty(),
-            None,
-        )
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+        sendmsg::<()>(sock.as_raw_fd(), &iov, &cmsg, MsgFlags::empty(), None)
+            .map_err(std::io::Error::other)
     })?;
 
     Ok(())

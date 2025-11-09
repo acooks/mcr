@@ -91,7 +91,9 @@ pub fn run_data_plane(
     let (egress_tx, egress_rx) = mpsc::channel::<EgressPacket>();
 
     // Create shared buffer pool (Arc<Mutex<>> for thread-safe shared access)
-    let buffer_pool = Arc::new(std::sync::Mutex::new(BufferPool::new(ingress_config.track_stats)));
+    let buffer_pool = Arc::new(std::sync::Mutex::new(BufferPool::new(
+        ingress_config.track_stats,
+    )));
 
     // Clone config for threads
     // TODO: ARCHITECTURAL FIX NEEDED
@@ -120,8 +122,12 @@ pub fn run_data_plane(
                 // Debug: Check if CAP_NET_RAW is available in this thread
                 use caps::{CapSet, Capability};
                 match caps::has_cap(None, CapSet::Effective, Capability::CAP_NET_RAW) {
-                    Ok(true) => println!("[DataPlane] Ingress thread has CAP_NET_RAW in Effective set"),
-                    Ok(false) => eprintln!("[DataPlane] WARNING: Ingress thread missing CAP_NET_RAW in Effective set!"),
+                    Ok(true) => {
+                        println!("[DataPlane] Ingress thread has CAP_NET_RAW in Effective set")
+                    }
+                    Ok(false) => eprintln!(
+                        "[DataPlane] WARNING: Ingress thread missing CAP_NET_RAW in Effective set!"
+                    ),
                     Err(e) => eprintln!("[DataPlane] ERROR checking capabilities: {}", e),
                 }
 

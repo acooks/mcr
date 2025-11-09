@@ -267,21 +267,33 @@ impl EgressLoop {
 
         // First, try to reap completions without blocking
         let processed = self.process_cqe_batch()?;
-        println!("[Egress] Processed {} completions without blocking", processed);
+        println!(
+            "[Egress] Processed {} completions without blocking",
+            processed
+        );
         completions_processed += processed;
 
         // If we haven't processed all expected completions, wait for more
         while completions_processed < expected_count {
-            println!("[Egress] Waiting for {} more completions", expected_count - completions_processed);
+            println!(
+                "[Egress] Waiting for {} more completions",
+                expected_count - completions_processed
+            );
             // The submit_and_wait call will block until at least one completion is ready.
             // This is the correct way to wait for io_uring events.
             self.ring.submit_and_wait(1)?;
             let processed = self.process_cqe_batch()?;
-            println!("[Egress] Processed {} completions after blocking", processed);
+            println!(
+                "[Egress] Processed {} completions after blocking",
+                processed
+            );
             completions_processed += processed;
         }
 
-        println!("[Egress] Finished reaping {} completions", completions_processed);
+        println!(
+            "[Egress] Finished reaping {} completions",
+            completions_processed
+        );
         Ok(completions_processed)
     }
 

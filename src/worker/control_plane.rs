@@ -30,7 +30,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ControlPlane<S> {
     }
 
     pub async fn run(self) -> Result<()> {
-        control_plane_task(self.supervisor_stream, self.request_stream, self.shared_flows).await
+        control_plane_task(
+            self.supervisor_stream,
+            self.request_stream,
+            self.shared_flows,
+        )
+        .await
     }
 }
 
@@ -131,7 +136,10 @@ mod tests {
         client_stream.shutdown().await.unwrap();
 
         let mut response_buffer = Vec::new();
-        let n = client_stream.read_to_end(&mut response_buffer).await.unwrap();
+        let n = client_stream
+            .read_to_end(&mut response_buffer)
+            .await
+            .unwrap();
 
         if n > 0 {
             let response: Response = serde_json::from_slice(&response_buffer[..n]).unwrap();

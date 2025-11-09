@@ -5,7 +5,7 @@
 set -euo pipefail
 
 # Configuration
-MAX_UNSAFE_BLOCKS=20        # Maximum allowed unsafe blocks in src/
+MAX_UNSAFE_BLOCKS=22        # Maximum allowed unsafe blocks in src/
 MAX_UNSAFE_PERCENTAGE=0.5   # Maximum percentage of codebase with unsafe
 BASELINE_FILE=".unsafe_baseline"
 

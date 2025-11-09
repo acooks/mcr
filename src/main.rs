@@ -77,8 +77,7 @@ fn main() -> Result<()> {
                 // to drive the high-performance data plane.
                 tokio_uring::start(async {
                     if let Err(e) =
-                        worker::run_data_plane(config, worker::DefaultWorkerLifecycle)
-                            .await
+                        worker::run_data_plane(config, worker::DefaultWorkerLifecycle).await
                     {
                         eprintln!("Data Plane worker process failed: {}", e);
                         std::process::exit(1);

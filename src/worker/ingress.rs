@@ -22,7 +22,9 @@
 
 use anyhow::{Context, Result};
 use io_uring::{opcode, types, IoUring};
-use nix::sys::eventfd::{EfdFlags, EventFd};
+#[cfg(test)]
+use nix::sys::eventfd::EfdFlags;
+use nix::sys::eventfd::EventFd;
 use socket2::{Domain, Protocol, Socket, Type};
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, UdpSocket as StdUdpSocket};
@@ -35,7 +37,7 @@ use crate::{ForwardingRule, RelayCommand};
 
 // Userdata constants for io_uring
 const COMMAND_NOTIFY: u64 = 0;
-const PACKET_RECV_BASE: u64 = 1;  // Buffer indices start at 1, allowing up to u64::MAX-1 buffers
+const PACKET_RECV_BASE: u64 = 1; // Buffer indices start at 1, allowing up to u64::MAX-1 buffers
 
 /// Statistics for the ingress loop
 #[derive(Debug, Clone, Default)]
@@ -256,7 +258,9 @@ impl IngressLoop {
                         // Re-submit the command notification read
                         self.submit_command_read(&mut command_notify_buf)?;
                     }
-                    ud if ud >= PACKET_RECV_BASE && ud < PACKET_RECV_BASE + self.config.batch_size as u64 => {
+                    ud if ud >= PACKET_RECV_BASE
+                        && ud < PACKET_RECV_BASE + self.config.batch_size as u64 =>
+                    {
                         // Decode buffer index from user_data
                         let buffer_idx = (ud - PACKET_RECV_BASE) as usize;
                         let bytes_received = cqe.result();
@@ -464,7 +468,10 @@ impl IngressLoop {
 ///
 /// An `OwnedFd` for the AF_PACKET socket
 pub fn setup_af_packet_socket(interface_name: &str) -> Result<OwnedFd> {
-    println!("[Ingress] Setting up AF_PACKET socket for interface {}", interface_name);
+    println!(
+        "[Ingress] Setting up AF_PACKET socket for interface {}",
+        interface_name
+    );
 
     // Create AF_PACKET socket with ETH_P_IP filter (0x0800)
     // This requires CAP_NET_RAW capability
@@ -485,7 +492,10 @@ pub fn setup_af_packet_socket(interface_name: &str) -> Result<OwnedFd> {
     // Get interface index
     let iface_index = get_interface_index(interface_name)
         .with_context(|| format!("Failed to get interface index for {}", interface_name))?;
-    println!("[Ingress] Interface index for {}: {}", interface_name, iface_index);
+    println!(
+        "[Ingress] Interface index for {}: {}",
+        interface_name, iface_index
+    );
 
     // Bind to the specific interface
     let mut addr_storage: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
@@ -504,7 +514,10 @@ pub fn setup_af_packet_socket(interface_name: &str) -> Result<OwnedFd> {
             ));
         }
     }
-    println!("[Ingress] AF_PACKET socket bound to interface {}", interface_name);
+    println!(
+        "[Ingress] AF_PACKET socket bound to interface {}",
+        interface_name
+    );
 
     // Convert Socket to OwnedFd
     // Socket::into_raw_fd() consumes the socket and returns RawFd

@@ -22,8 +22,8 @@ use control_plane::ControlPlane;
 use data_plane_integrated::run_data_plane as data_plane_task;
 
 use caps::{CapSet, Capability};
-use std::collections::HashSet;
 use nix::sys::socket::{recvmsg, MsgFlags};
+use std::collections::HashSet;
 use std::os::unix::io::AsRawFd;
 
 // ... other code ...
@@ -41,7 +41,7 @@ async fn recv_fd(sock: &UnixStream) -> Result<RawFd> {
             Some(&mut cmsg_buf),
             MsgFlags::empty(),
         )
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+        .map_err(std::io::Error::other)
     })?;
 
     for cmsg in msg.cmsgs()? {
@@ -281,7 +281,9 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
                     println!("[DataPlane Worker] Received command: {:?}", command);
                     match std_tx.send(command) {
                         Ok(_) => {
-                            println!("[DataPlane Worker] Command sent to data plane thread successfully");
+                            println!(
+                                "[DataPlane Worker] Command sent to data plane thread successfully"
+                            );
                         }
                         Err(e) => {
                             eprintln!("[DataPlane Worker] FATAL: Failed to send command to data plane thread: {:?}", e);
@@ -296,11 +298,7 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
                     tokio::task::spawn_blocking(move || {
                         let value: u64 = 1;
                         unsafe {
-                            libc::write(
-                                event_fd,
-                                &value as *const u64 as *const libc::c_void,
-                                8
-                            );
+                            libc::write(event_fd, &value as *const u64 as *const libc::c_void, 8);
                         }
                     });
                 }
@@ -484,11 +482,14 @@ mod tests {
         let command_fd = command_sock1.into_std()?.into_raw_fd();
 
         tokio::task::spawn(async move {
-            use nix::sys::socket::{sendmsg, MsgFlags, ControlMessage};
+            use nix::sys::socket::{sendmsg, ControlMessage, MsgFlags};
             use std::io::IoSlice;
             use std::os::unix::io::AsRawFd;
 
-            async fn send_fd_local(sock: &TokioUnixStream, fd: std::os::unix::io::RawFd) -> Result<()> {
+            async fn send_fd_local(
+                sock: &TokioUnixStream,
+                fd: std::os::unix::io::RawFd,
+            ) -> Result<()> {
                 let data = [0u8; 1];
                 let iov = [IoSlice::new(&data)];
                 let fds = [fd];
@@ -498,7 +499,7 @@ mod tests {
                 sock.try_io(tokio::io::Interest::WRITABLE, || {
                     sendmsg::<()>(sock.as_raw_fd(), &iov, &[cmsg], MsgFlags::empty(), None)
                         .map(|_| ())
-                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+                        .map_err(std::io::Error::other)
                 })?;
                 Ok(())
             }
