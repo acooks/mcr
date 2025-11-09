@@ -24,6 +24,142 @@ use tokio_util::codec::{Framed, LengthDelimitedCodec};
 const INITIAL_BACKOFF_MS: u64 = 250;
 const MAX_BACKOFF_MS: u64 = 16000; // 16 seconds
 
+/// Action that may need to be taken after handling a supervisor command
+#[derive(Debug, Clone, PartialEq)]
+pub enum CommandAction {
+    /// No further action needed
+    None,
+    /// Broadcast a relay command to all data plane workers
+    BroadcastToDataPlane(RelayCommand),
+}
+
+/// Handle a supervisor command by updating state and returning a response + action.
+///
+/// This function is pure (no I/O) and unit-testable. It handles state updates
+/// and returns what async actions need to be taken (like broadcasting to workers).
+///
+/// # Arguments
+/// * `command` - The supervisor command to process
+/// * `master_rules` - Shared state of all forwarding rules
+/// * `worker_map` - Map of active workers (pid -> WorkerInfo)
+/// * `global_min_level` - Global minimum log level
+/// * `facility_min_levels` - Per-facility log level overrides
+///
+/// # Returns
+/// A tuple of (Response to send to client, Action to take)
+pub fn handle_supervisor_command(
+    command: crate::SupervisorCommand,
+    master_rules: &Mutex<HashMap<String, ForwardingRule>>,
+    worker_map: &Mutex<HashMap<u32, crate::WorkerInfo>>,
+    global_min_level: &std::sync::atomic::AtomicU8,
+    facility_min_levels: &std::sync::RwLock<HashMap<crate::logging::Facility, crate::logging::Severity>>,
+) -> (crate::Response, CommandAction) {
+    use crate::{Response, SupervisorCommand};
+    use std::sync::atomic::Ordering;
+
+    match command {
+        SupervisorCommand::ListWorkers => {
+            let workers = worker_map.lock().unwrap().values().cloned().collect();
+            (Response::Workers(workers), CommandAction::None)
+        }
+
+        SupervisorCommand::AddRule {
+            rule_id,
+            input_interface,
+            input_group,
+            input_port,
+            outputs,
+            dtls_enabled,
+        } => {
+            let rule = ForwardingRule {
+                rule_id,
+                input_interface,
+                input_group,
+                input_port,
+                outputs,
+                dtls_enabled,
+            };
+            master_rules
+                .lock()
+                .unwrap()
+                .insert(rule.rule_id.clone(), rule.clone());
+
+            let response = Response::Success(format!("Rule {} added", rule.rule_id));
+            let action = CommandAction::BroadcastToDataPlane(RelayCommand::AddRule(rule));
+            (response, action)
+        }
+
+        SupervisorCommand::RemoveRule { rule_id } => {
+            let removed = master_rules.lock().unwrap().remove(&rule_id).is_some();
+            if removed {
+                let response = Response::Success(format!("Rule {} removed", rule_id.clone()));
+                let action = CommandAction::BroadcastToDataPlane(RelayCommand::RemoveRule {
+                    rule_id,
+                });
+                (response, action)
+            } else {
+                (
+                    Response::Error(format!("Rule {} not found", rule_id)),
+                    CommandAction::None,
+                )
+            }
+        }
+
+        SupervisorCommand::ListRules => {
+            let rules = master_rules
+                .lock()
+                .unwrap()
+                .values()
+                .cloned()
+                .collect();
+            (Response::Rules(rules), CommandAction::None)
+        }
+
+        SupervisorCommand::GetStats => {
+            // TODO: Implement stats aggregation from workers
+            (Response::Stats(vec![]), CommandAction::None)
+        }
+
+        SupervisorCommand::SetGlobalLogLevel { level } => {
+            global_min_level.store(level as u8, Ordering::Relaxed);
+            (
+                Response::Success(format!("Global log level set to {}", level)),
+                CommandAction::None,
+            )
+        }
+
+        SupervisorCommand::SetFacilityLogLevel { facility, level } => {
+            facility_min_levels.write().unwrap().insert(facility, level);
+            (
+                Response::Success(format!("Log level for {} set to {}", facility, level)),
+                CommandAction::None,
+            )
+        }
+
+        SupervisorCommand::GetLogLevels => {
+            let global =
+                crate::logging::Severity::from_u8(global_min_level.load(Ordering::Relaxed))
+                    .unwrap_or(crate::logging::Severity::Info);
+            let facility_overrides = facility_min_levels.read().unwrap().clone();
+            (
+                Response::LogLevels {
+                    global,
+                    facility_overrides,
+                },
+                CommandAction::None,
+            )
+        }
+
+        SupervisorCommand::GetWorkerRules { .. } => {
+            // This command requires async worker communication, not handled here
+            (
+                Response::Error("GetWorkerRules not supported in synchronous handler".to_string()),
+                CommandAction::None,
+            )
+        }
+    }
+}
+
 pub async fn spawn_control_plane_worker(
     uid: u32,
     gid: u32,
@@ -449,7 +585,6 @@ where
             // Branch 3: A new client connected to the control socket
                         Ok((mut client_stream, _)) = listener.accept() => {
                             let worker_map_clone = worker_map.clone();
-                            let worker_req_streams_clone = worker_req_streams.clone();
                             let dp_cmd_streams_clone = dp_cmd_streams.clone();
                             let master_rules_clone = master_rules.clone();
                             let logger_for_client = supervisor_logger.clone();
@@ -462,147 +597,58 @@ where
 
                                 let mut buffer = Vec::new();
                                 if let Ok(Ok(_)) = tokio::time::timeout(Duration::from_millis(100), client_stream.read_to_end(&mut buffer)).await {
-                                    let command: Result<SupervisorCommand, _> = serde_json::from_slice(&buffer);
+                                    let command_result: Result<SupervisorCommand, _> = serde_json::from_slice(&buffer);
 
-                                    match command {
-                                        Ok(SupervisorCommand::ListWorkers) => {
-                                            let workers = worker_map_clone.lock().unwrap().values().cloned().collect();
-                                            let response = Response::Workers(workers);
-                                            let response_bytes = serde_json::to_vec(&response).unwrap();
-                                            client_stream.write_all(&response_bytes).await.unwrap();
-                                        }
-                                        Ok(SupervisorCommand::AddRule { rule_id, input_interface, input_group, input_port, outputs, dtls_enabled }) => {
-                                            let rule = ForwardingRule { rule_id, input_interface, input_group, input_port, outputs, dtls_enabled };
-                                            master_rules_clone.lock().unwrap().insert(rule.rule_id.clone(), rule.clone());
-
-                                            let relay_cmd = RelayCommand::AddRule(rule.clone());
-                                            let cmd_bytes = serde_json::to_vec(&relay_cmd).unwrap();
-
-                                            let streams_to_send: Vec<_> = dp_cmd_streams_clone.lock().unwrap().values().cloned().collect();
-                                            log_info!(
-                                                logger_for_client,
-                                                Facility::Supervisor,
-                                                &format!("Sending AddRule to {} data plane workers", streams_to_send.len())
+                                    match command_result {
+                                        Ok(command) => {
+                                            // Use the extracted, testable command handler
+                                            let (response, action) = handle_supervisor_command(
+                                                command,
+                                                &master_rules_clone,
+                                                &worker_map_clone,
+                                                &global_min_level_clone,
+                                                &facility_min_levels_clone,
                                             );
-                                            for stream_mutex in streams_to_send {
-                                                let cmd_bytes_clone = cmd_bytes.clone();
-                                                let logger_for_task = logger_for_client.clone();
-                                                tokio::spawn(async move {
-                                                    let mut stream = stream_mutex.lock().await;
-                                                    let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
-                                                    match framed.send(cmd_bytes_clone.into()).await {
-                                                        Ok(_) => {
-                                                            logger_for_task.debug(Facility::Supervisor, "Successfully sent AddRule to worker");
-                                                        }
-                                                        Err(e) => {
-                                                            logger_for_task.error(Facility::Supervisor, &format!("Failed to send AddRule to worker: {}", e));
-                                                        }
-                                                    }
-                                                });
+
+                                            // Send response to client
+                                            let response_bytes = serde_json::to_vec(&response).unwrap();
+                                            if let Err(e) = client_stream.write_all(&response_bytes).await {
+                                                error!("Failed to send response to client: {}", e);
                                             }
 
-                                            let response = Response::Success(format!("Rule {} added", rule.rule_id));
-                                            let response_bytes = serde_json::to_vec(&response).unwrap();
-                                            client_stream.write_all(&response_bytes).await.unwrap();
-                                        }
-                                        Ok(SupervisorCommand::RemoveRule { rule_id }) => {
-                                            let removed = master_rules_clone.lock().unwrap().remove(&rule_id).is_some();
-                                            let response = if removed {
-                                                let relay_cmd = RelayCommand::RemoveRule { rule_id: rule_id.clone() };
-                                                let cmd_bytes = serde_json::to_vec(&relay_cmd).unwrap();
-
-                                                let streams_to_send: Vec<_> = dp_cmd_streams_clone.lock().unwrap().values().cloned().collect();
-                                                for stream_mutex in streams_to_send {
-                                                    let cmd_bytes_clone = cmd_bytes.clone();
-                                                    tokio::spawn(async move {
-                                                        let mut stream = stream_mutex.lock().await;
-                                                        let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
-                                                        if let Err(e) = framed.send(cmd_bytes_clone.into()).await {
-                                                            error!("Failed to send RemoveRule to worker: {}", e);
-                                                        }
-                                                    });
+                                            // Handle async actions
+                                            match action {
+                                                CommandAction::None => {
+                                                    // Nothing to do
                                                 }
-                                                Response::Success(format!("Rule {} removed", rule_id))
-                                            } else {
-                                                Response::Error(format!("Rule {} not found", rule_id))
-                                            };
-                                            let response_bytes = serde_json::to_vec(&response).unwrap();
-                                            client_stream.write_all(&response_bytes).await.unwrap();
-                                        }
-                                                                    Ok(SupervisorCommand::GetWorkerRules { worker_pid }) => {
-                                                                        let stream_mutex = {
-                                                                            let req_streams = worker_req_streams_clone.lock().unwrap();
-                                                                            req_streams.get(&worker_pid).cloned()
-                                                                        };
+                                                CommandAction::BroadcastToDataPlane(relay_cmd) => {
+                                                    let cmd_bytes = serde_json::to_vec(&relay_cmd).unwrap();
+                                                    let streams_to_send: Vec<_> = dp_cmd_streams_clone.lock().unwrap().values().cloned().collect();
 
-                                                                        if let Some(stream_mutex) = stream_mutex {
-                                                                            tokio::spawn(async move {
-                                                                                let mut stream = stream_mutex.lock().await;
-                                                                                let mut framed =
-                                                                                    Framed::new(&mut *stream, LengthDelimitedCodec::new());
-                                                                                let request = crate::ipc::Request::ListRules;
-                                                                                let bytes = serde_json::to_vec(&request).unwrap();
-                                                                                if framed.send(bytes.into()).await.is_ok() {
-                                                                                    if let Some(Ok(bytes)) = framed.next().await {
-                                                                                        let response: crate::ipc::Response =
-                                                                                            serde_json::from_slice(&bytes).unwrap();
-                                                                                        if let crate::ipc::Response::Rules(rules) = response
-                                                                                        {
-                                                                                            let response = Response::Rules(rules);
-                                                                                            let response_bytes =
-                                                                                                serde_json::to_vec(&response).unwrap();
-                                                                                            if client_stream
-                                                                                                .write_all(&response_bytes)
-                                                                                                .await
-                                                                                                .is_err()
-                                                                                            {
-                                                                                                error!("Failed to send response to client");
-                                                                                            }
-                                                                                        }
-                                                                                    }
-                                                                                }
-                                                                            });
-                                                                        }
-                                                                    }
-                                        Ok(SupervisorCommand::ListRules) => {
-                                            let rules = master_rules_clone.lock().unwrap().values().cloned().collect();
-                                            let response = Response::Rules(rules);
-                                            let response_bytes = serde_json::to_vec(&response).unwrap();
-                                            client_stream.write_all(&response_bytes).await.unwrap();
-                                        }
-                                        Ok(SupervisorCommand::GetStats) => {
-                                            // TODO: Implement stats aggregation from workers
-                                            let response = Response::Stats(vec![]);
-                                            let response_bytes = serde_json::to_vec(&response).unwrap();
-                                            client_stream.write_all(&response_bytes).await.unwrap();
-                                        }
-                                        Ok(SupervisorCommand::SetGlobalLogLevel { level }) => {
-                                            use std::sync::atomic::Ordering;
-                                            global_min_level_clone.store(level as u8, Ordering::Relaxed);
-                                            let response = Response::Success(format!("Global log level set to {}", level));
-                                            let response_bytes = serde_json::to_vec(&response).unwrap();
-                                            client_stream.write_all(&response_bytes).await.unwrap();
-                                        }
-                                        Ok(SupervisorCommand::SetFacilityLogLevel { facility, level }) => {
-                                            {
-                                                let mut levels = facility_min_levels_clone.write().unwrap();
-                                                levels.insert(facility, level);
-                                            } // Drop the lock before await
-                                            let response = Response::Success(format!("Log level for {} set to {}", facility, level));
-                                            let response_bytes = serde_json::to_vec(&response).unwrap();
-                                            client_stream.write_all(&response_bytes).await.unwrap();
-                                        }
-                                        Ok(SupervisorCommand::GetLogLevels) => {
-                                            use std::sync::atomic::Ordering;
-                                            let global = crate::logging::Severity::from_u8(
-                                                global_min_level_clone.load(Ordering::Relaxed)
-                                            ).unwrap_or(crate::logging::Severity::Info);
-                                            let facility_overrides = {
-                                                facility_min_levels_clone.read().unwrap().clone()
-                                            }; // Drop the lock immediately
-                                            let response = Response::LogLevels { global, facility_overrides };
-                                            let response_bytes = serde_json::to_vec(&response).unwrap();
-                                            client_stream.write_all(&response_bytes).await.unwrap();
+                                                    log_info!(
+                                                        logger_for_client,
+                                                        Facility::Supervisor,
+                                                        &format!("Broadcasting command to {} data plane workers", streams_to_send.len())
+                                                    );
+
+                                                    for stream_mutex in streams_to_send {
+                                                        let cmd_bytes_clone = cmd_bytes.clone();
+                                                        let logger_for_task = logger_for_client.clone();
+                                                        tokio::spawn(async move {
+                                                            let mut stream = stream_mutex.lock().await;
+                                                            let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
+                                                            match framed.send(cmd_bytes_clone.into()).await {
+                                                                Ok(_) => {
+                                                                    logger_for_task.debug(Facility::Supervisor, "Successfully sent command to worker");
+                                                                }
+                                                                Err(e) => {
+                                                                    logger_for_task.error(Facility::Supervisor, &format!("Failed to send command to worker: {}", e));
+                                                                }
+                                                            }
+                                                        });
+                                                    }
+                                                }
+                                            }
                                         }
                                         Err(e) => {
                                             let response = Response::Error(format!("Failed to parse command: {}", e));
@@ -698,6 +744,258 @@ mod tests {
             .map_err(anyhow::Error::from)
             .context("Failed to spawn failing worker")
     }
+
+    // --- Unit Tests for handle_supervisor_command ---
+
+    #[test]
+    fn test_handle_list_workers() {
+        let master_rules = Mutex::new(HashMap::new());
+        let worker_map = Mutex::new(HashMap::new());
+        worker_map.lock().unwrap().insert(
+            1234,
+            crate::WorkerInfo {
+                pid: 1234,
+                worker_type: "DataPlane".to_string(),
+                core_id: None,
+            },
+        );
+        let global_min_level = std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
+        let facility_min_levels = std::sync::RwLock::new(HashMap::new());
+
+        let (response, action) = handle_supervisor_command(
+            crate::SupervisorCommand::ListWorkers,
+            &master_rules,
+            &worker_map,
+            &global_min_level,
+            &facility_min_levels,
+        );
+
+        assert!(matches!(response, crate::Response::Workers(workers) if workers.len() == 1));
+        assert_eq!(action, CommandAction::None);
+    }
+
+    #[test]
+    fn test_handle_add_rule() {
+        let master_rules = Mutex::new(HashMap::new());
+        let worker_map = Mutex::new(HashMap::new());
+        let global_min_level = std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
+        let facility_min_levels = std::sync::RwLock::new(HashMap::new());
+
+        let (response, action) = handle_supervisor_command(
+            crate::SupervisorCommand::AddRule {
+                rule_id: "test-rule".to_string(),
+                input_interface: "lo".to_string(),
+                input_group: "224.0.0.1".parse().unwrap(),
+                input_port: 5000,
+                outputs: vec![],
+                dtls_enabled: false,
+            },
+            &master_rules,
+            &worker_map,
+            &global_min_level,
+            &facility_min_levels,
+        );
+
+        assert!(matches!(response, crate::Response::Success(_)));
+        assert!(matches!(action, CommandAction::BroadcastToDataPlane(_)));
+        assert_eq!(master_rules.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_handle_remove_rule_exists() {
+        let master_rules = Mutex::new(HashMap::new());
+        master_rules.lock().unwrap().insert(
+            "test-rule".to_string(),
+            ForwardingRule {
+                rule_id: "test-rule".to_string(),
+                input_interface: "lo".to_string(),
+                input_group: "224.0.0.1".parse().unwrap(),
+                input_port: 5000,
+                outputs: vec![],
+                dtls_enabled: false,
+            },
+        );
+        let worker_map = Mutex::new(HashMap::new());
+        let global_min_level = std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
+        let facility_min_levels = std::sync::RwLock::new(HashMap::new());
+
+        let (response, action) = handle_supervisor_command(
+            crate::SupervisorCommand::RemoveRule {
+                rule_id: "test-rule".to_string(),
+            },
+            &master_rules,
+            &worker_map,
+            &global_min_level,
+            &facility_min_levels,
+        );
+
+        assert!(matches!(response, crate::Response::Success(_)));
+        assert!(matches!(action, CommandAction::BroadcastToDataPlane(_)));
+        assert_eq!(master_rules.lock().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_handle_remove_rule_not_found() {
+        let master_rules = Mutex::new(HashMap::new());
+        let worker_map = Mutex::new(HashMap::new());
+        let global_min_level = std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
+        let facility_min_levels = std::sync::RwLock::new(HashMap::new());
+
+        let (response, action) = handle_supervisor_command(
+            crate::SupervisorCommand::RemoveRule {
+                rule_id: "nonexistent".to_string(),
+            },
+            &master_rules,
+            &worker_map,
+            &global_min_level,
+            &facility_min_levels,
+        );
+
+        assert!(matches!(response, crate::Response::Error(_)));
+        assert_eq!(action, CommandAction::None);
+    }
+
+    #[test]
+    fn test_handle_list_rules() {
+        let master_rules = Mutex::new(HashMap::new());
+        master_rules.lock().unwrap().insert(
+            "test-rule".to_string(),
+            ForwardingRule {
+                rule_id: "test-rule".to_string(),
+                input_interface: "lo".to_string(),
+                input_group: "224.0.0.1".parse().unwrap(),
+                input_port: 5000,
+                outputs: vec![],
+                dtls_enabled: false,
+            },
+        );
+        let worker_map = Mutex::new(HashMap::new());
+        let global_min_level = std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
+        let facility_min_levels = std::sync::RwLock::new(HashMap::new());
+
+        let (response, action) = handle_supervisor_command(
+            crate::SupervisorCommand::ListRules,
+            &master_rules,
+            &worker_map,
+            &global_min_level,
+            &facility_min_levels,
+        );
+
+        assert!(matches!(response, crate::Response::Rules(rules) if rules.len() == 1));
+        assert_eq!(action, CommandAction::None);
+    }
+
+    #[test]
+    fn test_handle_get_stats() {
+        let master_rules = Mutex::new(HashMap::new());
+        let worker_map = Mutex::new(HashMap::new());
+        let global_min_level = std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
+        let facility_min_levels = std::sync::RwLock::new(HashMap::new());
+
+        let (response, action) = handle_supervisor_command(
+            crate::SupervisorCommand::GetStats,
+            &master_rules,
+            &worker_map,
+            &global_min_level,
+            &facility_min_levels,
+        );
+
+        assert!(matches!(response, crate::Response::Stats(_)));
+        assert_eq!(action, CommandAction::None);
+    }
+
+    #[test]
+    fn test_handle_set_global_log_level() {
+        use std::sync::atomic::Ordering;
+
+        let master_rules = Mutex::new(HashMap::new());
+        let worker_map = Mutex::new(HashMap::new());
+        let global_min_level = std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
+        let facility_min_levels = std::sync::RwLock::new(HashMap::new());
+
+        let (response, action) = handle_supervisor_command(
+            crate::SupervisorCommand::SetGlobalLogLevel {
+                level: crate::logging::Severity::Debug,
+            },
+            &master_rules,
+            &worker_map,
+            &global_min_level,
+            &facility_min_levels,
+        );
+
+        assert!(matches!(response, crate::Response::Success(_)));
+        assert_eq!(action, CommandAction::None);
+        assert_eq!(
+            global_min_level.load(Ordering::Relaxed),
+            crate::logging::Severity::Debug as u8
+        );
+    }
+
+    #[test]
+    fn test_handle_set_facility_log_level() {
+        let master_rules = Mutex::new(HashMap::new());
+        let worker_map = Mutex::new(HashMap::new());
+        let global_min_level = std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
+        let facility_min_levels = std::sync::RwLock::new(HashMap::new());
+
+        let (response, action) = handle_supervisor_command(
+            crate::SupervisorCommand::SetFacilityLogLevel {
+                facility: crate::logging::Facility::Ingress,
+                level: crate::logging::Severity::Debug,
+            },
+            &master_rules,
+            &worker_map,
+            &global_min_level,
+            &facility_min_levels,
+        );
+
+        assert!(matches!(response, crate::Response::Success(_)));
+        assert_eq!(action, CommandAction::None);
+        assert_eq!(
+            facility_min_levels
+                .read()
+                .unwrap()
+                .get(&crate::logging::Facility::Ingress),
+            Some(&crate::logging::Severity::Debug)
+        );
+    }
+
+    #[test]
+    fn test_handle_get_log_levels() {
+        let master_rules = Mutex::new(HashMap::new());
+        let worker_map = Mutex::new(HashMap::new());
+        let global_min_level = std::sync::atomic::AtomicU8::new(crate::logging::Severity::Warning as u8);
+        let facility_min_levels = std::sync::RwLock::new(HashMap::new());
+        facility_min_levels
+            .write()
+            .unwrap()
+            .insert(crate::logging::Facility::Ingress, crate::logging::Severity::Debug);
+
+        let (response, action) = handle_supervisor_command(
+            crate::SupervisorCommand::GetLogLevels,
+            &master_rules,
+            &worker_map,
+            &global_min_level,
+            &facility_min_levels,
+        );
+
+        match response {
+            crate::Response::LogLevels {
+                global,
+                facility_overrides,
+            } => {
+                assert_eq!(global, crate::logging::Severity::Warning);
+                assert_eq!(
+                    facility_overrides.get(&crate::logging::Facility::Ingress),
+                    Some(&crate::logging::Severity::Debug)
+                );
+            }
+            _ => panic!("Expected LogLevels response"),
+        }
+        assert_eq!(action, CommandAction::None);
+    }
+
+    // --- Existing Integration Tests ---
 
     fn spawn_sleeping_worker() -> anyhow::Result<Child> {
         let mut command = tokio::process::Command::new("sleep");
