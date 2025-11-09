@@ -16,7 +16,8 @@ use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
 
-use crate::{ForwardingRule, RelayCommand};
+use crate::logging::{AsyncConsumer, Facility, MPSCRingBuffer};
+use crate::{log_info, log_notice, ForwardingRule, RelayCommand};
 use futures::{stream::StreamExt, SinkExt};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
@@ -229,6 +230,30 @@ where
     FutCp: Future<Output = Result<(Child, UnixStream, UnixStream)>> + Send + 'static,
     FutDp: Future<Output = Result<(Child, UnixStream, UnixStream)>> + Send + 'static,
 {
+    // === NEW LOGGING SYSTEM (Proof-of-Concept) ===
+    // Initialize lock-free logging infrastructure for supervisor
+    use crate::logging::Logger;
+
+    // Create ring buffer
+    let supervisor_ringbuffer = Arc::new(MPSCRingBuffer::new(Facility::Supervisor.buffer_size()));
+
+    // Create logger from ringbuffer
+    let supervisor_logger = Logger::from_mpsc(Arc::clone(&supervisor_ringbuffer));
+
+    // Spawn log consumer task
+    let ringbuffers_for_consumer = vec![(Facility::Supervisor, Arc::clone(&supervisor_ringbuffer))];
+    let _log_consumer_handle = tokio::spawn(async move {
+        AsyncConsumer::stderr(ringbuffers_for_consumer).run().await;
+    });
+
+    // Demonstrate new logging system (alongside existing println!)
+    log_info!(
+        supervisor_logger,
+        Facility::Supervisor,
+        "Lock-free logging system initialized"
+    );
+    // === END NEW LOGGING SYSTEM ===
+
     let worker_map: Arc<Mutex<HashMap<u32, crate::WorkerInfo>>> =
         Arc::new(Mutex::new(HashMap::new()));
     let worker_req_streams: Arc<Mutex<HashMap<u32, Arc<tokio::sync::Mutex<UnixStream>>>>> =
@@ -239,6 +264,12 @@ where
     println!(
         "[Supervisor] Starting with {} data plane workers.",
         num_cores
+    );
+    // NEW: Also log via new system
+    log_notice!(
+        supervisor_logger,
+        Facility::Supervisor,
+        &format!("Starting with {} data plane workers", num_cores)
     );
 
     if control_socket_path.exists() {

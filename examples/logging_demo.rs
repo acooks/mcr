@@ -3,6 +3,7 @@
 // Run with: cargo run --example logging_demo
 
 use multicast_relay::logging::*;
+use multicast_relay::{log_info, log_kv, log_warning};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -10,33 +11,28 @@ use std::time::Duration;
 async fn main() {
     println!("=== MCR Logging System Demo ===\n");
 
-    // Create a logging registry with MPSC ring buffers (for async/multi-threaded use)
-    let registry = LogRegistry::new_mpsc();
+    // Create ring buffers for different facilities
+    let supervisor_ringbuffer = Arc::new(MPSCRingBuffer::new(Facility::Supervisor.buffer_size()));
+    let ingress_ringbuffer = Arc::new(MPSCRingBuffer::new(Facility::Ingress.buffer_size()));
 
-    // Get loggers for different facilities
-    let supervisor_logger = registry.get_logger(Facility::Supervisor).unwrap();
-    let ingress_logger = registry.get_logger(Facility::Ingress).unwrap();
+    // Create loggers from the ring buffers
+    let supervisor_logger = Logger::from_mpsc(Arc::clone(&supervisor_ringbuffer));
+    let ingress_logger = Logger::from_mpsc(Arc::clone(&ingress_ringbuffer));
 
-    // Set up a consumer task to output logs to stdout
-    let ringbuffers: Vec<(Facility, Arc<MPSCRingBuffer>)> = vec![
-        (
-            Facility::Supervisor,
-            Arc::new(MPSCRingBuffer::new(Facility::Supervisor.buffer_size())),
-        ),
-        (
-            Facility::Ingress,
-            Arc::new(MPSCRingBuffer::new(Facility::Ingress.buffer_size())),
-        ),
+    // Set up ring buffers for the consumer task
+    let ringbuffers_for_consumer = vec![
+        (Facility::Supervisor, Arc::clone(&supervisor_ringbuffer)),
+        (Facility::Ingress, Arc::clone(&ingress_ringbuffer)),
     ];
 
-    // Note: In a real application, you'd get the ringbuffers from the registry.
-    // This is simplified for demonstration.
-
     // Start the consumer task
-    let consumer = AsyncConsumer::stdout(vec![]);
-    let _stop_handle = consumer.stop_handle();
+    let consumer = AsyncConsumer::stdout(ringbuffers_for_consumer);
+    let stop_handle = consumer.stop_handle();
 
-    // In production, you'd spawn: tokio::spawn(consumer.run());
+    // Spawn consumer in background
+    tokio::spawn(async move {
+        consumer.run().await;
+    });
 
     println!("1. Basic logging with severity helpers:");
     supervisor_logger.info(Facility::Supervisor, "Supervisor starting");
@@ -85,4 +81,8 @@ async fn main() {
 
     // Give logs time to flush
     tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Stop the consumer
+    stop_handle.store(false, std::sync::atomic::Ordering::Relaxed);
+    tokio::time::sleep(Duration::from_millis(10)).await;
 }
