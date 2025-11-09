@@ -93,7 +93,9 @@ fn drop_privileges(uid: Uid, gid: Gid, caps_to_keep: Option<&HashSet<Capability>
             caps::raise(None, CapSet::Ambient, *cap)
                 .with_context(|| format!("Failed to raise {:?} in Ambient set", cap))?;
         }
-        eprintln!("[Worker] Successfully set capabilities (including Ambient for thread inheritance)");
+        eprintln!(
+            "[Worker] Successfully set capabilities (including Ambient for thread inheritance)"
+        );
     }
 
     // Set the UID last (irreversible)
@@ -229,7 +231,9 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
     // Temporary workaround: Don't drop privileges for data plane workers.
     // They need CAP_NET_RAW anyway, so running as root is acceptable until FD passing is implemented.
 
-    eprintln!("[DataPlane] Worker process started (keeping root privileges - CAP_NET_RAW required)");
+    eprintln!(
+        "[DataPlane] Worker process started (keeping root privileges - CAP_NET_RAW required)"
+    );
     eprintln!("[DataPlane] TODO: Implement AF_PACKET FD passing from supervisor for proper privilege separation");
 
     // Skip privilege drop for now
@@ -244,7 +248,10 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
 
     if let Some(core_id) = config.core_id {
         lifecycle.set_cpu_affinity(core_id as usize)?;
-        eprintln!("[DataPlane] Successfully set CPU affinity to core {}", core_id);
+        eprintln!(
+            "[DataPlane] Successfully set CPU affinity to core {}",
+            core_id
+        );
     }
 
     // Get FD 3 from supervisor and set it to non-blocking before wrapping in tokio UnixStream
@@ -301,7 +308,10 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
                     });
                 }
                 Err(e) => {
-                    eprintln!("[DataPlane Worker] Error: Failed to deserialize RelayCommand: {}", e);
+                    eprintln!(
+                        "[DataPlane Worker] Error: Failed to deserialize RelayCommand: {}",
+                        e
+                    );
                 }
             }
         }

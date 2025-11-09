@@ -178,7 +178,7 @@ pub async fn run(
 
     // Initialize log-level filtering (default: Info)
     let global_min_level = Arc::new(std::sync::atomic::AtomicU8::new(
-        crate::logging::Severity::Info as u8
+        crate::logging::Severity::Info as u8,
     ));
     let facility_min_levels = Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
 
@@ -249,6 +249,7 @@ pub async fn run(
     .await
 }
 
+#[allow(clippy::too_many_arguments)] // Legitimate need for all parameters in supervisor
 pub async fn run_generic<F, G, FutCp, FutDp>(
     mut spawn_cp: F,
     num_cores: usize,
@@ -258,7 +259,11 @@ pub async fn run_generic<F, G, FutCp, FutDp>(
     master_rules: Arc<Mutex<HashMap<String, ForwardingRule>>>,
     supervisor_logger: crate::logging::Logger,
     global_min_level: Arc<std::sync::atomic::AtomicU8>,
-    facility_min_levels: Arc<std::sync::RwLock<std::collections::HashMap<crate::logging::Facility, crate::logging::Severity>>>,
+    facility_min_levels: Arc<
+        std::sync::RwLock<
+            std::collections::HashMap<crate::logging::Facility, crate::logging::Severity>,
+        >,
+    >,
 ) -> Result<()>
 where
     F: FnMut() -> FutCp,
@@ -266,7 +271,6 @@ where
     FutCp: Future<Output = Result<(Child, UnixStream, UnixStream)>> + Send + 'static,
     FutDp: Future<Output = Result<(Child, UnixStream, UnixStream)>> + Send + 'static,
 {
-
     let worker_map: Arc<Mutex<HashMap<u32, crate::WorkerInfo>>> =
         Arc::new(Mutex::new(HashMap::new()));
     let worker_req_streams: Arc<Mutex<HashMap<u32, Arc<tokio::sync::Mutex<UnixStream>>>>> =
@@ -662,12 +666,22 @@ mod tests {
 
     // --- Test Helpers ---
 
-    fn create_test_logger() -> (Logger, Arc<std::sync::atomic::AtomicU8>, Arc<std::sync::RwLock<std::collections::HashMap<crate::logging::Facility, crate::logging::Severity>>>) {
+    #[allow(clippy::type_complexity)] // Test helper with intentionally complex return type
+    fn create_test_logger() -> (
+        Logger,
+        Arc<std::sync::atomic::AtomicU8>,
+        Arc<
+            std::sync::RwLock<
+                std::collections::HashMap<crate::logging::Facility, crate::logging::Severity>,
+            >,
+        >,
+    ) {
         let ringbuffer = Arc::new(MPSCRingBuffer::new(64));
         let global_min_level = Arc::new(std::sync::atomic::AtomicU8::new(
-            crate::logging::Severity::Info as u8
+            crate::logging::Severity::Info as u8,
         ));
-        let facility_min_levels = Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+        let facility_min_levels =
+            Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
         let logger = Logger::from_mpsc(
             ringbuffer,
             Arc::clone(&global_min_level),

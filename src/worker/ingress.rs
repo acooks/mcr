@@ -280,7 +280,10 @@ impl IngressLoop {
                         }
                     }
                     _ => {
-                        eprintln!("[Ingress] Warning: Unknown io_uring user_data: {}", user_data);
+                        eprintln!(
+                            "[Ingress] Warning: Unknown io_uring user_data: {}",
+                            user_data
+                        );
                     }
                 }
             }

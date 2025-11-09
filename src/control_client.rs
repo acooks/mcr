@@ -168,14 +168,12 @@ pub fn build_command(cli_command: CliCommand) -> Result<multicast_relay::Supervi
                 level,
             } => {
                 if let Some(level_str) = global {
-                    let level = parse_severity(&level_str)
-                        .map_err(|e| anyhow::anyhow!("{}", e))?;
+                    let level = parse_severity(&level_str).map_err(|e| anyhow::anyhow!("{}", e))?;
                     multicast_relay::SupervisorCommand::SetGlobalLogLevel { level }
                 } else if let (Some(facility_str), Some(level_str)) = (facility, level) {
-                    let facility = parse_facility(&facility_str)
-                        .map_err(|e| anyhow::anyhow!("{}", e))?;
-                    let level = parse_severity(&level_str)
-                        .map_err(|e| anyhow::anyhow!("{}", e))?;
+                    let facility =
+                        parse_facility(&facility_str).map_err(|e| anyhow::anyhow!("{}", e))?;
+                    let level = parse_severity(&level_str).map_err(|e| anyhow::anyhow!("{}", e))?;
                     multicast_relay::SupervisorCommand::SetFacilityLogLevel { facility, level }
                 } else {
                     return Err(anyhow::anyhow!(
@@ -370,7 +368,9 @@ mod tests {
         let supervisor_cmd = build_command(cmd).unwrap();
         assert!(matches!(
             supervisor_cmd,
-            multicast_relay::SupervisorCommand::SetGlobalLogLevel { level: Severity::Info }
+            multicast_relay::SupervisorCommand::SetGlobalLogLevel {
+                level: Severity::Info
+            }
         ));
 
         // Test SetFacilityLogLevel

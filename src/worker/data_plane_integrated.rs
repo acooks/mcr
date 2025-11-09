@@ -329,7 +329,10 @@ mod tests {
         assert_eq!(parsed.udp.src_port, 5000);
         assert_eq!(parsed.udp.dst_port, 5001);
         assert_eq!(parsed.payload_len, 4);
-        assert_eq!(&packet[parsed.payload_offset..parsed.payload_offset + parsed.payload_len], b"TEST");
+        assert_eq!(
+            &packet[parsed.payload_offset..parsed.payload_offset + parsed.payload_len],
+            b"TEST"
+        );
     }
 
     #[test]
@@ -348,7 +351,10 @@ mod tests {
 
         let stats = pool.aggregate_stats();
         assert_eq!(stats.total_allocations(), 2);
-        assert_eq!(stats.small.deallocations_total + stats.standard.deallocations_total, 2);
+        assert_eq!(
+            stats.small.deallocations_total + stats.standard.deallocations_total,
+            2
+        );
     }
 
     #[test]
@@ -447,13 +453,16 @@ mod tests {
         // Fragmented packets should be rejected (D30)
         let result = parse_packet(&packet, false);
         assert!(result.is_err());
-        assert!(matches!(result, Err(crate::worker::packet_parser::ParseError::FragmentedPacket)));
+        assert!(matches!(
+            result,
+            Err(crate::worker::packet_parser::ParseError::FragmentedPacket)
+        ));
     }
 
     #[test]
     fn test_error_handling_malformed_packets() {
         // Too short
-        assert!(parse_packet(&vec![0u8; 10], false).is_err());
+        assert!(parse_packet(&[0u8; 10], false).is_err());
 
         // Invalid EtherType
         let mut invalid = vec![0u8; 42];
@@ -629,7 +638,10 @@ mod tests {
             avg_ns
         );
 
-        println!("✓ Packet parsing performance: {}ns (target: <100ns)", avg_ns);
+        println!(
+            "✓ Packet parsing performance: {}ns (target: <100ns)",
+            avg_ns
+        );
     }
 
     #[test]
@@ -698,7 +710,8 @@ mod tests {
         let copy_overhead_ns = 100; // Estimate for 1:N amplification prep
         let channel_send_ns = 200; // Estimate for mpsc channel send
 
-        let total_pipeline_ns = buffer_alloc_ns + parsing_ns + rule_lookup_ns + copy_overhead_ns + channel_send_ns;
+        let total_pipeline_ns =
+            buffer_alloc_ns + parsing_ns + rule_lookup_ns + copy_overhead_ns + channel_send_ns;
 
         // Convert to throughput
         let packets_per_sec = 1_000_000_000.0 / total_pipeline_ns as f64;
