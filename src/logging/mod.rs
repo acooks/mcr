@@ -5,18 +5,19 @@
 // - design/RINGBUFFER_IMPLEMENTATION.md - Ring buffer details
 // - design/KERNEL_RINGBUFFER_ANALYSIS.md - Linux/FreeBSD analysis
 
+mod consumer;
 mod entry;
 mod facility;
+mod logger;
+#[macro_use]
+mod macros;
 mod ringbuffer;
 mod severity;
 
 // Public exports
+pub use consumer::{AsyncConsumer, BlockingConsumer, LogSink, StderrSink, StdoutSink};
 pub use entry::{KeyValue, LogEntry};
 pub use facility::Facility;
+pub use logger::{LogRegistry, Logger};
 pub use ringbuffer::{MPSCRingBuffer, SPSCRingBuffer};
 pub use severity::Severity;
-
-// TODO: Add in future phases
-// mod logger;      - Logger and LogRegistry
-// mod macros;      - Logging macros
-// mod consumer;    - Consumer task and output sinks
