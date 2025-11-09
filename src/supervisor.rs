@@ -16,8 +16,8 @@ use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
 
-use crate::logging::{AsyncConsumer, Facility, MPSCRingBuffer};
-use crate::{log_info, log_notice, ForwardingRule, RelayCommand};
+use crate::logging::{AsyncConsumer, Facility, Logger, MPSCRingBuffer};
+use crate::{log_info, log_warning, ForwardingRule, RelayCommand};
 use futures::{stream::StreamExt, SinkExt};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
@@ -29,8 +29,9 @@ pub async fn spawn_control_plane_worker(
     gid: u32,
     relay_command_socket_path: PathBuf,
     prometheus_addr: Option<std::net::SocketAddr>,
+    logger: &crate::logging::Logger,
 ) -> Result<(Child, UnixStream, UnixStream)> {
-    println!("[Supervisor] Spawning Control Plane worker.");
+    logger.info(Facility::Supervisor, "Spawning Control Plane worker");
 
     // Create the supervisor-worker communication socket pair
     // This will be passed as FD 3 to the worker
@@ -84,10 +85,11 @@ pub async fn spawn_data_plane_worker(
     gid: u32,
     interface: String,
     relay_command_socket_path: PathBuf,
+    logger: &crate::logging::Logger,
 ) -> Result<(Child, UnixStream, UnixStream)> {
-    println!(
-        "[Supervisor] Spawning Data Plane worker for core {}.",
-        core_id
+    logger.info(
+        Facility::Supervisor,
+        &format!("Spawning Data Plane worker for core {}", core_id),
     );
 
     // Create the supervisor-worker communication socket pair
@@ -170,9 +172,22 @@ pub async fn run(
     // until lazy socket creation is implemented.
     let detected_cores = num_cpus::get();
     let num_cores = num_workers.unwrap_or(detected_cores);
-    println!(
-        "[Supervisor] Detected {} CPU cores, using {} data plane workers",
-        detected_cores, num_cores
+
+    // Initialize logging early (before spawning workers)
+    let supervisor_ringbuffer = Arc::new(MPSCRingBuffer::new(Facility::Supervisor.buffer_size()));
+    let supervisor_logger = Logger::from_mpsc(Arc::clone(&supervisor_ringbuffer));
+    let ringbuffers_for_consumer = vec![(Facility::Supervisor, Arc::clone(&supervisor_ringbuffer))];
+    let _log_consumer_handle = tokio::spawn(async move {
+        AsyncConsumer::stderr(ringbuffers_for_consumer).run().await;
+    });
+
+    log_info!(
+        supervisor_logger,
+        Facility::Supervisor,
+        &format!(
+            "Detected {} CPU cores, using {} data plane workers",
+            detected_cores, num_cores
+        )
     );
 
     let cp_socket_path = relay_command_socket_path.clone();
@@ -194,24 +209,29 @@ pub async fn run(
     )?;
 
     let interface = interface.to_string();
+    let logger_for_cp = supervisor_logger.clone();
+    let logger_for_dp = supervisor_logger.clone();
     run_generic(
         move || {
             let cp_socket_path = cp_socket_path.clone();
+            let logger = logger_for_cp.clone();
             async move {
-                spawn_control_plane_worker(uid, gid, cp_socket_path, prometheus_addr).await
+                spawn_control_plane_worker(uid, gid, cp_socket_path, prometheus_addr, &logger).await
             }
         },
         num_cores,
         move |core_id| {
             let dp_socket_path = dp_socket_path.clone();
             let interface = interface.clone();
+            let logger = logger_for_dp.clone();
             async move {
-                spawn_data_plane_worker(core_id, uid, gid, interface, dp_socket_path).await
+                spawn_data_plane_worker(core_id, uid, gid, interface, dp_socket_path, &logger).await
             }
         },
         _relay_command_rx,
         control_socket_path, // Pass down
         master_rules,
+        supervisor_logger,
     )
     .await
 }
@@ -221,8 +241,9 @@ pub async fn run_generic<F, G, FutCp, FutDp>(
     num_cores: usize,
     mut spawn_dp: G,
     _relay_command_rx: mpsc::Receiver<RelayCommand>,
-    control_socket_path: PathBuf, // New parameter
+    control_socket_path: PathBuf,
     master_rules: Arc<Mutex<HashMap<String, ForwardingRule>>>,
+    supervisor_logger: crate::logging::Logger,
 ) -> Result<()>
 where
     F: FnMut() -> FutCp,
@@ -230,29 +251,6 @@ where
     FutCp: Future<Output = Result<(Child, UnixStream, UnixStream)>> + Send + 'static,
     FutDp: Future<Output = Result<(Child, UnixStream, UnixStream)>> + Send + 'static,
 {
-    // === NEW LOGGING SYSTEM (Proof-of-Concept) ===
-    // Initialize lock-free logging infrastructure for supervisor
-    use crate::logging::Logger;
-
-    // Create ring buffer
-    let supervisor_ringbuffer = Arc::new(MPSCRingBuffer::new(Facility::Supervisor.buffer_size()));
-
-    // Create logger from ringbuffer
-    let supervisor_logger = Logger::from_mpsc(Arc::clone(&supervisor_ringbuffer));
-
-    // Spawn log consumer task
-    let ringbuffers_for_consumer = vec![(Facility::Supervisor, Arc::clone(&supervisor_ringbuffer))];
-    let _log_consumer_handle = tokio::spawn(async move {
-        AsyncConsumer::stderr(ringbuffers_for_consumer).run().await;
-    });
-
-    // Demonstrate new logging system (alongside existing println!)
-    log_info!(
-        supervisor_logger,
-        Facility::Supervisor,
-        "Lock-free logging system initialized"
-    );
-    // === END NEW LOGGING SYSTEM ===
 
     let worker_map: Arc<Mutex<HashMap<u32, crate::WorkerInfo>>> =
         Arc::new(Mutex::new(HashMap::new()));
@@ -261,12 +259,7 @@ where
     let dp_cmd_streams: Arc<Mutex<HashMap<u32, Arc<tokio::sync::Mutex<UnixStream>>>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
-    println!(
-        "[Supervisor] Starting with {} data plane workers.",
-        num_cores
-    );
-    // NEW: Also log via new system
-    log_notice!(
+    log_info!(
         supervisor_logger,
         Facility::Supervisor,
         &format!("Starting with {} data plane workers", num_cores)
@@ -280,9 +273,10 @@ where
         std_listener.set_nonblocking(true)?;
         tokio::net::UnixListener::from_std(std_listener)?
     };
-    println!(
-        "[Supervisor] Control socket listening on {:?}",
-        &control_socket_path
+    log_info!(
+        supervisor_logger,
+        Facility::Supervisor,
+        &format!("Control socket listening on {:?}", &control_socket_path)
     );
 
     let (mut cp_child, mut _cp_stream, cp_req_stream) = spawn_cp().await?;
@@ -351,10 +345,14 @@ where
 
                 if let Ok(status) = result {
                     if status.success() {
-                        println!("[Supervisor] Control Plane worker exited gracefully. Restarting immediately.");
+                        log_info!(supervisor_logger, Facility::Supervisor, "Control Plane worker exited gracefully, restarting immediately");
                         cp_backoff_ms = INITIAL_BACKOFF_MS;
                     } else {
-                        println!("[Supervisor] Control Plane worker failed (status: {}). Restarting after {}ms.", status, cp_backoff_ms);
+                        log_warning!(
+                            supervisor_logger,
+                            Facility::Supervisor,
+                            &format!("Control Plane worker failed (status: {}), restarting after {}ms", status, cp_backoff_ms)
+                        );
                         sleep(Duration::from_millis(cp_backoff_ms)).await;
                         cp_backoff_ms = (cp_backoff_ms * 2).min(MAX_BACKOFF_MS);
                     }
@@ -388,10 +386,18 @@ where
                 if let Ok(status) = result {
                     let backoff = dp_backoffs.entry(core_id).or_insert(INITIAL_BACKOFF_MS);
                     if status.success() {
-                        println!("[Supervisor] Data Plane worker (core {}) exited gracefully. Restarting immediately.", core_id);
+                        log_info!(
+                            supervisor_logger,
+                            Facility::Supervisor,
+                            &format!("Data Plane worker (core {}) exited gracefully, restarting immediately", core_id)
+                        );
                         *backoff = INITIAL_BACKOFF_MS;
                     } else {
-                        println!("[Supervisor] Data Plane worker (core {}) failed (status: {}). Restarting after {}ms.", core_id, status, *backoff);
+                        log_warning!(
+                            supervisor_logger,
+                            Facility::Supervisor,
+                            &format!("Data Plane worker (core {}) failed (status: {}), restarting after {}ms", core_id, status, *backoff)
+                        );
                         sleep(Duration::from_millis(*backoff)).await;
                         *backoff = (*backoff * 2).min(MAX_BACKOFF_MS);
                     }
@@ -427,6 +433,7 @@ where
                             let worker_req_streams_clone = worker_req_streams.clone();
                             let dp_cmd_streams_clone = dp_cmd_streams.clone();
                             let master_rules_clone = master_rules.clone();
+                            let logger_for_client = supervisor_logger.clone();
 
                             tokio::spawn(async move {
                                 use crate::{Response, SupervisorCommand};
@@ -451,15 +458,24 @@ where
                                             let cmd_bytes = serde_json::to_vec(&relay_cmd).unwrap();
 
                                             let streams_to_send: Vec<_> = dp_cmd_streams_clone.lock().unwrap().values().cloned().collect();
-                                            println!("[Supervisor] Sending AddRule to {} data plane workers", streams_to_send.len());
+                                            log_info!(
+                                                logger_for_client,
+                                                Facility::Supervisor,
+                                                &format!("Sending AddRule to {} data plane workers", streams_to_send.len())
+                                            );
                                             for stream_mutex in streams_to_send {
                                                 let cmd_bytes_clone = cmd_bytes.clone();
+                                                let logger_for_task = logger_for_client.clone();
                                                 tokio::spawn(async move {
                                                     let mut stream = stream_mutex.lock().await;
                                                     let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
                                                     match framed.send(cmd_bytes_clone.into()).await {
-                                                        Ok(_) => println!("[Supervisor] Successfully sent AddRule to worker"),
-                                                        Err(e) => error!("Failed to send AddRule to worker: {}", e),
+                                                        Ok(_) => {
+                                                            logger_for_task.debug(Facility::Supervisor, "Successfully sent AddRule to worker");
+                                                        }
+                                                        Err(e) => {
+                                                            logger_for_task.error(Facility::Supervisor, &format!("Failed to send AddRule to worker: {}", e));
+                                                        }
                                                     }
                                                 });
                                             }
@@ -601,6 +617,11 @@ mod tests {
 
     // --- Test Helpers ---
 
+    fn create_test_logger() -> Logger {
+        let ringbuffer = Arc::new(MPSCRingBuffer::new(64));
+        Logger::from_mpsc(ringbuffer)
+    }
+
     fn spawn_failing_worker() -> anyhow::Result<Child> {
         let mut command = tokio::process::Command::new("sh");
         command.arg("-c").arg("exit 1");
@@ -653,8 +674,15 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let socket_path = temp_dir.path().join("test.sock");
 
-        let supervisor_future =
-            run_generic(spawn_cp, 1, spawn_dp, rx, socket_path, master_rules.clone());
+        let supervisor_future = run_generic(
+            spawn_cp,
+            1,
+            spawn_dp,
+            rx,
+            socket_path,
+            master_rules.clone(),
+            create_test_logger(),
+        );
         let _ = tokio::time::timeout(Duration::from_millis(1000), supervisor_future).await;
 
         let spawn_times = cp_spawn_times.lock().unwrap();
@@ -694,8 +722,15 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let socket_path = temp_dir.path().join("test.sock");
 
-        let supervisor_future =
-            run_generic(spawn_cp, 1, spawn_dp, rx, socket_path, master_rules.clone());
+        let supervisor_future = run_generic(
+            spawn_cp,
+            1,
+            spawn_dp,
+            rx,
+            socket_path,
+            master_rules.clone(),
+            create_test_logger(),
+        );
         let _ = tokio::time::timeout(Duration::from_millis(1000), supervisor_future).await;
 
         let spawn_times = dp_spawn_times.lock().unwrap();
@@ -751,6 +786,7 @@ mod tests {
             rx,
             socket_path,
             master_rules.clone(),
+            create_test_logger(),
         );
         let _ = tokio::time::timeout(Duration::from_millis(200), supervisor_future).await;
 
@@ -815,8 +851,15 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let socket_path = temp_dir.path().join("test.sock");
 
-        let supervisor_future =
-            run_generic(spawn_cp, 1, spawn_dp, rx, socket_path, master_rules.clone());
+        let supervisor_future = run_generic(
+            spawn_cp,
+            1,
+            spawn_dp,
+            rx,
+            socket_path,
+            master_rules.clone(),
+            create_test_logger(),
+        );
 
         // Run long enough for three spawns: fail -> graceful -> fail
         let _ = tokio::time::timeout(Duration::from_millis(1000), supervisor_future).await;

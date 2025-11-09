@@ -62,13 +62,17 @@ pub struct RuleDispatcher {
 
     /// Currently active rules (supervisor is source of truth)
     active_rules: HashMap<String, ForwardingRule>,
+
+    /// Logger for rule dispatch operations
+    logger: crate::logging::Logger,
 }
 
 impl RuleDispatcher {
-    pub fn new() -> Self {
+    pub fn new(logger: crate::logging::Logger) -> Self {
         Self {
             workers: HashMap::new(),
             active_rules: HashMap::new(),
+            logger,
         }
     }
 
@@ -129,9 +133,9 @@ impl RuleDispatcher {
                 }
                 WorkerType::DataPlane { .. } => {
                     if let Err(e) = handle.command_tx.try_send(command) {
-                        eprintln!(
-                            "[Supervisor] Warning: Failed to send AddRule to DP worker {}: {}. Worker may be busy or restarting.",
-                            handle.pid, e
+                        self.logger.warning(
+                            crate::logging::Facility::RuleDispatch,
+                            &format!("Failed to send AddRule to DP worker {}: {}. Worker may be busy or restarting", handle.pid, e)
                         );
                     }
                 }
@@ -166,9 +170,9 @@ impl RuleDispatcher {
                 }
                 WorkerType::DataPlane { .. } => {
                     if let Err(e) = handle.command_tx.try_send(command.clone()) {
-                        eprintln!(
-                            "[Supervisor] Warning: Failed to send RemoveRule to DP worker {}: {}. Worker may be busy or restarting.",
-                            handle.pid, e
+                        self.logger.warning(
+                            crate::logging::Facility::RuleDispatch,
+                            &format!("Failed to send RemoveRule to DP worker {}: {}. Worker may be busy or restarting", handle.pid, e)
                         );
                     }
                 }
@@ -198,10 +202,9 @@ impl RuleDispatcher {
             .get(&worker_id)
             .context(format!("Worker {} not found for resync", worker_id))?;
 
-        println!(
-            "[Supervisor] Resyncing {} active rules to worker {}",
-            self.active_rules.len(),
-            worker_id
+        self.logger.info(
+            crate::logging::Facility::RuleDispatch,
+            &format!("Resyncing {} active rules to worker {}", self.active_rules.len(), worker_id)
         );
 
         for rule in self.active_rules.values() {
@@ -235,6 +238,12 @@ impl RuleDispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    fn create_test_logger() -> crate::logging::Logger {
+        let ringbuffer = Arc::new(crate::logging::MPSCRingBuffer::new(64));
+        crate::logging::Logger::from_mpsc(ringbuffer)
+    }
 
     /// **Tier 1 Unit Test**
     ///
@@ -243,7 +252,7 @@ mod tests {
     /// - **Tier:** 1 (Logic)
     #[test]
     fn test_register_worker() {
-        let mut dispatcher = RuleDispatcher::new();
+        let mut dispatcher = RuleDispatcher::new(create_test_logger());
         let (tx, _rx) = mpsc::channel(10);
 
         dispatcher
@@ -260,7 +269,7 @@ mod tests {
     /// - **Tier:** 1 (Logic)
     #[test]
     fn test_unregister_worker() {
-        let mut dispatcher = RuleDispatcher::new();
+        let mut dispatcher = RuleDispatcher::new(create_test_logger());
         let (tx, _rx) = mpsc::channel(10);
 
         dispatcher
@@ -286,7 +295,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_dispatch_add_rule() {
-        let mut dispatcher = RuleDispatcher::new();
+        let mut dispatcher = RuleDispatcher::new(create_test_logger());
         let (cp_tx, mut cp_rx) = mpsc::channel(10);
         let (dp_tx, mut dp_rx) = mpsc::channel(10);
 
@@ -314,7 +323,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_dispatch_remove_rule() {
-        let mut dispatcher = RuleDispatcher::new();
+        let mut dispatcher = RuleDispatcher::new(create_test_logger());
         let (cp_tx, mut cp_rx) = mpsc::channel(10);
         let (dp_tx, mut dp_rx) = mpsc::channel(10);
 
@@ -345,7 +354,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_resync_worker() {
-        let mut dispatcher = RuleDispatcher::new();
+        let mut dispatcher = RuleDispatcher::new(create_test_logger());
         let (worker1_tx, mut worker1_rx) = mpsc::channel(10);
 
         // Pre-populate with rules
