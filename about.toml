@@ -1,0 +1,16 @@
+# This file is used to configure `cargo-about`.
+# We accept a wide range of common permissive licenses found in the Rust ecosystem.
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Unlicense",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "CC0-1.0",
+    "BSL-1.0",
+    "Unicode-3.0",
+    "OpenSSL",
+    "LGPL-2.1-or-later",
+    "Apache-2.0 WITH LLVM-exception"
+]

@@ -242,7 +242,11 @@ mod tests {
 
     fn create_test_logger() -> crate::logging::Logger {
         let ringbuffer = Arc::new(crate::logging::MPSCRingBuffer::new(64));
-        crate::logging::Logger::from_mpsc(ringbuffer)
+        let global_min_level = Arc::new(std::sync::atomic::AtomicU8::new(
+            crate::logging::Severity::Info as u8
+        ));
+        let facility_min_levels = Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+        crate::logging::Logger::from_mpsc(ringbuffer, global_min_level, facility_min_levels)
     }
 
     /// **Tier 1 Unit Test**

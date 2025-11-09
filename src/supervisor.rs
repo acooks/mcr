@@ -175,7 +175,18 @@ pub async fn run(
 
     // Initialize logging early (before spawning workers)
     let supervisor_ringbuffer = Arc::new(MPSCRingBuffer::new(Facility::Supervisor.buffer_size()));
-    let supervisor_logger = Logger::from_mpsc(Arc::clone(&supervisor_ringbuffer));
+
+    // Initialize log-level filtering (default: Info)
+    let global_min_level = Arc::new(std::sync::atomic::AtomicU8::new(
+        crate::logging::Severity::Info as u8
+    ));
+    let facility_min_levels = Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+
+    let supervisor_logger = Logger::from_mpsc(
+        Arc::clone(&supervisor_ringbuffer),
+        Arc::clone(&global_min_level),
+        Arc::clone(&facility_min_levels),
+    );
     let ringbuffers_for_consumer = vec![(Facility::Supervisor, Arc::clone(&supervisor_ringbuffer))];
     let _log_consumer_handle = tokio::spawn(async move {
         AsyncConsumer::stderr(ringbuffers_for_consumer).run().await;
@@ -232,6 +243,8 @@ pub async fn run(
         control_socket_path, // Pass down
         master_rules,
         supervisor_logger,
+        global_min_level,
+        facility_min_levels,
     )
     .await
 }
@@ -244,6 +257,8 @@ pub async fn run_generic<F, G, FutCp, FutDp>(
     control_socket_path: PathBuf,
     master_rules: Arc<Mutex<HashMap<String, ForwardingRule>>>,
     supervisor_logger: crate::logging::Logger,
+    global_min_level: Arc<std::sync::atomic::AtomicU8>,
+    facility_min_levels: Arc<std::sync::RwLock<std::collections::HashMap<crate::logging::Facility, crate::logging::Severity>>>,
 ) -> Result<()>
 where
     F: FnMut() -> FutCp,
@@ -434,6 +449,8 @@ where
                             let dp_cmd_streams_clone = dp_cmd_streams.clone();
                             let master_rules_clone = master_rules.clone();
                             let logger_for_client = supervisor_logger.clone();
+                            let global_min_level_clone = Arc::clone(&global_min_level);
+                            let facility_min_levels_clone = Arc::clone(&facility_min_levels);
 
                             tokio::spawn(async move {
                                 use crate::{Response, SupervisorCommand};
@@ -555,6 +572,34 @@ where
                                             let response_bytes = serde_json::to_vec(&response).unwrap();
                                             client_stream.write_all(&response_bytes).await.unwrap();
                                         }
+                                        Ok(SupervisorCommand::SetGlobalLogLevel { level }) => {
+                                            use std::sync::atomic::Ordering;
+                                            global_min_level_clone.store(level as u8, Ordering::Relaxed);
+                                            let response = Response::Success(format!("Global log level set to {}", level));
+                                            let response_bytes = serde_json::to_vec(&response).unwrap();
+                                            client_stream.write_all(&response_bytes).await.unwrap();
+                                        }
+                                        Ok(SupervisorCommand::SetFacilityLogLevel { facility, level }) => {
+                                            {
+                                                let mut levels = facility_min_levels_clone.write().unwrap();
+                                                levels.insert(facility, level);
+                                            } // Drop the lock before await
+                                            let response = Response::Success(format!("Log level for {} set to {}", facility, level));
+                                            let response_bytes = serde_json::to_vec(&response).unwrap();
+                                            client_stream.write_all(&response_bytes).await.unwrap();
+                                        }
+                                        Ok(SupervisorCommand::GetLogLevels) => {
+                                            use std::sync::atomic::Ordering;
+                                            let global = crate::logging::Severity::from_u8(
+                                                global_min_level_clone.load(Ordering::Relaxed)
+                                            ).unwrap_or(crate::logging::Severity::Info);
+                                            let facility_overrides = {
+                                                facility_min_levels_clone.read().unwrap().clone()
+                                            }; // Drop the lock immediately
+                                            let response = Response::LogLevels { global, facility_overrides };
+                                            let response_bytes = serde_json::to_vec(&response).unwrap();
+                                            client_stream.write_all(&response_bytes).await.unwrap();
+                                        }
                                         Err(e) => {
                                             let response = Response::Error(format!("Failed to parse command: {}", e));
                                             let response_bytes = serde_json::to_vec(&response).unwrap();
@@ -617,9 +662,18 @@ mod tests {
 
     // --- Test Helpers ---
 
-    fn create_test_logger() -> Logger {
+    fn create_test_logger() -> (Logger, Arc<std::sync::atomic::AtomicU8>, Arc<std::sync::RwLock<std::collections::HashMap<crate::logging::Facility, crate::logging::Severity>>>) {
         let ringbuffer = Arc::new(MPSCRingBuffer::new(64));
-        Logger::from_mpsc(ringbuffer)
+        let global_min_level = Arc::new(std::sync::atomic::AtomicU8::new(
+            crate::logging::Severity::Info as u8
+        ));
+        let facility_min_levels = Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+        let logger = Logger::from_mpsc(
+            ringbuffer,
+            Arc::clone(&global_min_level),
+            Arc::clone(&facility_min_levels),
+        );
+        (logger, global_min_level, facility_min_levels)
     }
 
     fn spawn_failing_worker() -> anyhow::Result<Child> {
@@ -674,6 +728,7 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let socket_path = temp_dir.path().join("test.sock");
 
+        let (logger, global_min_level, facility_min_levels) = create_test_logger();
         let supervisor_future = run_generic(
             spawn_cp,
             1,
@@ -681,7 +736,9 @@ mod tests {
             rx,
             socket_path,
             master_rules.clone(),
-            create_test_logger(),
+            logger,
+            global_min_level,
+            facility_min_levels,
         );
         let _ = tokio::time::timeout(Duration::from_millis(1000), supervisor_future).await;
 
@@ -722,6 +779,7 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let socket_path = temp_dir.path().join("test.sock");
 
+        let (logger, global_min_level, facility_min_levels) = create_test_logger();
         let supervisor_future = run_generic(
             spawn_cp,
             1,
@@ -729,7 +787,9 @@ mod tests {
             rx,
             socket_path,
             master_rules.clone(),
-            create_test_logger(),
+            logger,
+            global_min_level,
+            facility_min_levels,
         );
         let _ = tokio::time::timeout(Duration::from_millis(1000), supervisor_future).await;
 
@@ -779,6 +839,7 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let socket_path = temp_dir.path().join("test.sock");
 
+        let (logger, global_min_level, facility_min_levels) = create_test_logger();
         let supervisor_future = run_generic(
             spawn_cp,
             num_cores,
@@ -786,7 +847,9 @@ mod tests {
             rx,
             socket_path,
             master_rules.clone(),
-            create_test_logger(),
+            logger,
+            global_min_level,
+            facility_min_levels,
         );
         let _ = tokio::time::timeout(Duration::from_millis(200), supervisor_future).await;
 
@@ -851,6 +914,7 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let socket_path = temp_dir.path().join("test.sock");
 
+        let (logger, global_min_level, facility_min_levels) = create_test_logger();
         let supervisor_future = run_generic(
             spawn_cp,
             1,
@@ -858,7 +922,9 @@ mod tests {
             rx,
             socket_path,
             master_rules.clone(),
-            create_test_logger(),
+            logger,
+            global_min_level,
+            facility_min_levels,
         );
 
         // Run long enough for three spawns: fail -> graceful -> fail

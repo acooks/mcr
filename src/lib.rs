@@ -139,6 +139,17 @@ pub enum SupervisorCommand {
     GetWorkerRules {
         worker_pid: u32,
     },
+    /// Set the global minimum log level
+    SetGlobalLogLevel {
+        level: logging::Severity,
+    },
+    /// Set the minimum log level for a specific facility
+    SetFacilityLogLevel {
+        facility: logging::Facility,
+        level: logging::Severity,
+    },
+    /// Get all configured log levels (global + per-facility overrides)
+    GetLogLevels,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -148,6 +159,10 @@ pub enum Response {
     Rules(Vec<ForwardingRule>),
     Stats(Vec<FlowStats>),
     Workers(Vec<WorkerInfo>),
+    LogLevels {
+        global: logging::Severity,
+        facility_overrides: std::collections::HashMap<logging::Facility, logging::Severity>,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Hash)]

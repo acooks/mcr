@@ -82,6 +82,18 @@ pub async fn control_plane_task<S: AsyncRead + AsyncWrite + Unpin>(
                                 "GetWorkerRules command should be handled by the supervisor"
                                     .to_string(),
                             ),
+                            Ok(SupervisorCommand::SetGlobalLogLevel { .. }) => Response::Error(
+                                "SetGlobalLogLevel command should be handled by the supervisor"
+                                    .to_string(),
+                            ),
+                            Ok(SupervisorCommand::SetFacilityLogLevel { .. }) => Response::Error(
+                                "SetFacilityLogLevel command should be handled by the supervisor"
+                                    .to_string(),
+                            ),
+                            Ok(SupervisorCommand::GetLogLevels) => Response::Error(
+                                "GetLogLevels command should be handled by the supervisor"
+                                    .to_string(),
+                            ),
                             Err(e) => Response::Error(e.to_string()),
                         };
                         let response_bytes = serde_json::to_vec(&response).unwrap();

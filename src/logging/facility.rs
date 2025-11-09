@@ -1,8 +1,10 @@
 // Logging facilities (component identifiers)
 
+use serde::{Deserialize, Serialize};
+
 /// Logging facility - identifies which component generated the log message
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Facility {
     // === Supervisor (runs in tokio async context) ===
     /// Supervisor core logic, worker lifecycle

@@ -1,8 +1,10 @@
 // Severity levels for logging (RFC 5424 syslog-style)
 
+use serde::{Deserialize, Serialize};
+
 /// Log severity levels (0-7, lower is more severe)
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Severity {
     /// System unusable (supervisor crash, data plane fatal)
     Emergency = 0,
