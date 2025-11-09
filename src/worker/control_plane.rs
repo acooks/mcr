@@ -13,6 +13,48 @@ type SharedFlows = Arc<Mutex<HashMap<String, (ForwardingRule, FlowStats)>>>;
 
 use tokio::io::{AsyncRead, AsyncWrite};
 
+/// Handle a supervisor command for the control plane worker.
+///
+/// This is a pure function extracted from the async I/O loop to enable unit testing.
+/// It processes commands that are meant for the control plane worker specifically.
+///
+/// Most commands return errors indicating they should be handled by the supervisor,
+/// since the control plane worker only handles `ListRules` and `GetStats`.
+pub fn handle_worker_command(
+    command: SupervisorCommand,
+    flows: &HashMap<String, (ForwardingRule, FlowStats)>,
+) -> Response {
+    match command {
+        SupervisorCommand::AddRule { .. } => {
+            Response::Error("AddRule should be handled by the supervisor directly".to_string())
+        }
+        SupervisorCommand::RemoveRule { .. } => {
+            Response::Error("RemoveRule should be handled by the supervisor directly".to_string())
+        }
+        SupervisorCommand::ListRules => {
+            Response::Rules(flows.values().map(|(r, _)| r.clone()).collect())
+        }
+        SupervisorCommand::GetStats => {
+            Response::Stats(flows.values().map(|(_, s)| s.clone()).collect())
+        }
+        SupervisorCommand::ListWorkers => {
+            Response::Error("ListWorkers command should be handled by the supervisor".to_string())
+        }
+        SupervisorCommand::GetWorkerRules { .. } => Response::Error(
+            "GetWorkerRules command should be handled by the supervisor".to_string(),
+        ),
+        SupervisorCommand::SetGlobalLogLevel { .. } => Response::Error(
+            "SetGlobalLogLevel command should be handled by the supervisor".to_string(),
+        ),
+        SupervisorCommand::SetFacilityLogLevel { .. } => Response::Error(
+            "SetFacilityLogLevel command should be handled by the supervisor".to_string(),
+        ),
+        SupervisorCommand::GetLogLevels => Response::Error(
+            "GetLogLevels command should be handled by the supervisor".to_string(),
+        ),
+    }
+}
+
 pub struct ControlPlane<S> {
     supervisor_stream: S,
     request_stream: UnixStream,
@@ -61,39 +103,10 @@ pub async fn control_plane_task<S: AsyncRead + AsyncWrite + Unpin>(
                     Ok(n) => {
                         let command: Result<SupervisorCommand, _> = serde_json::from_slice(&buffer[..n]);
                         let response = match command {
-                            Ok(SupervisorCommand::AddRule { .. }) => {
-                                Response::Error("AddRule should be handled by the supervisor directly".to_string())
-                            }
-                            Ok(SupervisorCommand::RemoveRule { .. }) => {
-                                Response::Error("RemoveRule should be handled by the supervisor directly".to_string())
-                            }
-                            Ok(SupervisorCommand::ListRules) => {
+                            Ok(cmd) => {
                                 let flows = shared_flows.lock().await;
-                                Response::Rules(flows.values().map(|(r, _)| r.clone()).collect())
+                                handle_worker_command(cmd, &flows)
                             }
-                            Ok(SupervisorCommand::GetStats) => {
-                                let flows = shared_flows.lock().await;
-                                Response::Stats(flows.values().map(|(_, s)| s.clone()).collect())
-                            }
-                            Ok(SupervisorCommand::ListWorkers) => Response::Error(
-                                "ListWorkers command should be handled by the supervisor".to_string(),
-                            ),
-                            Ok(SupervisorCommand::GetWorkerRules { .. }) => Response::Error(
-                                "GetWorkerRules command should be handled by the supervisor"
-                                    .to_string(),
-                            ),
-                            Ok(SupervisorCommand::SetGlobalLogLevel { .. }) => Response::Error(
-                                "SetGlobalLogLevel command should be handled by the supervisor"
-                                    .to_string(),
-                            ),
-                            Ok(SupervisorCommand::SetFacilityLogLevel { .. }) => Response::Error(
-                                "SetFacilityLogLevel command should be handled by the supervisor"
-                                    .to_string(),
-                            ),
-                            Ok(SupervisorCommand::GetLogLevels) => Response::Error(
-                                "GetLogLevels command should be handled by the supervisor"
-                                    .to_string(),
-                            ),
                             Err(e) => Response::Error(e.to_string()),
                         };
                         let response_bytes = serde_json::to_vec(&response).unwrap();
@@ -129,8 +142,213 @@ pub async fn control_plane_task<S: AsyncRead + AsyncWrite + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::SupervisorCommand;
+    use crate::{logging::Severity, SupervisorCommand};
+    use std::net::Ipv4Addr;
     use tokio::io::AsyncWriteExt;
+
+    // Helper to create test flows
+    fn create_test_flows() -> HashMap<String, (ForwardingRule, FlowStats)> {
+        let mut flows = HashMap::new();
+        flows.insert(
+            "test-rule".to_string(),
+            (
+                ForwardingRule {
+                    rule_id: "test-rule".to_string(),
+                    input_interface: "lo".to_string(),
+                    input_group: Ipv4Addr::new(224, 0, 0, 1),
+                    input_port: 5000,
+                    outputs: vec![],
+                    dtls_enabled: false,
+                },
+                FlowStats {
+                    input_group: Ipv4Addr::new(224, 0, 0, 1),
+                    input_port: 5000,
+                    packets_relayed: 10,
+                    bytes_relayed: 1000,
+                    packets_per_second: 100.0,
+                    bits_per_second: 8000.0,
+                },
+            ),
+        );
+        flows
+    }
+
+    #[test]
+    fn test_handle_list_rules_empty() {
+        let flows = HashMap::new();
+        let response = handle_worker_command(SupervisorCommand::ListRules, &flows);
+
+        match response {
+            Response::Rules(rules) => {
+                assert_eq!(rules.len(), 0, "Should return empty list");
+            }
+            _ => panic!("Expected Response::Rules, got {:?}", response),
+        }
+    }
+
+    #[test]
+    fn test_handle_list_rules_with_flows() {
+        let flows = create_test_flows();
+        let response = handle_worker_command(SupervisorCommand::ListRules, &flows);
+
+        match response {
+            Response::Rules(rules) => {
+                assert_eq!(rules.len(), 1, "Should return one rule");
+                assert_eq!(rules[0].rule_id, "test-rule");
+            }
+            _ => panic!("Expected Response::Rules, got {:?}", response),
+        }
+    }
+
+    #[test]
+    fn test_handle_get_stats_empty() {
+        let flows = HashMap::new();
+        let response = handle_worker_command(SupervisorCommand::GetStats, &flows);
+
+        match response {
+            Response::Stats(stats) => {
+                assert_eq!(stats.len(), 0, "Should return empty stats");
+            }
+            _ => panic!("Expected Response::Stats, got {:?}", response),
+        }
+    }
+
+    #[test]
+    fn test_handle_get_stats_with_flows() {
+        let flows = create_test_flows();
+        let response = handle_worker_command(SupervisorCommand::GetStats, &flows);
+
+        match response {
+            Response::Stats(stats) => {
+                assert_eq!(stats.len(), 1, "Should return one stat");
+                assert_eq!(stats[0].input_group, Ipv4Addr::new(224, 0, 0, 1));
+                assert_eq!(stats[0].input_port, 5000);
+                assert_eq!(stats[0].packets_relayed, 10);
+                assert_eq!(stats[0].bytes_relayed, 1000);
+            }
+            _ => panic!("Expected Response::Stats, got {:?}", response),
+        }
+    }
+
+    #[test]
+    fn test_handle_add_rule_returns_error() {
+        let flows = HashMap::new();
+        let response = handle_worker_command(
+            SupervisorCommand::AddRule {
+                rule_id: "test".to_string(),
+                input_interface: "lo".to_string(),
+                input_group: Ipv4Addr::new(224, 0, 0, 1),
+                input_port: 5000,
+                outputs: vec![],
+                dtls_enabled: false,
+            },
+            &flows,
+        );
+
+        match response {
+            Response::Error(msg) => {
+                assert!(msg.contains("supervisor"));
+            }
+            _ => panic!("Expected Response::Error, got {:?}", response),
+        }
+    }
+
+    #[test]
+    fn test_handle_remove_rule_returns_error() {
+        let flows = HashMap::new();
+        let response = handle_worker_command(
+            SupervisorCommand::RemoveRule {
+                rule_id: "test".to_string(),
+            },
+            &flows,
+        );
+
+        match response {
+            Response::Error(msg) => {
+                assert!(msg.contains("supervisor"));
+            }
+            _ => panic!("Expected Response::Error, got {:?}", response),
+        }
+    }
+
+    #[test]
+    fn test_handle_list_workers_returns_error() {
+        let flows = HashMap::new();
+        let response = handle_worker_command(SupervisorCommand::ListWorkers, &flows);
+
+        match response {
+            Response::Error(msg) => {
+                assert!(msg.contains("supervisor"));
+            }
+            _ => panic!("Expected Response::Error, got {:?}", response),
+        }
+    }
+
+    #[test]
+    fn test_handle_get_worker_rules_returns_error() {
+        let flows = HashMap::new();
+        let response = handle_worker_command(
+            SupervisorCommand::GetWorkerRules { worker_pid: 1234 },
+            &flows,
+        );
+
+        match response {
+            Response::Error(msg) => {
+                assert!(msg.contains("supervisor"));
+            }
+            _ => panic!("Expected Response::Error, got {:?}", response),
+        }
+    }
+
+    #[test]
+    fn test_handle_set_global_log_level_returns_error() {
+        let flows = HashMap::new();
+        let response = handle_worker_command(
+            SupervisorCommand::SetGlobalLogLevel {
+                level: Severity::Debug,
+            },
+            &flows,
+        );
+
+        match response {
+            Response::Error(msg) => {
+                assert!(msg.contains("supervisor"));
+            }
+            _ => panic!("Expected Response::Error, got {:?}", response),
+        }
+    }
+
+    #[test]
+    fn test_handle_set_facility_log_level_returns_error() {
+        let flows = HashMap::new();
+        let response = handle_worker_command(
+            SupervisorCommand::SetFacilityLogLevel {
+                facility: crate::logging::Facility::Ingress,
+                level: Severity::Debug,
+            },
+            &flows,
+        );
+
+        match response {
+            Response::Error(msg) => {
+                assert!(msg.contains("supervisor"));
+            }
+            _ => panic!("Expected Response::Error, got {:?}", response),
+        }
+    }
+
+    #[test]
+    fn test_handle_get_log_levels_returns_error() {
+        let flows = HashMap::new();
+        let response = handle_worker_command(SupervisorCommand::GetLogLevels, &flows);
+
+        match response {
+            Response::Error(msg) => {
+                assert!(msg.contains("supervisor"));
+            }
+            _ => panic!("Expected Response::Error, got {:?}", response),
+        }
+    }
 
     #[tokio::test]
     async fn test_control_plane_task_list_rules() {
