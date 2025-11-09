@@ -1,5 +1,58 @@
 # Multicast Relay Logging System Design
 
+## Implementation Status
+
+**Phase 1: COMPLETE** ✅ (commits d72eb93, 99423bd)
+- Lock-free SPSC and MPSC ring buffers
+- LogEntry (256 bytes, cache-line optimized)
+- Severity levels (RFC 5424) and Facilities
+- Comprehensive test suite (35 tests)
+
+**Phase 2: COMPLETE** ✅ (commit 99423bd)
+- Logger API with severity helpers
+- LogRegistry for managing per-facility ring buffers
+- Logging macros (`log_info!`, `log_error!`, `log_kv!`, etc.)
+- Consumer tasks (AsyncConsumer, BlockingConsumer)
+- Pluggable output sinks (stdout, stderr, custom)
+
+**Phase 3: PENDING** ⏳
+- Integration into supervisor and workers
+- Replace existing `println!`/`eprintln!` calls
+- Feature flags for compile-time control
+
+**Phase 4: PENDING** ⏳
+- Additional output sinks (file, syslog)
+- Runtime log level filtering
+- Metrics extraction
+
+## Quick Start Example
+
+```rust
+use multicast_relay::logging::*;
+
+// 1. Create a logging registry (in supervisor/worker startup)
+let registry = LogRegistry::new_mpsc();  // For async/multi-threaded
+// or: LogRegistry::new_spsc(core_id)   // For data plane workers
+
+// 2. Get a logger for a facility
+let logger = registry.get_logger(Facility::Supervisor).unwrap();
+
+// 3. Start consumer task to output logs
+tokio::spawn(async move {
+    AsyncConsumer::stdout(/* ringbuffers */).run().await;
+});
+
+// 4. Log messages
+log_info!(logger, Facility::Supervisor, "Worker started");
+log_error!(logger, Facility::Ingress, "Failed to parse packet");
+
+// 5. Structured logging
+log_kv!(logger, Severity::Info, Facility::Ingress, "Packet received",
+    "src" => "10.0.0.1", "port" => "5000");
+```
+
+See `examples/logging_demo.rs` for a complete working example.
+
 ## Overview
 
 This document defines a high-performance, ring-buffer based logging system for the Multicast Relay (MCR) project, inspired by syslog facilities/severity and FRR's per-thread buffering approach.
@@ -102,47 +155,90 @@ pub enum Facility {
 Each facility has its own ring buffer (or per-core ring buffer for data plane):
 
 ```rust
-pub struct RingBuffer {
-    entries: Box<[LogEntry]>,  // Fixed-size array
+// Lock-free SPSC ring buffer (single producer, single consumer)
+pub struct SPSCRingBuffer {
+    entries: Box<[UnsafeCell<LogEntry>]>,
     capacity: usize,           // Power of 2 for efficient modulo
-    write_pos: AtomicUsize,    // Writer position (monotonic)
-    read_pos: AtomicUsize,     // Reader position (monotonic)
+    write_seq: AtomicU64,      // Monotonic sequence number
+    read_seq: AtomicU64,       // Reader position
     overruns: AtomicU64,       // Count of lost messages
+    core_id: u8,               // CPU core ID
 }
 
+// Lock-free MPSC ring buffer (multiple producers, single consumer)
+pub struct MPSCRingBuffer {
+    entries: Box<[UnsafeCell<LogEntry>]>,
+    capacity: usize,
+    write_seq: AtomicU64,      // CAS for multiple writers
+    read_seq: AtomicU64,
+    overruns: AtomicU64,
+    cas_failures: AtomicU64,   // Contention metric
+}
+
+// Log entry: 256 bytes, cache-line optimized (4×64 bytes)
+#[repr(C, align(64))]
 pub struct LogEntry {
-    timestamp: u64,            // Monotonic nanoseconds since boot
+    // Cache Line 0 (64 bytes): HOTTEST - accessed on every read/write
+    state: AtomicU8,           // EMPTY/WRITING/READY state machine
     severity: Severity,
     facility: Facility,
-    core_id: u8,               // CPU core (0-255), 255 = unknown
-    process_id: u32,           // Worker process ID
-    thread_id: u64,            // Thread ID for correlation
-    message: [u8; 256],        // Fixed-size message buffer
-    message_len: u16,          // Actual message length
-    kvs: [KeyValue; 8],        // Up to 8 key-value pairs
-    kv_count: u8,              // Number of key-value pairs
+    message_len: u8,
+    kv_count: u8,
+    core_id: u8,
+    _pad1: [u8; 2],
+
+    timestamp_ns: u64,         // Monotonic nanoseconds
+    sequence: u64,             // Global sequence number
+    process_id: u32,
+    thread_id: u32,            // Truncated from full thread ID
+
+    message_start: [u8; 32],   // First 32 bytes of message
+
+    // Cache Lines 1-2 (128 bytes): HOT - message continuation
+    message_cont: [u8; 128],   // Total message: 160 bytes
+
+    // Cache Line 3 (64 bytes): WARM - structured logging
+    kvs: [KeyValue; 2],        // 2 key-value pairs
 }
 
+// KeyValue: 32 bytes (fits exactly 2 per cache line)
+#[repr(C)]
 pub struct KeyValue {
-    key: [u8; 32],
     key_len: u8,
-    value: [u8; 96],
     value_len: u8,
+    _pad: [u8; 2],
+    key: [u8; 8],              // Short keys: "worker", "core", "port"
+    value: [u8; 20],           // Values: "eth0", "10.0.0.1", "5555"
 }
 ```
 
+**Cache Line Optimization:** The 256-byte structure is designed for optimal cache performance:
+- **Line 0** contains all fields accessed during write/read operations
+- **Lines 1-2** contain the bulk of the message data
+- **Line 3** contains structured logging data (accessed less frequently)
+- Zero padding waste
+
 ### Buffer Sizing
 
-Different facilities have different log volumes:
+Optimized for small systems (1-2 CPUs) with 256-byte entries:
 
-| Facility | Buffer Size | Rationale |
-|----------|-------------|-----------|
-| Ingress/Egress (per-core) | 65,536 entries | ~17 MB/core, handles burst traffic |
-| DataPlane | 8,192 entries | ~2 MB, coordinator messages |
-| Supervisor/ControlPlane | 4,096 entries | ~1 MB, low-frequency |
-| Other facilities | 2,048 entries | ~512 KB default |
+| Facility | Buffer Size | Memory per Buffer | Rationale |
+|----------|-------------|-------------------|-----------|
+| Ingress (per-core) | 16,384 entries | 4 MB | Highest frequency facility |
+| Egress (per-core) | 4,096 entries | 1 MB | High frequency transmit |
+| PacketParser (per-core) | 4,096 entries | 1 MB | Called from ingress path |
+| DataPlane | 2,048 entries | 512 KB | Coordinator messages |
+| Supervisor | 1,024 entries | 256 KB | Low-frequency control |
+| ControlPlane | 1,024 entries | 256 KB | Low-frequency async |
+| Other facilities | 512 entries | 128 KB | Default for utilities |
 
-**Total Memory Budget**: ~50-100 MB for 4-core system
+**Memory Footprint Examples:**
+- **2-core system**: ~12.5 MB total
+  - Ingress: 2 × 4 MB = 8 MB
+  - Egress: 2 × 1 MB = 2 MB
+  - Other: ~2.5 MB
+- **1-core system**: ~6.5 MB total
+- **4-core system**: ~25 MB total
 
 ### Lock-Free Single-Producer Single-Consumer (SPSC)
 
@@ -161,57 +257,95 @@ For supervisor and async workers:
 
 ## API Design
 
-### Macro-Based Interface (Zero-Cost Abstractions)
+### Macro-Based Interface (Implemented)
 
 ```rust
-// Basic logging (format string + args)
-log_info!(Facility::Supervisor, "Starting {} workers", num_workers);
-log_error!(Facility::Ingress, "Failed to parse packet: {}", err);
+// Severity-specific macros
+log_info!(logger, Facility::Supervisor, "Starting workers");
+log_error!(logger, Facility::Ingress, "Failed to parse packet");
+log_debug!(logger, Facility::PacketParser, "Packet details");
+log_warning!(logger, Facility::BufferPool, "Pool near capacity");
 
-// Structured logging with key-value pairs
-log_notice!(Facility::DataPlane, "Worker started";
-    "worker_id" => worker_id,
-    "core" => core_id,
-    "interface" => interface_name
+// Structured logging with key-value pairs (max 2 pairs)
+log_kv!(
+    logger,
+    Severity::Info,
+    Facility::Ingress,
+    "Packet received",
+    "src" => "10.0.0.1",
+    "port" => "5000"
 );
-
-// Conditional compilation for debug logs
-#[cfg(debug_assertions)]
-log_debug!(Facility::PacketParser, "Parsed header: {:?}", header);
-
-// High-frequency data plane logging with rate limiting
-log_rate_limited!(Facility::Ingress, Severity::Info, Duration::from_secs(1),
-    "Packets processed: {}", count);
 ```
 
-### Programmatic Interface
+### Programmatic Interface (Implemented)
 
 ```rust
+// Logger: lightweight handle for writing logs
 pub struct Logger {
-    facility: Facility,
-    min_severity: AtomicU8,  // Runtime filtering
-    buffer: Arc<RingBuffer>,
+    ringbuffer: Arc<dyn RingBuffer>,  // SPSC or MPSC
 }
 
 impl Logger {
-    pub fn log(&self, severity: Severity, msg: &str);
-    pub fn log_kv(&self, severity: Severity, msg: &str, kvs: &[(&str, &dyn Display)]);
-    pub fn set_min_severity(&self, severity: Severity);
+    // Severity helpers
+    pub fn info(&self, facility: Facility, message: &str);
+    pub fn error(&self, facility: Facility, message: &str);
+    pub fn debug(&self, facility: Facility, message: &str);
+    // ... all 8 severity levels
+
+    // Generic methods
+    pub fn log(&self, severity: Severity, facility: Facility, message: &str);
+    pub fn log_kv(&self, severity: Severity, facility: Facility,
+                  message: &str, kvs: &[(&str, &str)]);
 }
 
-// Global registry
+// LogRegistry: creates and manages ring buffers per facility
 pub struct LogRegistry {
-    buffers: HashMap<(Facility, Option<u8>), Arc<RingBuffer>>, // (facility, core_id)
-    consumers: Vec<Box<dyn LogConsumer>>,
+    loggers: HashMap<Facility, Logger>,
+}
+
+impl LogRegistry {
+    // For supervisor/control plane (async, multiple writers)
+    pub fn new_mpsc() -> Self;
+
+    // For data plane workers (single thread, single writer)
+    pub fn new_spsc(core_id: u8) -> Self;
+
+    pub fn get_logger(&self, facility: Facility) -> Option<Logger>;
 }
 ```
 
-### Consumer Interface
+### Consumer Interface (Implemented)
 
 ```rust
-pub trait LogConsumer: Send {
-    fn consume(&mut self, entry: &LogEntry) -> Result<()>;
-    fn flush(&mut self) -> Result<()>;
+// Output sink trait
+pub trait LogSink: Send {
+    fn write_entry(&mut self, entry: &LogEntry);
+    fn flush(&mut self);
+}
+
+// Async consumer for tokio
+pub struct AsyncConsumer {
+    ringbuffers: Vec<(Facility, Arc<MPSCRingBuffer>)>,
+    sink: Box<dyn LogSink>,
+    running: Arc<AtomicBool>,
+}
+
+impl AsyncConsumer {
+    pub fn stdout(ringbuffers: Vec<(Facility, Arc<MPSCRingBuffer>)>) -> Self;
+    pub fn stderr(ringbuffers: Vec<(Facility, Arc<MPSCRingBuffer>)>) -> Self;
+    pub async fn run(self);  // Runs until stopped
+}
+
+// Blocking consumer for threads
+pub struct BlockingConsumer {
+    ringbuffers: Vec<(Facility, Arc<SPSCRingBuffer>)>,
+    sink: Box<dyn LogSink>,
+    running: Arc<AtomicBool>,
+}
+
+impl BlockingConsumer {
+    pub fn stdout(ringbuffers: Vec<(Facility, Arc<SPSCRingBuffer>)>) -> Self;
+    pub fn run(self);  // Blocks until stopped
 }
 
 // Built-in consumers
@@ -356,27 +490,34 @@ mcr-control log reset-stats
 
 ## Migration Strategy
 
-### Phase 1: Core Infrastructure
-1. Implement `RingBuffer`, `LogEntry`, `Severity`, `Facility`
-2. Implement basic macros: `log_info!`, `log_error!`, etc.
-3. Implement `StdoutConsumer`
-4. Add global `LogRegistry`
+### Phase 1: Core Infrastructure ✅ COMPLETE
+1. ✅ Implement `SPSCRingBuffer`, `MPSCRingBuffer` (lock-free, cache-optimized)
+2. ✅ Implement `LogEntry` (256 bytes, 4 cache lines)
+3. ✅ Implement `Severity` (RFC 5424) and `Facility` (MCR-specific)
+4. ✅ Comprehensive test suite (35 tests, all passing)
 
-### Phase 2: Integration
-1. Replace `println!` in supervisor with `log_info!`
-2. Replace `eprintln!` errors with `log_error!`
-3. Keep existing output format for compatibility
+### Phase 2: Logger and Consumer ✅ COMPLETE
+1. ✅ Implement `Logger` with severity helper methods
+2. ✅ Implement `LogRegistry` (per-facility ring buffers)
+3. ✅ Implement logging macros: `log_info!`, `log_error!`, `log_kv!`, etc.
+4. ✅ Implement `AsyncConsumer` and `BlockingConsumer`
+5. ✅ Implement output sinks (stdout, stderr, custom)
 
-### Phase 3: Data Plane Optimization
-1. Add per-core ring buffers for Ingress/Egress
-2. Implement lock-free SPSC for io_uring threads
-3. Add rate limiting for high-frequency messages
+### Phase 3: Integration ⏳ PENDING
+1. Create supervisor `LogRegistry` with MPSC buffers
+2. Start `AsyncConsumer` task in supervisor
+3. Replace `println!`/`eprintln!` in supervisor with logging macros
+4. Create worker `LogRegistry` with SPSC buffers (data plane) or MPSC (control plane)
+5. Start consumer tasks in workers
+6. Replace existing logging calls in workers
+7. Add feature flags for compile-time control (`--features logging`)
 
-### Phase 4: Advanced Features
-1. Add structured logging with key-value pairs
-2. Implement `SyslogConsumer`, `FileConsumer`
-3. Add runtime log level control via control socket
-4. Add metrics extraction via `MetricsConsumer`
+### Phase 4: Advanced Features ⏳ PENDING
+1. Implement `FileConsumer` with rotation support
+2. Implement `SyslogConsumer` (local/remote)
+3. Add runtime log level filtering via control socket
+4. Add `MetricsConsumer` for extracting counters from log stream
+5. Add sampling for high-frequency events (`log_sampled!` macro)
 
 ## Testing Strategy
 
