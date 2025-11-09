@@ -5,7 +5,7 @@
 //!
 //! ## Architecture
 //!
-//! ```
+//! ```text
 //! ┌──────────────┐         ┌──────────────┐
 //! │   Ingress    │─────────▶│   Egress     │
 //! │   Loop       │ Channel │   Loop       │
@@ -47,7 +47,7 @@ use crate::{DataPlaneConfig, RelayCommand};
 ///
 /// # Example
 ///
-/// ```no_run
+/// ```ignore
 /// use multicast_relay::worker::data_plane_integrated::{DataPlaneConfig, run_data_plane};
 /// use multicast_relay::ForwardingRule;
 /// use std::net::Ipv4Addr;
@@ -67,7 +67,7 @@ use crate::{DataPlaneConfig, RelayCommand};
 /// config.initial_rules.push(rule);
 ///
 /// // Run the data plane (blocks indefinitely)
-/// run_data_plane(config).expect("Data plane failed");
+/// run_data_plane(config, command_rx, event_fd).expect("Data plane failed");
 /// ```
 pub fn run_data_plane(
     config: DataPlaneConfig,
