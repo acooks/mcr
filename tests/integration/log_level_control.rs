@@ -1,7 +1,8 @@
 //! Integration Tests: Runtime Log Level Control
 //!
 //! These tests verify that log levels can be changed at runtime via the control socket
-//! and that the changes take effect immediately.
+//! and that the changes take effect immediately. Most command logic is covered by unit
+//! tests in src/supervisor.rs. These integration tests focus on IPC communication.
 
 #[cfg(test)]
 mod tests {
@@ -68,20 +69,21 @@ mod tests {
         Ok(response)
     }
 
+    /// Tests basic IPC communication: Set global log level and verify via GetLogLevels.
+    /// Command logic is covered by unit tests; this validates IPC serialization/communication.
     #[tokio::test]
-    async fn test_get_default_log_levels() -> Result<()> {
+    async fn test_set_and_get_global_log_level_via_ipc() -> Result<()> {
         if unsafe { libc::getuid() } != 0 {
-            println!("Skipping test_get_default_log_levels: requires root privileges.");
+            println!("Skipping test_set_and_get_global_log_level_via_ipc: requires root privileges.");
             return Ok(());
         }
 
-        let socket_path = unique_socket_path_with_prefix("log_level_get_default");
+        let socket_path = unique_socket_path_with_prefix("log_level_ipc_global");
         let mut supervisor = spawn_supervisor(&socket_path).await?;
 
-        // Get the current log levels (should be default: Info global, no facility overrides)
-        let response = send_command(&socket_path, SupervisorCommand::GetLogLevels).await?;
-
-        match response {
+        // Verify default level is Info
+        let get_response = send_command(&socket_path, SupervisorCommand::GetLogLevels).await?;
+        match get_response {
             Response::LogLevels {
                 global,
                 facility_overrides,
@@ -89,28 +91,13 @@ mod tests {
                 assert_eq!(global, Severity::Info, "Default global level should be Info");
                 assert!(
                     facility_overrides.is_empty(),
-                    "No facility overrides should be set by default"
+                    "No facility overrides by default"
                 );
             }
-            _ => panic!("Expected Response::LogLevels, got {:?}", response),
+            _ => panic!("Expected Response::LogLevels, got {:?}", get_response),
         }
 
-        supervisor.kill().await?;
-        cleanup_socket(&socket_path);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_set_global_log_level() -> Result<()> {
-        if unsafe { libc::getuid() } != 0 {
-            println!("Skipping test_set_global_log_level: requires root privileges.");
-            return Ok(());
-        }
-
-        let socket_path = unique_socket_path_with_prefix("log_level_set_global");
-        let mut supervisor = spawn_supervisor(&socket_path).await?;
-
-        // Set global log level to Warning
+        // Set global log level to Warning via IPC
         let set_response = send_command(
             &socket_path,
             SupervisorCommand::SetGlobalLogLevel {
@@ -129,9 +116,8 @@ mod tests {
             _ => panic!("Expected Response::Success, got {:?}", set_response),
         }
 
-        // Verify the change took effect
+        // Verify the change via IPC
         let get_response = send_command(&socket_path, SupervisorCommand::GetLogLevels).await?;
-
         match get_response {
             Response::LogLevels {
                 global,
@@ -151,17 +137,28 @@ mod tests {
         Ok(())
     }
 
+    /// Tests facility-specific overrides via IPC. Demonstrates that facility-level
+    /// settings can override global settings (hierarchy).
     #[tokio::test]
-    async fn test_set_facility_log_level() -> Result<()> {
+    async fn test_facility_override_via_ipc() -> Result<()> {
         if unsafe { libc::getuid() } != 0 {
-            println!("Skipping test_set_facility_log_level: requires root privileges.");
+            println!("Skipping test_facility_override_via_ipc: requires root privileges.");
             return Ok(());
         }
 
-        let socket_path = unique_socket_path_with_prefix("log_level_set_facility");
+        let socket_path = unique_socket_path_with_prefix("log_level_ipc_facility");
         let mut supervisor = spawn_supervisor(&socket_path).await?;
 
-        // Set Ingress facility log level to Debug
+        // Set global level to Error (restrictive)
+        send_command(
+            &socket_path,
+            SupervisorCommand::SetGlobalLogLevel {
+                level: Severity::Error,
+            },
+        )
+        .await?;
+
+        // Set Ingress facility to Debug (permissive, overrides global)
         let set_response = send_command(
             &socket_path,
             SupervisorCommand::SetFacilityLogLevel {
@@ -181,15 +178,14 @@ mod tests {
             _ => panic!("Expected Response::Success, got {:?}", set_response),
         }
 
-        // Verify the change took effect
+        // Verify facility override hierarchy via IPC
         let get_response = send_command(&socket_path, SupervisorCommand::GetLogLevels).await?;
-
         match get_response {
             Response::LogLevels {
                 global,
                 facility_overrides,
             } => {
-                assert_eq!(global, Severity::Info, "Global level should still be Info");
+                assert_eq!(global, Severity::Error, "Global level should be Error");
                 assert_eq!(
                     facility_overrides.len(),
                     1,
@@ -198,183 +194,10 @@ mod tests {
                 assert_eq!(
                     facility_overrides.get(&Facility::Ingress),
                     Some(&Severity::Debug),
-                    "Ingress should be set to Debug"
+                    "Ingress should override global Error with Debug"
                 );
             }
             _ => panic!("Expected Response::LogLevels, got {:?}", get_response),
-        }
-
-        supervisor.kill().await?;
-        cleanup_socket(&socket_path);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_multiple_facility_log_levels() -> Result<()> {
-        if unsafe { libc::getuid() } != 0 {
-            println!("Skipping test_multiple_facility_log_levels: requires root privileges.");
-            return Ok(());
-        }
-
-        let socket_path = unique_socket_path_with_prefix("log_level_multiple_facilities");
-        let mut supervisor = spawn_supervisor(&socket_path).await?;
-
-        // Set multiple facility log levels
-        send_command(
-            &socket_path,
-            SupervisorCommand::SetFacilityLogLevel {
-                facility: Facility::Ingress,
-                level: Severity::Debug,
-            },
-        )
-        .await?;
-
-        send_command(
-            &socket_path,
-            SupervisorCommand::SetFacilityLogLevel {
-                facility: Facility::Egress,
-                level: Severity::Error,
-            },
-        )
-        .await?;
-
-        send_command(
-            &socket_path,
-            SupervisorCommand::SetFacilityLogLevel {
-                facility: Facility::Supervisor,
-                level: Severity::Critical,
-            },
-        )
-        .await?;
-
-        // Verify all changes took effect
-        let get_response = send_command(&socket_path, SupervisorCommand::GetLogLevels).await?;
-
-        match get_response {
-            Response::LogLevels {
-                global,
-                facility_overrides,
-            } => {
-                assert_eq!(global, Severity::Info, "Global level should still be Info");
-                assert_eq!(
-                    facility_overrides.len(),
-                    3,
-                    "Should have three facility overrides"
-                );
-                assert_eq!(
-                    facility_overrides.get(&Facility::Ingress),
-                    Some(&Severity::Debug)
-                );
-                assert_eq!(
-                    facility_overrides.get(&Facility::Egress),
-                    Some(&Severity::Error)
-                );
-                assert_eq!(
-                    facility_overrides.get(&Facility::Supervisor),
-                    Some(&Severity::Critical)
-                );
-            }
-            _ => panic!("Expected Response::LogLevels, got {:?}", get_response),
-        }
-
-        supervisor.kill().await?;
-        cleanup_socket(&socket_path);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_facility_level_overrides_global() -> Result<()> {
-        if unsafe { libc::getuid() } != 0 {
-            println!("Skipping test_facility_level_overrides_global: requires root privileges.");
-            return Ok(());
-        }
-
-        let socket_path = unique_socket_path_with_prefix("log_level_facility_override");
-        let mut supervisor = spawn_supervisor(&socket_path).await?;
-
-        // Set global level to Error
-        send_command(
-            &socket_path,
-            SupervisorCommand::SetGlobalLogLevel {
-                level: Severity::Error,
-            },
-        )
-        .await?;
-
-        // Set Ingress facility to Debug (more permissive than global)
-        send_command(
-            &socket_path,
-            SupervisorCommand::SetFacilityLogLevel {
-                facility: Facility::Ingress,
-                level: Severity::Debug,
-            },
-        )
-        .await?;
-
-        // Verify both settings
-        let get_response = send_command(&socket_path, SupervisorCommand::GetLogLevels).await?;
-
-        match get_response {
-            Response::LogLevels {
-                global,
-                facility_overrides,
-            } => {
-                assert_eq!(global, Severity::Error, "Global level should be Error");
-                assert_eq!(
-                    facility_overrides.get(&Facility::Ingress),
-                    Some(&Severity::Debug),
-                    "Ingress should be set to Debug (overriding global Error)"
-                );
-            }
-            _ => panic!("Expected Response::LogLevels, got {:?}", get_response),
-        }
-
-        supervisor.kill().await?;
-        cleanup_socket(&socket_path);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_all_severity_levels() -> Result<()> {
-        if unsafe { libc::getuid() } != 0 {
-            println!("Skipping test_all_severity_levels: requires root privileges.");
-            return Ok(());
-        }
-
-        let socket_path = unique_socket_path_with_prefix("log_level_all_severities");
-        let mut supervisor = spawn_supervisor(&socket_path).await?;
-
-        // Test setting each severity level
-        let severity_levels = [
-            Severity::Emergency,
-            Severity::Alert,
-            Severity::Critical,
-            Severity::Error,
-            Severity::Warning,
-            Severity::Notice,
-            Severity::Info,
-            Severity::Debug,
-        ];
-
-        for severity in &severity_levels {
-            send_command(
-                &socket_path,
-                SupervisorCommand::SetGlobalLogLevel { level: *severity },
-            )
-            .await?;
-
-            let get_response = send_command(&socket_path, SupervisorCommand::GetLogLevels).await?;
-
-            match get_response {
-                Response::LogLevels { global, .. } => {
-                    assert_eq!(
-                        global, *severity,
-                        "Global level should be {:?}",
-                        severity
-                    );
-                }
-                _ => panic!("Expected Response::LogLevels"),
-            }
         }
 
         supervisor.kill().await?;

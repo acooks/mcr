@@ -22,16 +22,17 @@ mod tests {
 
 // Include integration test modules
 #[path = "integration/cli.rs"]
-mod cli;
+mod cli; // 3 tests: CLI smoke tests for supervisor and worker modes
 
 #[path = "integration/log_level_control.rs"]
-mod log_level_control;
+mod log_level_control; // 2 tests: IPC communication for log level control (command logic in unit tests)
 
 #[path = "integration/rule_management.rs"]
-mod rule_management;
+mod rule_management; // 1 test: E2E rule propagation from supervisor to data plane workers
 
 // REMOVED: supervisor.rs - redundant with unit tests in src/supervisor.rs
 // REMOVED: ipc.rs - broken code, redundant with rule_management.rs
+// REMOVED: 4 tests from log_level_control.rs - redundant with supervisor unit tests (kept 2 IPC tests)
 
 // DEFERRED: supervisor_resilience.rs - needs complete rewrite for current supervisor API
 // This contains 7 important tests that should be implemented after Phase 2-3 completion:
