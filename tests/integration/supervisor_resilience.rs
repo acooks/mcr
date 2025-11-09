@@ -26,7 +26,7 @@ use std::time::Duration;
 use tokio::process::{Child, Command};
 use tokio::time::sleep;
 
-use tests::{cleanup_socket, unique_socket_path_with_prefix};
+use crate::tests::{cleanup_socket, unique_socket_path_with_prefix};
 
 /// Helper to start supervisor in background for testing
 async fn start_supervisor() -> Result<(Child, PathBuf)> {
@@ -301,7 +301,7 @@ async fn test_supervisor_resyncs_rules_on_restart() -> Result<()> {
 
 use multicast_relay::supervisor::run_generic;
 use std::sync::{Arc, Mutex};
-use tokio::time::{Instant, sleep};
+use tokio::time::Instant;
 
 /// **Tier 2 Integration Test**
 ///

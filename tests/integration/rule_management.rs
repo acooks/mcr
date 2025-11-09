@@ -13,7 +13,7 @@ use tokio::net::UnixStream;
 use tokio::process::{Child, Command};
 use tokio::time::sleep;
 
-use tests::{cleanup_socket, unique_socket_path_with_prefix};
+use crate::tests::{cleanup_socket, unique_socket_path_with_prefix};
 
 // --- Test Harness: Control Client ---
 
@@ -131,6 +131,12 @@ async fn start_supervisor() -> Result<(Child, PathBuf)> {
 
 #[tokio::test]
 async fn test_add_and_remove_rule_e2e() -> Result<()> {
+    // Check for root privileges (required for AF_PACKET sockets and worker spawning)
+    if unsafe { libc::getuid() } != 0 {
+        println!("Skipping test_add_and_remove_rule_e2e: requires root privileges for AF_PACKET sockets.");
+        return Ok(());
+    }
+
     // 1. SETUP: Start the supervisor and create a client.
     let (mut supervisor, socket_path) = start_supervisor().await?;
     let client = ControlClient::new(&socket_path);

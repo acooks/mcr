@@ -8,10 +8,9 @@ mod tests {
     use anyhow::Result;
     use multicast_relay::logging::{Facility, Severity};
     use multicast_relay::{Response, SupervisorCommand};
-    use std::collections::HashMap;
     use std::path::PathBuf;
     use std::time::Duration;
-    use tests::{cleanup_socket, unique_socket_path_with_prefix};
+    use crate::tests::{cleanup_socket, unique_socket_path_with_prefix};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::UnixStream;
     use tokio::process::{Child, Command};
@@ -71,6 +70,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_default_log_levels() -> Result<()> {
+        if unsafe { libc::getuid() } != 0 {
+            println!("Skipping test_get_default_log_levels: requires root privileges.");
+            return Ok(());
+        }
+
         let socket_path = unique_socket_path_with_prefix("log_level_get_default");
         let mut supervisor = spawn_supervisor(&socket_path).await?;
 
@@ -98,6 +102,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_set_global_log_level() -> Result<()> {
+        if unsafe { libc::getuid() } != 0 {
+            println!("Skipping test_set_global_log_level: requires root privileges.");
+            return Ok(());
+        }
+
         let socket_path = unique_socket_path_with_prefix("log_level_set_global");
         let mut supervisor = spawn_supervisor(&socket_path).await?;
 
@@ -144,6 +153,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_set_facility_log_level() -> Result<()> {
+        if unsafe { libc::getuid() } != 0 {
+            println!("Skipping test_set_facility_log_level: requires root privileges.");
+            return Ok(());
+        }
+
         let socket_path = unique_socket_path_with_prefix("log_level_set_facility");
         let mut supervisor = spawn_supervisor(&socket_path).await?;
 
@@ -197,6 +211,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_multiple_facility_log_levels() -> Result<()> {
+        if unsafe { libc::getuid() } != 0 {
+            println!("Skipping test_multiple_facility_log_levels: requires root privileges.");
+            return Ok(());
+        }
+
         let socket_path = unique_socket_path_with_prefix("log_level_multiple_facilities");
         let mut supervisor = spawn_supervisor(&socket_path).await?;
 
@@ -265,6 +284,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_facility_level_overrides_global() -> Result<()> {
+        if unsafe { libc::getuid() } != 0 {
+            println!("Skipping test_facility_level_overrides_global: requires root privileges.");
+            return Ok(());
+        }
+
         let socket_path = unique_socket_path_with_prefix("log_level_facility_override");
         let mut supervisor = spawn_supervisor(&socket_path).await?;
 
@@ -312,6 +336,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_all_severity_levels() -> Result<()> {
+        if unsafe { libc::getuid() } != 0 {
+            println!("Skipping test_all_severity_levels: requires root privileges.");
+            return Ok(());
+        }
+
         let socket_path = unique_socket_path_with_prefix("log_level_all_severities");
         let mut supervisor = spawn_supervisor(&socket_path).await?;
 
