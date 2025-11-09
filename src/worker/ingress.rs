@@ -465,8 +465,16 @@ impl IngressLoop {
 /// An `OwnedFd` for the AF_PACKET socket
 pub fn setup_af_packet_socket(interface_name: &str) -> Result<OwnedFd> {
     println!("[Ingress] Setting up AF_PACKET socket for interface {}", interface_name);
+
     // Create AF_PACKET socket with ETH_P_IP filter (0x0800)
+    // This requires CAP_NET_RAW capability
     let socket = Socket::new(Domain::PACKET, Type::RAW, Some(Protocol::from(0x0800)))
+        .map_err(|e| {
+            eprintln!("[Ingress] FATAL: Failed to create AF_PACKET socket: {}", e);
+            eprintln!("[Ingress] This likely means CAP_NET_RAW capability is missing");
+            eprintln!("[Ingress] Error details: {:?}", e);
+            e
+        })
         .context("Failed to create AF_PACKET socket")?;
 
     // Increase the receive buffer size

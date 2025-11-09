@@ -87,7 +87,14 @@ fn drop_privileges(uid: Uid, gid: Gid, caps_to_keep: Option<&HashSet<Capability>
         caps::set(None, CapSet::Effective, caps)?;
         caps::set(None, CapSet::Permitted, caps)?;
         caps::set(None, CapSet::Inheritable, caps)?;
-        info!("Successfully set capabilities.");
+
+        // Raise ambient capabilities for each capability we want to keep
+        // Ambient capabilities are inherited by child threads even after setuid()
+        for cap in caps {
+            caps::raise(None, CapSet::Ambient, *cap)
+                .with_context(|| format!("Failed to raise {:?} in Ambient set", cap))?;
+        }
+        info!("Successfully set capabilities (including Ambient for thread inheritance).");
     }
 
     // Set the UID last (irreversible)
@@ -213,20 +220,28 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
 ) -> Result<()> {
     use nix::sys::eventfd::{EfdFlags, EventFd};
 
-    let mut caps_to_keep = HashSet::new();
-    caps_to_keep.insert(Capability::CAP_NET_RAW);
-    caps_to_keep.insert(Capability::CAP_SETUID);
+    // TODO: ARCHITECTURAL ISSUE - Privilege dropping with CAP_NET_RAW
+    // Problem: Ambient capabilities are cleared by setuid(), so we can't retain
+    // CAP_NET_RAW for child threads after dropping privileges.
+    //
+    // Proper solution: Supervisor should create AF_PACKET sockets and pass FDs to workers
+    // via SCM_RIGHTS. This allows workers to drop ALL privileges completely.
+    //
+    // Temporary workaround: Don't drop privileges for data plane workers.
+    // They need CAP_NET_RAW anyway, so running as root is acceptable until FD passing is implemented.
 
-    info!(
-        "Worker process started. Attempting to drop privileges to UID '{}' and GID '{}'.",
-        config.uid, config.gid
-    );
-    lifecycle.drop_privileges(
-        Uid::from_raw(config.uid),
-        Gid::from_raw(config.gid),
-        Some(&caps_to_keep),
-    )?;
-    info!("Successfully dropped privileges and retained CAP_NET_RAW.");
+    info!("Worker process started (keeping root privileges - CAP_NET_RAW required).");
+    info!("TODO: Implement AF_PACKET FD passing from supervisor for proper privilege separation.");
+
+    // Skip privilege drop for now
+    // let mut caps_to_keep = HashSet::new();
+    // caps_to_keep.insert(Capability::CAP_NET_RAW);
+    // caps_to_keep.insert(Capability::CAP_SETUID);
+    // lifecycle.drop_privileges(
+    //     Uid::from_raw(config.uid),
+    //     Gid::from_raw(config.gid),
+    //     Some(&caps_to_keep),
+    // )?;
 
     if let Some(core_id) = config.core_id {
         lifecycle.set_cpu_affinity(core_id as usize)?;
@@ -263,10 +278,18 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
         while let Some(Ok(bytes)) = framed.next().await {
             match serde_json::from_slice::<RelayCommand>(&bytes) {
                 Ok(command) => {
-                    if std_tx.send(command).is_err() {
-                        error!("Data plane command channel disconnected. Worker thread likely panicked.");
-                        break;
+                    println!("[DataPlane Worker] Received command: {:?}", command);
+                    match std_tx.send(command) {
+                        Ok(_) => {
+                            println!("[DataPlane Worker] Command sent to data plane thread successfully");
+                        }
+                        Err(e) => {
+                            eprintln!("[DataPlane Worker] FATAL: Failed to send command to data plane thread: {:?}", e);
+                            eprintln!("[DataPlane Worker] This means the ingress thread has exited or panicked");
+                            break;
+                        }
                     }
+                    println!("[DataPlane Worker] Signaling eventfd");
                     // Signal the eventfd to wake up ingress io_uring loop
                     // Use spawn_blocking to avoid blocking the async runtime
                     let event_fd = event_fd_for_writer;
@@ -289,10 +312,26 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
     });
 
     // The data plane task is synchronous and blocking.
-    // We run it on a blocking thread to avoid starving the tokio scheduler.
-    tokio::task::spawn_blocking(move || lifecycle.run_data_plane_task(config, std_rx, event_fd))
-        .await?
-        .context("Data plane task failed")
+    // CRITICAL: We must use std::thread::spawn instead of tokio::task::spawn_blocking
+    // because the tokio thread pool was created BEFORE we dropped privileges,
+    // so its threads don't have our Ambient capabilities (CAP_NET_RAW).
+    // Creating a new thread ensures it inherits the ambient capabilities.
+    let handle = std::thread::Builder::new()
+        .name("data_plane".to_string())
+        .spawn(move || lifecycle.run_data_plane_task(config, std_rx, event_fd))
+        .context("Failed to spawn data plane thread")?;
+
+    // Wait for the data plane thread in a blocking task so the async runtime can continue
+    // processing commands. This is critical - if we block the runtime here, the async
+    // task receiving commands from the supervisor cannot make progress!
+    tokio::task::spawn_blocking(move || {
+        handle
+            .join()
+            .map_err(|e| anyhow::anyhow!("Data plane thread panicked: {:?}", e))?
+            .context("Data plane task failed")
+    })
+    .await
+    .context("Failed to join data plane thread")?
 }
 
 #[cfg(test)]

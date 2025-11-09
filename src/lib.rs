@@ -38,6 +38,12 @@ pub enum Command {
         #[clap(long, default_value = "/tmp/multicast_relay_control.sock")]
         control_socket_path: PathBuf,
 
+        /// Network interface for data plane workers to listen on.
+        /// TODO: Remove this parameter. Per architecture (D21), interfaces should come from
+        /// ForwardingRule.input_interface, not as a global supervisor parameter.
+        #[clap(long, default_value = "lo")]
+        interface: String,
+
         /// User to run worker processes as.
         #[clap(long, default_value = "nobody")]
         user: String,
@@ -45,6 +51,9 @@ pub enum Command {
         group: String,
         #[arg(long)]
         prometheus_addr: Option<std::net::SocketAddr>,
+        /// Number of data plane workers to spawn. Defaults to number of CPU cores.
+        #[arg(long)]
+        num_workers: Option<usize>,
     },
     /// Run the worker process (intended to be called by the supervisor)
     Worker {

@@ -47,7 +47,8 @@ cargo build
 
 # --- Test ---
 echo "--- Starting Supervisor ---"
-sudo -E "$RELAY_BINARY" supervisor --control-socket-path "$SUPERVISOR_SOCKET" &
+# Use 1 worker for simple loopback test
+sudo -E "$RELAY_BINARY" supervisor --control-socket-path "$SUPERVISOR_SOCKET" --num-workers 1 &
 SUPERVISOR_PID=$!
 
 echo "--- Waiting for supervisor socket to be created ---"

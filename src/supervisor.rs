@@ -81,6 +81,7 @@ pub async fn spawn_data_plane_worker(
     core_id: u32,
     uid: u32,
     gid: u32,
+    interface: String,
     relay_command_socket_path: PathBuf,
 ) -> Result<(Child, UnixStream, UnixStream)> {
     println!(
@@ -107,7 +108,9 @@ pub async fn spawn_data_plane_worker(
         .arg(core_id.to_string())
         .arg("--data-plane")
         .arg("--relay-command-socket-path")
-        .arg(relay_command_socket_path);
+        .arg(relay_command_socket_path)
+        .arg("--input-interface-name")
+        .arg(interface);
 
     // Ensure worker_sock becomes FD 3 in the child
     unsafe {
@@ -141,11 +144,13 @@ pub async fn spawn_data_plane_worker(
 pub async fn run(
     user: &str,
     group: &str,
+    interface: &str,
     prometheus_addr: Option<std::net::SocketAddr>,
     _relay_command_rx: mpsc::Receiver<RelayCommand>,
     relay_command_socket_path: PathBuf,
-    control_socket_path: PathBuf, // New parameter
+    control_socket_path: PathBuf,
     master_rules: Arc<Mutex<HashMap<String, ForwardingRule>>>,
+    num_workers: Option<usize>,
 ) -> Result<()> {
     let uid = User::from_name(user)
         .with_context(|| format!("User '{}' not found", user))?
@@ -157,9 +162,13 @@ pub async fn run(
         .with_context(|| format!("Group '{}' not found", group))?;
 
     // Determine number of cores to use
-    // TODO: Make this configurable via command-line arg
-    let num_cores = num_cpus::get();
-    println!("[Supervisor] Detected {} CPU cores", num_cores);
+    // TODO: ARCHITECTURAL FIX NEEDED
+    // Per architecture (D21, D23): One worker per CPU core, rules hashed to cores.
+    // The --num-workers override exists to avoid resource exhaustion on single-interface tests
+    // until lazy socket creation is implemented.
+    let detected_cores = num_cpus::get();
+    let num_cores = num_workers.unwrap_or(detected_cores);
+    println!("[Supervisor] Detected {} CPU cores, using {} data plane workers", detected_cores, num_cores);
 
     let cp_socket_path = relay_command_socket_path.clone();
     let dp_socket_path = relay_command_socket_path.clone();
@@ -179,6 +188,7 @@ pub async fn run(
         Some(Gid::from_raw(gid)),
     )?;
 
+    let interface = interface.to_string();
     run_generic(
         move || {
             let cp_socket_path = cp_socket_path.clone();
@@ -189,7 +199,10 @@ pub async fn run(
         num_cores,
         move |core_id| {
             let dp_socket_path = dp_socket_path.clone();
-            async move { spawn_data_plane_worker(core_id, uid, gid, dp_socket_path).await }
+            let interface = interface.clone();
+            async move {
+                spawn_data_plane_worker(core_id, uid, gid, interface, dp_socket_path).await
+            }
         },
         _relay_command_rx,
         control_socket_path, // Pass down
@@ -379,7 +392,6 @@ where
                             let worker_req_streams_clone = worker_req_streams.clone();
                             let dp_cmd_streams_clone = dp_cmd_streams.clone();
                             let master_rules_clone = master_rules.clone();
-                            let mut current_cp_stream = std::mem::replace(&mut cp_stream, UnixStream::pair()?.0);
 
                             tokio::spawn(async move {
                                 use crate::{Response, SupervisorCommand};
@@ -404,13 +416,15 @@ where
                                             let cmd_bytes = serde_json::to_vec(&relay_cmd).unwrap();
 
                                             let streams_to_send: Vec<_> = dp_cmd_streams_clone.lock().unwrap().values().cloned().collect();
+                                            println!("[Supervisor] Sending AddRule to {} data plane workers", streams_to_send.len());
                                             for stream_mutex in streams_to_send {
                                                 let cmd_bytes_clone = cmd_bytes.clone();
                                                 tokio::spawn(async move {
                                                     let mut stream = stream_mutex.lock().await;
                                                     let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
-                                                    if let Err(e) = framed.send(cmd_bytes_clone.into()).await {
-                                                        error!("Failed to send AddRule to worker: {}", e);
+                                                    match framed.send(cmd_bytes_clone.into()).await {
+                                                        Ok(_) => println!("[Supervisor] Successfully sent AddRule to worker"),
+                                                        Err(e) => error!("Failed to send AddRule to worker: {}", e),
                                                     }
                                                 });
                                             }
@@ -477,22 +491,28 @@ where
                                                                                 }
                                                                             });
                                                                         }
-                                                                    }                            _ => {
-                                // Forward to control plane worker
-                                let (_, mut client_writer) = client_stream.split();
-                                let (mut cp_reader, mut cp_writer) = current_cp_stream.split();
-
-                                cp_writer.write_all(&buffer).await.unwrap();
-
-                                let worker_to_client = tokio::io::copy(&mut cp_reader, &mut client_writer);
-                                tokio::select! {
-                                    _ = worker_to_client => {},
+                                                                    }
+                                        Ok(SupervisorCommand::ListRules) => {
+                                            let rules = master_rules_clone.lock().unwrap().values().cloned().collect();
+                                            let response = Response::Rules(rules);
+                                            let response_bytes = serde_json::to_vec(&response).unwrap();
+                                            client_stream.write_all(&response_bytes).await.unwrap();
+                                        }
+                                        Ok(SupervisorCommand::GetStats) => {
+                                            // TODO: Implement stats aggregation from workers
+                                            let response = Response::Stats(vec![]);
+                                            let response_bytes = serde_json::to_vec(&response).unwrap();
+                                            client_stream.write_all(&response_bytes).await.unwrap();
+                                        }
+                                        Err(e) => {
+                                            let response = Response::Error(format!("Failed to parse command: {}", e));
+                                            let response_bytes = serde_json::to_vec(&response).unwrap();
+                                            client_stream.write_all(&response_bytes).await.unwrap();
+                                        }
+                                    }
                                 }
-                            }
+                            });
                         }
-                    }
-                });
-            }
         }
     }
 }

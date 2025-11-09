@@ -12,9 +12,11 @@ fn main() -> Result<()> {
         Command::Supervisor {
             relay_command_socket_path,
             control_socket_path,
+            interface,
             user,
             group,
             prometheus_addr,
+            num_workers,
         } => {
             // This channel is now unused, but we keep it for now to avoid breaking the build.
             // It will be removed in a future commit.
@@ -26,11 +28,13 @@ fn main() -> Result<()> {
                 if let Err(e) = supervisor::run(
                     &user,
                     &group,
+                    &interface,
                     prometheus_addr,
                     relay_command_rx, // This is now unused, will be removed from supervisor::run
                     relay_command_socket_path.clone(),
                     control_socket_path,
                     Arc::new(Mutex::new(HashMap::new())),
+                    num_workers,
                 )
                 .await
                 {
@@ -116,9 +120,11 @@ mod tests {
             Command::Supervisor {
                 relay_command_socket_path: PathBuf::from("/tmp/mcr_relay_commands.sock"),
                 control_socket_path: PathBuf::from("/tmp/multicast_relay_control.sock"),
+                interface: "lo".to_string(),
                 user: "nobody".to_string(),
                 group: "daemon".to_string(),
                 prometheus_addr: None,
+                num_workers: None,
             }
         );
 

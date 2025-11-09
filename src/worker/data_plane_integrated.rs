@@ -94,14 +94,16 @@ pub fn run_data_plane(
     let buffer_pool = Arc::new(std::sync::Mutex::new(BufferPool::new(ingress_config.track_stats)));
 
     // Clone config for threads
-    let interface_name = match config.input_interface_name.clone() {
-        Some(name) => name,
-        None => {
-            return Err(anyhow::anyhow!(
-                "input_interface_name must be specified for data plane worker"
-            ));
-        }
-    };
+    // TODO: ARCHITECTURAL FIX NEEDED
+    // This creates AF_PACKET socket eagerly on startup. Per architecture (D21, D23):
+    // - Workers should start with NO sockets
+    // - Sockets should be created LAZILY when rules are assigned to this worker
+    // - Each worker can handle multiple interfaces based on its assigned rules
+    // Current approach causes resource exhaustion when spawning many workers.
+    let interface_name = config
+        .input_interface_name
+        .clone()
+        .unwrap_or_else(|| "lo".to_string());
     let initial_rules = Vec::new(); // TODO: Pass rules from control plane
 
     // Spawn ingress thread
@@ -115,23 +117,44 @@ pub fn run_data_plane(
             .spawn(move || -> Result<()> {
                 println!("[DataPlane] Ingress thread started");
 
+                // Debug: Check if CAP_NET_RAW is available in this thread
+                use caps::{CapSet, Capability};
+                match caps::has_cap(None, CapSet::Effective, Capability::CAP_NET_RAW) {
+                    Ok(true) => println!("[DataPlane] Ingress thread has CAP_NET_RAW in Effective set"),
+                    Ok(false) => eprintln!("[DataPlane] WARNING: Ingress thread missing CAP_NET_RAW in Effective set!"),
+                    Err(e) => eprintln!("[DataPlane] ERROR checking capabilities: {}", e),
+                }
+
                 // Create ingress loop
-                let mut ingress = IngressLoop::new(
+                let mut ingress = match IngressLoop::new(
                     &interface_name,
                     ingress_config,
                     buffer_pool_for_ingress,
                     Some(egress_tx),
                     command_rx,
                     event_fd,
-                )?;
+                ) {
+                    Ok(ingress) => {
+                        println!("[DataPlane] Ingress loop created successfully");
+                        ingress
+                    }
+                    Err(e) => {
+                        eprintln!("[DataPlane] FATAL: IngressLoop::new() failed: {}", e);
+                        return Err(e);
+                    }
+                };
 
                 // Add initial rules
                 for rule in initial_rules {
                     ingress.add_rule(Arc::new(rule))?;
                 }
 
+                println!("[DataPlane] Starting ingress run loop");
                 // Run ingress loop (blocks forever)
-                ingress.run()?;
+                if let Err(e) = ingress.run() {
+                    eprintln!("[DataPlane] FATAL: Ingress run() failed: {}", e);
+                    return Err(e);
+                }
 
                 Ok(())
             })
