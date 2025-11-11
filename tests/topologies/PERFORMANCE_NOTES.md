@@ -111,6 +111,69 @@ ip link set veth0 txqueuelen 10000
 - Passes FDs to unprivileged workers
 - Improves security without performance impact
 
+## CPU Isolation Findings
+
+### Test Configuration
+- Each MCR instance pinned to separate CPU core via `taskset`
+- Tree fanout topology: 4 MCR instances on cores 0-3
+- 500k packets @ 300k pps with 3x amplification
+
+### Results
+**Before CPU isolation (all on core 0):**
+```
+MCR-1 matched: 87k (29% efficiency)
+All instances competing for 1 core (8 threads total)
+```
+
+**After CPU isolation (cores 0-3):**
+```
+MCR-1 matched: 85k (17% efficiency)
+Each instance on dedicated core
+```
+
+### Key Finding: CPU Isolation Did NOT Improve Throughput
+
+**Reason:** The bottlenecks are **not CPU contention**, but:
+
+1. **Kernel packet drops (58%)** - Before AF_PACKET socket
+   - 500k sent → 211k received by AF_PACKET
+   - veth interface limits
+   - Single AF_PACKET socket saturation
+
+2. **Buffer pool exhaustion (60% of received)**
+   - 211k received → 85k matched
+   - 126k packets dropped (buffer pool full)
+   - Pool sized for 1:1 forwarding (1000 buffers)
+   - 3x amplification needs 3x capacity or faster egress
+
+3. **Single-worker architecture**
+   - One thread doing ingress AND egress
+   - Egress can't drain fast enough (3x output rate)
+   - Backpressure fills buffer pool
+
+### Value of CPU Isolation
+
+While it didn't improve throughput, CPU isolation still provides:
+- ✅ **Stability** - No thread contention between MCR instances
+- ✅ **Predictability** - Each instance has guaranteed CPU time
+- ✅ **Testing** - Isolates per-instance performance issues
+- ✅ **Production** - Best practice for multi-tenant scenarios
+
+### Amplification-Specific Issues
+
+**Buffer Pool Undersizing for Amplification:**
+- Default: 1000 small buffers (1.5MB)
+- Designed for: 1:1 forwarding at 312k pps
+- Problem: With 3x amplification, need buffers for:
+  - Ingress packets waiting to be processed
+  - 3x copies in egress queue
+  - = **4x buffer pressure**
+
+**Recommendations for Amplification:**
+1. **Configurable buffer pool size** based on max fan-out
+2. **Separate ingress/egress workers** (D23) to parallelize
+3. **Backpressure to slow ingress** when egress can't keep up
+
 ## Current Test Strategy
 
 **Goal:** Validate **functionality**, not maximum performance

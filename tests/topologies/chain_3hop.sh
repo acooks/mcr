@@ -68,10 +68,10 @@ setup_veth_pair veth2a veth2b 10.0.2.1/24 10.0.2.2/24
 
 log_section 'Starting MCR Instances'
 
-# Start 3-hop chain
-start_mcr mcr1 veth0p /tmp/mcr1.sock /tmp/mcr1.log
-start_mcr mcr2 veth1b /tmp/mcr2.sock /tmp/mcr2.log
-start_mcr mcr3 veth2b /tmp/mcr3.sock /tmp/mcr3.log
+# Start 3-hop chain on separate CPU cores to avoid contention
+start_mcr mcr1 veth0p /tmp/mcr1.sock /tmp/mcr1.log 0
+start_mcr mcr2 veth1b /tmp/mcr2.sock /tmp/mcr2.log 1
+start_mcr mcr3 veth2b /tmp/mcr3.sock /tmp/mcr3.log 2
 
 # Wait for all instances to be ready
 wait_for_sockets /tmp/mcr1.sock /tmp/mcr2.sock /tmp/mcr3.sock

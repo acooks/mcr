@@ -55,20 +55,24 @@ enable_loopback() {
 # --- MCR Instance Management ---
 
 # Start an MCR instance
-# Usage: start_mcr <name> <interface> <control_socket> [log_file]
+# Usage: start_mcr <name> <interface> <control_socket> [log_file] [core_id]
 start_mcr() {
     local name="$1"
     local interface="$2"
     local control_socket="$3"
     local log_file="${4:-/tmp/${name}.log}"
+    local core_id="${5:-0}"
     local relay_socket="/tmp/${name}_relay.sock"
 
-    log_info "Starting $name (interface: $interface, socket: $control_socket)"
+    log_info "Starting $name (interface: $interface, socket: $control_socket, CPU core: $core_id)"
 
     # Clean up any existing sockets
     rm -f "$control_socket" "$relay_socket"
 
-    "$RELAY_BINARY" supervisor \
+    # Use taskset to pin the supervisor process tree to a specific CPU core
+    # This ensures the data plane worker (which would normally be pinned to core 0)
+    # inherits the affinity from the supervisor instead
+    taskset -c "$core_id" "$RELAY_BINARY" supervisor \
         --relay-command-socket-path "$relay_socket" \
         --control-socket-path "$control_socket" \
         --interface "$interface" \
