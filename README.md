@@ -14,14 +14,27 @@ The application is built for performance, using an asynchronous, parallel archit
 
 ## Project Documentation
 
-This project maintains several key documents to guide development and understanding:
+### Core Documentation (Start Here)
 
-- **`README.md` (This file):** Provides a high-level overview of the project, its features, and instructions for building and running the application.
-- **`ARCHITECTURE.md`:** The definitive, up-to-date guide to the system's design, components, and core technical decisions. This document describes _what_ the system is.
-- **`DEVLOG.md`:** A chronological, historical record of the project's evolution, including requirements, design discussions, and implementation progress. This document describes _how_ the system came to be.
-- **`CONTRIBUTING.md`:** The rulebook for all contributions, outlining the coding standards, testing requirements, and development principles that must be followed.
-- **`IMPLEMENTATION_PLAN.md`:** The strategic roadmap for building the application. It breaks the work into sequential phases, defining the goals and exit criteria for each step.
-- **`TESTING.md`:** Outlines the project's comprehensive, tiered testing philosophy and strategy, emphasizing unit, integration, and end-to-end testing, as well as the role of prototypes.
+- **[README.md](README.md)** (This file) - Project overview, quickstart, and usage
+- **[STATUS.md](STATUS.md)** - Current implementation state, performance results, and priorities
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** - System design, technical decisions, and architecture
+- **[CONTRIBUTING.md](CONTRIBUTING.md)** - Development standards, testing requirements, and workflow
+
+### Additional Documentation
+
+- **[docs/plans/](docs/plans/)** - Active work items and implementation plans
+  - [LOGGING_INTEGRATION_PLAN.md](docs/plans/LOGGING_INTEGRATION_PLAN.md) - Next priority (3.5 hours)
+
+- **[docs/completed/](docs/completed/)** - Completed phase reports and session summaries
+  - [PHASE4_COMPLETION.md](docs/completed/PHASE4_COMPLETION.md) - Performance validation results
+  - [SESSION_RECAP_2025-11-11.md](docs/completed/SESSION_RECAP_2025-11-11.md) - Latest session summary
+
+- **[docs/reference/](docs/reference/)** - Development guides and references
+  - [DEVELOPER_GUIDE.md](docs/reference/DEVELOPER_GUIDE.md) - Development workflows
+  - [TESTING.md](docs/reference/TESTING.md) - Testing strategy
+  - [EXPERIMENT_CANDIDATES.md](docs/reference/EXPERIMENT_CANDIDATES.md) - Experiment tracking
+
 
 ## Components
 
@@ -125,14 +138,28 @@ The `traffic_generator` can be used to send multicast traffic for testing purpos
 
 ## Running Tests
 
-To run the unit tests:
+### Unit and Integration Tests
+
+To run the unit and integration tests:
 
 ```bash
 cargo test
 ```
 
-To run the high-load functional test script:
+### Topology Tests (End-to-End)
+
+To run comprehensive end-to-end tests with network namespace isolation:
 
 ```bash
-./test_high_load.sh
+# Run all topology tests
+sudo just test-topologies
+
+# Run specific topology
+sudo tests/topologies/chain_3hop.sh
 ```
+
+Available topologies:
+- `chain_3hop.sh` - 3-hop serial forwarding pipeline
+- `tree_fanout.sh` - Head-end replication (1:N amplification)
+
+See [tests/topologies/README.md](tests/topologies/README.md) for details.

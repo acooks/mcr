@@ -75,6 +75,23 @@ outdated:
     @echo "--- Checking for Outdated Dependencies (cargo outdated) ---"
     @cargo outdated
 
+# Run topology tests (requires root for network namespace isolation)
+test-topologies:
+    @echo "--- Running Topology Integration Tests ---"
+    @if [ "$EUID" -ne 0 ]; then echo "ERROR: Requires root (sudo just test-topologies)"; exit 1; fi
+    @for test in tests/topologies/*.sh; do \
+        [ "$$test" = "tests/topologies/common.sh" ] && continue; \
+        echo "\n=== Running $$(basename $$test) ==="; \
+        "$$test" || exit 1; \
+    done
+    @echo "\n✅ All topology tests passed!"
+
+# Run specific topology test (requires root)
+test-topology TEST:
+    @echo "--- Running {{TEST}} Topology Test ---"
+    @if [ "$EUID" -ne 0 ]; then echo "ERROR: Requires root (sudo just test-topology {{TEST}})"; exit 1; fi
+    @sudo tests/topologies/{{TEST}}.sh
+
 # Generate test coverage report
 # Note: Tests run sequentially (--test-threads=1) due to supervisor test socket contention
 coverage:

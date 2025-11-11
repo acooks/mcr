@@ -1,0 +1,257 @@
+#!/bin/bash
+# Common functions for topology tests
+# Source this file from topology test scripts
+
+set -euo pipefail
+
+# --- Configuration Variables (can be overridden before sourcing) ---
+RELAY_BINARY="${RELAY_BINARY:-target/release/multicast_relay}"
+CONTROL_CLIENT_BINARY="${CONTROL_CLIENT_BINARY:-target/release/control_client}"
+TRAFFIC_GENERATOR_BINARY="${TRAFFIC_GENERATOR_BINARY:-target/release/traffic_generator}"
+
+# Default test parameters
+DEFAULT_PACKET_SIZE=1400      # Leaves room for headers (UDP 8 + IP 20 + Ethernet 14)
+DEFAULT_PACKET_COUNT=1000000  # 1M packets for quick tests
+DEFAULT_SEND_RATE=500000      # 500k pps target
+
+# --- Logging Utilities ---
+log_info() {
+    echo "[INFO] $*" >&2
+}
+
+log_error() {
+    echo "[ERROR] $*" >&2
+}
+
+log_section() {
+    echo "" >&2
+    echo "=== $* ===" >&2
+}
+
+# --- Network Setup Functions ---
+
+# Create and configure a veth pair
+# Usage: setup_veth_pair <name1> <name2> <ip1/prefix> <ip2/prefix>
+setup_veth_pair() {
+    local name1="$1"
+    local name2="$2"
+    local ip1="$3"
+    local ip2="$4"
+
+    log_info "Creating veth pair: $name1 ↔ $name2"
+    ip link add "$name1" type veth peer name "$name2"
+    ip addr add "$ip1" dev "$name1"
+    ip addr add "$ip2" dev "$name2"
+    ip link set "$name1" up
+    ip link set "$name2" up
+}
+
+# Enable loopback interface (required in new network namespace)
+enable_loopback() {
+    log_info "Enabling loopback interface"
+    ip link set lo up
+}
+
+# --- MCR Instance Management ---
+
+# Start an MCR instance
+# Usage: start_mcr <name> <interface> <control_socket> [log_file]
+start_mcr() {
+    local name="$1"
+    local interface="$2"
+    local control_socket="$3"
+    local log_file="${4:-/tmp/${name}.log}"
+    local relay_socket="/tmp/${name}_relay.sock"
+
+    log_info "Starting $name (interface: $interface, socket: $control_socket)"
+
+    # Clean up any existing sockets
+    rm -f "$control_socket" "$relay_socket"
+
+    "$RELAY_BINARY" supervisor \
+        --relay-command-socket-path "$relay_socket" \
+        --control-socket-path "$control_socket" \
+        --interface "$interface" \
+        --num-workers 1 \
+        > "$log_file" 2>&1 &
+
+    local pid=$!
+    log_info "$name started with PID $pid"
+
+    # Store PID for cleanup (export so parent shell can access)
+    export "${name}_PID=$pid"
+}
+
+# Wait for MCR control sockets to be ready
+# Usage: wait_for_sockets <socket1> [socket2] [socket3] ...
+wait_for_sockets() {
+    log_info "Waiting for MCR instances to start..."
+    local timeout=15
+    local start=$(date +%s)
+
+    for socket in "$@"; do
+        while ! [ -S "$socket" ]; do
+            if [ "$(($(date +%s) - start))" -gt "$timeout" ]; then
+                log_error "Timeout waiting for $socket"
+                return 1
+            fi
+            sleep 0.1
+        done
+        log_info "Socket ready: $socket"
+    done
+}
+
+# --- Rule Configuration Functions ---
+
+# Add a forwarding rule to an MCR instance
+# Usage: add_rule <socket> <input_iface> <input_group> <input_port> <output_spec>
+# Output spec format: "group:port:interface"
+add_rule() {
+    local socket="$1"
+    local input_iface="$2"
+    local input_group="$3"
+    local input_port="$4"
+    local output_spec="$5"
+
+    log_info "Adding rule: $input_iface ($input_group:$input_port) → $output_spec"
+
+    "$CONTROL_CLIENT_BINARY" --socket-path "$socket" add \
+        --input-interface "$input_iface" \
+        --input-group "$input_group" \
+        --input-port "$input_port" \
+        --outputs "$output_spec" > /dev/null
+}
+
+# --- Traffic Generation ---
+
+# Run traffic generator
+# Usage: run_traffic <interface_ip> <group> <port> <packet_count> <packet_size> <rate>
+run_traffic() {
+    local interface_ip="$1"
+    local group="$2"
+    local port="$3"
+    local packet_count="$4"
+    local packet_size="$5"
+    local rate="$6"
+
+    log_section "Running Traffic Generator"
+    log_info "Target: $group:$port via $interface_ip"
+    log_info "Parameters: $packet_count packets @ $packet_size bytes, rate $rate pps"
+
+    "$TRAFFIC_GENERATOR_BINARY" \
+        --interface "$interface_ip" \
+        --group "$group" \
+        --port "$port" \
+        --rate "$rate" \
+        --size "$packet_size" \
+        --count "$packet_count"
+
+    log_info "Traffic generation complete"
+}
+
+# --- Stats and Validation ---
+
+# Extract stats from MCR log file
+# Usage: get_stats <log_file>
+get_stats() {
+    local log_file="$1"
+
+    if [ ! -f "$log_file" ]; then
+        log_error "Log file not found: $log_file"
+        return 1
+    fi
+
+    # Get last ingress and egress stats lines
+    tail -50 "$log_file" | grep -E "\[STATS:(Ingress|Egress)\]" | tail -2 || true
+}
+
+# Print final stats for all MCR instances
+# Usage: print_final_stats <name1:logfile1> [name2:logfile2] ...
+print_final_stats() {
+    log_section "Final Stats Summary"
+
+    for pair in "$@"; do
+        local name="${pair%%:*}"
+        local logfile="${pair#*:}"
+
+        echo ""
+        echo "$name Final Stats:"
+        get_stats "$logfile" || echo "No stats found for $name"
+    done
+}
+
+# Extract specific stat value from log
+# Usage: extract_stat <log_file> <stat_type> <field>
+# Example: extract_stat /tmp/mcr1.log "STATS:Ingress" "matched"
+extract_stat() {
+    local log_file="$1"
+    local stat_type="$2"
+    local field="$3"
+
+    tail -50 "$log_file" | \
+        grep "\[$stat_type\]" | \
+        tail -1 | \
+        grep -oP "$field=\K[0-9]+" || echo "0"
+}
+
+# Validate stats meet expectations
+# Usage: validate_stat <log_file> <stat_type> <field> <min_value> <description>
+validate_stat() {
+    local log_file="$1"
+    local stat_type="$2"
+    local field="$3"
+    local min_value="$4"
+    local description="$5"
+
+    local actual=$(extract_stat "$log_file" "$stat_type" "$field")
+
+    if [ "$actual" -ge "$min_value" ]; then
+        log_info "✅ $description: $actual (>= $min_value)"
+        return 0
+    else
+        log_error "❌ $description: $actual (expected >= $min_value)"
+        return 1
+    fi
+}
+
+# --- Monitoring ---
+
+# Start log monitoring in background
+# Usage: start_log_monitor <name> <log_file>
+start_log_monitor() {
+    local name="$1"
+    local log_file="$2"
+
+    tail -f "$log_file" | sed "s/^/[$name] /" &
+    echo $!
+}
+
+# Stop log monitor
+# Usage: stop_log_monitor <pid>
+stop_log_monitor() {
+    local pid="$1"
+    kill "$pid" 2>/dev/null || true
+}
+
+# --- Cleanup ---
+
+# Kill all MCR processes
+cleanup_mcr_processes() {
+    log_info "Cleaning up MCR processes"
+    killall -q multicast_relay || true
+    killall -q traffic_generator || true
+}
+
+# Remove socket files
+cleanup_sockets() {
+    log_info "Cleaning up socket files"
+    rm -f /tmp/mcr*.sock
+    rm -f /tmp/mcr*_relay.sock
+}
+
+# Full cleanup (call from trap)
+cleanup_all() {
+    log_info "Running cleanup"
+    cleanup_mcr_processes
+    cleanup_sockets
+}
