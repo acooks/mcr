@@ -31,7 +31,8 @@ use std::net::{Ipv4Addr, UdpSocket as StdUdpSocket};
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::sync::{mpsc, Arc, Mutex};
 
-use crate::worker::buffer_pool::BufferSize;
+// Commented out for performance (used only in debug logging)
+// use crate::worker::buffer_pool::BufferSize;
 use crate::worker::{buffer_pool::BufferPool, egress::EgressPacket, packet_parser::parse_packet};
 use crate::{ForwardingRule, RelayCommand};
 
@@ -67,6 +68,15 @@ pub struct IngressConfig {
     pub batch_size: usize,
     /// Enable statistics tracking (0.12% overhead)
     pub track_stats: bool,
+    /// Buffer pool capacity for small buffers (≤1500 bytes)
+    /// Default: 1000, Recommended for amplification: 3000-5000
+    pub buffer_pool_small: usize,
+    /// Buffer pool capacity for standard buffers (≤4096 bytes)
+    /// Default: 500, Recommended for amplification: 1500-2500
+    pub buffer_pool_standard: usize,
+    /// Buffer pool capacity for jumbo buffers (≤9000 bytes)
+    /// Default: 200, Recommended for amplification: 600-1000
+    pub buffer_pool_jumbo: usize,
 }
 
 impl Default for IngressConfig {
@@ -75,6 +85,10 @@ impl Default for IngressConfig {
             queue_depth: 64,
             batch_size: 32,
             track_stats: true,
+            // Default buffer pool sizes (for 1:1 forwarding)
+            buffer_pool_small: 1000,
+            buffer_pool_standard: 500,
+            buffer_pool_jumbo: 200,
         }
     }
 }
@@ -224,6 +238,10 @@ impl IngressLoop {
         // Submit the initial command notification read
         self.submit_command_read(&mut command_notify_buf)?;
 
+        // Stats reporting
+        let mut last_stats_report = std::time::Instant::now();
+        let mut last_packets_received = 0u64;
+
         loop {
             // 1. Submit a batch of recv operations for all available buffers
             let available_buffers = self.config.batch_size - self.ring.submission().len();
@@ -287,6 +305,30 @@ impl IngressLoop {
                     }
                 }
             }
+
+            // Periodic stats reporting (every second)
+            // TODO: Replace println! with proper logging system (Facility::Stats, Severity::Info)
+            if self.config.track_stats {
+                let now = std::time::Instant::now();
+                if now.duration_since(last_stats_report).as_secs() >= 1 {
+                    let packets_delta = self.stats.packets_received - last_packets_received;
+                    let interval_secs = now.duration_since(last_stats_report).as_secs_f64();
+                    let pps = packets_delta as f64 / interval_secs;
+
+                    println!(
+                        "[STATS:Ingress] recv={} matched={} parse_err={} no_match={} buf_exhaust={} ({:.0} pps)",
+                        self.stats.packets_received,
+                        self.stats.packets_matched,
+                        self.stats.parse_errors,
+                        self.stats.no_rule_match,
+                        self.stats.buffer_exhaustion,
+                        pps
+                    );
+
+                    last_stats_report = now;
+                    last_packets_received = self.stats.packets_received;
+                }
+            }
         }
     }
 
@@ -326,17 +368,21 @@ impl IngressLoop {
 
     /// Process a single received packet
     fn process_packet(&mut self, packet_data: &[u8]) -> Result<()> {
-        println!("\n--- process_packet start ---");
-        println!("Packet data len: {}", packet_data.len());
+        // Debug logging disabled for performance (uncomment for debugging)
+        // println!("\n--- process_packet start ---");
+        // println!("Packet data len: {}", packet_data.len());
 
         // Parse packet headers
         let headers = match parse_packet(packet_data, false) {
             Ok(h) => {
-                println!("Parse successful: {:?}", h);
+                // println!("Parse successful: {:?}", h);
                 h
             }
-            Err(_e) => {
-                println!("Parse failed");
+            Err(e) => {
+                // Only log first 10 parse errors to avoid flooding
+                if self.stats.parse_errors < 10 {
+                    println!("[Ingress] Parse failed: {}", e);
+                }
                 if self.config.track_stats {
                     self.stats.parse_errors += 1;
                 }
@@ -347,14 +393,14 @@ impl IngressLoop {
 
         // Match against rules (userspace demux by dest_ip, dest_port)
         let key = (headers.ipv4.dst_ip, headers.udp.dst_port);
-        println!("Matching rule for key: {:?}", key);
+        // println!("Matching rule for key: {:?}", key);
         let rule = match self.rules.get(&key) {
             Some(r) => {
-                println!("Rule matched: {}", r.rule_id);
+                // println!("Rule matched: {}", r.rule_id);
                 r.clone()
             }
             None => {
-                println!("No rule matched");
+                // println!("No rule matched");
                 if self.config.track_stats {
                     self.stats.no_rule_match += 1;
                 }
@@ -365,14 +411,14 @@ impl IngressLoop {
 
         // If there are no outputs, we are done with this packet.
         if rule.outputs.is_empty() {
-            println!("Rule has no outputs, returning.");
+            // println!("Rule has no outputs, returning.");
             return Ok(());
         }
 
         // Forward to egress (if channel is available)
         if let Some(ref tx) = self.egress_tx {
             let payload_len = headers.payload_len;
-            println!("Payload len: {}", payload_len);
+            // println!("Payload len: {}", payload_len);
             let payload_start = headers.payload_offset;
             let payload_end = payload_start + payload_len;
 
@@ -382,16 +428,17 @@ impl IngressLoop {
 
             // Iterate through the outputs.
             for output in &rule.outputs {
-                println!("Processing output: {:?}", output);
-                {
-                    let pool = self.buffer_pool.lock().expect("BufferPool mutex poisoned");
-                    println!(
-                        "Buffer pool state before alloc: small={}, standard={}, jumbo={}",
-                        pool.pool(BufferSize::Small).available(),
-                        pool.pool(BufferSize::Standard).available(),
-                        pool.pool(BufferSize::Jumbo).available()
-                    );
-                }
+                // println!("Processing output: {:?}", output);
+                // Debug: buffer pool state (commented for performance)
+                // {
+                //     let pool = self.buffer_pool.lock().expect("BufferPool mutex poisoned");
+                //     println!(
+                //         "Buffer pool state before alloc: small={}, standard={}, jumbo={}",
+                //         pool.pool(BufferSize::Small).available(),
+                //         pool.pool(BufferSize::Standard).available(),
+                //         pool.pool(BufferSize::Jumbo).available()
+                //     );
+                // }
 
                 // Allocate a buffer for each output destination.
                 let mut buffer = match self
@@ -401,17 +448,17 @@ impl IngressLoop {
                     .allocate(payload_len)
                 {
                     Some(b) => {
-                        println!("Buffer allocation successful");
+                        // println!("Buffer allocation successful");
                         b
                     }
                     None => {
-                        println!("Buffer allocation failed (pool exhausted)");
+                        // println!("Buffer allocation failed (pool exhausted)");
                         // Pool is exhausted, increment stat and stop processing this packet.
                         if self.config.track_stats {
-                            println!(
-                                "Incrementing buffer_exhaustion. Old value: {}",
-                                self.stats.buffer_exhaustion
-                            );
+                            // println!(
+                            //     "Incrementing buffer_exhaustion. Old value: {}",
+                            //     self.stats.buffer_exhaustion
+                            // );
                             self.stats.buffer_exhaustion += 1;
                         }
                         return Ok(());
@@ -421,13 +468,28 @@ impl IngressLoop {
                 // If this is the first successful allocation, increment the matched stat.
                 if !matched_stat_incremented {
                     if self.config.track_stats {
-                        println!(
-                            "Incrementing packets_matched. Old value: {}",
-                            self.stats.packets_matched
-                        );
+                        // println!(
+                        //     "Incrementing packets_matched. Old value: {}",
+                        //     self.stats.packets_matched
+                        // );
                         self.stats.packets_matched += 1;
                     }
                     matched_stat_incremented = true;
+                }
+
+                // Verify packet is not truncated before copying
+                if packet_data.len() < payload_end {
+                    // Packet is truncated - this shouldn't happen with proper AF_PACKET setup
+                    // but we need to handle it gracefully
+                    if self.config.track_stats {
+                        self.stats.parse_errors += 1;
+                    }
+                    // Deallocate the buffer we just allocated
+                    self.buffer_pool
+                        .lock()
+                        .expect("BufferPool mutex poisoned")
+                        .deallocate(buffer);
+                    return Ok(());
                 }
 
                 // Copy payload into the newly allocated buffer.
@@ -439,21 +501,22 @@ impl IngressLoop {
 
                 let egress_packet = EgressPacket {
                     buffer, // Move ownership of the buffer to the egress packet
+                    payload_len,
                     interface_name: output.interface.clone(),
                     dest_addr,
                 };
 
                 if tx.send(egress_packet).is_err() && self.config.track_stats {
-                    println!(
-                        "Egress send failed, incrementing egress_channel_errors. Old value: {}",
-                        self.stats.egress_channel_errors
-                    );
+                    // println!(
+                    //     "Egress send failed, incrementing egress_channel_errors. Old value: {}",
+                    //     self.stats.egress_channel_errors
+                    // );
                     self.stats.egress_channel_errors += 1;
                 }
             }
         }
 
-        println!("--- process_packet end ---");
+        // println!("--- process_packet end ---");
         Ok(())
     }
 }

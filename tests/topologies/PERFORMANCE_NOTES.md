@@ -161,18 +161,31 @@ While it didn't improve throughput, CPU isolation still provides:
 
 ### Amplification-Specific Issues
 
-**Buffer Pool Undersizing for Amplification:**
-- Default: 1000 small buffers (1.5MB)
-- Designed for: 1:1 forwarding at 312k pps
-- Problem: With 3x amplification, need buffers for:
-  - Ingress packets waiting to be processed
-  - 3x copies in egress queue
-  - = **4x buffer pressure**
+**CRITICAL FINDING: Buffer Pool Size is NOT the Bottleneck**
 
-**Recommendations for Amplification:**
-1. **Configurable buffer pool size** based on max fan-out
-2. **Separate ingress/egress workers** (D23) to parallelize
-3. **Backpressure to slow ingress** when egress can't keep up
+Experiment tested buffer pool sizing impact on 3x amplification:
+- **Before:** 1000 small buffers → 64% buffer exhaustion (126k / 206k)
+- **After:** 4000 small buffers (4x capacity) → 65% buffer exhaustion (135k / 207k)
+- **Result:** NO IMPROVEMENT - same exhaustion percentage!
+
+**Conclusion:** Egress throughput is the real bottleneck, not buffer capacity.
+
+**Root Cause Analysis:**
+1. **Egress Saturation:** Must send 3x packets (to 3 outputs), ~219k pps egress vs 73k pps ingress
+2. **Single Worker Limitation:** One thread alternates ingress ↔ egress, can't parallelize
+3. **Buffers Fill Regardless:** Egress can't drain fast enough, any size buffer pool eventually fills
+4. **Ingress Blocks:** When buffers full, ingress drops packets, limiting overall throughput
+
+**Why Increasing Buffers Doesn't Help:**
+- Larger buffers delay the problem but don't solve it
+- If egress sends 200k pps but needs 300k pps, buffers will always fill
+- It's like trying to fix a traffic jam by building a bigger parking lot
+
+**The Real Fixes:**
+1. **Separate Ingress/Egress Workers (D23)** - Run on different cores in parallel
+2. **Batch Egress Operations** - Send multiple packets per syscall
+3. **Backpressure** - Slow ingress to match egress capacity
+4. **Accept Limitation** - Single worker @ 3x amplification = ~70k pps ingress capacity
 
 ## Current Test Strategy
 

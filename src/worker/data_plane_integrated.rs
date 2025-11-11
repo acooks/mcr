@@ -79,7 +79,37 @@ pub fn run_data_plane(
         config.input_interface_name.as_deref().unwrap_or("default")
     );
 
+    // Allow buffer pool sizing via environment variables for testing/tuning
+    let buffer_pool_small = std::env::var("MCR_BUFFER_POOL_SMALL")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(1000); // Default from IngressConfig
+
+    let buffer_pool_standard = std::env::var("MCR_BUFFER_POOL_STANDARD")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(500);
+
+    let buffer_pool_jumbo = std::env::var("MCR_BUFFER_POOL_JUMBO")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(200);
+
+    // Log buffer pool configuration for visibility
+    println!(
+        "[DataPlane] Buffer pool config: small={}, standard={}, jumbo={} (total ~{:.1} MB)",
+        buffer_pool_small,
+        buffer_pool_standard,
+        buffer_pool_jumbo,
+        (buffer_pool_small * 1500 + buffer_pool_standard * 4096 + buffer_pool_jumbo * 9000) as f64
+            / 1024.0
+            / 1024.0
+    );
+
     let ingress_config = IngressConfig {
+        buffer_pool_small,
+        buffer_pool_standard,
+        buffer_pool_jumbo,
         ..Default::default()
     };
 
@@ -90,8 +120,12 @@ pub fn run_data_plane(
     // Create channel for ingress→egress communication
     let (egress_tx, egress_rx) = mpsc::channel::<EgressPacket>();
 
-    // Create shared buffer pool (Arc<Mutex<>> for thread-safe shared access)
-    let buffer_pool = Arc::new(std::sync::Mutex::new(BufferPool::new(
+    // Create shared buffer pool with configurable capacities
+    // (Arc<Mutex<>> for thread-safe shared access between ingress/egress threads)
+    let buffer_pool = Arc::new(std::sync::Mutex::new(BufferPool::with_capacities(
+        ingress_config.buffer_pool_small,
+        ingress_config.buffer_pool_standard,
+        ingress_config.buffer_pool_jumbo,
         ingress_config.track_stats,
     )));
 
@@ -179,10 +213,20 @@ pub fn run_data_plane(
                 // Create egress loop
                 let mut egress = EgressLoop::new(egress_config.clone(), buffer_pool.clone())?;
 
+                // Stats reporting
+                let mut last_stats_report = std::time::Instant::now();
+                let mut last_packets_sent = 0u64;
+
                 // Main egress loop: receive packets from channel and send in batches
                 loop {
-                    // Receive packets from ingress (blocking)
-                    match egress_rx.recv_timeout(Duration::from_millis(10)) {
+                    // Reap completions first to free buffers ASAP
+                    // This is critical to prevent buffer pool exhaustion
+                    if let Err(e) = egress.reap_available_completions() {
+                        eprintln!("[DataPlane] Failed to reap completions: {}", e);
+                    }
+
+                    // Try to receive a packet without blocking
+                    match egress_rx.try_recv() {
                         Ok(packet) => {
                             // Add destination socket if not already present
                             if let Err(e) =
@@ -202,17 +246,60 @@ pub fn run_data_plane(
                                 }
                             }
                         }
-                        Err(mpsc::RecvTimeoutError::Timeout) => {
+                        Err(mpsc::TryRecvError::Empty) => {
                             // No packets available, flush pending packets
                             if !egress.is_queue_empty() {
                                 if let Err(e) = egress.send_batch() {
                                     eprintln!("[DataPlane] Egress send batch failed: {}", e);
                                 }
+                            } else {
+                                // Queue is empty, do a short blocking wait for next packet
+                                // This prevents tight-looping while remaining responsive
+                                match egress_rx.recv_timeout(Duration::from_micros(50)) {
+                                    Ok(packet) => {
+                                        if let Err(e) = egress.add_destination(&packet.interface_name, packet.dest_addr) {
+                                            eprintln!("[DataPlane] Failed to add egress destination: {}", e);
+                                            continue;
+                                        }
+                                        egress.queue_packet(packet);
+                                    }
+                                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                                        // No packet within 50μs, continue loop (will reap completions)
+                                    }
+                                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                                        println!("[DataPlane] Ingress channel closed, shutting down egress");
+                                        break;
+                                    }
+                                }
                             }
                         }
-                        Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        Err(mpsc::TryRecvError::Disconnected) => {
                             println!("[DataPlane] Ingress channel closed, shutting down egress");
                             break;
+                        }
+                    }
+
+                    // Periodic stats reporting (every second)
+                    // TODO: Replace println! with proper logging system (Facility::Stats, Severity::Info)
+                    if egress_config.track_stats {
+                        let now = std::time::Instant::now();
+                        if now.duration_since(last_stats_report).as_secs() >= 1 {
+                            let stats = egress.stats();
+                            let packets_delta = stats.packets_sent - last_packets_sent;
+                            let interval_secs = now.duration_since(last_stats_report).as_secs_f64();
+                            let pps = packets_delta as f64 / interval_secs;
+
+                            println!(
+                                "[STATS:Egress] sent={} submitted={} errors={} bytes={} ({:.0} pps)",
+                                stats.packets_sent,
+                                stats.packets_submitted,
+                                stats.send_errors,
+                                stats.bytes_sent,
+                                pps
+                            );
+
+                            last_stats_report = now;
+                            last_packets_sent = stats.packets_sent;
                         }
                     }
                 }
