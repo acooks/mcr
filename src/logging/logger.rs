@@ -180,6 +180,10 @@ pub struct LogRegistry {
     global_min_level: Arc<AtomicU8>,
     /// Per-facility minimum log levels (overrides global)
     facility_min_levels: Arc<RwLock<std::collections::HashMap<Facility, Severity>>>,
+    /// MPSC ring buffers (stored separately for export)
+    mpsc_ringbuffers: Vec<(Facility, Arc<MPSCRingBuffer>)>,
+    /// SPSC ring buffers (stored separately for export)
+    spsc_ringbuffers: Vec<(Facility, Arc<SPSCRingBuffer>)>,
 }
 
 impl LogRegistry {
@@ -188,6 +192,7 @@ impl LogRegistry {
     /// Use this for supervisor and control plane (async, multiple writers)
     pub fn new_mpsc() -> Self {
         let mut loggers = std::collections::HashMap::new();
+        let mut mpsc_ringbuffers = Vec::new();
 
         // Initialize shared filtering state (default: Info level = 6)
         let global_min_level = Arc::new(AtomicU8::new(Severity::Info as u8));
@@ -212,17 +217,20 @@ impl LogRegistry {
             let capacity = facility.buffer_size();
             let ringbuffer = Arc::new(MPSCRingBuffer::new(capacity));
             let logger = Logger::from_mpsc(
-                ringbuffer,
+                Arc::clone(&ringbuffer),
                 Arc::clone(&global_min_level),
                 Arc::clone(&facility_min_levels),
             );
             loggers.insert(facility, logger);
+            mpsc_ringbuffers.push((facility, ringbuffer));
         }
 
         Self {
             loggers,
             global_min_level,
             facility_min_levels,
+            mpsc_ringbuffers,
+            spsc_ringbuffers: Vec::new(),
         }
     }
 
@@ -231,6 +239,7 @@ impl LogRegistry {
     /// Use this for data plane workers (single thread, single writer)
     pub fn new_spsc(core_id: u8) -> Self {
         let mut loggers = std::collections::HashMap::new();
+        let mut spsc_ringbuffers = Vec::new();
 
         // Initialize shared filtering state (default: Info level = 6)
         let global_min_level = Arc::new(AtomicU8::new(Severity::Info as u8));
@@ -250,17 +259,20 @@ impl LogRegistry {
             let capacity = facility.buffer_size();
             let ringbuffer = Arc::new(SPSCRingBuffer::new(capacity, core_id));
             let logger = Logger::from_spsc(
-                ringbuffer,
+                Arc::clone(&ringbuffer),
                 Arc::clone(&global_min_level),
                 Arc::clone(&facility_min_levels),
             );
             loggers.insert(facility, logger);
+            spsc_ringbuffers.push((facility, ringbuffer));
         }
 
         Self {
             loggers,
             global_min_level,
             facility_min_levels,
+            mpsc_ringbuffers: Vec::new(),
+            spsc_ringbuffers,
         }
     }
 
@@ -326,6 +338,36 @@ impl LogRegistry {
     pub fn get_all_facility_levels(&self) -> std::collections::HashMap<Facility, Severity> {
         let levels = self.facility_min_levels.read().unwrap();
         levels.clone()
+    }
+
+    /// Export MPSC ring buffers for AsyncConsumer
+    ///
+    /// This is used by supervisor and control plane workers to get
+    /// ring buffers in the concrete MPSC type required by AsyncConsumer.
+    ///
+    /// # Returns
+    /// Vector of (Facility, Arc<MPSCRingBuffer>) pairs for consumption.
+    /// Returns an empty vector if this registry was created with new_spsc().
+    pub fn export_mpsc_ringbuffers(&self) -> Vec<(Facility, Arc<MPSCRingBuffer>)> {
+        self.mpsc_ringbuffers
+            .iter()
+            .map(|(facility, rb)| (*facility, Arc::clone(rb)))
+            .collect()
+    }
+
+    /// Export SPSC ring buffers for data plane workers
+    ///
+    /// This is used to pass data plane worker ring buffers to the
+    /// supervisor's central consumer.
+    ///
+    /// # Returns
+    /// Vector of (Facility, Arc<SPSCRingBuffer>) pairs for consumption.
+    /// Returns an empty vector if this registry was created with new_mpsc().
+    pub fn export_spsc_ringbuffers(&self) -> Vec<(Facility, Arc<SPSCRingBuffer>)> {
+        self.spsc_ringbuffers
+            .iter()
+            .map(|(facility, rb)| (*facility, Arc::clone(rb)))
+            .collect()
     }
 }
 

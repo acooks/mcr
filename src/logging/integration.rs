@@ -4,8 +4,7 @@
 //! the supervisor and worker processes.
 
 use crate::logging::{
-    AsyncConsumer, BlockingConsumer, Facility, LogRegistry, Logger, MPSCRingBuffer,
-    SPSCRingBuffer, StdoutSink,
+    AsyncConsumer, Facility, LogRegistry, Logger, SPSCRingBuffer, StdoutSink,
 };
 use std::sync::{atomic::AtomicBool, Arc};
 
@@ -27,10 +26,8 @@ impl SupervisorLogging {
     pub fn new() -> Self {
         let registry = LogRegistry::new_mpsc();
 
-        // Get ring buffers for the consumer - need to extract MPSC types
-        // For now, we'll use a workaround since get_ringbuffers returns trait objects
-        // TODO: Add export_mpsc_ringbuffers method to LogRegistry
-        let ringbuffers = vec![]; // Placeholder - will be filled by proper export method
+        // Get MPSC ring buffers for the consumer
+        let ringbuffers = registry.export_mpsc_ringbuffers();
 
         // Start async consumer task
         let consumer = AsyncConsumer::new(ringbuffers, Box::new(StdoutSink::new()));
@@ -59,7 +56,7 @@ impl SupervisorLogging {
     /// Shutdown the logging system
     pub async fn shutdown(mut self) {
         self.consumer_stop
-            .store(false, std::sync::atomic::Ordering::Release);
+            .store(false, std::sync::atomic::Ordering::Relaxed);
 
         if let Some(handle) = self.consumer_handle.take() {
             let _ = handle.await;
@@ -122,16 +119,14 @@ impl ControlPlaneLogging {
     /// This creates MPSC ring buffers and starts an async consumer.
     pub fn new() -> Self {
         let registry = LogRegistry::new_mpsc();
-        let running = Arc::new(AtomicBool::new(true));
 
         // Get ring buffers for the consumer
-        let ringbuffers = registry.export_ringbuffers();
+        let ringbuffers = registry.export_mpsc_ringbuffers();
 
         // Start async consumer task
-        let running_clone = running.clone();
+        let consumer = AsyncConsumer::new(ringbuffers, Box::new(StdoutSink::new()));
+        let running = consumer.stop_handle();
         let consumer_handle = Some(tokio::spawn(async move {
-            let sink = Box::new(StdoutSink::new());
-            let consumer = AsyncConsumer::new(ringbuffers, sink, running_clone);
             consumer.run().await;
         }));
 
@@ -150,7 +145,7 @@ impl ControlPlaneLogging {
     /// Shutdown the logging system
     pub async fn shutdown(mut self) {
         self.running
-            .store(false, std::sync::atomic::Ordering::Release);
+            .store(false, std::sync::atomic::Ordering::Relaxed);
 
         if let Some(handle) = self.consumer_handle.take() {
             let _ = handle.await;
@@ -161,7 +156,6 @@ impl ControlPlaneLogging {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::logging::Severity;
     use std::time::Duration;
 
     #[tokio::test]

@@ -8,6 +8,7 @@
 mod consumer;
 mod entry;
 mod facility;
+pub mod integration;
 mod logger;
 #[macro_use]
 mod macros;
@@ -18,6 +19,7 @@ mod severity;
 pub use consumer::{AsyncConsumer, BlockingConsumer, LogSink, StderrSink, StdoutSink};
 pub use entry::{KeyValue, LogEntry};
 pub use facility::Facility;
+pub use integration::{ControlPlaneLogging, DataPlaneLogging, SupervisorLogging};
 pub use logger::{LogRegistry, Logger};
 pub use ringbuffer::{MPSCRingBuffer, SPSCRingBuffer};
 pub use severity::Severity;
