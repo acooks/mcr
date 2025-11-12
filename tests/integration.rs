@@ -30,6 +30,9 @@ mod log_level_control; // 2 tests: IPC communication for log level control (comm
 #[path = "integration/rule_management.rs"]
 mod rule_management; // 1 test: E2E rule propagation from supervisor to data plane workers
 
+#[path = "integration/test_basic.rs"]
+mod test_basic; // Network integration tests with veth pairs and namespaces (requires root)
+
 // REMOVED: supervisor.rs - redundant with unit tests in src/supervisor.rs
 // REMOVED: ipc.rs - broken code, redundant with rule_management.rs
 // REMOVED: 4 tests from log_level_control.rs - redundant with supervisor unit tests (kept 2 IPC tests)
