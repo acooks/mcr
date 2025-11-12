@@ -57,6 +57,8 @@ pub struct IngressStats {
     pub egress_channel_errors: u64,
     /// Total bytes received
     pub bytes_received: u64,
+    /// DEBUG: Count of egress packets sent to channel
+    pub egress_packets_sent: u64,
 }
 
 /// Configuration for the ingress loop
@@ -241,6 +243,7 @@ impl IngressLoop {
         // Stats reporting
         let mut last_stats_report = std::time::Instant::now();
         let mut last_packets_received = 0u64;
+        let mut last_packets_matched = 0u64;
 
         loop {
             // 1. Submit a batch of recv operations for all available buffers
@@ -272,7 +275,11 @@ impl IngressLoop {
                 match user_data {
                     COMMAND_NOTIFY => {
                         // Command notification received, process all pending commands
-                        self.process_commands()?;
+                        let should_shutdown = self.process_commands()?;
+                        if should_shutdown {
+                            println!("[Ingress] Exiting run loop due to shutdown command");
+                            return Ok(());
+                        }
                         // Re-submit the command notification read
                         self.submit_command_read(&mut command_notify_buf)?;
                     }
@@ -311,29 +318,37 @@ impl IngressLoop {
             if self.config.track_stats {
                 let now = std::time::Instant::now();
                 if now.duration_since(last_stats_report).as_secs() >= 1 {
-                    let packets_delta = self.stats.packets_received - last_packets_received;
                     let interval_secs = now.duration_since(last_stats_report).as_secs_f64();
-                    let pps = packets_delta as f64 / interval_secs;
+                    let recv_delta = self.stats.packets_received - last_packets_received;
+                    let matched_delta = self.stats.packets_matched - last_packets_matched;
+                    let recv_pps = recv_delta as f64 / interval_secs;
+                    let matched_pps = matched_delta as f64 / interval_secs;
 
                     println!(
-                        "[STATS:Ingress] recv={} matched={} parse_err={} no_match={} buf_exhaust={} ({:.0} pps)",
+                        "[STATS:Ingress] total: recv={} matched={} egr_sent={} parse_err={} no_match={} buf_exhaust={} | interval: +{} recv, +{} matched ({:.0}/{:.0} pps)",
                         self.stats.packets_received,
                         self.stats.packets_matched,
+                        self.stats.egress_packets_sent,
                         self.stats.parse_errors,
                         self.stats.no_rule_match,
                         self.stats.buffer_exhaustion,
-                        pps
+                        recv_delta,
+                        matched_delta,
+                        recv_pps,
+                        matched_pps
                     );
 
                     last_stats_report = now;
                     last_packets_received = self.stats.packets_received;
+                    last_packets_matched = self.stats.packets_matched;
                 }
             }
         }
     }
 
     /// Process all pending commands from the supervisor
-    fn process_commands(&mut self) -> Result<()> {
+    /// Returns Ok(true) if shutdown was requested, Ok(false) otherwise
+    fn process_commands(&mut self) -> Result<bool> {
         while let Ok(command) = self.command_rx.try_recv() {
             match command {
                 RelayCommand::AddRule(rule) => {
@@ -342,9 +357,13 @@ impl IngressLoop {
                 RelayCommand::RemoveRule { rule_id } => {
                     self.remove_rule(&rule_id)?;
                 }
+                RelayCommand::Shutdown => {
+                    println!("[Ingress] Shutdown requested");
+                    return Ok(true);
+                }
             }
         }
-        Ok(())
+        Ok(false)
     }
 
     /// Submit a read operation to io_uring for the command eventfd
@@ -506,18 +525,40 @@ impl IngressLoop {
                     dest_addr,
                 };
 
-                if tx.send(egress_packet).is_err() && self.config.track_stats {
-                    // println!(
-                    //     "Egress send failed, incrementing egress_channel_errors. Old value: {}",
-                    //     self.stats.egress_channel_errors
-                    // );
-                    self.stats.egress_channel_errors += 1;
+                match tx.send(egress_packet) {
+                    Ok(_) => {
+                        // Debug: Track egress channel sends
+                        if self.config.track_stats {
+                            self.stats.egress_packets_sent += 1;
+                        }
+                    }
+                    Err(_) => {
+                        if self.config.track_stats {
+                            self.stats.egress_channel_errors += 1;
+                        }
+                        eprintln!("[Ingress] Failed to send packet to egress channel");
+                    }
                 }
             }
         }
 
         // println!("--- process_packet end ---");
         Ok(())
+    }
+
+    /// Print final statistics before exit
+    pub fn print_final_stats(&self) {
+        if self.config.track_stats {
+            println!(
+                "[STATS:Ingress FINAL] total: recv={} matched={} egr_sent={} parse_err={} no_match={} buf_exhaust={}",
+                self.stats.packets_received,
+                self.stats.packets_matched,
+                self.stats.egress_packets_sent,
+                self.stats.parse_errors,
+                self.stats.no_rule_match,
+                self.stats.buffer_exhaustion
+            );
+        }
     }
 }
 
@@ -986,5 +1027,164 @@ mod tests_unit {
         // Remove the rule and verify it's gone
         ingress_loop.remove_rule("rule-to-remove").unwrap();
         assert_eq!(ingress_loop.rules.len(), 0);
+    }
+
+    #[test]
+    fn test_process_packet_rule_with_no_outputs() {
+        // Test case where rule matches but has no output destinations
+        let buffer_pool = Arc::new(Mutex::new(BufferPool::new(true)));
+        let (mut ingress_loop, egress_rx, _) = setup_test_ingress_loop(buffer_pool);
+
+        // Add a rule with NO outputs
+        let rule = Arc::new(ForwardingRule {
+            rule_id: "rule-no-outputs".to_string(),
+            input_interface: "lo".to_string(),
+            input_group: Ipv4Addr::new(239, 1, 1, 1),
+            input_port: 1234,
+            outputs: vec![], // No outputs!
+            dtls_enabled: false,
+        });
+        ingress_loop
+            .rules
+            .insert((rule.input_group, rule.input_port), rule.clone());
+
+        // Create a matching packet
+        let packet = create_test_packet(rule.input_group, rule.input_port, b"test");
+
+        // Process the packet
+        ingress_loop.process_packet(&packet).unwrap();
+
+        // Should match the rule but not forward anything
+        assert_eq!(ingress_loop.stats.packets_matched, 0); // No buffer allocated, so not "matched"
+        assert_eq!(ingress_loop.stats.no_rule_match, 0);
+
+        // No packet should be sent to egress
+        assert!(egress_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn test_process_packet_egress_channel_closed() {
+        // Test what happens when egress channel is closed (receiver dropped)
+        let buffer_pool = Arc::new(Mutex::new(BufferPool::new(true)));
+        let (mut ingress_loop, egress_rx, _) = setup_test_ingress_loop(buffer_pool);
+
+        // Drop the receiver to close the channel
+        drop(egress_rx);
+
+        // Add a rule
+        let rule = Arc::new(ForwardingRule {
+            rule_id: "test-rule".to_string(),
+            input_interface: "lo".to_string(),
+            input_group: Ipv4Addr::new(239, 1, 1, 1),
+            input_port: 1234,
+            outputs: vec![crate::OutputDestination {
+                interface: "lo".to_string(),
+                group: Ipv4Addr::new(239, 10, 10, 10),
+                port: 5678,
+                dtls_enabled: false,
+            }],
+            dtls_enabled: false,
+        });
+        ingress_loop
+            .rules
+            .insert((rule.input_group, rule.input_port), rule.clone());
+
+        // Create a matching packet
+        let packet = create_test_packet(rule.input_group, rule.input_port, b"test");
+
+        // Process the packet
+        ingress_loop.process_packet(&packet).unwrap();
+
+        // Should increment egress_channel_errors
+        assert_eq!(ingress_loop.stats.egress_channel_errors, 1);
+        assert_eq!(ingress_loop.stats.packets_matched, 1); // Still counted as matched
+    }
+
+    #[test]
+    fn test_process_packet_multiple_outputs() {
+        // Test amplification: one input packet → multiple output packets
+        let buffer_pool = Arc::new(Mutex::new(BufferPool::new(true)));
+        let (mut ingress_loop, egress_rx, _) = setup_test_ingress_loop(buffer_pool);
+
+        // Add a rule with MULTIPLE outputs (amplification)
+        let rule = Arc::new(ForwardingRule {
+            rule_id: "amplification-rule".to_string(),
+            input_interface: "lo".to_string(),
+            input_group: Ipv4Addr::new(239, 1, 1, 1),
+            input_port: 1234,
+            outputs: vec![
+                crate::OutputDestination {
+                    interface: "lo".to_string(),
+                    group: Ipv4Addr::new(239, 10, 10, 10),
+                    port: 5678,
+                    dtls_enabled: false,
+                },
+                crate::OutputDestination {
+                    interface: "lo".to_string(),
+                    group: Ipv4Addr::new(239, 20, 20, 20),
+                    port: 9999,
+                    dtls_enabled: false,
+                },
+                crate::OutputDestination {
+                    interface: "lo".to_string(),
+                    group: Ipv4Addr::new(239, 30, 30, 30),
+                    port: 1111,
+                    dtls_enabled: false,
+                },
+            ],
+            dtls_enabled: false,
+        });
+        ingress_loop
+            .rules
+            .insert((rule.input_group, rule.input_port), rule.clone());
+
+        // Create a matching packet
+        let payload = b"amplify me";
+        let packet = create_test_packet(rule.input_group, rule.input_port, payload);
+
+        // Process the packet
+        ingress_loop.process_packet(&packet).unwrap();
+
+        // Should have sent 3 packets to egress
+        assert_eq!(ingress_loop.stats.packets_matched, 1); // One input packet
+        assert_eq!(ingress_loop.stats.egress_packets_sent, 3); // Three outputs
+
+        // Verify all 3 packets were sent with correct destinations
+        let pkt1 = egress_rx.try_recv().unwrap();
+        assert_eq!(
+            pkt1.dest_addr,
+            SocketAddr::new(rule.outputs[0].group.into(), rule.outputs[0].port)
+        );
+
+        let pkt2 = egress_rx.try_recv().unwrap();
+        assert_eq!(
+            pkt2.dest_addr,
+            SocketAddr::new(rule.outputs[1].group.into(), rule.outputs[1].port)
+        );
+
+        let pkt3 = egress_rx.try_recv().unwrap();
+        assert_eq!(
+            pkt3.dest_addr,
+            SocketAddr::new(rule.outputs[2].group.into(), rule.outputs[2].port)
+        );
+
+        // No more packets
+        assert!(egress_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn test_print_final_stats() {
+        // Test that print_final_stats doesn't panic
+        let buffer_pool = Arc::new(Mutex::new(BufferPool::new(true)));
+        let (mut ingress_loop, _egress_rx, _) = setup_test_ingress_loop(buffer_pool);
+
+        // Set some stats
+        ingress_loop.stats.packets_received = 100;
+        ingress_loop.stats.packets_matched = 95;
+        ingress_loop.stats.parse_errors = 3;
+        ingress_loop.stats.no_rule_match = 2;
+
+        // Should not panic
+        ingress_loop.print_final_stats();
     }
 }

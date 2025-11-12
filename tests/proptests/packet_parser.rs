@@ -18,8 +18,7 @@
 //! The `proptest!` macro is used to define strategies for generating arbitrary
 //! `Vec<u8>` inputs. These inputs are then fed to the parsing functions.
 //! Assertions are made not about the specific output, but about the properties
-of
-//! the output (or the fact that the function doesn't panic).
+//! of the output (or the fact that the function doesn't panic).
 
 #[cfg(test)]
 mod tests {
@@ -36,7 +35,9 @@ mod tests {
         #[test]
         fn test_parse_packet_does_not_panic(input in any::<Vec<u8>>()) {
             // We don't care about the result, only that it doesn't panic.
-            let _ = parse_packet(&input);
+            // Test with both checksum validation on and off
+            let _ = parse_packet(&input, true);
+            let _ = parse_packet(&input, false);
         }
     }
 }

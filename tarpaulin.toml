@@ -1,0 +1,35 @@
+# Tarpaulin Configuration
+# Run with: cargo tarpaulin
+# Or: cargo tarpaulin --out html --output-dir target/tarpaulin
+
+[tarpaulin]
+# Exclude files from coverage
+exclude-files = [
+    "src/main.rs",
+    "experiments/*",
+]
+
+# Skip problematic tests that cause FD safety violations under tarpaulin instrumentation
+# These tests work fine in normal cargo test but fail under tarpaulin
+args = [
+    "--skip", "test_run_data_plane_starts_successfully",
+    "--skip", "test_run_control_plane_starts_successfully",
+]
+
+# Output configuration
+out = ["Html", "Json"]
+output-dir = "target/tarpaulin"
+
+# Coverage options
+ignore-tests = true  # Don't count test code in coverage
+ignore-panics = false  # Count panic paths
+
+# Test options
+test-threads = 1  # Single-threaded to avoid race conditions
+timeout = 120  # 2 minute timeout
+
+# Additional features
+features = "integration_test"
+
+# Don't run ignored tests (network tests requiring root)
+# ignored = false
