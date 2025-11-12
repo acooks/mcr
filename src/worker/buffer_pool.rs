@@ -1,413 +1,367 @@
 //! Buffer Pool for Data Plane
 //!
-//! High-performance, lock-free buffer pool for packet processing.
+//! This module provides two implementations for the buffer pool, controlled by the
+//! `lock_free_buffer_pool` feature flag.
 //!
-//! This module implements the buffer pool strategy validated in
-//! experiments/poc_buffer_pool_performance/ (Experiment #3).
+//! 1.  **Default (Mutex-based):** A simple, single-threaded buffer pool design.
+//!     This is the original implementation, suitable for scenarios where the data plane
+//!     runs in a single thread or where contention is not a primary concern.
 //!
-//! **Design decisions validated:**
-//! - D15: Core-Local Buffer Pools
-//! - D16: Buffer Pool Observability
-//!
-//! **Key findings from Experiment #3:**
-//! - Pool allocation: 26.7 ns (1.79x faster than Vec::with_capacity)
-//! - Throughput: 37.6M ops/sec (120x headroom over target)
-//! - Recommended config: 1000/500/200 buffers per core (5.3 MB/core)
-//! - Metrics overhead: 0.12% (negligible)
-//!
-//! **Performance characteristics:**
-//! - Lock-free: Single-threaded per core, no contention
-//! - Pre-allocated: No dynamic allocation on hot path
-//! - Size-classified: Optimal for mixed packet sizes
-//! - Observable: Optional per-pool statistics
+//! 2.  **`lock_free_buffer_pool` feature:** A high-performance, lock-free buffer pool
+//!     designed for a multi-threaded data plane. It uses `crossbeam-queue` to allow
+//!     contention-free access between ingress and egress threads.
 
-use std::collections::VecDeque;
+// =================================================================================
+// Implementation 1: Original Mutex-based Buffer Pool
+// =================================================================================
 
-/// Size classes for buffer pools
-///
-/// Based on common packet sizes in multicast networks:
-/// - Small: Ethernet MTU (1500 bytes)
-/// - Standard: Common jumbo frame (4096 bytes)
-/// - Jumbo: Large jumbo frame (9000 bytes)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum BufferSize {
-    /// Small buffers: 1500 bytes (typical Ethernet MTU)
-    Small = 1500,
-    /// Standard buffers: 4096 bytes (common jumbo frame size)
-    Standard = 4096,
-    /// Jumbo buffers: 9000 bytes (large jumbo frames)
-    Jumbo = 9000,
-}
+#[cfg(not(feature = "lock_free_buffer_pool"))]
+mod mutex_pool {
+    use std::collections::VecDeque;
 
-impl BufferSize {
-    /// Get the size in bytes
-    pub const fn size(self) -> usize {
-        self as usize
+    /// Size classes for buffer pools
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub enum BufferSize {
+        Small = 1500,
+        Standard = 4096,
+        Jumbo = 9000,
     }
 
-    /// Select the appropriate buffer size for a given payload length
-    pub fn for_payload(payload_len: usize) -> Option<Self> {
-        if payload_len <= Self::Small.size() {
-            Some(Self::Small)
-        } else if payload_len <= Self::Standard.size() {
-            Some(Self::Standard)
-        } else if payload_len <= Self::Jumbo.size() {
-            Some(Self::Jumbo)
-        } else {
-            None // Packet too large
+    impl BufferSize {
+        pub const fn size(self) -> usize {
+            self as usize
         }
-    }
-}
-
-/// A single buffer from the pool
-pub struct Buffer {
-    data: Vec<u8>,
-    size_class: BufferSize,
-}
-
-impl Buffer {
-    /// Get the buffer's data as a mutable slice
-    pub fn as_mut_slice(&mut self) -> &mut [u8] {
-        &mut self.data
-    }
-
-    /// Get the buffer's data as a slice
-    pub fn as_slice(&self) -> &[u8] {
-        &self.data
-    }
-
-    /// Clone the buffer data (creates a new Buffer with copied data)
-    ///
-    /// This is used when a packet needs to be sent to multiple outputs.
-    /// The new buffer will have the same size class and data as the original.
-    pub fn clone_data(&self) -> Buffer {
-        Buffer {
-            data: self.data.clone(),
-            size_class: self.size_class,
-        }
-    }
-
-    /// Get the buffer's size class
-    pub fn size_class(&self) -> BufferSize {
-        self.size_class
-    }
-
-    /// Get the buffer's capacity
-    pub fn capacity(&self) -> usize {
-        self.data.capacity()
-    }
-
-    /// Get the current length of valid data
-    pub fn len(&self) -> usize {
-        self.data.len()
-    }
-
-    /// Check if the buffer is empty
-    pub fn is_empty(&self) -> bool {
-        self.data.is_empty()
-    }
-
-    /// Set the length of valid data (unsafe - caller must ensure data is initialized)
-    ///
-    /// # Safety
-    /// Caller must ensure that `len` bytes of the buffer are initialized.
-    pub unsafe fn set_len(&mut self, len: usize) {
-        self.data.set_len(len);
-    }
-}
-
-/// Statistics for a single buffer pool
-#[derive(Debug, Clone, Default)]
-pub struct PoolStats {
-    /// Total number of allocations requested
-    pub allocations_total: u64,
-    /// Number of successful allocations
-    pub allocations_success: u64,
-    /// Number of allocation failures (pool exhausted)
-    pub allocations_failed: u64,
-    /// Total number of deallocations
-    pub deallocations_total: u64,
-}
-
-impl PoolStats {
-    /// Calculate current utilization (buffers in use)
-    pub fn buffers_in_use(&self, pool_capacity: usize) -> usize {
-        let net_allocs = self
-            .allocations_success
-            .saturating_sub(self.deallocations_total);
-        net_allocs.min(pool_capacity as u64) as usize
-    }
-
-    /// Calculate success rate
-    pub fn success_rate(&self) -> f64 {
-        if self.allocations_total == 0 {
-            return 1.0;
-        }
-        self.allocations_success as f64 / self.allocations_total as f64
-    }
-}
-
-/// A buffer pool for a specific size class
-pub struct SizeClassPool {
-    size_class: BufferSize,
-    free_list: VecDeque<Vec<u8>>,
-    capacity: usize,
-    stats: PoolStats,
-    track_metrics: bool,
-}
-
-impl SizeClassPool {
-    /// Create a new pool with the specified capacity
-    ///
-    /// # Arguments
-    /// * `size_class` - The buffer size for this pool
-    /// * `capacity` - Number of buffers to pre-allocate
-    /// * `track_metrics` - Whether to track per-operation statistics
-    pub fn new(size_class: BufferSize, capacity: usize, track_metrics: bool) -> Self {
-        let mut free_list = VecDeque::with_capacity(capacity);
-
-        // Pre-allocate all buffers for this pool
-        for _ in 0..capacity {
-            free_list.push_back(vec![0; size_class.size()]);
-        }
-
-        Self {
-            size_class,
-            free_list,
-            capacity,
-            stats: PoolStats::default(),
-            track_metrics,
-        }
-    }
-
-    /// Allocate a buffer from the pool
-    ///
-    /// Returns `None` if the pool is exhausted.
-    pub fn allocate(&mut self) -> Option<Buffer> {
-        if self.track_metrics {
-            self.stats.allocations_total += 1;
-        }
-
-        match self.free_list.pop_front() {
-            Some(data) => {
-                if self.track_metrics {
-                    self.stats.allocations_success += 1;
-                }
-                Some(Buffer {
-                    data,
-                    size_class: self.size_class,
-                })
-            }
-            None => {
-                if self.track_metrics {
-                    self.stats.allocations_failed += 1;
-                }
+        pub fn for_payload(payload_len: usize) -> Option<Self> {
+            if payload_len <= Self::Small.size() {
+                Some(Self::Small)
+            } else if payload_len <= Self::Standard.size() {
+                Some(Self::Standard)
+            } else if payload_len <= Self::Jumbo.size() {
+                Some(Self::Jumbo)
+            } else {
                 None
             }
         }
     }
 
-    /// Deallocate a buffer back to the pool
-    ///
-    /// # Panics
-    /// Panics if the buffer's size class doesn't match this pool.
-    pub fn deallocate(&mut self, mut buffer: Buffer) {
-        assert_eq!(
-            buffer.size_class, self.size_class,
-            "Buffer size class mismatch: expected {:?}, got {:?}",
-            self.size_class, buffer.size_class
-        );
+    /// A single buffer from the pool
+    pub struct Buffer {
+        pub(crate) data: Vec<u8>,
+        pub(crate) size_class: BufferSize,
+    }
 
-        if self.track_metrics {
-            self.stats.deallocations_total += 1;
+    impl Buffer {
+        pub fn as_mut_slice(&mut self) -> &mut [u8] {
+            &mut self.data
         }
-
-        // Clear the buffer (optional, for security/consistency)
-        buffer.data.clear();
-        buffer.data.resize(buffer.size_class.size(), 0);
-
-        self.free_list.push_back(buffer.data);
+        pub fn as_slice(&self) -> &[u8] {
+            &self.data
+        }
+        pub fn clone_data(&self) -> Buffer {
+            Buffer {
+                data: self.data.clone(),
+                size_class: self.size_class,
+            }
+        }
+        pub fn size_class(&self) -> BufferSize {
+            self.size_class
+        }
+        pub fn capacity(&self) -> usize {
+            self.data.capacity()
+        }
+        pub fn len(&self) -> usize {
+            self.data.len()
+        }
+        pub fn is_empty(&self) -> bool {
+            self.data.is_empty()
+        }
+        pub unsafe fn set_len(&mut self, len: usize) {
+            self.data.set_len(len);
+        }
     }
 
-    /// Get the number of available (free) buffers
-    pub fn available(&self) -> usize {
-        self.free_list.len()
+    impl std::ops::Deref for Buffer {
+        type Target = [u8];
+        fn deref(&self) -> &Self::Target {
+            &self.data
+        }
     }
 
-    /// Get the total capacity of this pool
-    pub fn capacity(&self) -> usize {
-        self.capacity
+    impl std::ops::DerefMut for Buffer {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.data
+        }
     }
 
-    /// Get the number of buffers currently in use
-    pub fn in_use(&self) -> usize {
-        self.capacity - self.available()
+    #[derive(Debug, Clone, Default)]
+    pub struct PoolStats {
+        pub allocations_total: u64,
+        pub allocations_success: u64,
+        pub allocations_failed: u64,
+        pub deallocations_total: u64,
     }
 
-    /// Get a reference to the pool's statistics
-    pub fn stats(&self) -> &PoolStats {
-        &self.stats
-    }
-
-    /// Reset the pool's statistics
-    pub fn reset_stats(&mut self) {
-        self.stats = PoolStats::default();
-    }
-}
-
-/// Core-local buffer pool with multiple size classes
-///
-/// Each worker thread maintains its own BufferPool instance.
-/// No synchronization is required as pools are never shared.
-pub struct BufferPool {
-    small_pool: SizeClassPool,
-    standard_pool: SizeClassPool,
-    jumbo_pool: SizeClassPool,
-}
-
-impl BufferPool {
-    /// Create a new buffer pool with default configuration
-    ///
-    /// Default configuration (from Experiment #3):
-    /// - Small: 1000 buffers × 1500B = 1.5 MB
-    /// - Standard: 500 buffers × 4096B = 2.0 MB
-    /// - Jumbo: 200 buffers × 9000B = 1.8 MB
-    /// - Total: ~5.3 MB per core
-    ///
-    /// This configuration is validated for:
-    /// - 312.5k packets/second/core ingress
-    /// - Burst tolerance (98-99% success under 2-10x bursts)
-    /// - Sub-microsecond recovery time
-    pub fn new(track_metrics: bool) -> Self {
-        Self::with_capacities(1000, 500, 200, track_metrics)
-    }
-
-    /// Create a new buffer pool with custom capacities
-    pub fn with_capacities(
-        small_capacity: usize,
-        standard_capacity: usize,
-        jumbo_capacity: usize,
+    pub struct SizeClassPool {
+        size_class: BufferSize,
+        free_list: VecDeque<Vec<u8>>,
+        capacity: usize,
+        stats: PoolStats,
         track_metrics: bool,
-    ) -> Self {
-        Self {
-            small_pool: SizeClassPool::new(BufferSize::Small, small_capacity, track_metrics),
-            standard_pool: SizeClassPool::new(
-                BufferSize::Standard,
-                standard_capacity,
+    }
+
+    impl SizeClassPool {
+        pub fn new(size_class: BufferSize, capacity: usize, track_metrics: bool) -> Self {
+            let mut free_list = VecDeque::with_capacity(capacity);
+            for _ in 0..capacity {
+                free_list.push_back(vec![0; size_class.size()]);
+            }
+            Self {
+                size_class,
+                free_list,
+                capacity,
+                stats: PoolStats::default(),
                 track_metrics,
-            ),
-            jumbo_pool: SizeClassPool::new(BufferSize::Jumbo, jumbo_capacity, track_metrics),
+            }
+        }
+
+        pub fn allocate(&mut self) -> Option<Buffer> {
+            if self.track_metrics {
+                self.stats.allocations_total += 1;
+            }
+            match self.free_list.pop_front() {
+                Some(data) => {
+                    if self.track_metrics {
+                        self.stats.allocations_success += 1;
+                    }
+                    Some(Buffer {
+                        data,
+                        size_class: self.size_class,
+                    })
+                }
+                None => {
+                    if self.track_metrics {
+                        self.stats.allocations_failed += 1;
+                    }
+                    None
+                }
+            }
+        }
+
+        pub fn deallocate(&mut self, mut buffer: Buffer) {
+            assert_eq!(
+                buffer.size_class, self.size_class,
+                "Buffer size class mismatch"
+            );
+            if self.track_metrics {
+                self.stats.deallocations_total += 1;
+            }
+            buffer.data.clear();
+            buffer.data.resize(buffer.size_class.size(), 0);
+            self.free_list.push_back(buffer.data);
         }
     }
 
-    /// Allocate a buffer of the appropriate size for the given payload
-    ///
-    /// Returns `None` if no buffer of sufficient size is available.
-    pub fn allocate(&mut self, required_size: usize) -> Option<Buffer> {
-        if required_size <= BufferSize::Small.size() {
-            self.small_pool.allocate()
-        } else if required_size <= BufferSize::Standard.size() {
-            self.standard_pool.allocate()
-        } else if required_size <= BufferSize::Jumbo.size() {
-            self.jumbo_pool.allocate()
-        } else {
-            // Packet too large for any pool
-            None
+    pub struct BufferPool {
+        small_pool: SizeClassPool,
+        standard_pool: SizeClassPool,
+        jumbo_pool: SizeClassPool,
+    }
+
+    impl BufferPool {
+        pub fn new(track_metrics: bool) -> Self {
+            Self::with_capacities(1000, 500, 200, track_metrics)
         }
-    }
 
-    /// Allocate a buffer of a specific size class
-    pub fn allocate_exact(&mut self, size_class: BufferSize) -> Option<Buffer> {
-        match size_class {
-            BufferSize::Small => self.small_pool.allocate(),
-            BufferSize::Standard => self.standard_pool.allocate(),
-            BufferSize::Jumbo => self.jumbo_pool.allocate(),
+        pub fn with_capacities(
+            small_capacity: usize,
+            standard_capacity: usize,
+            jumbo_capacity: usize,
+            track_metrics: bool,
+        ) -> Self {
+            Self {
+                small_pool: SizeClassPool::new(BufferSize::Small, small_capacity, track_metrics),
+                standard_pool: SizeClassPool::new(
+                    BufferSize::Standard,
+                    standard_capacity,
+                    track_metrics,
+                ),
+                jumbo_pool: SizeClassPool::new(BufferSize::Jumbo, jumbo_capacity, track_metrics),
+            }
         }
-    }
 
-    /// Deallocate a buffer back to its pool
-    pub fn deallocate(&mut self, buffer: Buffer) {
-        match buffer.size_class {
-            BufferSize::Small => self.small_pool.deallocate(buffer),
-            BufferSize::Standard => self.standard_pool.deallocate(buffer),
-            BufferSize::Jumbo => self.jumbo_pool.deallocate(buffer),
+        pub fn allocate(&mut self, required_size: usize) -> Option<Buffer> {
+            if required_size <= BufferSize::Small.size() {
+                self.small_pool.allocate()
+            } else if required_size <= BufferSize::Standard.size() {
+                self.standard_pool.allocate()
+            } else if required_size <= BufferSize::Jumbo.size() {
+                self.jumbo_pool.allocate()
+            } else {
+                None
+            }
         }
-    }
 
-    /// Get a reference to a specific size class pool
-    pub fn pool(&self, size_class: BufferSize) -> &SizeClassPool {
-        match size_class {
-            BufferSize::Small => &self.small_pool,
-            BufferSize::Standard => &self.standard_pool,
-            BufferSize::Jumbo => &self.jumbo_pool,
-        }
-    }
-
-    /// Get a mutable reference to a specific size class pool
-    pub fn pool_mut(&mut self, size_class: BufferSize) -> &mut SizeClassPool {
-        match size_class {
-            BufferSize::Small => &mut self.small_pool,
-            BufferSize::Standard => &mut self.standard_pool,
-            BufferSize::Jumbo => &mut self.jumbo_pool,
-        }
-    }
-
-    /// Get total memory footprint in bytes
-    pub fn memory_footprint(&self) -> usize {
-        (self.small_pool.capacity() * BufferSize::Small.size())
-            + (self.standard_pool.capacity() * BufferSize::Standard.size())
-            + (self.jumbo_pool.capacity() * BufferSize::Jumbo.size())
-    }
-
-    /// Get aggregate statistics across all pools
-    pub fn aggregate_stats(&self) -> AggregateStats {
-        AggregateStats {
-            small: self.small_pool.stats().clone(),
-            standard: self.standard_pool.stats().clone(),
-            jumbo: self.jumbo_pool.stats().clone(),
+        pub fn deallocate(&mut self, buffer: Buffer) {
+            match buffer.size_class {
+                BufferSize::Small => self.small_pool.deallocate(buffer),
+                BufferSize::Standard => self.standard_pool.deallocate(buffer),
+                BufferSize::Jumbo => self.jumbo_pool.deallocate(buffer),
+            }
         }
     }
 }
 
-/// Aggregate statistics across all buffer pools
-#[derive(Debug, Clone)]
-pub struct AggregateStats {
-    pub small: PoolStats,
-    pub standard: PoolStats,
-    pub jumbo: PoolStats,
-}
+#[cfg(not(feature = "lock_free_buffer_pool"))]
+pub use mutex_pool::*;
 
-impl AggregateStats {
-    /// Get total allocations across all pools
-    pub fn total_allocations(&self) -> u64 {
-        self.small.allocations_total
-            + self.standard.allocations_total
-            + self.jumbo.allocations_total
+// =================================================================================
+// Implementation 2: Lock-Free Buffer Pool
+// =================================================================================
+
+#[cfg(feature = "lock_free_buffer_pool")]
+mod lock_free_pool {
+    use crossbeam_queue::SegQueue;
+    use std::ops::{Deref, DerefMut};
+    use std::sync::Arc;
+
+    const SMALL_BUFFER_SIZE: usize = 2048;
+    const STANDARD_BUFFER_SIZE: usize = 4096;
+    const JUMBO_BUFFER_SIZE: usize = 9216;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum BufferSize {
+        Small,
+        Standard,
+        Jumbo,
     }
 
-    /// Get total successful allocations across all pools
-    pub fn total_allocations_success(&self) -> u64 {
-        self.small.allocations_success
-            + self.standard.allocations_success
-            + self.jumbo.allocations_success
-    }
-
-    /// Get total failed allocations across all pools
-    pub fn total_allocations_failed(&self) -> u64 {
-        self.small.allocations_failed
-            + self.standard.allocations_failed
-            + self.jumbo.allocations_failed
-    }
-
-    /// Get overall success rate across all pools
-    pub fn overall_success_rate(&self) -> f64 {
-        let total = self.total_allocations();
-        if total == 0 {
-            return 1.0;
+    impl BufferSize {
+        pub const fn size(self) -> usize {
+            match self {
+                BufferSize::Small => SMALL_BUFFER_SIZE,
+                BufferSize::Standard => STANDARD_BUFFER_SIZE,
+                BufferSize::Jumbo => JUMBO_BUFFER_SIZE,
+            }
         }
-        self.total_allocations_success() as f64 / total as f64
+
+        pub fn for_payload(payload_len: usize) -> Option<Self> {
+            if payload_len <= SMALL_BUFFER_SIZE {
+                Some(Self::Small)
+            } else if payload_len <= STANDARD_BUFFER_SIZE {
+                Some(Self::Standard)
+            } else if payload_len <= JUMBO_BUFFER_SIZE {
+                Some(Self::Jumbo)
+            } else {
+                None
+            }
+        }
+    }
+
+    /// A "smart buffer" that automatically returns itself to its pool when dropped.
+    pub struct ManagedBuffer {
+        buffer: Box<[u8]>,
+        size_category: BufferSize,
+        pool: Arc<BufferPool>,
+    }
+
+    impl ManagedBuffer {
+        /// Get the buffer's size category.
+        pub fn size_category(&self) -> BufferSize {
+            self.size_category
+        }
+    }
+
+    impl Drop for ManagedBuffer {
+        fn drop(&mut self) {
+            // Move the buffer out and replace it with an empty one to satisfy the borrow checker.
+            let fresh_buffer = std::mem::replace(&mut self.buffer, Box::new([]));
+            self.pool.release(fresh_buffer, self.size_category);
+        }
+    }
+
+    impl Deref for ManagedBuffer {
+        type Target = [u8];
+        fn deref(&self) -> &Self::Target {
+            &self.buffer
+        }
+    }
+
+    impl DerefMut for ManagedBuffer {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.buffer
+        }
+    }
+
+    /// The lock-free pool manager. It is cheap to clone as it only contains Arcs.
+    pub struct BufferPool {
+        free_small: SegQueue<Box<[u8]>>,
+        free_standard: SegQueue<Box<[u8]>>,
+        free_jumbo: SegQueue<Box<[u8]>>,
+    }
+
+    impl BufferPool {
+        /// Creates a new `BufferPool` and pre-allocates all buffers.
+        /// Returns an `Arc` so it can be shared between threads.
+        pub fn new(small_count: usize, std_count: usize, jumbo_count: usize) -> Arc<Self> {
+            let pool = Arc::new(Self {
+                free_small: SegQueue::new(),
+                free_standard: SegQueue::new(),
+                free_jumbo: SegQueue::new(),
+            });
+
+            for _ in 0..small_count {
+                pool.free_small
+                    .push(vec![0u8; SMALL_BUFFER_SIZE].into_boxed_slice());
+            }
+            for _ in 0..std_count {
+                pool.free_standard
+                    .push(vec![0u8; STANDARD_BUFFER_SIZE].into_boxed_slice());
+            }
+            for _ in 0..jumbo_count {
+                pool.free_jumbo
+                    .push(vec![0u8; JUMBO_BUFFER_SIZE].into_boxed_slice());
+            }
+
+            pool
+        }
+
+        /// Acquires a buffer from the appropriate free pool.
+        /// Returns `None` if the pool for the requested size is empty.
+        pub fn acquire(self: &Arc<Self>, size: BufferSize) -> Option<ManagedBuffer> {
+            let queue = match size {
+                BufferSize::Small => &self.free_small,
+                BufferSize::Standard => &self.free_standard,
+                BufferSize::Jumbo => &self.free_jumbo,
+            };
+
+            queue.pop().map(|buffer| ManagedBuffer {
+                buffer,
+                size_category: size,
+                pool: self.clone(),
+            })
+        }
+
+        /// Releases a buffer back to its corresponding free pool.
+        /// This is called by the `Drop` implementation of `ManagedBuffer`.
+        fn release(&self, buffer: Box<[u8]>, size: BufferSize) {
+            let queue = match size {
+                BufferSize::Small => &self.free_small,
+                BufferSize::Standard => &self.free_standard,
+                BufferSize::Jumbo => &self.free_jumbo,
+            };
+            queue.push(buffer);
+        }
+
+        /// Returns the number of available buffers in a specific pool.
+        pub fn available(&self, size: BufferSize) -> usize {
+            match size {
+                BufferSize::Small => self.free_small.len(),
+                BufferSize::Standard => self.free_standard.len(),
+                BufferSize::Jumbo => self.free_jumbo.len(),
+            }
+        }
     }
 }
 
-#[cfg(test)]
-mod tests;
+#[cfg(feature = "lock_free_buffer_pool")]
+pub use lock_free_pool::*;
