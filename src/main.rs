@@ -25,7 +25,24 @@ fn main() -> Result<()> {
             // The supervisor runs in a standard tokio runtime.
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(async {
-                if let Err(e) = supervisor::run(
+                // Set up SIGTERM handler for graceful shutdown
+                let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("Failed to install SIGTERM handler");
+                let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+                    .expect("Failed to install SIGINT handler");
+
+                let shutdown_future = async move {
+                    tokio::select! {
+                        _ = sigterm.recv() => {
+                            eprintln!("[Supervisor] Received SIGTERM, initiating graceful shutdown");
+                        }
+                        _ = sigint.recv() => {
+                            eprintln!("[Supervisor] Received SIGINT, initiating graceful shutdown");
+                        }
+                    }
+                };
+
+                let supervisor_future = supervisor::run(
                     &user,
                     &group,
                     &interface,
@@ -35,11 +52,22 @@ fn main() -> Result<()> {
                     control_socket_path,
                     Arc::new(Mutex::new(HashMap::new())),
                     num_workers,
-                )
-                .await
-                {
-                    eprintln!("[Supervisor] Error: {}", e);
-                    std::process::exit(1);
+                );
+
+                // Run supervisor until either it exits or we receive a shutdown signal
+                tokio::select! {
+                    result = supervisor_future => {
+                        if let Err(e) = result {
+                            eprintln!("[Supervisor] Error: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                    _ = shutdown_future => {
+                        // Shutdown signal received - give workers time to flush logs and shut down gracefully
+                        eprintln!("[Supervisor] Shutdown signal received, waiting for workers to exit...");
+                        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+                        eprintln!("[Supervisor] Shutdown complete");
+                    }
                 }
             });
         }

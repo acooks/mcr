@@ -17,7 +17,7 @@ pub struct IngressStats {
     pub recv: u64,
     pub matched: u64,
     pub egr_sent: u64,
-    pub parse_err: u64,
+    pub filtered: u64,
     pub no_match: u64,
     pub buf_exhaust: u64,
 }
@@ -64,7 +64,7 @@ impl Stats {
 
     fn parse_ingress_final(content: &str) -> Option<IngressStats> {
         let re = Regex::new(
-            r"\[STATS:Ingress FINAL\] total: recv=(\d+) matched=(\d+) egr_sent=(\d+) parse_err=(\d+) no_match=(\d+) buf_exhaust=(\d+)"
+            r"\[STATS:Ingress FINAL\] total: recv=(\d+) matched=(\d+) egr_sent=(\d+) filtered=(\d+) no_match=(\d+) buf_exhaust=(\d+)"
         ).ok()?;
 
         content
@@ -75,7 +75,7 @@ impl Stats {
                 recv: caps[1].parse().unwrap(),
                 matched: caps[2].parse().unwrap(),
                 egr_sent: caps[3].parse().unwrap(),
-                parse_err: caps[4].parse().unwrap(),
+                filtered: caps[4].parse().unwrap(),
                 no_match: caps[5].parse().unwrap(),
                 buf_exhaust: caps[6].parse().unwrap(),
             })
@@ -83,7 +83,7 @@ impl Stats {
 
     fn parse_ingress_last(content: &str) -> Option<IngressStats> {
         let re = Regex::new(
-            r"\[STATS:Ingress\] total: recv=(\d+) matched=(\d+) egr_sent=(\d+) parse_err=(\d+) no_match=(\d+) buf_exhaust=(\d+)"
+            r"\[STATS:Ingress\] total: recv=(\d+) matched=(\d+) egr_sent=(\d+) filtered=(\d+) no_match=(\d+) buf_exhaust=(\d+)"
         ).ok()?;
 
         content
@@ -94,7 +94,7 @@ impl Stats {
                 recv: caps[1].parse().unwrap(),
                 matched: caps[2].parse().unwrap(),
                 egr_sent: caps[3].parse().unwrap(),
-                parse_err: caps[4].parse().unwrap(),
+                filtered: caps[4].parse().unwrap(),
                 no_match: caps[5].parse().unwrap(),
                 buf_exhaust: caps[6].parse().unwrap(),
             })
@@ -126,9 +126,9 @@ mod tests {
     #[test]
     fn test_parse_final_stats() {
         let log = r#"
-[STATS:Ingress] total: recv=100 matched=100 egr_sent=100 parse_err=0 no_match=0 buf_exhaust=0 | interval: +100 recv, +100 matched (100/100 pps)
+[STATS:Ingress] total: recv=100 matched=100 egr_sent=100 filtered=0 no_match=0 buf_exhaust=0 | interval: +100 recv, +100 matched (100/100 pps)
 [STATS:Egress] total: sent=100 submitted=100 ch_recv=100 errors=0 bytes=140000 | interval: +100 pkts (100 pps)
-[STATS:Ingress FINAL] total: recv=200 matched=200 egr_sent=200 parse_err=0 no_match=0 buf_exhaust=0
+[STATS:Ingress FINAL] total: recv=200 matched=200 egr_sent=200 filtered=0 no_match=0 buf_exhaust=0
 "#;
 
         let stats = Stats::from_log_content(log).unwrap();
@@ -146,7 +146,7 @@ mod tests {
     #[test]
     fn test_parse_periodic_stats() {
         let log = r#"
-[STATS:Ingress] total: recv=50 matched=50 egr_sent=50 parse_err=0 no_match=0 buf_exhaust=0 | interval: +50 recv, +50 matched (50/50 pps)
+[STATS:Ingress] total: recv=50 matched=50 egr_sent=50 filtered=0 no_match=0 buf_exhaust=0 | interval: +50 recv, +50 matched (50/50 pps)
 [STATS:Egress] total: sent=50 submitted=50 ch_recv=50 errors=0 bytes=70000 | interval: +50 pkts (50 pps)
 "#;
 

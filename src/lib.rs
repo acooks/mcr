@@ -59,9 +59,9 @@ pub enum Command {
     /// Run the worker process (intended to be called by the supervisor)
     Worker {
         #[arg(long)]
-        uid: u32,
+        uid: Option<u32>,
         #[arg(long)]
-        gid: u32,
+        gid: Option<u32>,
         #[arg(long)]
         relay_command_socket_path: PathBuf,
         #[arg(long)]
@@ -89,16 +89,16 @@ pub enum Command {
 
 #[derive(Debug, Clone)]
 pub struct ControlPlaneConfig {
-    pub uid: u32,
-    pub gid: u32,
+    pub uid: Option<u32>,
+    pub gid: Option<u32>,
     pub relay_command_socket_path: PathBuf,
     pub prometheus_addr: Option<std::net::SocketAddr>,
     pub reporting_interval: u64,
 }
 
 pub struct DataPlaneConfig {
-    pub uid: u32,
-    pub gid: u32,
+    pub uid: Option<u32>,
+    pub gid: Option<u32>,
     pub core_id: Option<u32>,
     pub prometheus_addr: std::net::SocketAddr,
     pub input_interface_name: Option<String>,

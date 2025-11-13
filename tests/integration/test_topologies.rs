@@ -113,11 +113,11 @@ async fn test_baseline_2hop_100k_packets() -> Result<()> {
     // Print results
     println!("\n=== MCR-1 Results ===");
     println!(
-        "Ingress: recv={} matched={} egr_sent={} parse_err={} no_match={} buf_exhaust={}",
+        "Ingress: recv={} matched={} egr_sent={} filtered={} no_match={} buf_exhaust={}",
         stats1.ingress.recv,
         stats1.ingress.matched,
         stats1.ingress.egr_sent,
-        stats1.ingress.parse_err,
+        stats1.ingress.filtered,
         stats1.ingress.no_match,
         stats1.ingress.buf_exhaust
     );
@@ -132,11 +132,11 @@ async fn test_baseline_2hop_100k_packets() -> Result<()> {
 
     println!("\n=== MCR-2 Results ===");
     println!(
-        "Ingress: recv={} matched={} egr_sent={} parse_err={} no_match={} buf_exhaust={}",
+        "Ingress: recv={} matched={} egr_sent={} filtered={} no_match={} buf_exhaust={}",
         stats2.ingress.recv,
         stats2.ingress.matched,
         stats2.ingress.egr_sent,
-        stats2.ingress.parse_err,
+        stats2.ingress.filtered,
         stats2.ingress.no_match,
         stats2.ingress.buf_exhaust
     );
@@ -181,7 +181,7 @@ async fn test_baseline_2hop_100k_packets() -> Result<()> {
 
     // No errors on either instance
     assert_eq!(
-        stats1.ingress.parse_err, 0,
+        stats1.ingress.filtered, 0,
         "MCR-1 should have no parse errors"
     );
     assert_eq!(
@@ -189,7 +189,7 @@ async fn test_baseline_2hop_100k_packets() -> Result<()> {
         "MCR-1 should have no egress errors"
     );
     assert_eq!(
-        stats2.ingress.parse_err, 0,
+        stats2.ingress.filtered, 0,
         "MCR-2 should have no parse errors"
     );
     assert_eq!(
@@ -337,9 +337,9 @@ async fn test_chain_3hop() -> Result<()> {
     );
 
     // No errors
-    assert_eq!(stats1.ingress.parse_err, 0);
-    assert_eq!(stats2.ingress.parse_err, 0);
-    assert_eq!(stats3.ingress.parse_err, 0);
+    assert_eq!(stats1.ingress.filtered, 0);
+    assert_eq!(stats2.ingress.filtered, 0);
+    assert_eq!(stats3.ingress.filtered, 0);
 
     println!("\n=== ✅ Test passed: 3-hop chain with perfect forwarding ===\n");
     Ok(())
@@ -487,7 +487,7 @@ async fn test_tree_fanout_1_to_3() -> Result<()> {
     assert!(stats4.ingress.matched > 0, "MCR-4 should receive packets");
 
     // No errors
-    assert_eq!(stats1.ingress.parse_err, 0);
+    assert_eq!(stats1.ingress.filtered, 0);
     assert_eq!(stats1.egress.errors, 0);
 
     println!("\n=== ✅ Test passed: 1:3 fanout with head-end replication ===\n");

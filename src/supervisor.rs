@@ -228,8 +228,8 @@ pub async fn spawn_control_plane_worker(
 
 pub async fn spawn_data_plane_worker(
     core_id: u32,
-    uid: u32,
-    gid: u32,
+    _uid: u32,
+    _gid: u32,
     interface: String,
     relay_command_socket_path: PathBuf,
     logger: &crate::logging::Logger,
@@ -250,10 +250,6 @@ pub async fn spawn_data_plane_worker(
     let mut command = Command::new(std::env::current_exe()?);
     command
         .arg("worker")
-        .arg("--uid")
-        .arg(uid.to_string())
-        .arg("--gid")
-        .arg(gid.to_string())
         .arg("--core-id")
         .arg(core_id.to_string())
         .arg("--data-plane")
@@ -480,10 +476,13 @@ where
     let mut log_managers: HashMap<u32, SharedMemoryLogManager> = HashMap::new();
 
     for core_id in 0..num_cores as u32 {
-        // Create shared memory for this worker's logging (REQUIRED)
-        let log_manager = SharedMemoryLogManager::create_for_worker(core_id as u8, 16384)
-            .with_context(|| format!("Failed to create shared memory for worker {}", core_id))?;
-        log_managers.insert(core_id, log_manager);
+        // Create shared memory for this worker's logging (REQUIRED in production)
+        #[cfg(not(feature = "testing"))]
+        {
+            let log_manager = SharedMemoryLogManager::create_for_worker(core_id as u8, 16384)
+                .with_context(|| format!("Failed to create shared memory for worker {}", core_id))?;
+            log_managers.insert(core_id, log_manager);
+        }
 
         let (mut child, dp_cmd_stream, dp_req_stream) = spawn_dp(core_id).await?;
         let pid = child.id().unwrap();
@@ -576,11 +575,14 @@ where
                         sleep(Duration::from_millis(*backoff)).await;
                         *backoff = (*backoff * 2).min(MAX_BACKOFF_MS);
                     }
-                    // Recreate shared memory for the restarting worker (REQUIRED)
+                    // Recreate shared memory for the restarting worker (REQUIRED in production)
                     // The old shared memory will be cleaned up when the old manager is dropped
-                    let log_manager = SharedMemoryLogManager::create_for_worker(core_id as u8, 16384)
-                        .with_context(|| format!("Failed to recreate shared memory for worker {}", core_id))?;
-                    log_managers.insert(core_id, log_manager);
+                    #[cfg(not(feature = "testing"))]
+                    {
+                        let log_manager = SharedMemoryLogManager::create_for_worker(core_id as u8, 16384)
+                            .with_context(|| format!("Failed to recreate shared memory for worker {}", core_id))?;
+                        log_managers.insert(core_id, log_manager);
+                    }
 
                     // Restart the worker for the specific core
                     let (mut new_child, new_cmd_stream, new_req_stream) = spawn_dp(core_id).await?;

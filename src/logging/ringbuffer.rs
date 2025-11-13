@@ -536,6 +536,10 @@ impl SharedSPSCRingBuffer {
 
         let size = calc_shm_size(capacity);
 
+        // Remove any stale shared memory object from previous crashed instances
+        // Ignore ENOENT (file doesn't exist) - that's the expected case
+        let _ = shm_unlink(shm_id);
+
         // Create shared memory object
         let fd = shm_open(
             shm_id,

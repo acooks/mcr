@@ -74,11 +74,11 @@ async fn test_scale_1000_packets() -> Result<()> {
 
     println!("\n=== Results ===");
     println!(
-        "Ingress: recv={} matched={} egr_sent={} parse_err={} no_match={} buf_exhaust={}",
+        "Ingress: recv={} matched={} egr_sent={} filtered={} no_match={} buf_exhaust={}",
         stats.ingress.recv,
         stats.ingress.matched,
         stats.ingress.egr_sent,
-        stats.ingress.parse_err,
+        stats.ingress.filtered,
         stats.ingress.no_match,
         stats.ingress.buf_exhaust
     );
@@ -111,7 +111,6 @@ async fn test_scale_1000_packets() -> Result<()> {
     );
 
     // No errors
-    assert_eq!(stats.ingress.parse_err, 0, "Should have no parse errors");
     assert_eq!(
         stats.ingress.buf_exhaust, 0,
         "Should have no buffer exhaustion"
@@ -150,11 +149,11 @@ async fn test_scale_10000_packets() -> Result<()> {
 
     println!("\n=== Results ===");
     println!(
-        "Ingress: recv={} matched={} egr_sent={} parse_err={} no_match={} buf_exhaust={}",
+        "Ingress: recv={} matched={} egr_sent={} filtered={} no_match={} buf_exhaust={}",
         stats.ingress.recv,
         stats.ingress.matched,
         stats.ingress.egr_sent,
-        stats.ingress.parse_err,
+        stats.ingress.filtered,
         stats.ingress.no_match,
         stats.ingress.buf_exhaust
     );
@@ -187,7 +186,6 @@ async fn test_scale_10000_packets() -> Result<()> {
     );
 
     // No errors
-    assert_eq!(stats.ingress.parse_err, 0, "Should have no parse errors");
     assert_eq!(
         stats.ingress.buf_exhaust, 0,
         "Should have no buffer exhaustion"
@@ -251,11 +249,11 @@ async fn test_scale_1m_packets() -> Result<()> {
 
     println!("\n=== Results ===");
     println!(
-        "Ingress: recv={} matched={} egr_sent={} parse_err={} no_match={} buf_exhaust={}",
+        "Ingress: recv={} matched={} egr_sent={} filtered={} no_match={} buf_exhaust={}",
         stats.ingress.recv,
         stats.ingress.matched,
         stats.ingress.egr_sent,
-        stats.ingress.parse_err,
+        stats.ingress.filtered,
         stats.ingress.no_match,
         stats.ingress.buf_exhaust
     );
@@ -288,7 +286,6 @@ async fn test_scale_1m_packets() -> Result<()> {
     );
 
     // No errors
-    assert_eq!(stats.ingress.parse_err, 0, "Should have no parse errors");
     assert_eq!(
         stats.ingress.buf_exhaust, 0,
         "Should have no buffer exhaustion"

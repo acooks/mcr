@@ -118,8 +118,10 @@ mod mutex_backend {
             thread::Builder::new()
                 .name("egress".to_string())
                 .spawn(move || -> Result<()> {
-                    let mut egress = EgressLoop::new(egress_config.clone(), buffer_pool.clone(), egress_logger)?;
-                    loop {
+                    let mut egress =
+                        EgressLoop::new(egress_config.clone(), buffer_pool.clone(), egress_logger)?;
+                    let mut running = true;
+                    while running {
                         egress.reap_available_completions()?;
                         match egress_rx.try_recv() {
                             Ok(packet) => {
@@ -141,12 +143,16 @@ mod mutex_backend {
                                             )?;
                                             egress.queue_packet(packet);
                                         }
-                                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                                        Err(mpsc::RecvTimeoutError::Disconnected) => {
+                                            running = false;
+                                        }
                                         _ => {}
                                     }
                                 }
                             }
-                            Err(mpsc::TryRecvError::Disconnected) => break,
+                            Err(mpsc::TryRecvError::Disconnected) => {
+                                running = false;
+                            }
                         }
                     }
                     Ok(())
@@ -252,7 +258,8 @@ mod lock_free_backend {
             thread::Builder::new()
                 .name("egress".to_string())
                 .spawn(move || -> Result<()> {
-                    let mut egress = EgressLoop::new(egress_config.clone(), buffer_pool.clone(), egress_logger)?;
+                    let mut egress =
+                        EgressLoop::new(egress_config.clone(), buffer_pool.clone(), egress_logger)?;
                     loop {
                         egress.reap_available_completions()?;
                         match egress_rx.pop() {

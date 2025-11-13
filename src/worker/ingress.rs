@@ -159,6 +159,8 @@ where
     pub fn add_rule(&mut self, rule: Arc<ForwardingRule>) -> Result<()> {
         let key = (rule.input_group, rule.input_port);
         self.rules.insert(key, rule.clone());
+        // Create helper socket to send IGMP joins for this multicast group.
+        // This ensures switches/routers forward the multicast traffic to our interface.
         let helper_key = (rule.input_interface.clone(), rule.input_group);
         self.helper_sockets.entry(helper_key).or_insert_with(|| {
             setup_helper_socket(&rule.input_interface, rule.input_group).unwrap()
@@ -215,7 +217,10 @@ where
             match command {
                 RelayCommand::AddRule(rule) => self.add_rule(Arc::new(rule))?,
                 RelayCommand::RemoveRule { rule_id } => self.remove_rule(&rule_id)?,
-                RelayCommand::Shutdown => return Ok(true),
+                RelayCommand::Shutdown => {
+                    self.logger.info(Facility::Ingress, "Shutdown requested");
+                    return Ok(true);
+                }
             }
         }
         Ok(false)
@@ -234,10 +239,10 @@ where
         // Periodic stats logging (every 10,000 packets)
         if self.stats.packets_received % 10000 == 0 {
             let msg = format!(
-                "Stats: rx={} matched={} parse_err={} no_match={} buf_exhausted={} egress_err={}",
+                "Stats: rx={} matched={} filtered={} no_match={} buf_exhausted={} egress_err={}",
                 self.stats.packets_received,
                 self.stats.packets_matched,
-                self.stats.parse_errors,
+                self.stats.filtered,
                 self.stats.no_rule_match,
                 self.stats.buffer_exhaustion,
                 self.stats.egress_channel_errors
@@ -248,11 +253,11 @@ where
         let headers = match parse_packet(packet_data, false) {
             Ok(h) => h,
             Err(_) => {
-                self.stats.parse_errors += 1;
-                // Sample logging: log every 100th parse error
-                if self.stats.parse_errors % 100 == 0 {
-                    let msg = format!("Parse errors: {}", self.stats.parse_errors);
-                    self.logger.error(Facility::Ingress, &msg);
+                self.stats.filtered += 1;
+                // Sample logging: log every 100th filtered packet
+                if self.stats.filtered % 100 == 0 {
+                    let msg = format!("Filtered packets (non-UDP): {}", self.stats.filtered);
+                    self.logger.debug(Facility::Ingress, &msg);
                 }
                 return Ok(());
             }
@@ -374,6 +379,11 @@ where
                 match user_data {
                     COMMAND_NOTIFY => {
                         if self.process_commands()? {
+                            self.logger.info(
+                                Facility::Ingress,
+                                "Exiting run loop due to shutdown command",
+                            );
+                            self.print_final_stats();
                             return Ok(());
                         }
                         self.submit_command_read(&mut command_notify_buf)?;
@@ -391,6 +401,20 @@ where
                 }
             }
         }
+    }
+
+    fn print_final_stats(&self) {
+        // Print final stats in the format expected by integration tests
+        let msg = format!(
+            "[STATS:Ingress FINAL] total: recv={} matched={} egr_sent={} filtered={} no_match={} buf_exhaust={}",
+            self.stats.packets_received,
+            self.stats.packets_matched,
+            self.stats.egress_packets_sent,
+            self.stats.filtered,
+            self.stats.no_rule_match,
+            self.stats.buffer_exhaustion
+        );
+        self.logger.info(Facility::Ingress, &msg);
     }
 }
 
@@ -459,7 +483,7 @@ impl IngressLoop<Arc<LockFreeBufferPool>, Arc<SegQueue<EgressWorkItem>>> {
 pub struct IngressStats {
     pub packets_received: u64,
     pub packets_matched: u64,
-    pub parse_errors: u64,
+    pub filtered: u64, // Non-UDP packets (ARP, IPv6, TCP, etc.) - not an error
     pub no_rule_match: u64,
     pub buffer_exhaustion: u64,
     pub egress_channel_errors: u64,
@@ -491,12 +515,14 @@ const COMMAND_NOTIFY: u64 = 0;
 const PACKET_RECV_BASE: u64 = 1;
 
 pub fn setup_af_packet_socket(interface_name: &str) -> Result<OwnedFd> {
-    let socket = Socket::new(Domain::PACKET, Type::RAW, Some(Protocol::from(0x0800)))?;
+    // Use ETH_P_ALL (0x0003) to receive all packets, including multicast
+    // Using ETH_P_IP (0x0800) only receives unicast IPv4 packets
+    let socket = Socket::new(Domain::PACKET, Type::RAW, Some(Protocol::from(libc::ETH_P_ALL as i32)))?;
     socket.set_recv_buffer_size(32 * 1024 * 1024)?;
     let iface_index = get_interface_index(interface_name)?;
     let mut addr: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
     addr.sll_family = libc::AF_PACKET as u16;
-    addr.sll_protocol = (libc::ETH_P_IP as u16).to_be();
+    addr.sll_protocol = (libc::ETH_P_ALL as u16).to_be();
     addr.sll_ifindex = iface_index;
     unsafe {
         if libc::bind(
@@ -515,10 +541,26 @@ pub fn setup_helper_socket(
     interface_name: &str,
     multicast_group: Ipv4Addr,
 ) -> Result<StdUdpSocket> {
-    let socket = StdUdpSocket::bind("0.0.0.0:0")?;
-    let interface_ip = get_interface_ip(interface_name)?;
-    socket.join_multicast_v4(&multicast_group, &interface_ip)?;
-    Ok(socket)
+    // Use socket2 to join multicast group by interface index instead of IP address.
+    // This works reliably in network namespaces where interface IPs may not be discoverable.
+    let socket = socket2::Socket::new(
+        socket2::Domain::IPV4,
+        socket2::Type::DGRAM,
+        Some(socket2::Protocol::UDP),
+    )?;
+
+    socket.bind(&socket2::SockAddr::from(std::net::SocketAddrV4::new(
+        Ipv4Addr::UNSPECIFIED,
+        0,
+    )))?;
+
+    let interface_index = get_interface_index(interface_name)?;
+    socket.join_multicast_v4_n(
+        &multicast_group,
+        &socket2::InterfaceIndexOrAddress::Index(interface_index as u32),
+    )?;
+
+    Ok(socket.into())
 }
 fn get_interface_index(name: &str) -> Result<i32> {
     let c_name = std::ffi::CString::new(name)?;

@@ -17,6 +17,8 @@ pub mod packet_parser;
 pub mod stats;
 
 use crate::logging::{DataPlaneLogging, Facility, Logger};
+#[cfg(feature = "testing")]
+use crate::logging::ControlPlaneLogging;
 use crate::{ControlPlaneConfig, DataPlaneConfig, RelayCommand};
 use control_plane::ControlPlane;
 use data_plane_integrated::run_data_plane as data_plane_task;
@@ -159,12 +161,15 @@ pub async fn run_control_plane_generic_with_logger<S: AsyncRead + AsyncWrite + U
 
 pub async fn run_control_plane(config: ControlPlaneConfig) -> Result<()> {
     // Note: Can't use logging yet as it's not initialized
-    eprintln!(
-        "[ControlPlane] Worker process started, dropping privileges to UID {} and GID {}",
-        config.uid, config.gid
-    );
-
-    drop_privileges(Uid::from_raw(config.uid), Gid::from_raw(config.gid), None)?;
+    if let (Some(uid), Some(gid)) = (config.uid, config.gid) {
+        eprintln!(
+            "[ControlPlane] Worker process started, dropping privileges to UID {} and GID {}",
+            uid, gid
+        );
+        drop_privileges(Uid::from_raw(uid), Gid::from_raw(gid), None)?;
+    } else {
+        eprintln!("[ControlPlane] Worker process started without dropping privileges");
+    }
 
     // Initialize logging system (MPSC ring buffers with async consumer)
     use crate::logging::ControlPlaneLogging;
@@ -290,13 +295,17 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
         );
     }
 
-    // Attach to shared memory ring buffers for logging (REQUIRED)
+    // Attach to shared memory ring buffers for logging (REQUIRED in production)
     let core_id = config
         .core_id
         .ok_or_else(|| anyhow::anyhow!("Data plane worker requires core_id"))?;
 
+    #[cfg(not(feature = "testing"))]
     let logging = DataPlaneLogging::attach(core_id as u8)
         .context("Failed to attach to shared memory logging - supervisor must create shared memory before spawning workers")?;
+
+    #[cfg(feature = "testing")]
+    let logging = ControlPlaneLogging::new();
 
     let logger = logging
         .logger(Facility::DataPlane)
@@ -366,14 +375,12 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
                     }
                     logger_for_spawn.debug(Facility::DataPlane, "Signaling eventfd");
                     // Signal the eventfd to wake up ingress io_uring loop
-                    // Use spawn_blocking to avoid blocking the async runtime
-                    let event_fd = event_fd_for_writer;
-                    tokio::task::spawn_blocking(move || {
-                        let value: u64 = 1;
-                        unsafe {
-                            libc::write(event_fd, &value as *const u64 as *const libc::c_void, 8);
-                        }
-                    });
+                    // Note: eventfd was created with EFD_NONBLOCK, so this write is non-blocking
+                    // and doesn't need spawn_blocking
+                    let value: u64 = 1;
+                    unsafe {
+                        libc::write(event_fd_for_writer, &value as *const u64 as *const libc::c_void, 8);
+                    }
                 }
                 Err(e) => {
                     logger_for_spawn.error(
@@ -385,6 +392,7 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
         }
 
         // Stream closed - supervisor has exited, send shutdown command to data plane
+        logger_for_spawn.info(Facility::DataPlane, "Supervisor stream closed.");
         logger_for_spawn.info(
             Facility::DataPlane,
             "Supervisor stream closed, sending shutdown to data plane",
@@ -396,13 +404,11 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
             );
         } else {
             // Signal eventfd to wake up ingress loop to process shutdown
-            let event_fd = event_fd_for_writer;
-            tokio::task::spawn_blocking(move || {
-                let value: u64 = 1;
-                unsafe {
-                    libc::write(event_fd, &value as *const u64 as *const libc::c_void, 8);
-                }
-            });
+            // Note: eventfd was created with EFD_NONBLOCK, so this write is non-blocking
+            let value: u64 = 1;
+            unsafe {
+                libc::write(event_fd_for_writer, &value as *const u64 as *const libc::c_void, 8);
+            }
         }
     });
 
@@ -489,8 +495,8 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let socket_path = temp_dir.path().join("test.sock");
         let _config = ControlPlaneConfig {
-            uid: 0,
-            gid: 0,
+            uid: Some(0),
+            gid: Some(0),
             relay_command_socket_path: socket_path.clone(),
             prometheus_addr: None,
             reporting_interval: 1000,
@@ -545,8 +551,8 @@ mod tests {
         let current_gid = unsafe { libc::getgid() };
 
         let config = DataPlaneConfig {
-            uid: current_uid,
-            gid: current_gid,
+            uid: Some(current_uid),
+            gid: Some(current_gid),
             core_id: Some(0),
             prometheus_addr: "127.0.0.1:9002".parse().unwrap(),
             input_interface_name: Some("lo".to_string()),
