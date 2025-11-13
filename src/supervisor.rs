@@ -298,6 +298,7 @@ pub async fn run(
     control_socket_path: PathBuf,
     master_rules: Arc<Mutex<HashMap<String, ForwardingRule>>>,
     num_workers: Option<usize>,
+    mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<()> {
     let uid = User::from_name(user)
         .with_context(|| format!("User '{}' not found", user))?
@@ -388,6 +389,7 @@ pub async fn run(
         supervisor_logger,
         global_min_level,
         facility_min_levels,
+        shutdown_rx,
     )
     .await
 }
@@ -407,6 +409,7 @@ pub async fn run_generic<F, G, FutCp, FutDp>(
             std::collections::HashMap<crate::logging::Facility, crate::logging::Severity>,
         >,
     >,
+    mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<()>
 where
     F: FnMut() -> FutCp,
@@ -514,103 +517,158 @@ where
     }
 
     let mut cp_backoff_ms = INITIAL_BACKOFF_MS;
+    let mut shutting_down = false;
+    let mut remaining_workers = num_cores + 1; // CP + DP workers
 
     loop {
         tokio::select! {
+            // Branch 0: Graceful shutdown signal received
+            _ = &mut shutdown_rx, if !shutting_down => {
+                log_info!(supervisor_logger, Facility::Supervisor, "Graceful shutdown initiated, signaling workers");
+                shutting_down = true;
+
+                // Send Shutdown command to all data plane workers
+                let cmd_bytes = serde_json::to_vec(&RelayCommand::Shutdown).unwrap();
+                let streams_to_send: Vec<_> = dp_cmd_streams.lock().unwrap().values().cloned().collect();
+
+                for stream_mutex in streams_to_send {
+                    let cmd_bytes_clone = cmd_bytes.clone();
+                    tokio::spawn(async move {
+                        let mut stream = stream_mutex.lock().await;
+                        let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
+                        let _ = framed.send(cmd_bytes_clone.into()).await;
+                    });
+                }
+
+                log_info!(supervisor_logger, Facility::Supervisor, &format!("Waiting for {} workers to exit", remaining_workers));
+            }
+
             // Branch 1: A control plane worker exited
             (pid, result, mut cp_child) = &mut cp_child_future => {
                 worker_map.lock().unwrap().remove(&pid);
 
-                if let Ok(status) = result {
-                    if status.success() {
-                        log_info!(supervisor_logger, Facility::Supervisor, "Control Plane worker exited gracefully, restarting immediately");
-                        cp_backoff_ms = INITIAL_BACKOFF_MS;
-                    } else {
-                        log_warning!(
-                            supervisor_logger,
-                            Facility::Supervisor,
-                            &format!("Control Plane worker failed (status: {}), restarting after {}ms", status, cp_backoff_ms)
-                        );
-                        sleep(Duration::from_millis(cp_backoff_ms)).await;
-                        cp_backoff_ms = (cp_backoff_ms * 2).min(MAX_BACKOFF_MS);
+                if shutting_down {
+                    remaining_workers -= 1;
+                    log_info!(
+                        supervisor_logger,
+                        Facility::Supervisor,
+                        &format!("Control Plane worker exited during shutdown ({} workers remaining)", remaining_workers)
+                    );
+                    if remaining_workers == 0 {
+                        log_info!(supervisor_logger, Facility::Supervisor, "All workers exited, supervisor shutting down");
+                        return Ok(());
                     }
+                    // Don't restart during shutdown - create a pending future to keep the branch active
+                    cp_child_future = Box::pin(async move {
+                        std::future::pending().await
+                    });
+                } else {
+                    if let Ok(status) = result {
+                        if status.success() {
+                            log_info!(supervisor_logger, Facility::Supervisor, "Control Plane worker exited gracefully, restarting immediately");
+                            cp_backoff_ms = INITIAL_BACKOFF_MS;
+                        } else {
+                            log_warning!(
+                                supervisor_logger,
+                                Facility::Supervisor,
+                                &format!("Control Plane worker failed (status: {}), restarting after {}ms", status, cp_backoff_ms)
+                            );
+                            sleep(Duration::from_millis(cp_backoff_ms)).await;
+                            cp_backoff_ms = (cp_backoff_ms * 2).min(MAX_BACKOFF_MS);
+                        }
+                    }
+                    let (cp_child_new, _cp_stream_new, cp_req_stream_new) = spawn_cp().await?;
+                    cp_child = cp_child_new;
+                    _cp_stream = _cp_stream_new;
+                    cp_pid = cp_child.id().unwrap();
+                    worker_map.lock().unwrap().insert(
+                        cp_pid,
+                        crate::WorkerInfo {
+                            pid: cp_pid,
+                            worker_type: "ControlPlane".to_string(),
+                            core_id: None,
+                        },
+                    );
+                    worker_req_streams
+                        .lock()
+                        .unwrap()
+                        .insert(cp_pid, Arc::new(tokio::sync::Mutex::new(cp_req_stream_new)));
+                    cp_child_future = Box::pin(async move {
+                        let res = cp_child.wait().await;
+                        (cp_pid, res, cp_child)
+                    });
                 }
-                let (cp_child_new, _cp_stream_new, cp_req_stream_new) = spawn_cp().await?;
-                cp_child = cp_child_new;
-                _cp_stream = _cp_stream_new;
-                cp_pid = cp_child.id().unwrap();
-                worker_map.lock().unwrap().insert(
-                    cp_pid,
-                    crate::WorkerInfo {
-                        pid: cp_pid,
-                        worker_type: "ControlPlane".to_string(),
-                        core_id: None,
-                    },
-                );
-                worker_req_streams
-                    .lock()
-                    .unwrap()
-                    .insert(cp_pid, Arc::new(tokio::sync::Mutex::new(cp_req_stream_new)));
-                cp_child_future = Box::pin(async move {
-                    let res = cp_child.wait().await;
-                    (cp_pid, res, cp_child)
-                });
             }
 
             // Branch 2: A data plane worker exited
             Some((core_id, pid, result)) = dp_futs.next() => {
                 worker_map.lock().unwrap().remove(&pid);
                 dp_cmd_streams.lock().unwrap().remove(&pid);
-                if let Ok(status) = result {
-                    let backoff = dp_backoffs.entry(core_id).or_insert(INITIAL_BACKOFF_MS);
-                    if status.success() {
-                        log_info!(
-                            supervisor_logger,
-                            Facility::Supervisor,
-                            &format!("Data Plane worker (core {}) exited gracefully, restarting immediately", core_id)
-                        );
-                        *backoff = INITIAL_BACKOFF_MS;
-                    } else {
-                        log_warning!(
-                            supervisor_logger,
-                            Facility::Supervisor,
-                            &format!("Data Plane worker (core {}) failed (status: {}), restarting after {}ms", core_id, status, *backoff)
-                        );
-                        sleep(Duration::from_millis(*backoff)).await;
-                        *backoff = (*backoff * 2).min(MAX_BACKOFF_MS);
-                    }
-                    // Recreate shared memory for the restarting worker (REQUIRED in production)
-                    // The old shared memory will be cleaned up when the old manager is dropped
-                    #[cfg(not(feature = "testing"))]
-                    {
-                        let log_manager = SharedMemoryLogManager::create_for_worker(core_id as u8, 16384)
-                            .with_context(|| format!("Failed to recreate shared memory for worker {}", core_id))?;
-                        log_managers.insert(core_id, log_manager);
-                    }
 
-                    // Restart the worker for the specific core
-                    let (mut new_child, new_cmd_stream, new_req_stream) = spawn_dp(core_id).await?;
-                    let new_pid = new_child.id().unwrap();
-                    worker_map.lock().unwrap().insert(
-                        new_pid,
-                        crate::WorkerInfo {
-                            pid: new_pid,
-                            worker_type: "DataPlane".to_string(),
-                            core_id: Some(core_id),
-                        },
+                if shutting_down {
+                    remaining_workers -= 1;
+                    log_info!(
+                        supervisor_logger,
+                        Facility::Supervisor,
+                        &format!("Data Plane worker (core {}) exited during shutdown ({} workers remaining)", core_id, remaining_workers)
                     );
-                    worker_req_streams
-                        .lock()
-                        .unwrap()
-                        .insert(new_pid, Arc::new(tokio::sync::Mutex::new(new_req_stream)));
-                    dp_cmd_streams
-                        .lock()
-                        .unwrap()
-                        .insert(new_pid, Arc::new(tokio::sync::Mutex::new(new_cmd_stream)));
-                    dp_futs.push(Box::pin(async move {
-                        let res = new_child.wait().await;
-                        (core_id, new_pid, res)
-                    }));
+                    if remaining_workers == 0 {
+                        log_info!(supervisor_logger, Facility::Supervisor, "All workers exited, supervisor shutting down");
+                        return Ok(());
+                    }
+                    // Don't restart during shutdown
+                } else {
+                    if let Ok(status) = result {
+                        let backoff = dp_backoffs.entry(core_id).or_insert(INITIAL_BACKOFF_MS);
+                        if status.success() {
+                            log_info!(
+                                supervisor_logger,
+                                Facility::Supervisor,
+                                &format!("Data Plane worker (core {}) exited gracefully, restarting immediately", core_id)
+                            );
+                            *backoff = INITIAL_BACKOFF_MS;
+                        } else {
+                            log_warning!(
+                                supervisor_logger,
+                                Facility::Supervisor,
+                                &format!("Data Plane worker (core {}) failed (status: {}), restarting after {}ms", core_id, status, *backoff)
+                            );
+                            sleep(Duration::from_millis(*backoff)).await;
+                            *backoff = (*backoff * 2).min(MAX_BACKOFF_MS);
+                        }
+                        // Recreate shared memory for the restarting worker (REQUIRED in production)
+                        // The old shared memory will be cleaned up when the old manager is dropped
+                        #[cfg(not(feature = "testing"))]
+                        {
+                            let log_manager = SharedMemoryLogManager::create_for_worker(core_id as u8, 16384)
+                                .with_context(|| format!("Failed to recreate shared memory for worker {}", core_id))?;
+                            log_managers.insert(core_id, log_manager);
+                        }
+
+                        // Restart the worker for the specific core
+                        let (mut new_child, new_cmd_stream, new_req_stream) = spawn_dp(core_id).await?;
+                        let new_pid = new_child.id().unwrap();
+                        worker_map.lock().unwrap().insert(
+                            new_pid,
+                            crate::WorkerInfo {
+                                pid: new_pid,
+                                worker_type: "DataPlane".to_string(),
+                                core_id: Some(core_id),
+                            },
+                        );
+                        worker_req_streams
+                            .lock()
+                            .unwrap()
+                            .insert(new_pid, Arc::new(tokio::sync::Mutex::new(new_req_stream)));
+                        dp_cmd_streams
+                            .lock()
+                            .unwrap()
+                            .insert(new_pid, Arc::new(tokio::sync::Mutex::new(new_cmd_stream)));
+                        dp_futs.push(Box::pin(async move {
+                            let res = new_child.wait().await;
+                            (core_id, new_pid, res)
+                        }));
+                    }
                 }
             }
 
@@ -1092,6 +1150,7 @@ mod tests {
         let socket_path = temp_dir.path().join("test.sock");
 
         let (logger, global_min_level, facility_min_levels) = create_test_logger();
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         let supervisor_future = run_generic(
             spawn_cp,
             1,
@@ -1102,6 +1161,7 @@ mod tests {
             logger,
             global_min_level,
             facility_min_levels,
+            shutdown_rx,
         );
         let _ = tokio::time::timeout(Duration::from_millis(1000), supervisor_future).await;
 
@@ -1144,6 +1204,7 @@ mod tests {
         let socket_path = temp_dir.path().join("test.sock");
 
         let (logger, global_min_level, facility_min_levels) = create_test_logger();
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         let supervisor_future = run_generic(
             spawn_cp,
             1,
@@ -1154,6 +1215,7 @@ mod tests {
             logger,
             global_min_level,
             facility_min_levels,
+            shutdown_rx,
         );
         let _ = tokio::time::timeout(Duration::from_millis(1000), supervisor_future).await;
 
@@ -1206,6 +1268,7 @@ mod tests {
         let socket_path = temp_dir.path().join("test.sock");
 
         let (logger, global_min_level, facility_min_levels) = create_test_logger();
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         let supervisor_future = run_generic(
             spawn_cp,
             num_cores,
@@ -1216,6 +1279,7 @@ mod tests {
             logger,
             global_min_level,
             facility_min_levels,
+            shutdown_rx,
         );
         let _ = tokio::time::timeout(Duration::from_millis(200), supervisor_future).await;
 
@@ -1282,6 +1346,7 @@ mod tests {
         let socket_path = temp_dir.path().join("test.sock");
 
         let (logger, global_min_level, facility_min_levels) = create_test_logger();
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         let supervisor_future = run_generic(
             spawn_cp,
             1,
@@ -1292,6 +1357,7 @@ mod tests {
             logger,
             global_min_level,
             facility_min_levels,
+            shutdown_rx,
         );
 
         // Run long enough for three spawns: fail -> graceful -> fail
