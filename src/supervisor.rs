@@ -471,6 +471,10 @@ where
     > = FuturesUnordered::new();
     let mut dp_backoffs = HashMap::new();
 
+    // Clean up any stale shared memory from previous crashed/killed instances
+    #[cfg(not(feature = "testing"))]
+    SharedMemoryLogManager::cleanup_stale_shared_memory(Some(num_cores as u8));
+
     // Create shared memory log managers for data plane workers
     // Each worker gets its own set of ring buffers in shared memory
     let mut log_managers: HashMap<u32, SharedMemoryLogManager> = HashMap::new();

@@ -145,6 +145,33 @@ impl SharedMemoryLogManager {
 
         // Shared buffers will be automatically cleaned up on drop
     }
+
+    /// Clean up stale shared memory from previous instances
+    ///
+    /// This should be called at supervisor startup to remove any shared memory
+    /// left behind by crashed or killed previous instances.
+    ///
+    /// # Arguments
+    /// * `max_workers` - Maximum number of workers to clean up (defaults to 16)
+    pub fn cleanup_stale_shared_memory(max_workers: Option<u8>) {
+        use nix::sys::mman::shm_unlink;
+
+        let max_workers = max_workers.unwrap_or(16);
+        let facilities = [
+            Facility::DataPlane,
+            Facility::Ingress,
+            Facility::Egress,
+            Facility::BufferPool,
+        ];
+
+        for core_id in 0..max_workers {
+            for facility in &facilities {
+                let shm_id = shm_id_for_facility(core_id, *facility);
+                // Ignore errors - the shared memory may not exist
+                let _ = shm_unlink(shm_id.as_str());
+            }
+        }
+    }
 }
 
 /// Logging system for data plane worker processes

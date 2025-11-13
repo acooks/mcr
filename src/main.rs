@@ -66,6 +66,15 @@ fn main() -> Result<()> {
                         // Shutdown signal received - give workers time to flush logs and shut down gracefully
                         eprintln!("[Supervisor] Shutdown signal received, waiting for workers to exit...");
                         tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+                        // Clean up shared memory on shutdown
+                        #[cfg(not(feature = "testing"))]
+                        {
+                            use multicast_relay::logging::SharedMemoryLogManager;
+                            SharedMemoryLogManager::cleanup_stale_shared_memory(num_workers.map(|n| n as u8));
+                            eprintln!("[Supervisor] Shared memory cleaned up");
+                        }
+
                         eprintln!("[Supervisor] Shutdown complete");
                     }
                 }
