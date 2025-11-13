@@ -16,6 +16,7 @@ pub mod metrics;
 pub mod packet_parser;
 pub mod stats;
 
+use crate::logging::{DataPlaneLogging, Facility};
 use crate::{ControlPlaneConfig, DataPlaneConfig, RelayCommand};
 use control_plane::ControlPlane;
 use data_plane_integrated::run_data_plane as data_plane_task;
@@ -253,6 +254,32 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
             core_id
         );
     }
+
+    // Attach to shared memory ring buffers for logging
+    let _logging = if let Some(core_id) = config.core_id {
+        match DataPlaneLogging::attach(core_id as u8) {
+            Ok(logging) => {
+                // Get a logger and log startup message
+                if let Some(logger) = logging.logger(Facility::DataPlane) {
+                    logger.info(
+                        Facility::DataPlane,
+                        &format!("Data plane worker started on core {}", core_id),
+                    );
+                }
+                Some(logging)
+            }
+            Err(e) => {
+                eprintln!(
+                    "[DataPlane] Warning: Failed to attach to shared memory logging: {:?}",
+                    e
+                );
+                eprintln!("[DataPlane] Continuing without cross-process logging");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     // Get FD 3 from supervisor and set it to non-blocking before wrapping in tokio UnixStream
     let supervisor_sock = unsafe {

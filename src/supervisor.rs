@@ -16,7 +16,7 @@ use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
 
-use crate::logging::{AsyncConsumer, Facility, Logger, MPSCRingBuffer};
+use crate::logging::{AsyncConsumer, Facility, Logger, MPSCRingBuffer, SharedMemoryLogManager};
 use crate::{log_info, log_warning, ForwardingRule, RelayCommand};
 use futures::{stream::StreamExt, SinkExt};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
@@ -475,7 +475,17 @@ where
     > = FuturesUnordered::new();
     let mut dp_backoffs = HashMap::new();
 
+    // Create shared memory log managers for data plane workers
+    // Each worker gets its own set of ring buffers in shared memory
+    let mut log_managers: HashMap<u32, SharedMemoryLogManager> = HashMap::new();
+
     for core_id in 0..num_cores as u32 {
+        // Create shared memory for this worker's logging
+        // Using buffer sizes from Facility::buffer_size()
+        let log_manager = SharedMemoryLogManager::create_for_worker(core_id as u8, 16384)
+            .with_context(|| format!("Failed to create shared memory for worker {}", core_id))?;
+        log_managers.insert(core_id, log_manager);
+
         let (mut child, dp_cmd_stream, dp_req_stream) = spawn_dp(core_id).await?;
         let pid = child.id().unwrap();
         worker_map.lock().unwrap().insert(
@@ -567,6 +577,12 @@ where
                         sleep(Duration::from_millis(*backoff)).await;
                         *backoff = (*backoff * 2).min(MAX_BACKOFF_MS);
                     }
+                    // Recreate shared memory for the restarting worker
+                    // The old shared memory will be cleaned up when the old manager is dropped
+                    let log_manager = SharedMemoryLogManager::create_for_worker(core_id as u8, 16384)
+                        .with_context(|| format!("Failed to recreate shared memory for worker {}", core_id))?;
+                    log_managers.insert(core_id, log_manager);
+
                     // Restart the worker for the specific core
                     let (mut new_child, new_cmd_stream, new_req_stream) = spawn_dp(core_id).await?;
                     let new_pid = new_child.id().unwrap();
