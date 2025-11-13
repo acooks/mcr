@@ -466,7 +466,11 @@ mod tests {
 // Shared Memory SPSC Ring Buffer (Cross-Process)
 // ============================================================================
 
-use shared_memory::{Shmem, ShmemConf, ShmemError};
+use nix::fcntl::OFlag;
+use nix::sys::mman::{mmap, munmap, shm_open, shm_unlink, MapFlags, ProtFlags};
+use nix::sys::stat::Mode;
+use nix::unistd::ftruncate;
+use std::os::fd::{AsRawFd, OwnedFd};
 
 /// Generate shared memory ID for a data plane worker's ring buffer
 ///
@@ -506,7 +510,10 @@ fn calc_shm_size(capacity: usize) -> usize {
 /// This can be used across process boundaries. The supervisor creates
 /// the shared memory region, and workers attach to it.
 pub struct SharedSPSCRingBuffer {
-    shmem: Shmem,
+    shm_name: String,
+    _shm_fd: OwnedFd,  // Keep fd alive, will auto-close on drop
+    mapped_addr: *mut u8,
+    mapped_size: usize,
     header: *mut SharedRingBufferHeader,
     entries: *mut UnsafeCell<LogEntry>,
     capacity: usize,
@@ -524,44 +531,62 @@ impl SharedSPSCRingBuffer {
     /// * `shm_id` - Shared memory ID (e.g., "/mcr_log_dp0")
     /// * `capacity` - Number of entries (must be power of 2)
     /// * `core_id` - CPU core ID for this buffer
-    ///
-    /// # Returns
-    /// The ring buffer and the shm_id to pass to workers
-    pub fn create(shm_id: &str, capacity: usize, core_id: u8) -> Result<Self, ShmemError> {
+    pub fn create(shm_id: &str, capacity: usize, core_id: u8) -> Result<Self, nix::Error> {
         assert!(capacity.is_power_of_two(), "Capacity must be power of 2");
-        
+
         let size = calc_shm_size(capacity);
-        
-        // Create shared memory
-        let shmem = ShmemConf::new()
-            .size(size)
-            .os_id(shm_id)
-            .create()?;
-        
+
+        // Create shared memory object
+        let fd = shm_open(
+            shm_id,
+            OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_RDWR,
+            Mode::S_IRUSR | Mode::S_IWUSR,
+        )?;
+
+        // Set size
+        ftruncate(&fd, size as i64)?;
+
+        // Map into memory
+        let addr = unsafe {
+            mmap(
+                None,
+                std::num::NonZeroUsize::new(size).unwrap(),
+                ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
+                MapFlags::MAP_SHARED,
+                &fd,
+                0,
+            )?
+        };
+
         unsafe {
+            let mapped_addr = addr.as_ptr() as *mut u8;
+
             // Initialize header
-            let header = shmem.as_ptr() as *mut SharedRingBufferHeader;
+            let header = mapped_addr as *mut SharedRingBufferHeader;
             std::ptr::write(&mut (*header).write_seq, AtomicU64::new(0));
             std::ptr::write(&mut (*header).read_seq, AtomicU64::new(0));
             std::ptr::write(&mut (*header).overruns, AtomicU64::new(0));
             (*header).capacity = capacity;
             (*header).core_id = core_id;
-            
+
             // Calculate entries pointer (after aligned header)
             use std::mem::{size_of, align_of};
             let header_size = size_of::<SharedRingBufferHeader>();
             let entry_align = align_of::<LogEntry>();
             let aligned_header = (header_size + entry_align - 1) & !(entry_align - 1);
-            let entries = (shmem.as_ptr() as usize + aligned_header) as *mut UnsafeCell<LogEntry>;
-            
+            let entries = (mapped_addr as usize + aligned_header) as *mut UnsafeCell<LogEntry>;
+
             // Initialize all entries to EMPTY
             for i in 0..capacity {
                 let entry = &mut *entries.add(i).cast::<LogEntry>();
                 *entry = LogEntry::default();
             }
-            
+
             Ok(Self {
-                shmem,
+                shm_name: shm_id.to_string(),
+                _shm_fd: fd,
+                mapped_addr,
+                mapped_size: size,
                 header,
                 entries,
                 capacity,
@@ -569,29 +594,71 @@ impl SharedSPSCRingBuffer {
             })
         }
     }
-    
+
     /// Attach to existing shared memory ring buffer (worker side)
     ///
     /// # Arguments
     /// * `shm_id` - Shared memory ID to attach to
-    pub fn attach(shm_id: &str) -> Result<Self, ShmemError> {
-        let shmem = ShmemConf::new()
-            .os_id(shm_id)
-            .open()?;
-        
+    pub fn attach(shm_id: &str) -> Result<Self, nix::Error> {
+        // Open existing shared memory
+        let fd = shm_open(
+            shm_id,
+            OFlag::O_RDWR,
+            Mode::empty(),
+        )?;
+
+        // First, map just the header to read the capacity
+        let header_size = std::mem::size_of::<SharedRingBufferHeader>();
+        let temp_addr = unsafe {
+            mmap(
+                None,
+                std::num::NonZeroUsize::new(header_size).unwrap(),
+                ProtFlags::PROT_READ,
+                MapFlags::MAP_SHARED,
+                &fd,
+                0,
+            )?
+        };
+
+        let capacity = unsafe {
+            let header = temp_addr.as_ptr() as *const SharedRingBufferHeader;
+            (*header).capacity
+        };
+
+        // Unmap temporary mapping
         unsafe {
-            let header = shmem.as_ptr() as *mut SharedRingBufferHeader;
-            let capacity = (*header).capacity;
-            
+            munmap(temp_addr, header_size)?;
+        }
+
+        // Now map the full size
+        let size = calc_shm_size(capacity);
+        let addr = unsafe {
+            mmap(
+                None,
+                std::num::NonZeroUsize::new(size).unwrap(),
+                ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
+                MapFlags::MAP_SHARED,
+                &fd,
+                0,
+            )?
+        };
+
+        unsafe {
+            let mapped_addr = addr.as_ptr() as *mut u8;
+            let header = mapped_addr as *mut SharedRingBufferHeader;
+
             // Calculate entries pointer
             use std::mem::{size_of, align_of};
             let header_size = size_of::<SharedRingBufferHeader>();
             let entry_align = align_of::<LogEntry>();
             let aligned_header = (header_size + entry_align - 1) & !(entry_align - 1);
-            let entries = (shmem.as_ptr() as usize + aligned_header) as *mut UnsafeCell<LogEntry>;
-            
+            let entries = (mapped_addr as usize + aligned_header) as *mut UnsafeCell<LogEntry>;
+
             Ok(Self {
-                shmem,
+                shm_name: shm_id.to_string(),
+                _shm_fd: fd,
+                mapped_addr,
+                mapped_size: size,
                 header,
                 entries,
                 capacity,
@@ -675,16 +742,26 @@ impl SharedSPSCRingBuffer {
     
     /// Get shared memory ID for passing to workers
     pub fn shm_id(&self) -> &str {
-        self.shmem.get_os_id()
+        &self.shm_name
     }
 }
 
 impl Drop for SharedSPSCRingBuffer {
     fn drop(&mut self) {
-        // Only the owner (supervisor) unlinks the shared memory
-        // Workers just detach when they drop
-        if self.is_owner {
-            // shared_memory crate handles shm_unlink on drop
+        unsafe {
+            // Unmap memory
+            let _ = munmap(
+                std::ptr::NonNull::new(self.mapped_addr as *mut libc::c_void).unwrap(),
+                self.mapped_size,
+            );
+
+            // OwnedFd will automatically close the file descriptor
+
+            // Only the owner (supervisor) unlinks the shared memory
+            // Workers just detach when they drop
+            if self.is_owner {
+                let _ = shm_unlink(self.shm_name.as_str());
+            }
         }
     }
 }
