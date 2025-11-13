@@ -5,49 +5,44 @@
 ```bash
 # 1. Build everything as regular user
 cargo build --release --bins
-cargo test --no-run
 
 # 2. Run unit tests (no sudo needed)
 cargo test --lib
 
-# 3. Run integration tests (requires sudo)
-sudo -E cargo test --test integration test_basic -- --ignored --test-threads=1
+# 3. Run shell integration tests (requires sudo)
+sudo ./tests/test_all_scripts.sh
 ```
 
 ## Test Types
 
-### Unit Tests (122 tests)
+### Unit Tests (~122 tests)
 - **Location:** `src/**/*.rs` with `#[cfg(test)]`
 - **Requirements:** None (run as regular user)
 - **Run:** `cargo test --lib`
 - **What they test:** Individual functions, logic, protocol parsing
+- **Status:** ✅ All passing
 
-### Integration Tests (Existing)
-- **Location:** `tests/integration/{cli,log_level_control,rule_management}.rs`
-- **Requirements:** None (run as regular user)
-- **Run:** `cargo test --test integration` (without --ignored)
-- **What they test:** CLI, IPC, rule propagation
-
-### Network Integration Tests (New!)
-- **Location:** `tests/integration/test_*.rs` (test_basic, test_scaling, test_topologies)
-- **Requirements:** Root privileges for network namespaces
-- **Run:** `sudo -E cargo test --test integration <test_name> -- --ignored --test-threads=1`
+### Shell Integration Tests
+- **Location:** `tests/*.sh` and `tests/topologies/*.sh`
+- **Requirements:** Root privileges (AF_PACKET, network namespaces)
+- **Run:** `sudo ./tests/test_all_scripts.sh` (runs all tests)
 - **What they test:**
-  - `test_basic`: Basic 10 and 1000 packet forwarding (replaces debug_10_packets.sh)
-  - `test_scaling`: Scaling at 1k, 10k, and 1M packets (replaces scaling_test.sh)
-  - `test_topologies`: Multi-hop chains and fanout patterns (replaces baseline_50k.sh, chain_3hop.sh, tree_fanout.sh)
+  - Basic forwarding validation (debug_10_packets.sh)
+  - End-to-end packet delivery (data_plane_e2e.sh)
+  - Performance and scaling (scaling_test.sh, data_plane_performance.sh)
+  - Multi-hop topologies (topologies/baseline_50k.sh, chain_3hop.sh, tree_fanout.sh)
+- **Documentation:** See [tests/README.md](tests/README.md)
 
 ## Why Build Before Running Tests?
 
 **Always build as regular user first:**
 ```bash
 cargo build --release --bins
-cargo test --no-run
 ```
 
 **Then run tests with sudo:**
 ```bash
-sudo -E cargo test --test integration test_basic -- --ignored --test-threads=1
+sudo ./tests/test_all_scripts.sh
 ```
 
 This prevents:
@@ -55,31 +50,46 @@ This prevents:
 - Permission errors in cargo cache
 - Toolchain confusion
 
-## Detailed Documentation
+## Test Standards
 
-See [tests/integration/README.md](tests/integration/README.md) for:
-- Test utilities (McrInstance, NetworkNamespace, VethPair)
-- Writing new tests
-- Debugging failures
-- Known issues
+Shell integration tests follow standardized patterns:
+- Network namespace isolation (no host pollution)
+- Graceful shutdown with final stats logging
+- Consistent pass/fail reporting (✅/❌)
+- Individual test logs in `/tmp/`
+
+See [tests/TEST_STANDARDS.md](tests/TEST_STANDARDS.md) for detailed patterns and templates.
+
+## Debugging Failed Tests
+
+Each test writes detailed logs:
+```bash
+# Run a test
+sudo ./tests/debug_10_packets.sh
+
+# Check logs
+cat /tmp/test_mcr.log        # MCR process log
+cat /tmp/test_debug_10_packets.log  # Test output
+```
+
+## Testing Philosophy
+
+For the formal testing strategy and 3-tier architecture, see [docs/reference/TESTING.md](docs/reference/TESTING.md).
 
 ## CI/Automation
 
-For CI environments, use:
+For CI environments:
 ```bash
 # Build step (as regular user)
 cargo build --release --bins
-cargo test --no-run
 
-# Test step (unit tests)
+# Unit test step (no root needed)
 cargo test --lib
 
-# Test step (integration tests - if root available)
+# Integration test step (requires root)
 if [ "$EUID" -eq 0 ]; then
-    cargo test --test integration test_basic -- --ignored --test-threads=1
-    cargo test --test integration test_scaling -- --ignored --test-threads=1
-    cargo test --test integration test_topologies -- --ignored --test-threads=1
+    ./tests/test_all_scripts.sh
 else
-    echo "Skipping network integration tests (no root)"
+    echo "Skipping integration tests (no root)"
 fi
 ```
