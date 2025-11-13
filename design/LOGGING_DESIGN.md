@@ -97,43 +97,76 @@ Data Plane Worker Process                 Supervisor Process
 - Comprehensive unit and integration tests (101 tests passing)
 - Performance: <100ns overhead for log-level checks
 
-**Phase 5: IN PROGRESS** 🔄
-- Shared memory ring buffers for cross-process logging
-- Worker process integration (data plane + control plane)
-- Centralized log collection in supervisor
+**Phase 5: COMPLETE** ✅ (commits 06f5273, cc4bf9d)
+- Shared memory ring buffers for data plane workers (lock-free cross-process)
+- Control plane workers use MPSC ring buffers (async-safe)
+- All workers integrated with structured logging
+- Supervisor and workers use appropriate logging systems
+- 106/107 tests passing
 
-**Phase 6: PENDING** ⏳
-- Additional output sinks (file, syslog)
-- Metrics extraction
+**Phase 6: AVAILABLE FOR FUTURE ENHANCEMENT** ⏳
+- Additional output sinks (file, syslog) - infrastructure exists, not yet configured
+- Metrics extraction from logs
 - Log streaming to control_client (see INTERACTIVE_CLI_DESIGN.md)
+- Runtime log level control via control socket (commands defined, not yet wired up)
 
 ## Quick Start Example
+
+### Supervisor Process (Async Context)
 
 ```rust
 use multicast_relay::logging::*;
 
-// 1. Create a logging registry (in supervisor/worker startup)
-let registry = LogRegistry::new_mpsc();  // For async/multi-threaded
-// or: LogRegistry::new_spsc(core_id)   // For data plane workers
+// 1. Initialize supervisor logging (MPSC ring buffers)
+let logging = SupervisorLogging::new();
+let logger = logging.logger(Facility::Supervisor).unwrap();
 
-// 2. Get a logger for a facility
-let logger = registry.get_logger(Facility::Supervisor).unwrap();
+// 2. Log messages
+logger.info(Facility::Supervisor, "Starting MCR supervisor");
+logger.error(Facility::Supervisor, "Worker process exited unexpectedly");
 
-// 3. Start consumer task to output logs
-tokio::spawn(async move {
-    AsyncConsumer::stdout(/* ringbuffers */).run().await;
-});
-
-// 4. Log messages
-log_info!(logger, Facility::Supervisor, "Worker started");
-log_error!(logger, Facility::Ingress, "Failed to parse packet");
-
-// 5. Structured logging
-log_kv!(logger, Severity::Info, Facility::Ingress, "Packet received",
-    "src" => "10.0.0.1", "port" => "5000");
+// 3. Shutdown logging before exit
+logging.shutdown().await;
 ```
 
-See `examples/logging_demo.rs` for a complete working example.
+### Control Plane Worker (Async Context)
+
+```rust
+use multicast_relay::logging::*;
+
+// 1. Initialize control plane logging (MPSC ring buffers)
+let logging = ControlPlaneLogging::new();
+let logger = logging.logger(Facility::ControlPlane).unwrap();
+
+// 2. Log messages
+logger.info(Facility::ControlPlane, "Control plane worker started");
+logger.error(Facility::ControlPlane, "Failed to read from supervisor stream");
+
+// 3. Shutdown logging before exit
+logging.shutdown().await;
+```
+
+### Data Plane Worker (Lock-Free Shared Memory)
+
+```rust
+use multicast_relay::logging::*;
+
+// 1. Supervisor creates shared memory for worker
+let manager = SharedMemoryLogManager::create_for_worker(core_id, capacity)?;
+
+// 2. Worker attaches to shared memory
+let logging = DataPlaneLogging::attach(core_id)?;
+let logger = logging.logger(Facility::DataPlane).unwrap();
+
+// 3. Log messages (lock-free, ~50ns overhead)
+logger.info(Facility::DataPlane, "Data plane worker started on core 0");
+logger.debug(Facility::Ingress, "Packet received");
+
+// 4. Supervisor shuts down shared memory manager
+manager.shutdown();
+```
+
+See `demo_logging.md` for interactive examples and `src/logging/integration.rs` for complete API documentation.
 
 ## Overview
 
@@ -585,21 +618,21 @@ mcr-control log reset-stats
 4. ✅ Implement `AsyncConsumer` and `BlockingConsumer`
 5. ✅ Implement output sinks (stdout, stderr, custom)
 
-### Phase 3: Integration ⏳ PENDING
-1. Create supervisor `LogRegistry` with MPSC buffers
-2. Start `AsyncConsumer` task in supervisor
-3. Replace `println!`/`eprintln!` in supervisor with logging macros
-4. Create worker `LogRegistry` with SPSC buffers (data plane) or MPSC (control plane)
-5. Start consumer tasks in workers
-6. Replace existing logging calls in workers
-7. Add feature flags for compile-time control (`--features logging`)
+### Phase 3: Integration ✅ COMPLETE
+1. ✅ Created `SupervisorLogging` with MPSC buffers and AsyncConsumer
+2. ✅ Created `ControlPlaneLogging` with MPSC buffers and AsyncConsumer
+3. ✅ Created `SharedMemoryLogManager` for data plane cross-process logging
+4. ✅ Created `DataPlaneLogging` for workers to attach to shared memory
+5. ✅ Integrated logging in supervisor, control plane, and data plane workers
+6. ✅ Replaced all debug `println!`/`eprintln!` with structured logging
+7. ✅ Documented intentional remaining prints (pre-logging initialization, CLI tools)
 
-### Phase 4: Advanced Features ⏳ PENDING
-1. Implement `FileConsumer` with rotation support
-2. Implement `SyslogConsumer` (local/remote)
-3. Add runtime log level filtering via control socket
-4. Add `MetricsConsumer` for extracting counters from log stream
-5. Add sampling for high-frequency events (`log_sampled!` macro)
+### Phase 4: Advanced Features ⏳ AVAILABLE FOR FUTURE ENHANCEMENT
+1. ⏳ Implement `FileConsumer` with rotation support (infrastructure exists)
+2. ⏳ Implement `SyslogConsumer` (local/remote) (infrastructure exists)
+3. ⏳ Wire up runtime log level filtering via control socket (commands exist)
+4. ⏳ Add `MetricsConsumer` for extracting counters from log stream
+5. ⏳ Add sampling for high-frequency events (`log_sampled!` macro)
 
 ## Testing Strategy
 

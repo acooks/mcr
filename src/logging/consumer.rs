@@ -239,10 +239,7 @@ pub struct SharedBlockingConsumer {
 impl SharedBlockingConsumer {
     /// Create a new shared blocking consumer
     pub fn new(ringbuffers: Vec<Arc<SharedSPSCRingBuffer>>, sink: Box<dyn LogSink>) -> Self {
-        Self {
-            ringbuffers,
-            sink,
-        }
+        Self { ringbuffers, sink }
     }
 
     /// Process once (read all available entries from all buffers)
@@ -371,8 +368,16 @@ mod tests {
         let buffer = Arc::new(buffer);
 
         // Write some entries
-        buffer.write(LogEntry::new(Severity::Info, Facility::Test, "Shared message 1"));
-        buffer.write(LogEntry::new(Severity::Error, Facility::Test, "Shared message 2"));
+        buffer.write(LogEntry::new(
+            Severity::Info,
+            Facility::Test,
+            "Shared message 1",
+        ));
+        buffer.write(LogEntry::new(
+            Severity::Error,
+            Facility::Test,
+            "Shared message 2",
+        ));
 
         let (sink, entries) = TestSink::new();
         let mut consumer = SharedBlockingConsumer::new(vec![Arc::clone(&buffer)], Box::new(sink));
