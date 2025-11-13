@@ -52,7 +52,9 @@ pub fn handle_supervisor_command(
     master_rules: &Mutex<HashMap<String, ForwardingRule>>,
     worker_map: &Mutex<HashMap<u32, crate::WorkerInfo>>,
     global_min_level: &std::sync::atomic::AtomicU8,
-    facility_min_levels: &std::sync::RwLock<HashMap<crate::logging::Facility, crate::logging::Severity>>,
+    facility_min_levels: &std::sync::RwLock<
+        HashMap<crate::logging::Facility, crate::logging::Severity>,
+    >,
 ) -> (crate::Response, CommandAction) {
     use crate::{Response, SupervisorCommand};
     use std::sync::atomic::Ordering;
@@ -93,9 +95,8 @@ pub fn handle_supervisor_command(
             let removed = master_rules.lock().unwrap().remove(&rule_id).is_some();
             if removed {
                 let response = Response::Success(format!("Rule {} removed", rule_id.clone()));
-                let action = CommandAction::BroadcastToDataPlane(RelayCommand::RemoveRule {
-                    rule_id,
-                });
+                let action =
+                    CommandAction::BroadcastToDataPlane(RelayCommand::RemoveRule { rule_id });
                 (response, action)
             } else {
                 (
@@ -106,18 +107,28 @@ pub fn handle_supervisor_command(
         }
 
         SupervisorCommand::ListRules => {
-            let rules = master_rules
-                .lock()
-                .unwrap()
-                .values()
-                .cloned()
-                .collect();
+            let rules = master_rules.lock().unwrap().values().cloned().collect();
             (Response::Rules(rules), CommandAction::None)
         }
 
         SupervisorCommand::GetStats => {
-            // TODO: Implement stats aggregation from workers
-            (Response::Stats(vec![]), CommandAction::None)
+            // Return FlowStats for each configured rule
+            // TODO: In the future, query data plane workers for actual stats via worker communication
+            // Currently returns configured rules with zero counters as a placeholder
+            let stats: Vec<crate::FlowStats> = master_rules
+                .lock()
+                .unwrap()
+                .values()
+                .map(|rule| crate::FlowStats {
+                    input_group: rule.input_group,
+                    input_port: rule.input_port,
+                    packets_relayed: 0,
+                    bytes_relayed: 0,
+                    packets_per_second: 0.0,
+                    bits_per_second: 0.0,
+                })
+                .collect();
+            (Response::Stats(stats), CommandAction::None)
         }
 
         SupervisorCommand::SetGlobalLogLevel { level } => {
@@ -759,7 +770,8 @@ mod tests {
                 core_id: None,
             },
         );
-        let global_min_level = std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
+        let global_min_level =
+            std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
         let facility_min_levels = std::sync::RwLock::new(HashMap::new());
 
         let (response, action) = handle_supervisor_command(
@@ -778,7 +790,8 @@ mod tests {
     fn test_handle_add_rule() {
         let master_rules = Mutex::new(HashMap::new());
         let worker_map = Mutex::new(HashMap::new());
-        let global_min_level = std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
+        let global_min_level =
+            std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
         let facility_min_levels = std::sync::RwLock::new(HashMap::new());
 
         let (response, action) = handle_supervisor_command(
@@ -816,7 +829,8 @@ mod tests {
             },
         );
         let worker_map = Mutex::new(HashMap::new());
-        let global_min_level = std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
+        let global_min_level =
+            std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
         let facility_min_levels = std::sync::RwLock::new(HashMap::new());
 
         let (response, action) = handle_supervisor_command(
@@ -838,7 +852,8 @@ mod tests {
     fn test_handle_remove_rule_not_found() {
         let master_rules = Mutex::new(HashMap::new());
         let worker_map = Mutex::new(HashMap::new());
-        let global_min_level = std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
+        let global_min_level =
+            std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
         let facility_min_levels = std::sync::RwLock::new(HashMap::new());
 
         let (response, action) = handle_supervisor_command(
@@ -870,7 +885,8 @@ mod tests {
             },
         );
         let worker_map = Mutex::new(HashMap::new());
-        let global_min_level = std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
+        let global_min_level =
+            std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
         let facility_min_levels = std::sync::RwLock::new(HashMap::new());
 
         let (response, action) = handle_supervisor_command(
@@ -889,7 +905,8 @@ mod tests {
     fn test_handle_get_stats() {
         let master_rules = Mutex::new(HashMap::new());
         let worker_map = Mutex::new(HashMap::new());
-        let global_min_level = std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
+        let global_min_level =
+            std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
         let facility_min_levels = std::sync::RwLock::new(HashMap::new());
 
         let (response, action) = handle_supervisor_command(
@@ -910,7 +927,8 @@ mod tests {
 
         let master_rules = Mutex::new(HashMap::new());
         let worker_map = Mutex::new(HashMap::new());
-        let global_min_level = std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
+        let global_min_level =
+            std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
         let facility_min_levels = std::sync::RwLock::new(HashMap::new());
 
         let (response, action) = handle_supervisor_command(
@@ -935,7 +953,8 @@ mod tests {
     fn test_handle_set_facility_log_level() {
         let master_rules = Mutex::new(HashMap::new());
         let worker_map = Mutex::new(HashMap::new());
-        let global_min_level = std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
+        let global_min_level =
+            std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
         let facility_min_levels = std::sync::RwLock::new(HashMap::new());
 
         let (response, action) = handle_supervisor_command(
@@ -964,12 +983,13 @@ mod tests {
     fn test_handle_get_log_levels() {
         let master_rules = Mutex::new(HashMap::new());
         let worker_map = Mutex::new(HashMap::new());
-        let global_min_level = std::sync::atomic::AtomicU8::new(crate::logging::Severity::Warning as u8);
+        let global_min_level =
+            std::sync::atomic::AtomicU8::new(crate::logging::Severity::Warning as u8);
         let facility_min_levels = std::sync::RwLock::new(HashMap::new());
-        facility_min_levels
-            .write()
-            .unwrap()
-            .insert(crate::logging::Facility::Ingress, crate::logging::Severity::Debug);
+        facility_min_levels.write().unwrap().insert(
+            crate::logging::Facility::Ingress,
+            crate::logging::Severity::Debug,
+        );
 
         let (response, action) = handle_supervisor_command(
             crate::SupervisorCommand::GetLogLevels,
