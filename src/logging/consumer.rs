@@ -363,4 +363,69 @@ mod tests {
         assert!(entries[0].contains("Message 1"));
         assert!(entries[1].contains("Message 2"));
     }
+
+    #[test]
+    fn test_shared_blocking_consumer() {
+        // Create shared memory ring buffer
+        let buffer = SharedSPSCRingBuffer::create("/test_shared_consumer", 16, 0).unwrap();
+        let buffer = Arc::new(buffer);
+
+        // Write some entries
+        buffer.write(LogEntry::new(Severity::Info, Facility::Test, "Shared message 1"));
+        buffer.write(LogEntry::new(Severity::Error, Facility::Test, "Shared message 2"));
+
+        let (sink, entries) = TestSink::new();
+        let mut consumer = SharedBlockingConsumer::new(vec![Arc::clone(&buffer)], Box::new(sink));
+
+        // Process entries
+        consumer.process_once();
+
+        // Check entries were consumed
+        let entries = entries.lock().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(entries[0].contains("Shared message 1"));
+        assert!(entries[1].contains("Shared message 2"));
+    }
+
+    #[test]
+    fn test_stdout_sink() {
+        let mut sink = StdoutSink::new();
+        let entry = LogEntry::new(Severity::Info, Facility::Test, "Test stdout");
+
+        // Just ensure it doesn't crash - we can't easily capture stdout in tests
+        sink.write_entry(&entry);
+        sink.flush();
+    }
+
+    #[test]
+    fn test_stderr_sink() {
+        let mut sink = StderrSink::new();
+        let entry = LogEntry::new(Severity::Error, Facility::Test, "Test stderr");
+
+        // Just ensure it doesn't crash - we can't easily capture stderr in tests
+        sink.write_entry(&entry);
+        sink.flush();
+    }
+
+    #[test]
+    fn test_consumer_convenience_constructors() {
+        let ringbuffer = Arc::new(SPSCRingBuffer::new(16, 0));
+
+        // Test stdout constructor
+        let _consumer = BlockingConsumer::stdout(vec![(Facility::Test, Arc::clone(&ringbuffer))]);
+
+        // Test stderr constructor
+        let _consumer = BlockingConsumer::stderr(vec![(Facility::Test, ringbuffer)]);
+    }
+
+    #[tokio::test]
+    async fn test_async_consumer_constructors() {
+        let ringbuffer = Arc::new(MPSCRingBuffer::new(16));
+
+        // Test stdout constructor
+        let _consumer = AsyncConsumer::stdout(vec![(Facility::Test, Arc::clone(&ringbuffer))]);
+
+        // Test stderr constructor
+        let _consumer = AsyncConsumer::stderr(vec![(Facility::Test, ringbuffer)]);
+    }
 }
