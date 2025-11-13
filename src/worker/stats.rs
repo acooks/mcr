@@ -36,10 +36,6 @@ pub async fn monitoring_task(shared_flows: SharedFlows, reporting_interval: u64)
 
         let flows = shared_flows.lock().await;
         for (rule, stats) in flows.values() {
-            println!(
-                "Flow {}: {} pps, {} bps",
-                rule.rule_id, stats.packets_per_second, stats.bits_per_second
-            );
             // Update Prometheus metrics with labels for each rule
             gauge!("packets_per_second", "rule_id" => rule.rule_id.clone())
                 .set(stats.packets_per_second);

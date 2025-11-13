@@ -138,12 +138,22 @@ impl<T: AsyncWrite + Unpin> UnixSocketRelayCommandSender<T> {
 
 // --- Worker Entrypoints ---
 
-/// Generic control plane runner for testing purposes.
+/// Generic control plane runner for testing purposes (without logging).
 pub async fn run_control_plane_generic<S: AsyncRead + AsyncWrite + Unpin>(
     supervisor_stream: S,
     request_stream: UnixStream,
 ) -> Result<()> {
     let control_plane = ControlPlane::new(supervisor_stream, request_stream);
+    control_plane.run().await
+}
+
+/// Generic control plane runner with logger support.
+pub async fn run_control_plane_generic_with_logger<S: AsyncRead + AsyncWrite + Unpin>(
+    supervisor_stream: S,
+    request_stream: UnixStream,
+    logger: Logger,
+) -> Result<()> {
+    let control_plane = ControlPlane::new_with_logger(supervisor_stream, request_stream, logger);
     control_plane.run().await
 }
 
@@ -155,6 +165,15 @@ pub async fn run_control_plane(config: ControlPlaneConfig) -> Result<()> {
     );
 
     drop_privileges(Uid::from_raw(config.uid), Gid::from_raw(config.gid), None)?;
+
+    // Initialize logging system (MPSC ring buffers with async consumer)
+    use crate::logging::ControlPlaneLogging;
+    let logging = ControlPlaneLogging::new();
+    let logger = logging
+        .logger(Facility::ControlPlane)
+        .ok_or_else(|| anyhow::anyhow!("Failed to get logger for ControlPlane facility"))?;
+
+    logger.info(Facility::ControlPlane, "Control plane worker started");
 
     // Get FD 3 from supervisor and set it to non-blocking before wrapping in tokio UnixStream
     let supervisor_sock = unsafe {
@@ -174,7 +193,14 @@ pub async fn run_control_plane(config: ControlPlaneConfig) -> Result<()> {
 
     // Control plane no longer needs a separate relay stream connection
     // All communication happens via supervisor_sock (FD 3)
-    run_control_plane_generic(supervisor_sock, request_stream).await
+    let result =
+        run_control_plane_generic_with_logger(supervisor_sock, request_stream, logger.clone())
+            .await;
+
+    // Shutdown logging before exiting
+    logging.shutdown().await;
+
+    result
 }
 
 // --- Worker Lifecycle Abstraction for Testing ---
@@ -312,14 +338,29 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
         while let Some(Ok(bytes)) = framed.next().await {
             match serde_json::from_slice::<RelayCommand>(&bytes) {
                 Ok(command) => {
-                    logger_for_spawn.debug(Facility::DataPlane, &format!("Received command: {:?}", command));
+                    logger_for_spawn.debug(
+                        Facility::DataPlane,
+                        &format!("Received command: {:?}", command),
+                    );
                     match std_tx.send(command) {
                         Ok(_) => {
-                            logger_for_spawn.debug(Facility::DataPlane, "Command sent to data plane thread successfully");
+                            logger_for_spawn.debug(
+                                Facility::DataPlane,
+                                "Command sent to data plane thread successfully",
+                            );
                         }
                         Err(e) => {
-                            logger_for_spawn.error(Facility::DataPlane, &format!("FATAL: Failed to send command to data plane thread: {:?}", e));
-                            logger_for_spawn.error(Facility::DataPlane, "This means the ingress thread has exited or panicked");
+                            logger_for_spawn.error(
+                                Facility::DataPlane,
+                                &format!(
+                                    "FATAL: Failed to send command to data plane thread: {:?}",
+                                    e
+                                ),
+                            );
+                            logger_for_spawn.error(
+                                Facility::DataPlane,
+                                "This means the ingress thread has exited or panicked",
+                            );
                             break;
                         }
                     }
@@ -335,15 +376,24 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
                     });
                 }
                 Err(e) => {
-                    logger_for_spawn.error(Facility::DataPlane, &format!("Failed to deserialize RelayCommand: {}", e));
+                    logger_for_spawn.error(
+                        Facility::DataPlane,
+                        &format!("Failed to deserialize RelayCommand: {}", e),
+                    );
                 }
             }
         }
 
         // Stream closed - supervisor has exited, send shutdown command to data plane
-        logger_for_spawn.info(Facility::DataPlane, "Supervisor stream closed, sending shutdown to data plane");
+        logger_for_spawn.info(
+            Facility::DataPlane,
+            "Supervisor stream closed, sending shutdown to data plane",
+        );
         if let Err(e) = std_tx.send(RelayCommand::Shutdown) {
-            logger_for_spawn.error(Facility::DataPlane, &format!("Failed to send shutdown command: {:?}", e));
+            logger_for_spawn.error(
+                Facility::DataPlane,
+                &format!("Failed to send shutdown command: {:?}", e),
+            );
         } else {
             // Signal eventfd to wake up ingress loop to process shutdown
             let event_fd = event_fd_for_writer;
@@ -363,7 +413,9 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
     // Creating a new thread ensures it inherits the ambient capabilities.
     let handle = std::thread::Builder::new()
         .name("data_plane".to_string())
-        .spawn(move || lifecycle.run_data_plane_task(config, std_rx, event_fd, logger_for_dp_thread))
+        .spawn(move || {
+            lifecycle.run_data_plane_task(config, std_rx, event_fd, logger_for_dp_thread)
+        })
         .context("Failed to spawn data plane thread")?;
 
     // Wait for the data plane thread in a blocking task so the async runtime can continue

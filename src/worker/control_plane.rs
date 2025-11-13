@@ -7,6 +7,7 @@ use tokio::net::UnixStream;
 use tokio::sync::Mutex;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
+use crate::logging::{Facility, Logger};
 use crate::{FlowStats, ForwardingRule, Response, SupervisorCommand};
 
 type SharedFlows = Arc<Mutex<HashMap<String, (ForwardingRule, FlowStats)>>>;
@@ -59,6 +60,7 @@ pub struct ControlPlane<S> {
     supervisor_stream: S,
     request_stream: UnixStream,
     shared_flows: SharedFlows,
+    logger: Option<Logger>,
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> ControlPlane<S> {
@@ -68,6 +70,21 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ControlPlane<S> {
             supervisor_stream,
             request_stream,
             shared_flows,
+            logger: None,
+        }
+    }
+
+    pub fn new_with_logger(
+        supervisor_stream: S,
+        request_stream: UnixStream,
+        logger: Logger,
+    ) -> Self {
+        let shared_flows = Arc::new(Mutex::new(HashMap::new()));
+        Self {
+            supervisor_stream,
+            request_stream,
+            shared_flows,
+            logger: Some(logger),
         }
     }
 
@@ -76,6 +93,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> ControlPlane<S> {
             self.supervisor_stream,
             self.request_stream,
             self.shared_flows,
+            self.logger,
         )
         .await
     }
@@ -85,6 +103,7 @@ pub async fn control_plane_task<S: AsyncRead + AsyncWrite + Unpin>(
     mut supervisor_stream: S,
     request_stream: UnixStream,
     shared_flows: SharedFlows,
+    logger: Option<Logger>,
 ) -> Result<()> {
     let mut framed = Framed::new(request_stream, LengthDelimitedCodec::new());
 
@@ -97,7 +116,9 @@ pub async fn control_plane_task<S: AsyncRead + AsyncWrite + Unpin>(
                 match read_result {
                     Ok(0) => {
                         // Stream closed
-                        println!("[Worker] Supervisor stream closed.");
+                        if let Some(ref log) = logger {
+                            log.info(Facility::ControlPlane, "Supervisor stream closed");
+                        }
                         break;
                     }
                     Ok(n) => {
@@ -111,12 +132,16 @@ pub async fn control_plane_task<S: AsyncRead + AsyncWrite + Unpin>(
                         };
                         let response_bytes = serde_json::to_vec(&response).unwrap();
                         if supervisor_stream.write_all(&response_bytes).await.is_err() {
-                            eprintln!("[Worker] Failed to write response to supervisor.");
+                            if let Some(ref log) = logger {
+                                log.error(Facility::ControlPlane, "Failed to write response to supervisor");
+                            }
                             break;
                         }
                     }
                     Err(e) => {
-                        eprintln!("[Worker] Failed to read from supervisor stream: {}", e);
+                        if let Some(ref log) = logger {
+                            log.error(Facility::ControlPlane, &format!("Failed to read from supervisor stream: {}", e));
+                        }
                         break;
                     }
                 }

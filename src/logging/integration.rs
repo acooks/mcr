@@ -4,8 +4,8 @@
 //! the supervisor and worker processes.
 
 use crate::logging::{
-    AsyncConsumer, Facility, LogRegistry, Logger, SharedBlockingConsumer, SharedSPSCRingBuffer,
-    StdoutSink, shm_id_for_facility,
+    shm_id_for_facility, AsyncConsumer, Facility, LogRegistry, Logger, SharedBlockingConsumer,
+    SharedSPSCRingBuffer, StdoutSink,
 };
 use std::collections::HashMap;
 use std::sync::{atomic::AtomicBool, Arc};
@@ -19,6 +19,12 @@ pub struct SupervisorLogging {
     registry: LogRegistry,
     consumer_handle: Option<tokio::task::JoinHandle<()>>,
     consumer_stop: Arc<AtomicBool>,
+}
+
+impl Default for SupervisorLogging {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SupervisorLogging {
@@ -201,6 +207,12 @@ pub struct ControlPlaneLogging {
     registry: LogRegistry,
     consumer_handle: Option<tokio::task::JoinHandle<()>>,
     running: Arc<AtomicBool>,
+}
+
+impl Default for ControlPlaneLogging {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ControlPlaneLogging {
