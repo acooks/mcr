@@ -21,12 +21,12 @@ pub fn run_data_plane(
     #[cfg(feature = "lock_free_buffer_pool")]
     {
         logger.info(Facility::DataPlane, "Using Lock-Free Backend");
-        lock_free_backend::run(config, command_rx, event_fd)
+        lock_free_backend::run(config, command_rx, event_fd, logger)
     }
     #[cfg(not(feature = "lock_free_buffer_pool"))]
     {
         logger.info(Facility::DataPlane, "Using Mutex Backend");
-        mutex_backend::run(config, command_rx, event_fd)
+        mutex_backend::run(config, command_rx, event_fd, logger)
     }
 }
 
@@ -41,6 +41,7 @@ mod mutex_backend {
     use std::thread;
     use std::time::Duration;
 
+    use crate::logging::Logger;
     use crate::worker::{
         buffer_pool::BufferPool,
         egress::{EgressConfig, EgressLoop, EgressPacket},
@@ -52,6 +53,7 @@ mod mutex_backend {
         config: DataPlaneConfig,
         command_rx: mpsc::Receiver<RelayCommand>,
         event_fd: nix::sys::eventfd::EventFd,
+        logger: Logger,
     ) -> Result<()> {
         let buffer_pool_small = std::env::var("MCR_BUFFER_POOL_SMALL")
             .ok()
@@ -93,6 +95,7 @@ mod mutex_backend {
             let interface_name = interface_name.clone();
             let egress_tx = egress_tx.clone();
             let buffer_pool_for_ingress = buffer_pool.clone();
+            let ingress_logger = logger.clone();
             thread::Builder::new()
                 .name("ingress".to_string())
                 .spawn(move || -> Result<()> {
@@ -103,6 +106,7 @@ mod mutex_backend {
                         Some(egress_tx),
                         command_rx,
                         event_fd,
+                        ingress_logger,
                     )?;
                     ingress.run()
                 })
@@ -171,6 +175,7 @@ mod lock_free_backend {
     use std::thread;
     use std::time::Duration;
 
+    use crate::logging::Logger;
     use crate::worker::{
         buffer_pool::BufferPool,
         egress::{EgressConfig, EgressLoop, EgressWorkItem},
@@ -182,6 +187,7 @@ mod lock_free_backend {
         config: DataPlaneConfig,
         command_rx: mpsc::Receiver<RelayCommand>,
         event_fd: nix::sys::eventfd::EventFd,
+        logger: Logger,
     ) -> Result<()> {
         let buffer_pool_small = std::env::var("MCR_BUFFER_POOL_SMALL")
             .ok()
@@ -221,6 +227,7 @@ mod lock_free_backend {
             let interface_name = interface_name.clone();
             let egress_queue = egress_queue.clone();
             let buffer_pool_for_ingress = buffer_pool.clone();
+            let ingress_logger = logger.clone();
             thread::Builder::new()
                 .name("ingress".to_string())
                 .spawn(move || -> Result<()> {
@@ -231,6 +238,7 @@ mod lock_free_backend {
                         Some(egress_queue),
                         command_rx,
                         event_fd,
+                        ingress_logger,
                     )?;
                     ingress.run()
                 })

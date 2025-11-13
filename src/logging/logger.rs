@@ -74,10 +74,10 @@ impl Logger {
     /// shared memory and the supervisor reads. Log level filtering is disabled
     /// in this mode (all messages are written).
     pub fn from_shared(ringbuffer: Arc<SharedSPSCRingBuffer>) -> Self {
-        // For cross-process logging, use Debug (lowest filtering)
+        // For cross-process logging, use Trace (lowest filtering)
         // to ensure all messages are written to shared memory.
         // The supervisor will handle filtering when reading.
-        let global_min_level = Arc::new(AtomicU8::new(Severity::Debug as u8));
+        let global_min_level = Arc::new(AtomicU8::new(Severity::Trace as u8));
         let facility_min_levels = Arc::new(RwLock::new(std::collections::HashMap::new()));
 
         Self {
@@ -182,6 +182,12 @@ impl Logger {
     #[inline]
     pub fn debug(&self, facility: Facility, message: &str) {
         self.log(Severity::Debug, facility, message);
+    }
+
+    /// Log with trace severity
+    #[inline]
+    pub fn trace(&self, facility: Facility, message: &str) {
+        self.log(Severity::Trace, facility, message);
     }
 }
 
@@ -465,6 +471,7 @@ mod tests {
         logger.notice(Facility::Test, "Notice");
         logger.info(Facility::Test, "Info");
         logger.debug(Facility::Test, "Debug");
+        logger.trace(Facility::Test, "Trace");
     }
 
     #[test]

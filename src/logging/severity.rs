@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Log severity levels (0-7, lower is more severe)
+/// Log severity levels (0-8, lower is more severe)
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Severity {
@@ -22,10 +22,12 @@ pub enum Severity {
     Info = 6,
     /// Debug-level messages (verbose packet traces)
     Debug = 7,
+    /// Trace-level messages (per-packet events, very verbose)
+    Trace = 8,
 }
 
 impl Severity {
-    /// Get severity level as u8 (0-7)
+    /// Get severity level as u8 (0-8)
     #[inline]
     pub const fn as_u8(self) -> u8 {
         self as u8
@@ -42,6 +44,7 @@ impl Severity {
             Severity::Notice => "NOTICE",
             Severity::Info => "INFO",
             Severity::Debug => "DEBUG",
+            Severity::Trace => "TRACE",
         }
     }
 
@@ -56,6 +59,7 @@ impl Severity {
             5 => Some(Severity::Notice),
             6 => Some(Severity::Info),
             7 => Some(Severity::Debug),
+            8 => Some(Severity::Trace),
             _ => None,
         }
     }
@@ -80,24 +84,28 @@ mod tests {
         assert!(Severity::Warning < Severity::Notice);
         assert!(Severity::Notice < Severity::Info);
         assert!(Severity::Info < Severity::Debug);
+        assert!(Severity::Debug < Severity::Trace);
     }
 
     #[test]
     fn test_severity_values() {
         assert_eq!(Severity::Emergency.as_u8(), 0);
         assert_eq!(Severity::Debug.as_u8(), 7);
+        assert_eq!(Severity::Trace.as_u8(), 8);
     }
 
     #[test]
     fn test_severity_from_u8() {
         assert_eq!(Severity::from_u8(0), Some(Severity::Emergency));
         assert_eq!(Severity::from_u8(7), Some(Severity::Debug));
-        assert_eq!(Severity::from_u8(8), None);
+        assert_eq!(Severity::from_u8(8), Some(Severity::Trace));
+        assert_eq!(Severity::from_u8(9), None);
     }
 
     #[test]
     fn test_severity_display() {
         assert_eq!(format!("{}", Severity::Emergency), "EMERGENCY");
         assert_eq!(format!("{}", Severity::Info), "INFO");
+        assert_eq!(format!("{}", Severity::Trace), "TRACE");
     }
 }

@@ -9,6 +9,7 @@ use std::ops::{Deref, DerefMut};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::sync::{mpsc, Arc};
 
+use crate::logging::{Facility, Logger};
 use crate::worker::packet_parser::parse_packet;
 use crate::{ForwardingRule, RelayCommand};
 
@@ -144,6 +145,8 @@ pub struct IngressLoop<P, C> {
     egress_tx: Option<C>,
     command_rx: mpsc::Receiver<RelayCommand>,
     command_event_fd: OwnedFd,
+    logger: Logger,
+    first_packet_logged: bool,
 }
 
 // Common implementation for both backends
@@ -160,11 +163,33 @@ where
         self.helper_sockets.entry(helper_key).or_insert_with(|| {
             setup_helper_socket(&rule.input_interface, rule.input_group).unwrap()
         });
+        self.logger.info(
+            Facility::Ingress,
+            &format!(
+                "Rule added: {}:{} -> {} outputs (total rules: {})",
+                rule.input_group,
+                rule.input_port,
+                rule.outputs.len(),
+                self.rules.len()
+            ),
+        );
         Ok(())
     }
 
     pub fn remove_rule(&mut self, rule_id: &str) -> Result<()> {
+        let before_count = self.rules.len();
         self.rules.retain(|_key, rule| rule.rule_id != rule_id);
+        let removed = before_count - self.rules.len();
+        if removed > 0 {
+            self.logger.info(
+                Facility::Ingress,
+                &format!(
+                    "Rule removed: {} (total rules: {})",
+                    rule_id,
+                    self.rules.len()
+                ),
+            );
+        }
         Ok(())
     }
 
@@ -197,18 +222,63 @@ where
     }
 
     fn process_packet(&mut self, packet_data: &[u8]) -> Result<()> {
+        self.stats.packets_received += 1;
+        self.stats.bytes_received += packet_data.len() as u64;
+
+        // Log first packet received
+        if !self.first_packet_logged {
+            self.logger.debug(Facility::Ingress, "First packet received");
+            self.first_packet_logged = true;
+        }
+
+        // Periodic stats logging (every 10,000 packets)
+        if self.stats.packets_received % 10000 == 0 {
+            let msg = format!(
+                "Stats: rx={} matched={} parse_err={} no_match={} buf_exhausted={} egress_err={}",
+                self.stats.packets_received,
+                self.stats.packets_matched,
+                self.stats.parse_errors,
+                self.stats.no_rule_match,
+                self.stats.buffer_exhaustion,
+                self.stats.egress_channel_errors
+            );
+            self.logger.debug(Facility::Ingress, &msg);
+        }
+
         let headers = match parse_packet(packet_data, false) {
             Ok(h) => h,
             Err(_) => {
                 self.stats.parse_errors += 1;
+                // Sample logging: log every 100th parse error
+                if self.stats.parse_errors % 100 == 0 {
+                    let msg = format!("Parse errors: {}", self.stats.parse_errors);
+                    self.logger.error(Facility::Ingress, &msg);
+                }
                 return Ok(());
             }
         };
+
+        self.logger.trace(
+            Facility::Ingress,
+            &format!(
+                "Packet: dst={}:{} len={}",
+                headers.ipv4.dst_ip, headers.udp.dst_port, packet_data.len()
+            ),
+        );
+
         let key = (headers.ipv4.dst_ip, headers.udp.dst_port);
         let rule = match self.rules.get(&key) {
             Some(r) => r.clone(),
             None => {
                 self.stats.no_rule_match += 1;
+                // Sample logging: log every 100th miss
+                if self.stats.no_rule_match % 100 == 0 {
+                    let msg = format!(
+                        "No rule match for {}:{} (total misses: {})",
+                        headers.ipv4.dst_ip, headers.udp.dst_port, self.stats.no_rule_match
+                    );
+                    self.logger.debug(Facility::Ingress, &msg);
+                }
                 return Ok(());
             }
         };
@@ -216,12 +286,21 @@ where
             return Ok(());
         }
 
+        self.stats.packets_matched += 1;
+
         if let Some(ref tx) = self.egress_tx {
             for output in &rule.outputs {
                 let mut buffer = match self.buffer_pool.allocate(headers.payload_len) {
                     Some(b) => b,
                     None => {
                         self.stats.buffer_exhaustion += 1;
+                        self.logger.critical(
+                            Facility::Ingress,
+                            &format!(
+                                "Buffer pool exhausted! Total exhaustions: {}",
+                                self.stats.buffer_exhaustion
+                            ),
+                        );
                         return Ok(());
                     }
                 };
@@ -234,8 +313,23 @@ where
                     output.interface.clone(),
                     SocketAddr::new(output.group.into(), output.port),
                 );
+                self.logger.trace(
+                    Facility::Ingress,
+                    &format!(
+                        "Forwarding to {}:{} via {}",
+                        output.group, output.port, output.interface
+                    ),
+                );
+                self.stats.egress_packets_sent += 1;
                 if tx.send(egress_item).is_err() {
                     self.stats.egress_channel_errors += 1;
+                    self.logger.error(
+                        Facility::Ingress,
+                        &format!(
+                            "Egress channel send failed! Total errors: {}",
+                            self.stats.egress_channel_errors
+                        ),
+                    );
                 }
             }
         }
@@ -311,7 +405,9 @@ impl IngressLoop<Arc<Mutex<MutexBufferPool>>, mpsc::Sender<EgressPacket>> {
         egress_tx: Option<mpsc::Sender<EgressPacket>>,
         command_rx: mpsc::Receiver<RelayCommand>,
         command_event_fd: EventFd,
+        logger: Logger,
     ) -> Result<Self> {
+        logger.info(Facility::Ingress, "Ingress loop starting");
         Ok(Self {
             af_packet_socket: setup_af_packet_socket(interface_name)?,
             ring: IoUring::new(config.queue_depth)?,
@@ -323,6 +419,8 @@ impl IngressLoop<Arc<Mutex<MutexBufferPool>>, mpsc::Sender<EgressPacket>> {
             egress_tx,
             command_rx,
             command_event_fd: command_event_fd.into(),
+            logger,
+            first_packet_logged: false,
         })
     }
 }
@@ -336,7 +434,9 @@ impl IngressLoop<Arc<LockFreeBufferPool>, Arc<SegQueue<EgressWorkItem>>> {
         egress_tx: Option<Arc<SegQueue<EgressWorkItem>>>,
         command_rx: mpsc::Receiver<RelayCommand>,
         command_event_fd: EventFd,
+        logger: Logger,
     ) -> Result<Self> {
+        logger.info(Facility::Ingress, "Ingress loop starting");
         Ok(Self {
             af_packet_socket: setup_af_packet_socket(interface_name)?,
             ring: IoUring::new(config.queue_depth)?,
@@ -348,6 +448,8 @@ impl IngressLoop<Arc<LockFreeBufferPool>, Arc<SegQueue<EgressWorkItem>>> {
             egress_tx,
             command_rx,
             command_event_fd: command_event_fd.into(),
+            logger,
+            first_packet_logged: false,
         })
     }
 }
