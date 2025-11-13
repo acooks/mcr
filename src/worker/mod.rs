@@ -341,8 +341,11 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
     );
 
     let logger_for_dp_thread = logger.clone();
-    let logger_for_spawn = logger;
+    let logger_for_spawn = logger.clone();
+    let logger = logger;
+    logger_for_spawn.debug(Facility::DataPlane, "Starting command bridge task");
     tokio::spawn(async move {
+        logger_for_spawn.debug(Facility::DataPlane, "Command bridge task started, waiting for commands");
         use futures::StreamExt;
         while let Some(Ok(bytes)) = framed.next().await {
             match serde_json::from_slice::<RelayCommand>(&bytes) {

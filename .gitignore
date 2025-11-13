@@ -12,3 +12,6 @@ target/tarpaulin/
 
 # Unsafe code tracking baseline (local development file)
 .unsafe_baseline
+
+# Test results
+test_results/

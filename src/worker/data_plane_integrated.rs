@@ -91,6 +91,7 @@ mod mutex_backend {
             .clone()
             .unwrap_or_else(|| "lo".to_string());
 
+        logger.debug(crate::logging::Facility::DataPlane, "Spawning ingress thread");
         let ingress_handle = {
             let interface_name = interface_name.clone();
             let egress_tx = egress_tx.clone();
@@ -112,7 +113,9 @@ mod mutex_backend {
                 })
                 .context("Failed to spawn ingress thread")?
         };
+        logger.debug(crate::logging::Facility::DataPlane, "Ingress thread spawned successfully");
 
+        logger.debug(crate::logging::Facility::DataPlane, "Spawning egress thread");
         let egress_handle = {
             let egress_logger = logger.clone();
             thread::Builder::new()
@@ -159,13 +162,21 @@ mod mutex_backend {
                 })
                 .context("Failed to spawn egress thread")?
         };
+        logger.debug(crate::logging::Facility::DataPlane, "Egress thread spawned successfully");
 
+        logger.info(crate::logging::Facility::DataPlane, "Waiting for ingress thread to exit");
         ingress_handle
             .join()
             .map_err(|e| anyhow::anyhow!("Ingress thread panicked: {:?}", e))??;
+        logger.info(crate::logging::Facility::DataPlane, "Ingress thread exited");
+
+        logger.info(crate::logging::Facility::DataPlane, "Waiting for egress thread to exit");
         egress_handle
             .join()
             .map_err(|e| anyhow::anyhow!("Egress thread panicked: {:?}", e))??;
+        logger.info(crate::logging::Facility::DataPlane, "Egress thread exited");
+
+        logger.info(crate::logging::Facility::DataPlane, "Data plane shutdown complete");
         Ok(())
     }
 }

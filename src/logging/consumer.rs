@@ -38,12 +38,14 @@ impl Default for StdoutSink {
 
 impl LogSink for StdoutSink {
     fn write_entry(&mut self, entry: &LogEntry) {
-        // Format: [SEVERITY] [Facility] message key1=value1 key2=value2
+        // Format: [TIMESTAMP] [SEVERITY] [Facility] message key1=value1 key2=value2
+        let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
         let kvs = entry.get_kvs();
         if kvs.is_empty() {
             let _ = writeln!(
                 self.stdout,
-                "[{:?}] [{}] {}",
+                "[{}] [{:?}] [{}] {}",
+                timestamp,
                 entry.severity,
                 entry.facility.as_str(),
                 entry.get_message()
@@ -52,7 +54,8 @@ impl LogSink for StdoutSink {
             let kv_str: Vec<String> = kvs.iter().map(|kv| format!("{:?}", kv)).collect();
             let _ = writeln!(
                 self.stdout,
-                "[{:?}] [{}] {} {}",
+                "[{}] [{:?}] [{}] {} {}",
+                timestamp,
                 entry.severity,
                 entry.facility.as_str(),
                 entry.get_message(),
@@ -87,11 +90,13 @@ impl Default for StderrSink {
 
 impl LogSink for StderrSink {
     fn write_entry(&mut self, entry: &LogEntry) {
+        let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
         let kvs = entry.get_kvs();
         if kvs.is_empty() {
             let _ = writeln!(
                 self.stderr,
-                "[{:?}] [{}] {}",
+                "[{}] [{:?}] [{}] {}",
+                timestamp,
                 entry.severity,
                 entry.facility.as_str(),
                 entry.get_message()
@@ -100,7 +105,8 @@ impl LogSink for StderrSink {
             let kv_str: Vec<String> = kvs.iter().map(|kv| format!("{:?}", kv)).collect();
             let _ = writeln!(
                 self.stderr,
-                "[{:?}] [{}] {} {}",
+                "[{}] [{:?}] [{}] {} {}",
+                timestamp,
                 entry.severity,
                 entry.facility.as_str(),
                 entry.get_message(),
