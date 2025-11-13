@@ -315,6 +315,24 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
                 }
             }
         }
+
+        // Stream closed - supervisor has exited, send shutdown command to data plane
+        println!("[DataPlane Worker] Supervisor stream closed, sending shutdown to data plane");
+        if let Err(e) = std_tx.send(RelayCommand::Shutdown) {
+            eprintln!(
+                "[DataPlane Worker] Failed to send shutdown command: {:?}",
+                e
+            );
+        } else {
+            // Signal eventfd to wake up ingress loop to process shutdown
+            let event_fd = event_fd_for_writer;
+            tokio::task::spawn_blocking(move || {
+                let value: u64 = 1;
+                unsafe {
+                    libc::write(event_fd, &value as *const u64 as *const libc::c_void, 8);
+                }
+            });
+        }
     });
 
     // The data plane task is synchronous and blocking.

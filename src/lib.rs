@@ -189,6 +189,7 @@ pub struct FlowStats {
 pub enum RelayCommand {
     AddRule(ForwardingRule),
     RemoveRule { rule_id: String },
+    Shutdown,
 }
 
 impl RelayCommand {
@@ -196,6 +197,7 @@ impl RelayCommand {
         match self {
             RelayCommand::AddRule(rule) => Some(rule.rule_id.clone()),
             RelayCommand::RemoveRule { rule_id } => Some(rule_id.clone()),
+            RelayCommand::Shutdown => None,
         }
     }
 }
