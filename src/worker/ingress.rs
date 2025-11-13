@@ -47,12 +47,7 @@ pub trait EgressChannel {
 
 /// Factory trait for creating egress items from buffers
 pub trait EgressItemFactory<B> {
-    fn new(
-        buffer: B,
-        payload_len: usize,
-        interface_name: String,
-        dest_addr: SocketAddr,
-    ) -> Self;
+    fn new(buffer: B, payload_len: usize, interface_name: String, dest_addr: SocketAddr) -> Self;
 }
 
 // --- Concrete implementations for the Mutex backend ---
@@ -275,7 +270,11 @@ where
             self.ring.submit_and_wait(1)?;
 
             // Collect completion queue entries to avoid borrow checker issues
-            let cqes: Vec<_> = self.ring.completion().map(|cqe| (cqe.user_data(), cqe.result())).collect();
+            let cqes: Vec<_> = self
+                .ring
+                .completion()
+                .map(|cqe| (cqe.user_data(), cqe.result()))
+                .collect();
 
             for (user_data, result) in cqes {
                 match user_data {

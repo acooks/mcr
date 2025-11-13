@@ -1,20 +1,20 @@
 //! Tier 3 Property-Based Tests: Packet Parser
-//! 
+//!
 //! These tests use the `proptest` framework to generate a wide variety of
 //! byte inputs to throw at the `packet_parser`. The goal is to test the parser's
 //! robustness against unexpected, malformed, or edge-case inputs that might not
 //! be covered by simple unit tests.
-//! 
+//!
 //! # Coverage
-//! 
+//!
 //! - **Arbitrary Byte Arrays:** The parser should gracefully handle any possible
 //!   byte array without panicking.
 //! - **Packet Structure Properties:** For byte arrays that are successfully parsed,
 //!   the resulting `Packet` struct should adhere to certain invariants (e.g.,
 //!   IP checksums should be valid if the packet is not fragmented).
-//! 
+//!
 //! # Methodology
-//! 
+//!
 //! The `proptest!` macro is used to define strategies for generating arbitrary
 //! `Vec<u8>` inputs. These inputs are then fed to the parsing functions.
 //! Assertions are made not about the specific output, but about the properties

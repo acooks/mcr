@@ -49,9 +49,9 @@ pub fn handle_worker_command(
         SupervisorCommand::SetFacilityLogLevel { .. } => Response::Error(
             "SetFacilityLogLevel command should be handled by the supervisor".to_string(),
         ),
-        SupervisorCommand::GetLogLevels => Response::Error(
-            "GetLogLevels command should be handled by the supervisor".to_string(),
-        ),
+        SupervisorCommand::GetLogLevels => {
+            Response::Error("GetLogLevels command should be handled by the supervisor".to_string())
+        }
     }
 }
 

@@ -576,10 +576,13 @@ mod tests {
         packet.extend_from_slice(&[0x00, 0x00]); // Checksum
         packet.extend_from_slice(&[192, 168, 1, 1]); // Src IP
         packet.extend_from_slice(&[239, 255, 0, 1]); // Dst IP
-        // Missing 4 bytes of IP options - packet is too short
+                                                     // Missing 4 bytes of IP options - packet is too short
 
         let result = parse_packet(&packet, false);
-        assert!(matches!(result, Err(ParseError::PacketTooShort { expected: 24, .. })));
+        assert!(matches!(
+            result,
+            Err(ParseError::PacketTooShort { expected: 24, .. })
+        ));
     }
 
     #[test]
@@ -623,7 +626,10 @@ mod tests {
         packet.extend_from_slice(&[0x1F, 0x90, 0x1F, 0x40, 0x00, 0x08]);
 
         let result = parse_packet(&packet, false);
-        assert!(matches!(result, Err(ParseError::PacketTooShort { expected: 8, .. })));
+        assert!(matches!(
+            result,
+            Err(ParseError::PacketTooShort { expected: 8, .. })
+        ));
     }
 
     #[test]

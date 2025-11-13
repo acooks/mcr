@@ -484,22 +484,22 @@ pub fn shm_id_for_facility(core_id: u8, facility: crate::logging::Facility) -> S
 #[repr(C, align(64))]
 struct SharedRingBufferHeader {
     write_seq: AtomicU64,
-    _pad1: [u8; 56],  // Cache line padding
+    _pad1: [u8; 56], // Cache line padding
     read_seq: AtomicU64,
-    _pad2: [u8; 56],  // Cache line padding
+    _pad2: [u8; 56], // Cache line padding
     overruns: AtomicU64,
     capacity: usize,
     core_id: u8,
-    _pad3: [u8; 47],  // Align to cache line
+    _pad3: [u8; 47], // Align to cache line
 }
 
 /// Calculate total shared memory size needed
 fn calc_shm_size(capacity: usize) -> usize {
-    use std::mem::{size_of, align_of};
+    use std::mem::{align_of, size_of};
     let header_size = size_of::<SharedRingBufferHeader>();
     let entry_size = size_of::<LogEntry>();
     let entry_align = align_of::<LogEntry>();
-    
+
     // Round up header to entry alignment
     let aligned_header = (header_size + entry_align - 1) & !(entry_align - 1);
     aligned_header + (capacity * entry_size)
@@ -511,13 +511,13 @@ fn calc_shm_size(capacity: usize) -> usize {
 /// the shared memory region, and workers attach to it.
 pub struct SharedSPSCRingBuffer {
     shm_name: String,
-    _shm_fd: OwnedFd,  // Keep fd alive, will auto-close on drop
+    _shm_fd: OwnedFd, // Keep fd alive, will auto-close on drop
     mapped_addr: *mut u8,
     mapped_size: usize,
     header: *mut SharedRingBufferHeader,
     entries: *mut UnsafeCell<LogEntry>,
     capacity: usize,
-    is_owner: bool,  // True if this process created the shm
+    is_owner: bool, // True if this process created the shm
 }
 
 // SAFETY: Same as SPSCRingBuffer - atomics + state machine guarantee safety
@@ -570,7 +570,7 @@ impl SharedSPSCRingBuffer {
             (*header).core_id = core_id;
 
             // Calculate entries pointer (after aligned header)
-            use std::mem::{size_of, align_of};
+            use std::mem::{align_of, size_of};
             let header_size = size_of::<SharedRingBufferHeader>();
             let entry_align = align_of::<LogEntry>();
             let aligned_header = (header_size + entry_align - 1) & !(entry_align - 1);
@@ -601,11 +601,7 @@ impl SharedSPSCRingBuffer {
     /// * `shm_id` - Shared memory ID to attach to
     pub fn attach(shm_id: &str) -> Result<Self, nix::Error> {
         // Open existing shared memory
-        let fd = shm_open(
-            shm_id,
-            OFlag::O_RDWR,
-            Mode::empty(),
-        )?;
+        let fd = shm_open(shm_id, OFlag::O_RDWR, Mode::empty())?;
 
         // First, map just the header to read the capacity
         let header_size = std::mem::size_of::<SharedRingBufferHeader>();
@@ -648,7 +644,7 @@ impl SharedSPSCRingBuffer {
             let header = mapped_addr as *mut SharedRingBufferHeader;
 
             // Calculate entries pointer
-            use std::mem::{size_of, align_of};
+            use std::mem::{align_of, size_of};
             let header_size = size_of::<SharedRingBufferHeader>();
             let entry_align = align_of::<LogEntry>();
             let aligned_header = (header_size + entry_align - 1) & !(entry_align - 1);
@@ -666,7 +662,7 @@ impl SharedSPSCRingBuffer {
             })
         }
     }
-    
+
     /// Write an entry (same algorithm as SPSCRingBuffer)
     pub fn write(&self, mut entry: LogEntry) {
         unsafe {
@@ -699,19 +695,19 @@ impl SharedSPSCRingBuffer {
             (*self.header).write_seq.fetch_add(1, Ordering::Release);
         }
     }
-    
+
     /// Read an entry (same algorithm as SPSCRingBuffer)
     pub fn read(&self) -> Option<LogEntry> {
         unsafe {
             let read_seq = (*self.header).read_seq.load(Ordering::Relaxed);
             let write_seq = (*self.header).write_seq.load(Ordering::Acquire);
-            
+
             if read_seq >= write_seq {
                 return None;
             }
-            
+
             let pos = (read_seq as usize) & (self.capacity - 1);
-            
+
             // Wait for READY state
             while (*self.entries.add(pos).cast::<LogEntry>())
                 .state
@@ -720,26 +716,26 @@ impl SharedSPSCRingBuffer {
             {
                 std::hint::spin_loop();
             }
-            
+
             // Read entry
             let entry = std::ptr::read(self.entries.add(pos).cast::<LogEntry>());
-            
+
             // Mark as consumed
             (*self.entries.add(pos).cast::<LogEntry>())
                 .state
                 .store(EMPTY, Ordering::Release);
-            
+
             (*self.header).read_seq.fetch_add(1, Ordering::Release);
-            
+
             Some(entry)
         }
     }
-    
+
     /// Get number of overruns
     pub fn overruns(&self) -> u64 {
         unsafe { (*self.header).overruns.load(Ordering::Relaxed) }
     }
-    
+
     /// Get shared memory ID for passing to workers
     pub fn shm_id(&self) -> &str {
         &self.shm_name

@@ -3,9 +3,7 @@
 //! This module provides helpers for integrating the logging system into
 //! the supervisor and worker processes.
 
-use crate::logging::{
-    AsyncConsumer, Facility, LogRegistry, Logger, SPSCRingBuffer, StdoutSink,
-};
+use crate::logging::{AsyncConsumer, Facility, LogRegistry, Logger, SPSCRingBuffer, StdoutSink};
 use std::sync::{atomic::AtomicBool, Arc};
 
 /// Logging system for the supervisor process
