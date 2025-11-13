@@ -661,64 +661,111 @@ impl SharedSPSCRingBuffer {
         }
     }
 
-    /// Write an entry (same algorithm as SPSCRingBuffer)
+    /// Write an entry (MPSC-safe with fetch_add reserve-then-write)
+    ///
+    /// This uses atomic fetch_add to reserve a slot before writing, making it
+    /// safe for multiple producers (MPSC) without locks.
     pub fn write(&self, mut entry: LogEntry) {
         unsafe {
-            let write_seq = (*self.header).write_seq.load(Ordering::Relaxed);
-            let read_seq = (*self.header).read_seq.load(Ordering::Acquire);
-
-            // Check if buffer is full
-            if write_seq - read_seq >= self.capacity as u64 {
-                (*self.header).overruns.fetch_add(1, Ordering::Relaxed);
-                return;
-            }
-
+            // STEP 1: Atomically reserve a slot
+            // fetch_add returns the PREVIOUS value, giving us exclusive ownership
+            // of this sequence number. The counter is incremented atomically,
+            // so the next thread gets a different, unique sequence number.
+            let write_seq = (*self.header).write_seq.fetch_add(1, Ordering::Relaxed);
             let pos = (write_seq as usize) & (self.capacity - 1);
 
-            // Fill entry metadata
+            // STEP 2: Wait for slot to be free (buffer might be full)
+            // If we've lapped the consumer (write_seq >= read_seq + capacity),
+            // we must wait for the consumer to advance.
+            const MAX_SPIN_ITERATIONS: u32 = 10_000;
+            let mut spin_count = 0;
+
+            loop {
+                let read_seq = (*self.header).read_seq.load(Ordering::Acquire);
+
+                // Check if the slot we reserved is available
+                if write_seq < read_seq + self.capacity as u64 {
+                    break; // Slot is free, proceed
+                }
+
+                // Buffer is full - implement spin timeout to prevent DoS
+                spin_count += 1;
+                if spin_count > MAX_SPIN_ITERATIONS {
+                    // Drop the log message instead of blocking forever
+                    (*self.header).overruns.fetch_add(1, Ordering::Relaxed);
+                    return;
+                }
+
+                std::hint::spin_loop();
+            }
+
+            // STEP 3: Fill entry metadata
             entry.sequence = write_seq;
             entry.core_id = (*self.header).core_id;
-
-            // Set state to WRITING
             entry.state.store(WRITING, Ordering::Relaxed);
 
-            // Write entry
+            // STEP 4: Write entry to our reserved slot
             std::ptr::write(self.entries.add(pos).cast::<LogEntry>(), entry);
 
-            // Mark as READY
+            // STEP 5: Signal completion with Release ordering
+            // This ensures all data writes above are visible to the consumer
+            // before it sees the READY state.
             (*self.entries.add(pos).cast::<LogEntry>())
                 .state
                 .store(READY, Ordering::Release);
-
-            (*self.header).write_seq.fetch_add(1, Ordering::Release);
         }
     }
 
-    /// Read an entry (same algorithm as SPSCRingBuffer)
+    /// Read an entry (consumer side of MPSC ringbuffer)
+    ///
+    /// This method is safe for a single consumer thread reading from multiple
+    /// producer threads. It uses proper Acquire ordering to synchronize with
+    /// the producers' Release stores.
     pub fn read(&self) -> Option<LogEntry> {
         unsafe {
             let read_seq = (*self.header).read_seq.load(Ordering::Relaxed);
             let write_seq = (*self.header).write_seq.load(Ordering::Acquire);
 
+            // Check if there are any entries to read
             if read_seq >= write_seq {
                 return None;
             }
 
             let pos = (read_seq as usize) & (self.capacity - 1);
 
-            // Wait for READY state
-            while (*self.entries.add(pos).cast::<LogEntry>())
-                .state
-                .load(Ordering::Acquire)
-                != READY
-            {
+            // Wait for READY state with timeout to prevent DoS
+            // A producer may have reserved this slot (via fetch_add) but not yet
+            // marked it READY. We must wait, but with a timeout to prevent blocking forever.
+            const MAX_SPIN_ITERATIONS: u32 = 10_000;
+            let mut spin_count = 0;
+
+            loop {
+                let state = (*self.entries.add(pos).cast::<LogEntry>())
+                    .state
+                    .load(Ordering::Acquire);
+
+                if state == READY {
+                    break; // Entry is ready to read
+                }
+
+                // Implement spin timeout to prevent DoS
+                spin_count += 1;
+                if spin_count > MAX_SPIN_ITERATIONS {
+                    // Producer took too long to write - treat as empty
+                    // This shouldn't happen in normal operation but prevents
+                    // a malicious or buggy producer from blocking the consumer forever
+                    return None;
+                }
+
                 std::hint::spin_loop();
             }
 
-            // Read entry
+            // Read entry with proper synchronization
             let entry = std::ptr::read(self.entries.add(pos).cast::<LogEntry>());
 
-            // Mark as consumed
+            // Mark as consumed with Release ordering
+            // This ensures the consumer's read is complete before the slot
+            // can be reused by producers
             (*self.entries.add(pos).cast::<LogEntry>())
                 .state
                 .store(EMPTY, Ordering::Release);
