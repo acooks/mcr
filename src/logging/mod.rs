@@ -1,8 +1,9 @@
 // High-performance lockless logging system for MCR
 //
-// Design documentation:
-// - design/LOGGING_DESIGN.md - Overall architecture
-// - design/RINGBUFFER_IMPLEMENTATION.md - Ring buffer details
+// Documentation:
+// - docs/LOGGING.md - User guide and quick start (START HERE)
+// - design/LOGGING_DESIGN.md - Technical design details
+// - design/RINGBUFFER_IMPLEMENTATION.md - Ring buffer implementation
 // - design/KERNEL_RINGBUFFER_ANALYSIS.md - Linux/FreeBSD analysis
 
 mod consumer;
