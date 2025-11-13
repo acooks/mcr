@@ -480,8 +480,7 @@ where
     let mut log_managers: HashMap<u32, SharedMemoryLogManager> = HashMap::new();
 
     for core_id in 0..num_cores as u32 {
-        // Create shared memory for this worker's logging
-        // Using buffer sizes from Facility::buffer_size()
+        // Create shared memory for this worker's logging (REQUIRED)
         let log_manager = SharedMemoryLogManager::create_for_worker(core_id as u8, 16384)
             .with_context(|| format!("Failed to create shared memory for worker {}", core_id))?;
         log_managers.insert(core_id, log_manager);
@@ -577,7 +576,7 @@ where
                         sleep(Duration::from_millis(*backoff)).await;
                         *backoff = (*backoff * 2).min(MAX_BACKOFF_MS);
                     }
-                    // Recreate shared memory for the restarting worker
+                    // Recreate shared memory for the restarting worker (REQUIRED)
                     // The old shared memory will be cleaned up when the old manager is dropped
                     let log_manager = SharedMemoryLogManager::create_for_worker(core_id as u8, 16384)
                         .with_context(|| format!("Failed to recreate shared memory for worker {}", core_id))?;
@@ -736,6 +735,15 @@ mod tests {
     use super::*;
     use std::time::Instant;
     use tempfile::tempdir;
+
+    /// Clean up leftover shared memory from previous test runs
+    fn cleanup_shared_memory() {
+        for core_id in 0..4 {
+            for facility in ["dataplane", "ingress", "egress", "bufferpool"] {
+                let _ = std::fs::remove_file(format!("/dev/shm/mcr_dp_c{}_{}", core_id, facility));
+            }
+        }
+    }
 
     // --- Test Helpers ---
 
@@ -1053,6 +1061,7 @@ mod tests {
     /// - **Tier:** 1 (Logic)
     #[tokio::test]
     async fn test_supervisor_restarts_cp_worker_with_backoff() {
+        cleanup_shared_memory();
         let cp_spawn_times = Arc::new(Mutex::new(Vec::new()));
         let cp_spawn_times_clone = cp_spawn_times.clone();
 
@@ -1105,6 +1114,7 @@ mod tests {
     /// - **Tier:** 1 (Logic)
     #[tokio::test]
     async fn test_supervisor_restarts_dp_worker_with_backoff() {
+        cleanup_shared_memory();
         let dp_spawn_times = Arc::new(Mutex::new(Vec::new()));
         let spawn_cp = move || async {
             let (stream, _) = UnixStream::pair()?;
@@ -1157,6 +1167,8 @@ mod tests {
     /// - **Tier:** 1 (Logic)
     #[tokio::test]
     async fn test_supervisor_spawns_workers() {
+        cleanup_shared_memory();
+
         let pids = Arc::new(Mutex::new(Vec::new()));
         let pids_clone = pids.clone();
         let spawn_cp = move || {
@@ -1224,6 +1236,7 @@ mod tests {
     /// - **Tier:** 1 (Logic)
     #[tokio::test]
     async fn test_supervisor_resets_backoff_on_graceful_exit() {
+        cleanup_shared_memory();
         let cp_spawn_times = Arc::new(Mutex::new(Vec::new()));
         let cp_spawn_times_clone = cp_spawn_times.clone();
         let cp_spawn_count = Arc::new(Mutex::new(0));

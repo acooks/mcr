@@ -4,6 +4,7 @@
 //! into a complete packet processing pipeline. It uses conditional compilation
 //! to select between a Mutex-based backend and a high-performance lock-free backend.
 
+use crate::logging::{Facility, Logger};
 use crate::{DataPlaneConfig, RelayCommand};
 use anyhow::Result;
 
@@ -15,15 +16,16 @@ pub fn run_data_plane(
     config: DataPlaneConfig,
     command_rx: std::sync::mpsc::Receiver<RelayCommand>,
     event_fd: nix::sys::eventfd::EventFd,
+    logger: Logger,
 ) -> Result<()> {
     #[cfg(feature = "lock_free_buffer_pool")]
     {
-        println!("[DataPlane] Using Lock-Free Backend");
+        logger.info(Facility::DataPlane, "Using Lock-Free Backend");
         lock_free_backend::run(config, command_rx, event_fd)
     }
     #[cfg(not(feature = "lock_free_buffer_pool"))]
     {
-        println!("[DataPlane] Using Mutex Backend");
+        logger.info(Facility::DataPlane, "Using Mutex Backend");
         mutex_backend::run(config, command_rx, event_fd)
     }
 }

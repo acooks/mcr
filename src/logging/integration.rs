@@ -264,6 +264,11 @@ mod tests {
 
     #[test]
     fn test_data_plane_logging() {
+        // Clean up any leftover shared memory from previous test runs
+        for facility in ["dataplane", "ingress", "egress", "bufferpool"] {
+            let _ = std::fs::remove_file(format!("/dev/shm/mcr_dp_c0_{}", facility));
+        }
+
         // Create shared memory (supervisor side)
         let manager = SharedMemoryLogManager::create_for_worker(0, 1024).unwrap();
 

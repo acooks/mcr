@@ -16,7 +16,7 @@ pub mod metrics;
 pub mod packet_parser;
 pub mod stats;
 
-use crate::logging::{DataPlaneLogging, Facility};
+use crate::logging::{DataPlaneLogging, Facility, Logger};
 use crate::{ControlPlaneConfig, DataPlaneConfig, RelayCommand};
 use control_plane::ControlPlane;
 use data_plane_integrated::run_data_plane as data_plane_task;
@@ -62,6 +62,7 @@ fn drop_privileges(uid: Uid, gid: Gid, caps_to_keep: Option<&HashSet<Capability>
     // In this case, we're not actually dropping privileges, so don't try to set capabilities
     // (which requires root privileges)
     if current_uid == uid && current_gid == gid {
+        // Note: Can't use logging here as we may not have initialized it yet
         eprintln!(
             "[Worker] Already running as uid={}, gid={}, skipping privilege drop",
             uid, gid
@@ -69,6 +70,7 @@ fn drop_privileges(uid: Uid, gid: Gid, caps_to_keep: Option<&HashSet<Capability>
         return Ok(());
     }
 
+    // Note: Can't use logging here as we may not have initialized it yet
     eprintln!("[Worker] Dropping privileges to uid={}, gid={}", uid, gid);
 
     // Get the username for initgroups
@@ -94,6 +96,7 @@ fn drop_privileges(uid: Uid, gid: Gid, caps_to_keep: Option<&HashSet<Capability>
             caps::raise(None, CapSet::Ambient, *cap)
                 .with_context(|| format!("Failed to raise {:?} in Ambient set", cap))?;
         }
+        // Note: Can't use logging here as we may not have initialized it yet
         eprintln!(
             "[Worker] Successfully set capabilities (including Ambient for thread inheritance)"
         );
@@ -101,6 +104,7 @@ fn drop_privileges(uid: Uid, gid: Gid, caps_to_keep: Option<&HashSet<Capability>
 
     // Set the UID last (irreversible)
     nix::unistd::setuid(uid).context("Failed to set UID")?;
+    // Note: Can't use logging here as we may not have initialized it yet
     eprintln!("[Worker] Successfully dropped privileges");
     Ok(())
 }
@@ -144,6 +148,7 @@ pub async fn run_control_plane_generic<S: AsyncRead + AsyncWrite + Unpin>(
 }
 
 pub async fn run_control_plane(config: ControlPlaneConfig) -> Result<()> {
+    // Note: Can't use logging yet as it's not initialized
     eprintln!(
         "[ControlPlane] Worker process started, dropping privileges to UID {} and GID {}",
         config.uid, config.gid
@@ -187,6 +192,7 @@ pub trait WorkerLifecycle: Send + 'static {
         config: DataPlaneConfig,
         command_rx: std::sync::mpsc::Receiver<RelayCommand>,
         event_fd: nix::sys::eventfd::EventFd,
+        logger: Logger,
     ) -> Result<()>;
 }
 
@@ -211,8 +217,9 @@ impl WorkerLifecycle for DefaultWorkerLifecycle {
         config: DataPlaneConfig,
         command_rx: std::sync::mpsc::Receiver<RelayCommand>,
         event_fd: nix::sys::eventfd::EventFd,
+        logger: Logger,
     ) -> Result<()> {
-        data_plane_task(config, command_rx, event_fd)
+        data_plane_task(config, command_rx, event_fd, logger)
     }
 }
 
@@ -232,6 +239,7 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
     // Temporary workaround: Don't drop privileges for data plane workers.
     // They need CAP_NET_RAW anyway, so running as root is acceptable until FD passing is implemented.
 
+    // Note: Can't use logging yet as it's not initialized
     eprintln!(
         "[DataPlane] Worker process started (keeping root privileges - CAP_NET_RAW required)"
     );
@@ -249,37 +257,29 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
 
     if let Some(core_id) = config.core_id {
         lifecycle.set_cpu_affinity(core_id as usize)?;
+        // Note: Can't use logging yet as it's not initialized
         eprintln!(
             "[DataPlane] Successfully set CPU affinity to core {}",
             core_id
         );
     }
 
-    // Attach to shared memory ring buffers for logging
-    let _logging = if let Some(core_id) = config.core_id {
-        match DataPlaneLogging::attach(core_id as u8) {
-            Ok(logging) => {
-                // Get a logger and log startup message
-                if let Some(logger) = logging.logger(Facility::DataPlane) {
-                    logger.info(
-                        Facility::DataPlane,
-                        &format!("Data plane worker started on core {}", core_id),
-                    );
-                }
-                Some(logging)
-            }
-            Err(e) => {
-                eprintln!(
-                    "[DataPlane] Warning: Failed to attach to shared memory logging: {:?}",
-                    e
-                );
-                eprintln!("[DataPlane] Continuing without cross-process logging");
-                None
-            }
-        }
-    } else {
-        None
-    };
+    // Attach to shared memory ring buffers for logging (REQUIRED)
+    let core_id = config
+        .core_id
+        .ok_or_else(|| anyhow::anyhow!("Data plane worker requires core_id"))?;
+
+    let logging = DataPlaneLogging::attach(core_id as u8)
+        .context("Failed to attach to shared memory logging - supervisor must create shared memory before spawning workers")?;
+
+    let logger = logging
+        .logger(Facility::DataPlane)
+        .ok_or_else(|| anyhow::anyhow!("Failed to get logger for DataPlane facility"))?;
+
+    logger.info(
+        Facility::DataPlane,
+        &format!("Data plane worker started on core {}", core_id),
+    );
 
     // Get FD 3 from supervisor and set it to non-blocking before wrapping in tokio UnixStream
     let supervisor_sock = unsafe {
@@ -305,25 +305,25 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
         tokio_util::codec::LengthDelimitedCodec::new(),
     );
 
+    let logger_for_dp_thread = logger.clone();
+    let logger_for_spawn = logger;
     tokio::spawn(async move {
         use futures::StreamExt;
         while let Some(Ok(bytes)) = framed.next().await {
             match serde_json::from_slice::<RelayCommand>(&bytes) {
                 Ok(command) => {
-                    println!("[DataPlane Worker] Received command: {:?}", command);
+                    logger_for_spawn.debug(Facility::DataPlane, &format!("Received command: {:?}", command));
                     match std_tx.send(command) {
                         Ok(_) => {
-                            println!(
-                                "[DataPlane Worker] Command sent to data plane thread successfully"
-                            );
+                            logger_for_spawn.debug(Facility::DataPlane, "Command sent to data plane thread successfully");
                         }
                         Err(e) => {
-                            eprintln!("[DataPlane Worker] FATAL: Failed to send command to data plane thread: {:?}", e);
-                            eprintln!("[DataPlane Worker] This means the ingress thread has exited or panicked");
+                            logger_for_spawn.error(Facility::DataPlane, &format!("FATAL: Failed to send command to data plane thread: {:?}", e));
+                            logger_for_spawn.error(Facility::DataPlane, "This means the ingress thread has exited or panicked");
                             break;
                         }
                     }
-                    println!("[DataPlane Worker] Signaling eventfd");
+                    logger_for_spawn.debug(Facility::DataPlane, "Signaling eventfd");
                     // Signal the eventfd to wake up ingress io_uring loop
                     // Use spawn_blocking to avoid blocking the async runtime
                     let event_fd = event_fd_for_writer;
@@ -335,21 +335,15 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
                     });
                 }
                 Err(e) => {
-                    eprintln!(
-                        "[DataPlane Worker] Error: Failed to deserialize RelayCommand: {}",
-                        e
-                    );
+                    logger_for_spawn.error(Facility::DataPlane, &format!("Failed to deserialize RelayCommand: {}", e));
                 }
             }
         }
 
         // Stream closed - supervisor has exited, send shutdown command to data plane
-        println!("[DataPlane Worker] Supervisor stream closed, sending shutdown to data plane");
+        logger_for_spawn.info(Facility::DataPlane, "Supervisor stream closed, sending shutdown to data plane");
         if let Err(e) = std_tx.send(RelayCommand::Shutdown) {
-            eprintln!(
-                "[DataPlane Worker] Failed to send shutdown command: {:?}",
-                e
-            );
+            logger_for_spawn.error(Facility::DataPlane, &format!("Failed to send shutdown command: {:?}", e));
         } else {
             // Signal eventfd to wake up ingress loop to process shutdown
             let event_fd = event_fd_for_writer;
@@ -369,7 +363,7 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
     // Creating a new thread ensures it inherits the ambient capabilities.
     let handle = std::thread::Builder::new()
         .name("data_plane".to_string())
-        .spawn(move || lifecycle.run_data_plane_task(config, std_rx, event_fd))
+        .spawn(move || lifecycle.run_data_plane_task(config, std_rx, event_fd, logger_for_dp_thread))
         .context("Failed to spawn data plane thread")?;
 
     // Wait for the data plane thread in a blocking task so the async runtime can continue
@@ -485,6 +479,7 @@ mod tests {
                 _config: DataPlaneConfig,
                 _command_rx: std::sync::mpsc::Receiver<RelayCommand>,
                 _event_fd: nix::sys::eventfd::EventFd,
+                _logger: Logger,
             ) -> Result<()> {
                 // In a real test, we might block here indefinitely,
                 // but for the timeout test, returning Ok is sufficient.
