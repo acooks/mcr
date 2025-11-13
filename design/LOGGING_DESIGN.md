@@ -1,5 +1,75 @@
 # Multicast Relay Logging System Design
 
+## The Cross-Process Logging Challenge
+
+### The Problem
+
+MCR uses a **multi-process architecture** where data plane workers run as separate processes:
+
+```
+Supervisor Process (async tokio)
+├─ Control Plane Worker (process) - async, handles management
+└─ Data Plane Workers (processes) - sync io_uring, packet forwarding
+```
+
+**Why this is challenging for logging:**
+
+1. **In-process ring buffers don't work across processes**
+   - Initial SPSC/MPSC ring buffers use `Box<[UnsafeCell<LogEntry>]>`
+   - This memory only exists in the creating process
+   - Worker processes can't access supervisor's memory
+
+2. **Data plane performance constraints**
+   - ❌ Cannot make syscalls (write/send) in packet processing hot path
+   - ❌ Cannot allocate memory (Box::new, Vec::push)
+   - ❌ Cannot use locks or blocking operations
+   - ✅ Can only use: atomics, pre-allocated memory, lock-free ops
+
+3. **Traditional IPC doesn't meet requirements**
+   - Unix sockets: require syscalls
+   - `ipc-channel`: requires serialization + syscalls
+   - stdout/stderr: requires syscalls + buffering
+
+### The Solution: Shared Memory Ring Buffers
+
+Use **POSIX shared memory** to create ring buffers accessible by multiple processes:
+
+```rust
+// Supervisor creates shared memory ring buffer
+let shm = SharedSPSCRingBuffer::create("/mcr_log_dp0", capacity)?;
+
+// Worker attaches to existing shared memory
+let shm = SharedSPSCRingBuffer::attach("/mcr_log_dp0")?;
+
+// Data plane writes (no syscalls, just atomics)
+shm.write(log_entry);  // Lock-free, fast!
+
+// Supervisor reads in separate thread (syscalls OK here)
+while let Some(entry) = shm.read() {
+    println!("{}", entry);
+}
+```
+
+**Why this works:**
+
+1. ✅ **Lock-free writes** - data plane uses atomic operations only
+2. ✅ **No syscalls** in hot path - just memory writes to shared region
+3. ✅ **No allocation** - entries pre-allocated in shared memory
+4. ✅ **Process-safe** - POSIX shm accessible by both processes
+5. ✅ **Bounded memory** - fixed-size ring buffer, no unbounded growth
+
+**Architecture:**
+
+```
+Data Plane Worker Process                 Supervisor Process
+┌─────────────────────┐                   ┌──────────────────┐
+│ packet_processing() │                   │                  │
+│   ↓                 │                   │  Consumer Thread │
+│ ring.write(entry)   │ ← Shared Memory → │  ring.read()     │
+│   (atomics only)    │                   │  println!(...)   │
+└─────────────────────┘                   └──────────────────┘
+```
+
 ## Implementation Status
 
 **Phase 1: COMPLETE** ✅ (commits d72eb93, 99423bd)
@@ -27,7 +97,12 @@
 - Comprehensive unit and integration tests (101 tests passing)
 - Performance: <100ns overhead for log-level checks
 
-**Phase 5: PENDING** ⏳
+**Phase 5: IN PROGRESS** 🔄
+- Shared memory ring buffers for cross-process logging
+- Worker process integration (data plane + control plane)
+- Centralized log collection in supervisor
+
+**Phase 6: PENDING** ⏳
 - Additional output sinks (file, syslog)
 - Metrics extraction
 - Log streaming to control_client (see INTERACTIVE_CLI_DESIGN.md)
@@ -579,3 +654,107 @@ mcr-control log reset-stats
 - FRR Logging Documentation: https://docs.frrouting.org/projects/dev-guide/en/latest/logging.html
 - Linux `io_uring` performance considerations
 - Rust `std::sync::atomic` documentation
+
+## Shared Memory Ring Buffer Implementation
+
+### Memory Layout
+
+The shared memory region contains the complete ring buffer structure:
+
+```
+Shared Memory Region: /dev/shm/mcr_log_dp{worker_id}
+┌──────────────────────────────────────────────────────────┐
+│ Header (metadata)                                        │
+│  ├─ write_seq: AtomicU64        (cache-aligned)         │
+│  ├─ read_seq: AtomicU64         (cache-aligned)         │
+│  ├─ overruns: AtomicU64                                 │
+│  ├─ capacity: usize                                     │
+│  └─ core_id: u8                                         │
+├──────────────────────────────────────────────────────────┤
+│ Entry Array [LogEntry; capacity]                        │
+│  ├─ Entry 0 (256 bytes, cache-line aligned)            │
+│  ├─ Entry 1 (256 bytes)                                 │
+│  ├─ ...                                                  │
+│  └─ Entry N (256 bytes)                                 │
+└──────────────────────────────────────────────────────────┘
+
+Total Size = Header + (capacity * 256 bytes)
+```
+
+### Initialization Flow
+
+**Supervisor (creates shared memory):**
+```rust
+// 1. Create shared memory segment
+let shm = Shmem::create()
+    .size(calc_shm_size(capacity))
+    .os_id(format!("/mcr_log_dp{}", worker_id))
+    .create()?;
+
+// 2. Initialize header + entries in shared memory
+unsafe {
+    let ptr = shm.as_ptr() as *mut SharedRingBufferHeader;
+    (*ptr).write_seq = AtomicU64::new(0);
+    (*ptr).read_seq = AtomicU64::new(0);
+    (*ptr).capacity = capacity;
+    // ... initialize entry array ...
+}
+
+// 3. Pass shm ID to worker via environment/args
+worker.spawn_with_env("MCR_LOG_SHM=/mcr_log_dp0");
+```
+
+**Worker (attaches to shared memory):**
+```rust
+// 1. Get shared memory ID from environment
+let shm_id = env::var("MCR_LOG_SHM")?;
+
+// 2. Attach to existing shared memory
+let shm = Shmem::open(shm_id)?;
+
+// 3. Get pointer to ring buffer structure
+let ring = unsafe {
+    &*(shm.as_ptr() as *const SharedRingBufferHeader)
+};
+
+// 4. Use atomics to write log entries
+ring.write(log_entry);  // Lock-free!
+```
+
+### Atomics Guarantee Cross-Process Safety
+
+The existing SPSC algorithm works across processes because:
+
+1. **Atomics are process-safe** - `AtomicU64` uses CPU atomic instructions
+2. **State machine prevents races** - same 3-state protocol (EMPTY→WRITING→READY)
+3. **Memory barriers** - `Ordering::Acquire`/`Release` ensures visibility
+4. **Single writer guarantee** - each worker has dedicated ring buffer
+
+### Cleanup and Lifecycle
+
+```rust
+// Supervisor owns shared memory lifetime
+impl Drop for SharedSPSCRingBuffer {
+    fn drop(&mut self) {
+        // Shared memory automatically cleaned up when:
+        // 1. All processes detach (munmap)
+        // 2. shm_unlink called
+        // OS cleans up /dev/shm on reboot if process crashes
+    }
+}
+```
+
+### Performance Characteristics
+
+**Writer (Data Plane) - Hot Path:**
+- Atomic load: ~5ns
+- Atomic CAS: ~10ns  
+- Memory copy: ~50ns (256 bytes)
+- **Total: ~65ns per log entry**
+- **Zero syscalls**
+
+**Reader (Supervisor Consumer Thread):**
+- Atomic load: ~5ns
+- Memory read: ~50ns
+- Format + write to stdout: ~1-10μs (syscalls OK)
+

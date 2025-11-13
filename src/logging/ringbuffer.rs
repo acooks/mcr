@@ -461,3 +461,270 @@ mod tests {
         assert_eq!(count, 400);
     }
 }
+
+// ============================================================================
+// Shared Memory SPSC Ring Buffer (Cross-Process)
+// ============================================================================
+
+use shared_memory::{Shmem, ShmemConf, ShmemError};
+
+/// Generate shared memory ID for a data plane worker's ring buffer
+///
+/// Format: `/mcr_dp_c{core_id}_{facility_code}`
+/// Example: `/mcr_dp_c0_ingress` for core 0's ingress facility
+pub fn shm_id_for_facility(core_id: u8, facility: crate::logging::Facility) -> String {
+    format!("/mcr_dp_c{}_{}", core_id, facility.as_str().to_lowercase())
+}
+
+/// Header structure stored at the beginning of shared memory
+#[repr(C, align(64))]
+struct SharedRingBufferHeader {
+    write_seq: AtomicU64,
+    _pad1: [u8; 56],  // Cache line padding
+    read_seq: AtomicU64,
+    _pad2: [u8; 56],  // Cache line padding
+    overruns: AtomicU64,
+    capacity: usize,
+    core_id: u8,
+    _pad3: [u8; 47],  // Align to cache line
+}
+
+/// Calculate total shared memory size needed
+fn calc_shm_size(capacity: usize) -> usize {
+    use std::mem::{size_of, align_of};
+    let header_size = size_of::<SharedRingBufferHeader>();
+    let entry_size = size_of::<LogEntry>();
+    let entry_align = align_of::<LogEntry>();
+    
+    // Round up header to entry alignment
+    let aligned_header = (header_size + entry_align - 1) & !(entry_align - 1);
+    aligned_header + (capacity * entry_size)
+}
+
+/// Lock-free SPSC ring buffer in shared memory
+///
+/// This can be used across process boundaries. The supervisor creates
+/// the shared memory region, and workers attach to it.
+pub struct SharedSPSCRingBuffer {
+    shmem: Shmem,
+    header: *mut SharedRingBufferHeader,
+    entries: *mut UnsafeCell<LogEntry>,
+    capacity: usize,
+    is_owner: bool,  // True if this process created the shm
+}
+
+// SAFETY: Same as SPSCRingBuffer - atomics + state machine guarantee safety
+unsafe impl Send for SharedSPSCRingBuffer {}
+unsafe impl Sync for SharedSPSCRingBuffer {}
+
+impl SharedSPSCRingBuffer {
+    /// Create a new shared memory ring buffer (supervisor side)
+    ///
+    /// # Arguments
+    /// * `shm_id` - Shared memory ID (e.g., "/mcr_log_dp0")
+    /// * `capacity` - Number of entries (must be power of 2)
+    /// * `core_id` - CPU core ID for this buffer
+    ///
+    /// # Returns
+    /// The ring buffer and the shm_id to pass to workers
+    pub fn create(shm_id: &str, capacity: usize, core_id: u8) -> Result<Self, ShmemError> {
+        assert!(capacity.is_power_of_two(), "Capacity must be power of 2");
+        
+        let size = calc_shm_size(capacity);
+        
+        // Create shared memory
+        let shmem = ShmemConf::new()
+            .size(size)
+            .os_id(shm_id)
+            .create()?;
+        
+        unsafe {
+            // Initialize header
+            let header = shmem.as_ptr() as *mut SharedRingBufferHeader;
+            std::ptr::write(&mut (*header).write_seq, AtomicU64::new(0));
+            std::ptr::write(&mut (*header).read_seq, AtomicU64::new(0));
+            std::ptr::write(&mut (*header).overruns, AtomicU64::new(0));
+            (*header).capacity = capacity;
+            (*header).core_id = core_id;
+            
+            // Calculate entries pointer (after aligned header)
+            use std::mem::{size_of, align_of};
+            let header_size = size_of::<SharedRingBufferHeader>();
+            let entry_align = align_of::<LogEntry>();
+            let aligned_header = (header_size + entry_align - 1) & !(entry_align - 1);
+            let entries = (shmem.as_ptr() as usize + aligned_header) as *mut UnsafeCell<LogEntry>;
+            
+            // Initialize all entries to EMPTY
+            for i in 0..capacity {
+                let entry = &mut *entries.add(i).cast::<LogEntry>();
+                *entry = LogEntry::default();
+            }
+            
+            Ok(Self {
+                shmem,
+                header,
+                entries,
+                capacity,
+                is_owner: true,
+            })
+        }
+    }
+    
+    /// Attach to existing shared memory ring buffer (worker side)
+    ///
+    /// # Arguments
+    /// * `shm_id` - Shared memory ID to attach to
+    pub fn attach(shm_id: &str) -> Result<Self, ShmemError> {
+        let shmem = ShmemConf::new()
+            .os_id(shm_id)
+            .open()?;
+        
+        unsafe {
+            let header = shmem.as_ptr() as *mut SharedRingBufferHeader;
+            let capacity = (*header).capacity;
+            
+            // Calculate entries pointer
+            use std::mem::{size_of, align_of};
+            let header_size = size_of::<SharedRingBufferHeader>();
+            let entry_align = align_of::<LogEntry>();
+            let aligned_header = (header_size + entry_align - 1) & !(entry_align - 1);
+            let entries = (shmem.as_ptr() as usize + aligned_header) as *mut UnsafeCell<LogEntry>;
+            
+            Ok(Self {
+                shmem,
+                header,
+                entries,
+                capacity,
+                is_owner: false,
+            })
+        }
+    }
+    
+    /// Write an entry (same algorithm as SPSCRingBuffer)
+    pub fn write(&self, mut entry: LogEntry) {
+        unsafe {
+            let write_seq = (*self.header).write_seq.load(Ordering::Relaxed);
+            let read_seq = (*self.header).read_seq.load(Ordering::Acquire);
+
+            // Check if buffer is full
+            if write_seq - read_seq >= self.capacity as u64 {
+                (*self.header).overruns.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+
+            let pos = (write_seq as usize) & (self.capacity - 1);
+
+            // Fill entry metadata
+            entry.sequence = write_seq;
+            entry.core_id = (*self.header).core_id;
+
+            // Set state to WRITING
+            entry.state.store(WRITING, Ordering::Relaxed);
+
+            // Write entry
+            std::ptr::write(self.entries.add(pos).cast::<LogEntry>(), entry);
+
+            // Mark as READY
+            (*self.entries.add(pos).cast::<LogEntry>())
+                .state
+                .store(READY, Ordering::Release);
+
+            (*self.header).write_seq.fetch_add(1, Ordering::Release);
+        }
+    }
+    
+    /// Read an entry (same algorithm as SPSCRingBuffer)
+    pub fn read(&self) -> Option<LogEntry> {
+        unsafe {
+            let read_seq = (*self.header).read_seq.load(Ordering::Relaxed);
+            let write_seq = (*self.header).write_seq.load(Ordering::Acquire);
+            
+            if read_seq >= write_seq {
+                return None;
+            }
+            
+            let pos = (read_seq as usize) & (self.capacity - 1);
+            
+            // Wait for READY state
+            while (*self.entries.add(pos).cast::<LogEntry>())
+                .state
+                .load(Ordering::Acquire)
+                != READY
+            {
+                std::hint::spin_loop();
+            }
+            
+            // Read entry
+            let entry = std::ptr::read(self.entries.add(pos).cast::<LogEntry>());
+            
+            // Mark as consumed
+            (*self.entries.add(pos).cast::<LogEntry>())
+                .state
+                .store(EMPTY, Ordering::Release);
+            
+            (*self.header).read_seq.fetch_add(1, Ordering::Release);
+            
+            Some(entry)
+        }
+    }
+    
+    /// Get number of overruns
+    pub fn overruns(&self) -> u64 {
+        unsafe { (*self.header).overruns.load(Ordering::Relaxed) }
+    }
+    
+    /// Get shared memory ID for passing to workers
+    pub fn shm_id(&self) -> &str {
+        self.shmem.get_os_id()
+    }
+}
+
+impl Drop for SharedSPSCRingBuffer {
+    fn drop(&mut self) {
+        // Only the owner (supervisor) unlinks the shared memory
+        // Workers just detach when they drop
+        if self.is_owner {
+            // shared_memory crate handles shm_unlink on drop
+        }
+    }
+}
+
+#[cfg(test)]
+mod shared_tests {
+    use super::*;
+    use crate::logging::{Facility, Severity};
+
+    #[test]
+    fn test_shared_ringbuffer_basic() {
+        let shm_id = "/mcr_test_basic";
+        let capacity = 16;
+        let core_id = 0;
+
+        // Create shared memory ring buffer (supervisor side)
+        let ring = SharedSPSCRingBuffer::create(shm_id, capacity, core_id)
+            .expect("Failed to create shared ring buffer");
+
+        // Write an entry
+        let mut entry = LogEntry::default();
+        entry.facility = Facility::DataPlane;
+        entry.severity = Severity::Info;
+        ring.write(entry);
+
+        // Read it back
+        let read_entry = ring.read().expect("Failed to read entry");
+        assert_eq!(read_entry.facility, Facility::DataPlane);
+        assert_eq!(read_entry.severity, Severity::Info);
+        assert_eq!(read_entry.core_id, core_id);
+
+        // Clean up happens automatically on drop
+    }
+
+    #[test]
+    fn test_shm_id_generation() {
+        let id = shm_id_for_facility(0, Facility::Ingress);
+        assert_eq!(id, "/mcr_dp_c0_ingress");
+
+        let id = shm_id_for_facility(7, Facility::Egress);
+        assert_eq!(id, "/mcr_dp_c7_egress");
+    }
+}

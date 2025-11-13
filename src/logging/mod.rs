@@ -21,5 +21,5 @@ pub use entry::{KeyValue, LogEntry};
 pub use facility::Facility;
 pub use integration::{ControlPlaneLogging, DataPlaneLogging, SupervisorLogging};
 pub use logger::{LogRegistry, Logger};
-pub use ringbuffer::{MPSCRingBuffer, SPSCRingBuffer};
+pub use ringbuffer::{shm_id_for_facility, MPSCRingBuffer, SPSCRingBuffer, SharedSPSCRingBuffer};
 pub use severity::Severity;
