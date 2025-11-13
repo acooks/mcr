@@ -118,11 +118,12 @@ mod mutex_backend {
         logger.debug(crate::logging::Facility::DataPlane, "Spawning egress thread");
         let egress_handle = {
             let egress_logger = logger.clone();
+            let egress_logger_clone = egress_logger.clone();
             thread::Builder::new()
                 .name("egress".to_string())
                 .spawn(move || -> Result<()> {
                     let mut egress =
-                        EgressLoop::new(egress_config.clone(), buffer_pool.clone(), egress_logger)?;
+                        EgressLoop::new(egress_config.clone(), buffer_pool.clone(), egress_logger_clone)?;
                     let mut running = true;
                     while running {
                         egress.reap_available_completions()?;
@@ -154,10 +155,14 @@ mod mutex_backend {
                                 }
                             }
                             Err(mpsc::TryRecvError::Disconnected) => {
+                                egress_logger.info(crate::logging::Facility::Egress, "Ingress disconnected, shutting down");
                                 running = false;
                             }
                         }
                     }
+                    egress_logger.info(crate::logging::Facility::Egress, "Egress loop exiting");
+                    egress.print_final_stats();
+                    egress_logger.info(crate::logging::Facility::Egress, "Egress shutdown complete");
                     Ok(())
                 })
                 .context("Failed to spawn egress thread")?

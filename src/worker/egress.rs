@@ -269,6 +269,18 @@ where
     pub fn is_queue_empty(&self) -> bool {
         self.egress_queue.is_empty()
     }
+
+    pub fn print_final_stats(&self) {
+        // Print final stats in the format expected by integration tests
+        let msg = format!(
+            "[STATS:Egress FINAL] submitted={} sent={} errors={} bytes={}",
+            self.stats.packets_submitted,
+            self.stats.packets_sent,
+            self.stats.send_errors,
+            self.stats.bytes_sent
+        );
+        self.logger.info(Facility::Egress, &msg);
+    }
 }
 
 // --- Backend-specific `new` implementations ---
