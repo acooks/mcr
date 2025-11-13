@@ -29,10 +29,13 @@ sudo -E cargo test --test integration test_basic -- --ignored --test-threads=1
 - **What they test:** CLI, IPC, rule propagation
 
 ### Network Integration Tests (New!)
-- **Location:** `tests/integration/test_basic.rs`
+- **Location:** `tests/integration/test_*.rs` (test_basic, test_scaling, test_topologies)
 - **Requirements:** Root privileges for network namespaces
-- **Run:** `sudo -E cargo test --test integration test_basic -- --ignored --test-threads=1`
-- **What they test:** Full packet forwarding with isolated network setups
+- **Run:** `sudo -E cargo test --test integration <test_name> -- --ignored --test-threads=1`
+- **What they test:**
+  - `test_basic`: Basic 10 and 1000 packet forwarding (replaces debug_10_packets.sh)
+  - `test_scaling`: Scaling at 1k, 10k, and 1M packets (replaces scaling_test.sh)
+  - `test_topologies`: Multi-hop chains and fanout patterns (replaces baseline_50k.sh, chain_3hop.sh, tree_fanout.sh)
 
 ## Why Build Before Running Tests?
 
@@ -74,6 +77,8 @@ cargo test --lib
 # Test step (integration tests - if root available)
 if [ "$EUID" -eq 0 ]; then
     cargo test --test integration test_basic -- --ignored --test-threads=1
+    cargo test --test integration test_scaling -- --ignored --test-threads=1
+    cargo test --test integration test_topologies -- --ignored --test-threads=1
 else
     echo "Skipping network integration tests (no root)"
 fi

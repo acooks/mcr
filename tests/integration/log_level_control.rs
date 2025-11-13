@@ -6,12 +6,12 @@
 
 #[cfg(test)]
 mod tests {
+    use crate::tests::{cleanup_socket, unique_socket_path_with_prefix};
     use anyhow::Result;
     use multicast_relay::logging::{Facility, Severity};
     use multicast_relay::{Response, SupervisorCommand};
     use std::path::PathBuf;
     use std::time::Duration;
-    use crate::tests::{cleanup_socket, unique_socket_path_with_prefix};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::UnixStream;
     use tokio::process::{Child, Command};
@@ -19,8 +19,7 @@ mod tests {
 
     /// Spawns a supervisor process with a unique socket path
     async fn spawn_supervisor(socket_path: &PathBuf) -> Result<Child> {
-        let current_exe =
-            std::env::current_exe().expect("Failed to get current executable path");
+        let current_exe = std::env::current_exe().expect("Failed to get current executable path");
 
         cleanup_socket(socket_path);
 
@@ -53,10 +52,7 @@ mod tests {
     }
 
     /// Send a command to the supervisor and get the response
-    async fn send_command(
-        socket_path: &PathBuf,
-        command: SupervisorCommand,
-    ) -> Result<Response> {
+    async fn send_command(socket_path: &PathBuf, command: SupervisorCommand) -> Result<Response> {
         let mut stream = UnixStream::connect(socket_path).await?;
         let command_bytes = serde_json::to_vec(&command)?;
         stream.write_all(&command_bytes).await?;
@@ -74,7 +70,9 @@ mod tests {
     #[tokio::test]
     async fn test_set_and_get_global_log_level_via_ipc() -> Result<()> {
         if unsafe { libc::getuid() } != 0 {
-            println!("Skipping test_set_and_get_global_log_level_via_ipc: requires root privileges.");
+            println!(
+                "Skipping test_set_and_get_global_log_level_via_ipc: requires root privileges."
+            );
             return Ok(());
         }
 
@@ -88,7 +86,11 @@ mod tests {
                 global,
                 facility_overrides,
             } => {
-                assert_eq!(global, Severity::Info, "Default global level should be Info");
+                assert_eq!(
+                    global,
+                    Severity::Info,
+                    "Default global level should be Info"
+                );
                 assert!(
                     facility_overrides.is_empty(),
                     "No facility overrides by default"

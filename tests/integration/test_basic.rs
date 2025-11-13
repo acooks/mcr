@@ -17,12 +17,7 @@ use std::thread;
 use std::time::Duration;
 
 /// Helper to send multicast packets using traffic_generator
-fn send_packets(
-    source_ip: &str,
-    dest_group: &str,
-    dest_port: u16,
-    count: u32,
-) -> Result<()> {
+fn send_packets(source_ip: &str, dest_group: &str, dest_port: u16, count: u32) -> Result<()> {
     let traffic_bin = common::binary_path("traffic_generator");
 
     let output = Command::new(traffic_bin)
@@ -41,7 +36,10 @@ fn send_packets(
         .output()?;
 
     if !output.status.success() {
-        eprintln!("Traffic generator stderr: {}", String::from_utf8_lossy(&output.stderr));
+        eprintln!(
+            "Traffic generator stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         anyhow::bail!("Traffic generator failed");
     }
 
@@ -92,12 +90,23 @@ async fn test_single_hop_1000_packets() -> Result<()> {
 
     // Validate results
     println!("\n=== Results ===");
-    println!("Ingress: recv={} matched={} egr_sent={} parse_err={} no_match={} buf_exhaust={}",
-        stats.ingress.recv, stats.ingress.matched, stats.ingress.egr_sent,
-        stats.ingress.parse_err, stats.ingress.no_match, stats.ingress.buf_exhaust);
-    println!("Egress: sent={} submitted={} ch_recv={} errors={} bytes={}",
-        stats.egress.sent, stats.egress.submitted, stats.egress.ch_recv,
-        stats.egress.errors, stats.egress.bytes);
+    println!(
+        "Ingress: recv={} matched={} egr_sent={} parse_err={} no_match={} buf_exhaust={}",
+        stats.ingress.recv,
+        stats.ingress.matched,
+        stats.ingress.egr_sent,
+        stats.ingress.parse_err,
+        stats.ingress.no_match,
+        stats.ingress.buf_exhaust
+    );
+    println!(
+        "Egress: sent={} submitted={} ch_recv={} errors={} bytes={}",
+        stats.egress.sent,
+        stats.egress.submitted,
+        stats.egress.ch_recv,
+        stats.egress.errors,
+        stats.egress.bytes
+    );
 
     // With veth interfaces, AF_PACKET sees both RX and TX packets
     // So we expect roughly half the packets (this is a known limitation)
@@ -115,7 +124,10 @@ async fn test_single_hop_1000_packets() -> Result<()> {
 
     // Validate no packet errors
     assert_eq!(stats.ingress.parse_err, 0, "Should have no parse errors");
-    assert_eq!(stats.ingress.buf_exhaust, 0, "Should have no buffer exhaustion");
+    assert_eq!(
+        stats.ingress.buf_exhaust, 0,
+        "Should have no buffer exhaustion"
+    );
     assert_eq!(stats.egress.errors, 0, "Should have no egress errors");
 
     // This is the critical assertion - egress should receive what ingress sent
@@ -123,8 +135,7 @@ async fn test_single_hop_1000_packets() -> Result<()> {
     assert_eq!(
         stats.egress.ch_recv, stats.ingress.egr_sent,
         "Egress ch_recv ({}) should equal ingress egr_sent ({})",
-        stats.egress.ch_recv,
-        stats.ingress.egr_sent
+        stats.egress.ch_recv, stats.ingress.egr_sent
     );
 
     assert_eq!(
@@ -169,12 +180,23 @@ async fn test_minimal_10_packets() -> Result<()> {
     let stats = mcr.shutdown_and_get_stats()?;
 
     println!("\n=== Results ===");
-    println!("Ingress: recv={} matched={} egr_sent={} parse_err={} no_match={} buf_exhaust={}",
-        stats.ingress.recv, stats.ingress.matched, stats.ingress.egr_sent,
-        stats.ingress.parse_err, stats.ingress.no_match, stats.ingress.buf_exhaust);
-    println!("Egress: sent={} submitted={} ch_recv={} errors={} bytes={}",
-        stats.egress.sent, stats.egress.submitted, stats.egress.ch_recv,
-        stats.egress.errors, stats.egress.bytes);
+    println!(
+        "Ingress: recv={} matched={} egr_sent={} parse_err={} no_match={} buf_exhaust={}",
+        stats.ingress.recv,
+        stats.ingress.matched,
+        stats.ingress.egr_sent,
+        stats.ingress.parse_err,
+        stats.ingress.no_match,
+        stats.ingress.buf_exhaust
+    );
+    println!(
+        "Egress: sent={} submitted={} ch_recv={} errors={} bytes={}",
+        stats.egress.sent,
+        stats.egress.submitted,
+        stats.egress.ch_recv,
+        stats.egress.errors,
+        stats.egress.bytes
+    );
 
     assert!(stats.ingress.matched > 0, "Should forward some packets");
     assert_eq!(stats.ingress.parse_err, 0, "Should have no parse errors");

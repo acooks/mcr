@@ -192,6 +192,17 @@ extract_stat() {
     local stat_type="$2"
     local field="$3"
 
+    # For ingress stats, prefer FINAL stats for accuracy
+    if [[ "$stat_type" == "STATS:Ingress" ]]; then
+        # Try to get FINAL stats first
+        local final_value=$(grep "\[STATS:Ingress FINAL\]" "$log_file" | tail -1 | grep -oP "$field=\K[0-9]+" || echo "")
+        if [ -n "$final_value" ]; then
+            echo "$final_value"
+            return
+        fi
+    fi
+
+    # Fall back to last periodic stat
     tail -50 "$log_file" | \
         grep "\[$stat_type\]" | \
         tail -1 | \

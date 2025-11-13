@@ -195,7 +195,10 @@ async fn test_add_and_remove_rule_e2e() -> Result<()> {
 
     // 5. REMOVE RULE: Remove the rule via the supervisor.
     client.remove_rule(&rule.rule_id).await?;
-    println!("[TEST] RemoveRule command sent for rule '{}'.", rule.rule_id);
+    println!(
+        "[TEST] RemoveRule command sent for rule '{}'.",
+        rule.rule_id
+    );
 
     // Give a moment for the command to propagate.
     sleep(Duration::from_millis(200)).await;

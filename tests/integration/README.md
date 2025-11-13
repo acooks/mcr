@@ -6,13 +6,15 @@ This directory contains integration tests for the multicast relay that test the 
 
 ```
 integration/
-├── common/           # Shared test utilities
-│   ├── mod.rs       # Module exports
-│   ├── mcr.rs       # McrInstance wrapper for managing MCR processes
-│   ├── network.rs   # Network namespace and veth pair management
-│   └── stats.rs     # Stats parsing from log files
-├── test_basic.rs    # Basic forwarding tests
-└── README.md        # This file
+├── common/              # Shared test utilities
+│   ├── mod.rs          # Module exports
+│   ├── mcr.rs          # McrInstance wrapper for managing MCR processes
+│   ├── network.rs      # Network namespace and veth pair management
+│   └── stats.rs        # Stats parsing from log files
+├── test_basic.rs       # Basic forwarding tests (10, 1000 packets)
+├── test_scaling.rs     # Scaling tests (1k, 10k, 1M packets)
+├── test_topologies.rs  # Multi-hop and fanout topologies (2-hop, 3-hop, 1:3 fanout)
+└── README.md           # This file
 ```
 
 ## Requirements
@@ -36,6 +38,8 @@ This ensures:
 ```bash
 # Run all network integration tests
 sudo -E cargo test --test integration test_basic -- --ignored --test-threads=1
+sudo -E cargo test --test integration test_scaling -- --ignored --test-threads=1
+sudo -E cargo test --test integration test_topologies -- --ignored --test-threads=1
 
 # Run a specific test
 sudo -E cargo test --test integration test_minimal_10_packets -- --ignored --test-threads=1

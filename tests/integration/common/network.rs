@@ -153,7 +153,6 @@ impl VethPair {
 
         Ok(())
     }
-
 }
 
 impl Drop for VethPair {

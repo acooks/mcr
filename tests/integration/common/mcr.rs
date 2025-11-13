@@ -91,7 +91,10 @@ impl McrInstance {
         }
 
         if !socket_path.exists() {
-            bail!("Control socket not found after 5 seconds: {:?}", socket_path);
+            bail!(
+                "Control socket not found after 5 seconds: {:?}",
+                socket_path
+            );
         }
 
         // Give MCR time to fully initialize

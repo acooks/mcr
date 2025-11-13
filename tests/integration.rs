@@ -33,6 +33,12 @@ mod rule_management; // 1 test: E2E rule propagation from supervisor to data pla
 #[path = "integration/test_basic.rs"]
 mod test_basic; // Network integration tests with veth pairs and namespaces (requires root)
 
+#[path = "integration/test_scaling.rs"]
+mod test_scaling; // Scaling tests at different packet counts (requires root)
+
+#[path = "integration/test_topologies.rs"]
+mod test_topologies; // Multi-hop and fanout topology tests (requires root)
+
 // REMOVED: supervisor.rs - redundant with unit tests in src/supervisor.rs
 // REMOVED: ipc.rs - broken code, redundant with rule_management.rs
 // REMOVED: 4 tests from log_level_control.rs - redundant with supervisor unit tests (kept 2 IPC tests)
