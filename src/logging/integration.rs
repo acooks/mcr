@@ -3,8 +3,13 @@
 //! This module provides helpers for integrating the logging system into
 //! the supervisor and worker processes.
 
-use crate::logging::{AsyncConsumer, Facility, LogRegistry, Logger, SPSCRingBuffer, StdoutSink};
+use crate::logging::{
+    AsyncConsumer, Facility, LogRegistry, Logger, SharedBlockingConsumer, SharedSPSCRingBuffer,
+    StdoutSink, shm_id_for_facility,
+};
+use std::collections::HashMap;
 use std::sync::{atomic::AtomicBool, Arc};
+use std::thread;
 
 /// Logging system for the supervisor process
 ///
@@ -62,37 +67,124 @@ impl SupervisorLogging {
     }
 }
 
+/// Manager for shared memory ring buffers used by data plane workers
+///
+/// The supervisor creates shared memory regions that workers attach to.
+/// This allows lock-free cross-process logging.
+pub struct SharedMemoryLogManager {
+    /// Shared memory ring buffers created by supervisor (owned, will be cleaned up on drop)
+    shared_buffers: HashMap<String, Arc<SharedSPSCRingBuffer>>,
+    /// Consumer thread that reads from all shared buffers
+    consumer_handle: Option<thread::JoinHandle<()>>,
+    consumer_stop: Arc<AtomicBool>,
+}
+
+impl SharedMemoryLogManager {
+    /// Create shared memory ring buffers for a data plane worker
+    ///
+    /// Creates SharedSPSCRingBuffer for each data plane facility.
+    /// The worker will attach to these using the same shm_id.
+    pub fn create_for_worker(core_id: u8, capacity: usize) -> Result<Self, nix::Error> {
+        let mut shared_buffers = HashMap::new();
+
+        // Create shared memory ring buffers for data plane facilities
+        let facilities = [
+            Facility::DataPlane,
+            Facility::Ingress,
+            Facility::Egress,
+            Facility::BufferPool,
+        ];
+
+        for facility in &facilities {
+            let shm_id = shm_id_for_facility(core_id, *facility);
+            let buffer = SharedSPSCRingBuffer::create(&shm_id, capacity, core_id)?;
+            shared_buffers.insert(shm_id, Arc::new(buffer));
+        }
+
+        // Start consumer thread
+        let buffers_for_consumer = shared_buffers.values().cloned().collect::<Vec<_>>();
+        let consumer_stop = Arc::new(AtomicBool::new(true));
+        let consumer_stop_clone = consumer_stop.clone();
+
+        let consumer_handle = Some(thread::spawn(move || {
+            let sink = Box::new(StdoutSink::new());
+            let mut consumer = SharedBlockingConsumer::new(buffers_for_consumer, sink);
+
+            while consumer_stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                consumer.process_once();
+                thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }));
+
+        Ok(Self {
+            shared_buffers,
+            consumer_handle,
+            consumer_stop,
+        })
+    }
+
+    /// Get core ID from the first buffer
+    pub fn core_id(&self) -> Option<u8> {
+        self.shared_buffers.values().next().map(|b| b.core_id())
+    }
+
+    /// Shutdown the consumer and clean up shared memory
+    pub fn shutdown(mut self) {
+        self.consumer_stop
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+
+        if let Some(handle) = self.consumer_handle.take() {
+            let _ = handle.join();
+        }
+
+        // Shared buffers will be automatically cleaned up on drop
+    }
+}
+
 /// Logging system for data plane worker processes
 ///
-/// Data plane workers use SPSC ring buffers for lock-free logging
-/// (single producer = worker thread, single consumer = supervisor).
+/// Data plane workers attach to shared memory ring buffers created by the supervisor
+/// for lock-free cross-process logging.
 pub struct DataPlaneLogging {
-    registry: LogRegistry,
+    shared_buffers: HashMap<Facility, Arc<SharedSPSCRingBuffer>>,
     core_id: u8,
 }
 
 impl DataPlaneLogging {
-    /// Create a new data plane logging system
+    /// Attach to existing shared memory ring buffers
     ///
-    /// This creates SPSC ring buffers optimized for single-threaded
-    /// data plane workers.
-    pub fn new(core_id: u8) -> Self {
-        let registry = LogRegistry::new_spsc(core_id);
+    /// The supervisor must have already created these shared memory regions
+    /// before the worker process starts.
+    pub fn attach(core_id: u8) -> Result<Self, nix::Error> {
+        let mut shared_buffers = HashMap::new();
 
-        Self { registry, core_id }
+        // Attach to shared memory ring buffers for data plane facilities
+        let facilities = [
+            Facility::DataPlane,
+            Facility::Ingress,
+            Facility::Egress,
+            Facility::BufferPool,
+        ];
+
+        for facility in &facilities {
+            let shm_id = shm_id_for_facility(core_id, *facility);
+            let buffer = SharedSPSCRingBuffer::attach(&shm_id)?;
+            shared_buffers.insert(*facility, Arc::new(buffer));
+        }
+
+        Ok(Self {
+            shared_buffers,
+            core_id,
+        })
     }
 
     /// Get a logger for a specific facility
-    pub fn logger(&self, facility: Facility) -> Option<Logger> {
-        self.registry.get_logger(facility)
-    }
-
-    /// Export ring buffers for the supervisor to consume
     ///
-    /// The supervisor will collect these ring buffers from all workers
-    /// and read from them in its central consumer task.
-    pub fn export_ringbuffers(&self) -> Vec<(Facility, Arc<SPSCRingBuffer>)> {
-        self.registry.export_spsc_ringbuffers()
+    /// Creates a Logger that writes directly to the shared memory ring buffer.
+    pub fn logger(&self, facility: Facility) -> Option<Logger> {
+        self.shared_buffers
+            .get(&facility)
+            .map(|buffer| Logger::from_shared(buffer.clone()))
     }
 
     /// Get core ID
@@ -172,15 +264,21 @@ mod tests {
 
     #[test]
     fn test_data_plane_logging() {
-        let logging = DataPlaneLogging::new(0);
+        // Create shared memory (supervisor side)
+        let manager = SharedMemoryLogManager::create_for_worker(0, 1024).unwrap();
+
+        // Attach to shared memory (worker side)
+        let logging = DataPlaneLogging::attach(0).unwrap();
         let logger = logging.logger(Facility::DataPlane).unwrap();
 
         // Log a message
         logger.info(Facility::DataPlane, "Test data plane message");
 
-        // Export ring buffers (supervisor would collect these)
-        let ringbuffers = logging.export_ringbuffers();
-        assert!(!ringbuffers.is_empty());
+        // Verify core ID
+        assert_eq!(logging.core_id(), 0);
+
+        // Cleanup
+        manager.shutdown();
     }
 
     #[tokio::test]

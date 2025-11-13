@@ -470,7 +470,7 @@ use nix::fcntl::OFlag;
 use nix::sys::mman::{mmap, munmap, shm_open, shm_unlink, MapFlags, ProtFlags};
 use nix::sys::stat::Mode;
 use nix::unistd::ftruncate;
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::OwnedFd;
 
 /// Generate shared memory ID for a data plane worker's ring buffer
 ///
@@ -628,18 +628,16 @@ impl SharedSPSCRingBuffer {
 
         // Now map the full size
         let size = calc_shm_size(capacity);
-        let addr = unsafe {
-            mmap(
+        unsafe {
+            let addr = mmap(
                 None,
                 std::num::NonZeroUsize::new(size).unwrap(),
                 ProtFlags::PROT_READ | ProtFlags::PROT_WRITE,
                 MapFlags::MAP_SHARED,
                 &fd,
                 0,
-            )?
-        };
+            )?;
 
-        unsafe {
             let mapped_addr = addr.as_ptr() as *mut u8;
             let header = mapped_addr as *mut SharedRingBufferHeader;
 
@@ -739,6 +737,11 @@ impl SharedSPSCRingBuffer {
     /// Get shared memory ID for passing to workers
     pub fn shm_id(&self) -> &str {
         &self.shm_name
+    }
+
+    /// Get the core ID associated with this ring buffer
+    pub fn core_id(&self) -> u8 {
+        unsafe { (*self.header).core_id }
     }
 }
 

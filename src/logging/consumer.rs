@@ -1,7 +1,7 @@
 // Log consumer task - drains ring buffers and outputs log entries
 
 use super::entry::LogEntry;
-use super::ringbuffer::{MPSCRingBuffer, SPSCRingBuffer};
+use super::ringbuffer::{MPSCRingBuffer, SPSCRingBuffer, SharedSPSCRingBuffer};
 use super::Facility;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -227,6 +227,41 @@ impl BlockingConsumer {
 
         // Final flush
         self.sink.flush();
+    }
+}
+
+/// Consumer task for SharedSPSCRingBuffer (cross-process logging)
+pub struct SharedBlockingConsumer {
+    ringbuffers: Vec<Arc<SharedSPSCRingBuffer>>,
+    sink: Box<dyn LogSink>,
+}
+
+impl SharedBlockingConsumer {
+    /// Create a new shared blocking consumer
+    pub fn new(ringbuffers: Vec<Arc<SharedSPSCRingBuffer>>, sink: Box<dyn LogSink>) -> Self {
+        Self {
+            ringbuffers,
+            sink,
+        }
+    }
+
+    /// Process once (read all available entries from all buffers)
+    ///
+    /// This is called repeatedly by the consumer thread.
+    pub fn process_once(&mut self) {
+        let mut any_read = false;
+
+        // Poll all ring buffers
+        for ringbuffer in &self.ringbuffers {
+            while let Some(entry) = ringbuffer.read() {
+                self.sink.write_entry(&entry);
+                any_read = true;
+            }
+        }
+
+        if any_read {
+            self.sink.flush();
+        }
     }
 }
 

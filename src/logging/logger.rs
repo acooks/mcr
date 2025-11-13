@@ -1,7 +1,7 @@
 // Logger and LogRegistry for managing ring buffers
 
 use super::entry::LogEntry;
-use super::ringbuffer::{MPSCRingBuffer, SPSCRingBuffer};
+use super::ringbuffer::{MPSCRingBuffer, SPSCRingBuffer, SharedSPSCRingBuffer};
 use super::{Facility, Severity};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
@@ -35,6 +35,12 @@ impl RingBuffer for MPSCRingBuffer {
     }
 }
 
+impl RingBuffer for SharedSPSCRingBuffer {
+    fn write(&self, entry: LogEntry) {
+        SharedSPSCRingBuffer::write(self, entry);
+    }
+}
+
 impl Logger {
     /// Create a new logger from an SPSC ring buffer
     pub fn from_spsc(
@@ -55,6 +61,25 @@ impl Logger {
         global_min_level: Arc<AtomicU8>,
         facility_min_levels: Arc<RwLock<std::collections::HashMap<Facility, Severity>>>,
     ) -> Self {
+        Self {
+            ringbuffer: ringbuffer as Arc<dyn RingBuffer>,
+            global_min_level,
+            facility_min_levels,
+        }
+    }
+
+    /// Create a new logger from a shared SPSC ring buffer
+    ///
+    /// This is used for cross-process logging where the worker writes to
+    /// shared memory and the supervisor reads. Log level filtering is disabled
+    /// in this mode (all messages are written).
+    pub fn from_shared(ringbuffer: Arc<SharedSPSCRingBuffer>) -> Self {
+        // For cross-process logging, use Debug (lowest filtering)
+        // to ensure all messages are written to shared memory.
+        // The supervisor will handle filtering when reading.
+        let global_min_level = Arc::new(AtomicU8::new(Severity::Debug as u8));
+        let facility_min_levels = Arc::new(RwLock::new(std::collections::HashMap::new()));
+
         Self {
             ringbuffer: ringbuffer as Arc<dyn RingBuffer>,
             global_min_level,
