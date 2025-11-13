@@ -68,16 +68,57 @@ async fn main() -> anyhow::Result<()> {
     let mut interval_timer = time::interval(interval);
 
     let mut packets_sent = 0;
+    let mut errors = 0;
+    let start_time = std::time::Instant::now();
+    let mut last_report = start_time;
+    let mut last_report_count = 0;
+
     loop {
         interval_timer.tick().await;
         if let Err(e) = sender_socket.send_to(&packet, dest_addr).await {
-            eprintln!("Error sending packet: {}", e);
+            errors += 1;
+            if errors <= 10 {
+                eprintln!("Error sending packet: {}", e);
+            }
         }
         packets_sent += 1;
+
+        // Progress reporting every second
+        let now = std::time::Instant::now();
+        if now.duration_since(last_report).as_secs() >= 1 {
+            let interval_packets = packets_sent - last_report_count;
+            let interval_duration = now.duration_since(last_report).as_secs_f64();
+            let current_pps = interval_packets as f64 / interval_duration;
+            let current_gbps = (current_pps * args.size as f64 * 8.0) / 1_000_000_000.0;
+            println!(
+                "Progress: {} packets sent, current rate: {:.0} pps ({:.2} Gbps), errors: {}",
+                packets_sent, current_pps, current_gbps, errors
+            );
+            last_report = now;
+            last_report_count = packets_sent;
+        }
+
         if args.count > 0 && packets_sent >= args.count {
             break;
         }
     }
+
+    // Final statistics
+    let elapsed = start_time.elapsed();
+    let elapsed_secs = elapsed.as_secs_f64();
+    let actual_pps = packets_sent as f64 / elapsed_secs;
+    let actual_gbps = (actual_pps * args.size as f64 * 8.0) / 1_000_000_000.0;
+
+    println!("\n=== Traffic Generator Summary ===");
+    println!("Total packets sent: {}", packets_sent);
+    println!("Total errors: {}", errors);
+    println!("Elapsed time: {:.2}s", elapsed_secs);
+    println!(
+        "Actual packet rate: {:.0} pps (target: {} pps)",
+        actual_pps, args.rate
+    );
+    println!("Actual throughput: {:.2} Gbps", actual_gbps);
+    println!("Packet size: {} bytes", args.size);
 
     Ok(())
 }
