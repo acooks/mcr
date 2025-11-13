@@ -114,10 +114,11 @@ mod mutex_backend {
         };
 
         let egress_handle = {
+            let egress_logger = logger.clone();
             thread::Builder::new()
                 .name("egress".to_string())
                 .spawn(move || -> Result<()> {
-                    let mut egress = EgressLoop::new(egress_config.clone(), buffer_pool.clone())?;
+                    let mut egress = EgressLoop::new(egress_config.clone(), buffer_pool.clone(), egress_logger)?;
                     loop {
                         egress.reap_available_completions()?;
                         match egress_rx.try_recv() {
@@ -247,10 +248,11 @@ mod lock_free_backend {
 
         let egress_handle = {
             let egress_rx = egress_queue;
+            let egress_logger = logger.clone();
             thread::Builder::new()
                 .name("egress".to_string())
                 .spawn(move || -> Result<()> {
-                    let mut egress = EgressLoop::new(egress_config.clone(), buffer_pool.clone())?;
+                    let mut egress = EgressLoop::new(egress_config.clone(), buffer_pool.clone(), egress_logger)?;
                     loop {
                         egress.reap_available_completions()?;
                         match egress_rx.pop() {

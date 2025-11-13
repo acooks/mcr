@@ -7,6 +7,8 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::ops::Deref;
 use std::os::fd::{AsRawFd, OwnedFd};
 
+use crate::logging::{Facility, Logger};
+
 // Conditional imports and type definitions
 #[cfg(feature = "lock_free_buffer_pool")]
 use crate::worker::buffer_pool::{BufferPool as LockFreeBufferPool, ManagedBuffer};
@@ -100,6 +102,8 @@ pub struct EgressLoop<B, P> {
     stats: EgressStats,
     in_flight: HashMap<u64, B>,
     next_user_data: u64,
+    logger: Logger,
+    first_packet_logged: bool,
 }
 
 // Common implementation for both backends
@@ -120,6 +124,15 @@ where
         let source_ip = get_interface_ip(interface_name)?;
         let socket = create_connected_udp_socket(source_ip, dest_addr)?;
         self.sockets.insert(key, (socket, source_ip));
+
+        self.logger.debug(
+            Facility::Egress,
+            &format!(
+                "New destination added: {} -> {} (total sockets: {})",
+                source_ip, dest_addr, self.sockets.len()
+            ),
+        );
+
         Ok(source_ip)
     }
 
@@ -141,7 +154,16 @@ where
     }
 
     fn submit_send(&mut self, packet: B) -> Result<()> {
+        // Log first packet
+        if !self.first_packet_logged {
+            self.logger.debug(Facility::Egress, "First packet submitted");
+            self.first_packet_logged = true;
+        }
+
+        // Extract packet metadata before moving
         let key = (packet.interface_name().to_string(), packet.dest_addr());
+        let payload_len = packet.payload_len();
+
         let (socket_fd, _) = self
             .sockets
             .get(&key)
@@ -151,7 +173,7 @@ where
         let send_op = opcode::Send::new(
             types::Fd(socket_fd.as_raw_fd()),
             packet.deref().as_ptr(),
-            packet.payload_len() as u32,
+            payload_len as u32,
         )
         .build()
         .user_data(user_data);
@@ -165,6 +187,18 @@ where
         if self.config.track_stats {
             self.stats.packets_submitted += 1;
         }
+
+        // Trace-level per-packet logging
+        self.logger.trace(
+            Facility::Egress,
+            &format!(
+                "Packet submitted: {} -> {} len={}",
+                key.0,
+                key.1,
+                payload_len
+            ),
+        );
+
         Ok(())
     }
 
@@ -195,10 +229,31 @@ where
                 if self.config.track_stats {
                     self.stats.send_errors += 1;
                 }
+                // Log send errors (sample every 100th error to avoid spam)
+                if self.stats.send_errors % 100 == 1 {
+                    self.logger.error(
+                        Facility::Egress,
+                        &format!("Send error: errno={} (total errors: {})", -result, self.stats.send_errors),
+                    );
+                }
             } else {
                 if self.config.track_stats {
                     self.stats.packets_sent += 1;
                     self.stats.bytes_sent += result as u64;
+                }
+
+                // Periodic stats logging (every 10,000 packets)
+                if self.stats.packets_sent % 10000 == 0 {
+                    self.logger.debug(
+                        Facility::Egress,
+                        &format!(
+                            "Stats: sent={} submitted={} errors={} bytes={}",
+                            self.stats.packets_sent,
+                            self.stats.packets_submitted,
+                            self.stats.send_errors,
+                            self.stats.bytes_sent
+                        ),
+                    );
                 }
             }
         }
@@ -220,7 +275,12 @@ where
 
 #[cfg(not(feature = "lock_free_buffer_pool"))]
 impl EgressLoop<EgressPacket, Arc<Mutex<MutexBufferPool>>> {
-    pub fn new(config: EgressConfig, buffer_pool: Arc<Mutex<MutexBufferPool>>) -> Result<Self> {
+    pub fn new(
+        config: EgressConfig,
+        buffer_pool: Arc<Mutex<MutexBufferPool>>,
+        logger: Logger,
+    ) -> Result<Self> {
+        logger.info(Facility::Egress, "Egress loop starting");
         Ok(Self {
             ring: IoUring::new(config.queue_depth)?,
             sockets: HashMap::new(),
@@ -230,13 +290,20 @@ impl EgressLoop<EgressPacket, Arc<Mutex<MutexBufferPool>>> {
             stats: EgressStats::default(),
             in_flight: HashMap::new(),
             next_user_data: 0,
+            logger,
+            first_packet_logged: false,
         })
     }
 }
 
 #[cfg(feature = "lock_free_buffer_pool")]
 impl EgressLoop<EgressWorkItem, Arc<LockFreeBufferPool>> {
-    pub fn new(config: EgressConfig, buffer_pool: Arc<LockFreeBufferPool>) -> Result<Self> {
+    pub fn new(
+        config: EgressConfig,
+        buffer_pool: Arc<LockFreeBufferPool>,
+        logger: Logger,
+    ) -> Result<Self> {
+        logger.info(Facility::Egress, "Egress loop starting (lock-free)");
         Ok(Self {
             ring: IoUring::new(config.queue_depth)?,
             sockets: HashMap::new(),
@@ -246,6 +313,8 @@ impl EgressLoop<EgressWorkItem, Arc<LockFreeBufferPool>> {
             stats: EgressStats::default(),
             in_flight: HashMap::new(),
             next_user_data: 0,
+            logger,
+            first_packet_logged: false,
         })
     }
 }
