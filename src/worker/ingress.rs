@@ -58,52 +58,28 @@ impl BufferPoolTrait for Arc<BufferPool> {
     }
 }
 
-/// Wrapper that combines a lock-free queue with an eventfd for waking egress
+/// Wrapper that combines a lock-free queue with adaptive eventfd wakeup
 pub struct EgressQueueWithWakeup {
-    queue: Arc<SegQueue<EgressWorkItem>>,
-    wakeup_fd: i32,  // Raw FD for the egress eventfd
+    adaptive: crate::worker::adaptive_wakeup::AdaptiveWakeup,
 }
 
 impl EgressQueueWithWakeup {
     pub fn new(queue: Arc<SegQueue<EgressWorkItem>>, wakeup_fd: i32) -> Self {
-        Self { queue, wakeup_fd }
+        let config = crate::worker::adaptive_wakeup::AdaptiveConfig::default();
+        Self {
+            adaptive: crate::worker::adaptive_wakeup::AdaptiveWakeup::new(
+                queue,
+                wakeup_fd,
+                config,
+            ),
+        }
     }
 }
 
 impl EgressChannel for EgressQueueWithWakeup {
     type Item = EgressWorkItem;
     fn send(&self, item: Self::Item) -> Result<(), ()> {
-        self.queue.push(item);
-
-        // Signal egress thread to wake up - CRITICAL: must be robust
-        // The eventfd write can fail with EAGAIN if the kernel's internal buffer is full.
-        // This is a transient error in high-throughput scenarios. We MUST retry to ensure
-        // the wakeup signal is delivered, otherwise packets pile up in the queue but the
-        // egress thread never wakes to process them, leading to buffer exhaustion.
-        let value: u64 = 1;
-        loop {
-            let ret = unsafe {
-                libc::write(
-                    self.wakeup_fd,
-                    &value as *const u64 as *const libc::c_void,
-                    8,
-                )
-            };
-            if ret == 8 {
-                break; // Success
-            }
-            if ret < 0 {
-                let errno = std::io::Error::last_os_error();
-                if errno.raw_os_error() == Some(libc::EAGAIN) || errno.raw_os_error() == Some(libc::EWOULDBLOCK) {
-                    // Buffer is full, spin briefly and retry
-                    std::hint::spin_loop();
-                    continue;
-                }
-                // A real error occurred - this is extremely rare but fatal
-                return Err(());
-            }
-        }
-        Ok(())
+        self.adaptive.send(item)
     }
 }
 
