@@ -173,6 +173,13 @@ impl AsyncConsumer {
             }
         }
 
+        // Final drain: process any remaining entries after shutdown signal
+        for (_facility, ringbuffer) in &self.ringbuffers {
+            while let Some(entry) = ringbuffer.read() {
+                self.sink.write_entry(&entry);
+            }
+        }
+
         // Final flush
         self.sink.flush();
     }
@@ -228,6 +235,13 @@ impl BlockingConsumer {
             } else {
                 // No data available, sleep briefly
                 std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+
+        // Final drain: process any remaining entries after shutdown signal
+        for (_facility, ringbuffer) in &self.ringbuffers {
+            while let Some(entry) = ringbuffer.read() {
+                self.sink.write_entry(&entry);
             }
         }
 
