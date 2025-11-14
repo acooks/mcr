@@ -7,7 +7,8 @@ NS_NAME="mcr_e2e_test_$$" # Unique namespace name per script run
 VETH_HOST="vh-$$"
 VETH_NS="vn-$$"
 IP_HOST="192.168.200.1/24"
-IP_NS="192.18.0.2/24"
+IP_NS="192.168.200.2/24"
+IP_NS_ADDR="192.168.200.2" # Without CIDR for traffic_generator
 
 RELAY_COMMAND_SOCKET="/tmp/mcr_relay_e2e_$$.sock"
 WORKER_CONTROL_SOCKET="/tmp/multicast_relay_control.sock"
@@ -26,8 +27,8 @@ cleanup() {
     # Remove the network namespace
     sudo ip netns del "$NS_NAME" 2>/dev/null || true
 
-    # Clean up temporary files
-    rm -f "$RELAY_COMMAND_SOCKET" "$WORKER_CONTROL_SOCKET" "$OUTPUT_FILE"
+    # Clean up temporary files (use sudo for files created by relay/socat running as root)
+    sudo rm -f "$RELAY_COMMAND_SOCKET" "$WORKER_CONTROL_SOCKET" "$OUTPUT_FILE" || true
 }
 
 # Function to set up an isolated network namespace
@@ -77,9 +78,11 @@ start_relay() {
     # Note: The relay needs to be run with sudo to have CAP_NET_RAW for AF_PACKET
     # The supervisor and workers will run with privileges dropped to the configured user/group
     # (or root if not configured, which is fine for tests).
+    # Use --num-workers 1 for faster, more reliable test execution
     sudo ip netns exec "$NS_NAME" \
         ./target/debug/multicast_relay supervisor \
-        --relay-command-socket-path "$RELAY_COMMAND_SOCKET" &
+        --relay-command-socket-path "$RELAY_COMMAND_SOCKET" \
+        --num-workers 1 &
     RELAY_PID=$!
     echo "Relay started with PID $RELAY_PID."
 
@@ -102,7 +105,7 @@ send_packets() {
         ./target/debug/traffic_generator \
         --group "$input_group" \
         --port "$input_port" \
-        --interface "$VETH_NS" \
+        --interface "$IP_NS_ADDR" \
         --count "$packet_count" \
         --payload "$packet_payload"
     echo "Packets sent. Waiting for relay..."
