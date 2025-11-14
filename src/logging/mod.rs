@@ -1,15 +1,11 @@
-// High-performance lockless logging system for MCR
+// High-performance logging system for MCR
 //
-// Documentation:
-// - docs/LOGGING.md - User guide and quick start (START HERE)
-// - design/LOGGING_DESIGN.md - Technical design details
-// - design/RINGBUFFER_IMPLEMENTATION.md - Ring buffer implementation
-// - design/KERNEL_RINGBUFFER_ANALYSIS.md - Linux/FreeBSD analysis
+// Uses pipe-based JSON logging for data plane workers,
+// and MPSC ring buffers for control plane components.
 
 mod consumer;
 mod entry;
 mod facility;
-pub mod integration;
 mod logger;
 #[macro_use]
 mod macros;
@@ -22,9 +18,41 @@ pub use consumer::{
 };
 pub use entry::{KeyValue, LogEntry};
 pub use facility::Facility;
-pub use integration::{
-    ControlPlaneLogging, DataPlaneLogging, SharedMemoryLogManager, SupervisorLogging,
-};
 pub use logger::{LogRegistry, Logger};
-pub use ringbuffer::{shm_id_for_facility, MPSCRingBuffer, SPSCRingBuffer, SharedSPSCRingBuffer};
+pub use ringbuffer::{MPSCRingBuffer, SPSCRingBuffer};
 pub use severity::Severity;
+
+// Re-export ControlPlaneLogging for backward compatibility
+// This is a simple wrapper around Logger with MPSC ring buffers
+pub struct ControlPlaneLogging {
+    registry: LogRegistry,
+}
+
+impl ControlPlaneLogging {
+    pub fn new() -> Self {
+        Self {
+            registry: LogRegistry::new_mpsc(),
+        }
+    }
+
+    pub fn logger(&self, facility: Facility) -> Option<Logger> {
+        self.registry.get_logger(facility)
+    }
+
+    pub fn registry(&self) -> &LogRegistry {
+        &self.registry
+    }
+
+    /// Shutdown logging system
+    /// For MPSC ring buffers, this is a no-op since they're automatically cleaned up
+    pub async fn shutdown(&self) {
+        // MPSC ring buffers are automatically dropped when consumers exit
+        // No explicit cleanup needed
+    }
+}
+
+impl Default for ControlPlaneLogging {
+    fn default() -> Self {
+        Self::new()
+    }
+}

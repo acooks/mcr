@@ -11,7 +11,6 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::net::UnixStream;
 use tokio::process::{Child, Command};
-use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
 
 use crate::logging::{AsyncConsumer, Facility, Logger, MPSCRingBuffer};
@@ -859,7 +858,6 @@ pub async fn run(
     group: &str,
     interface: &str,
     prometheus_addr: Option<std::net::SocketAddr>,
-    _relay_command_rx: mpsc::Receiver<RelayCommand>,
     relay_command_socket_path: PathBuf,
     control_socket_path: PathBuf,
     master_rules: Arc<Mutex<HashMap<String, ForwardingRule>>>,
@@ -1048,15 +1046,6 @@ mod tests {
     use super::*;
     use std::time::Instant;
     use tempfile::tempdir;
-
-    /// Clean up leftover shared memory from previous test runs
-    fn cleanup_shared_memory() {
-        for core_id in 0..4 {
-            for facility in ["dataplane", "ingress", "egress", "bufferpool"] {
-                let _ = std::fs::remove_file(format!("/dev/shm/mcr_dp_c{}_{}", core_id, facility));
-            }
-        }
-    }
 
     // --- Test Helpers ---
 

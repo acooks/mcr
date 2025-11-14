@@ -3,7 +3,6 @@ use clap::Parser;
 use multicast_relay::{supervisor, worker, Args, Command};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc;
 
 fn main() -> Result<()> {
     let args = Args::parse();
@@ -18,10 +17,6 @@ fn main() -> Result<()> {
             prometheus_addr,
             num_workers,
         } => {
-            // This channel is now unused, but we keep it for now to avoid breaking the build.
-            // It will be removed in a future commit.
-            let (_relay_command_tx, relay_command_rx) = mpsc::channel(100);
-
             // Create oneshot channel for graceful shutdown
             let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
 
@@ -54,7 +49,6 @@ fn main() -> Result<()> {
                     &group,
                     &interface,
                     prometheus_addr,
-                    relay_command_rx, // This is now unused, will be removed from supervisor::run
                     relay_command_socket_path.clone(),
                     control_socket_path,
                     Arc::new(Mutex::new(HashMap::new())),
@@ -70,14 +64,6 @@ fn main() -> Result<()> {
 
                 // Give workers a brief moment to flush final logs
                 tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-
-                // Clean up shared memory on shutdown
-                #[cfg(not(feature = "testing"))]
-                {
-                    use multicast_relay::logging::SharedMemoryLogManager;
-                    SharedMemoryLogManager::cleanup_stale_shared_memory(std::process::id(), num_workers.map(|n| n as u8));
-                    eprintln!("[Supervisor] Shared memory cleaned up");
-                }
 
                 eprintln!("[Supervisor] Shutdown complete");
             });
