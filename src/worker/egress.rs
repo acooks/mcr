@@ -9,7 +9,6 @@ use std::os::fd::{AsRawFd, OwnedFd};
 
 use crate::logging::{Facility, Logger};
 use crate::RelayCommand;
-use nix::sys::eventfd::EventFd;
 use std::sync::mpsc;
 
 // Conditional imports and type definitions
@@ -106,15 +105,10 @@ pub struct EgressLoop<B, P> {
     in_flight: HashMap<u64, B>,
     next_user_data: u64,
     command_rx: mpsc::Receiver<RelayCommand>,
-    shutdown_event_fd: EventFd,
-    shutdown_buffer: [u8; 8], // Buffer for eventfd read
     shutdown_requested: bool,
     logger: Logger,
     first_packet_logged: bool,
 }
-
-// Special user_data value to identify shutdown eventfd completions
-const SHUTDOWN_USER_DATA: u64 = u64::MAX;
 
 // Common implementation for both backends
 impl<B, P> EgressLoop<B, P>
@@ -232,22 +226,6 @@ where
             let user_data = cqe.user_data();
             let result = cqe.result();
 
-            // Check if this is the shutdown eventfd completion
-            if user_data == SHUTDOWN_USER_DATA {
-                if result >= 0 {
-                    self.logger.info(Facility::Egress, "Shutdown signal received via io_uring");
-                    self.shutdown_requested = true;
-                    // Don't resubmit the shutdown read - we're shutting down
-                } else if result != -(nix::errno::Errno::ECANCELED as i32) {
-                    // Log error unless it's a cancellation (expected during shutdown)
-                    self.logger.error(
-                        Facility::Egress,
-                        &format!("Error reading shutdown eventfd: errno={}", -result),
-                    );
-                }
-                continue;
-            }
-
             // Handle packet send completions
             let _buffer_item = self
                 .in_flight
@@ -298,29 +276,6 @@ where
         self.egress_queue.is_empty()
     }
 
-    /// Submit a read operation on the shutdown eventfd to io_uring
-    /// This allows submit_and_wait to wake up when shutdown is signaled
-    fn submit_shutdown_read(&mut self) -> Result<()> {
-        use std::os::fd::AsRawFd;
-
-        let read_op = opcode::Read::new(
-            types::Fd(self.shutdown_event_fd.as_raw_fd()),
-            self.shutdown_buffer.as_mut_ptr(),
-            self.shutdown_buffer.len() as u32,
-        )
-        .build()
-        .user_data(SHUTDOWN_USER_DATA);
-
-        unsafe {
-            self.ring
-                .submission()
-                .push(&read_op)
-                .context("Failed to push shutdown read op")?;
-        }
-
-        self.logger.trace(Facility::Egress, "Submitted shutdown eventfd read to io_uring");
-        Ok(())
-    }
 
     /// Check if shutdown has been requested
     pub fn shutdown_requested(&self) -> bool {
@@ -376,7 +331,6 @@ impl EgressLoop<EgressPacket, Arc<Mutex<MutexBufferPool>>> {
         config: EgressConfig,
         buffer_pool: Arc<Mutex<MutexBufferPool>>,
         command_rx: mpsc::Receiver<RelayCommand>,
-        shutdown_event_fd: EventFd,
         logger: Logger,
     ) -> Result<Self> {
         logger.info(Facility::Egress, "Egress loop starting");
@@ -391,16 +345,10 @@ impl EgressLoop<EgressPacket, Arc<Mutex<MutexBufferPool>>> {
             in_flight: HashMap::new(),
             next_user_data: 0,
             command_rx,
-            shutdown_event_fd,
-            shutdown_buffer: [0u8; 8],
             shutdown_requested: false,
             logger,
             first_packet_logged: false,
         };
-
-        // Note: We don't submit the shutdown eventfd to io_uring for egress
-        // because the egress loop polls the command channel directly.
-        // The eventfd is kept for API consistency but not actively used.
 
         Ok(egress_loop)
     }
@@ -412,7 +360,6 @@ impl EgressLoop<EgressWorkItem, Arc<LockFreeBufferPool>> {
         config: EgressConfig,
         buffer_pool: Arc<LockFreeBufferPool>,
         command_rx: mpsc::Receiver<RelayCommand>,
-        shutdown_event_fd: EventFd,
         logger: Logger,
     ) -> Result<Self> {
         logger.info(Facility::Egress, "Egress loop starting (lock-free)");
@@ -427,16 +374,10 @@ impl EgressLoop<EgressWorkItem, Arc<LockFreeBufferPool>> {
             in_flight: HashMap::new(),
             next_user_data: 0,
             command_rx,
-            shutdown_event_fd,
-            shutdown_buffer: [0u8; 8],
             shutdown_requested: false,
             logger,
             first_packet_logged: false,
         };
-
-        // Note: We don't submit the shutdown eventfd to io_uring for egress
-        // because the egress loop polls the command channel directly.
-        // The eventfd is kept for API consistency but not actively used.
 
         Ok(egress_loop)
     }

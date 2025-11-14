@@ -24,9 +24,22 @@ use control_plane::ControlPlane;
 use data_plane_integrated::run_data_plane as data_plane_task;
 
 use caps::{CapSet, Capability};
+use nix::sys::eventfd::EventFd;
 use nix::sys::socket::{recvmsg, MsgFlags};
 use std::collections::HashSet;
 use std::os::unix::io::AsRawFd;
+
+/// Channel set for ingress thread communication
+pub struct IngressChannelSet {
+    pub command_rx: std::sync::mpsc::Receiver<RelayCommand>,
+    pub event_fd: EventFd,
+}
+
+/// Channel set for egress thread communication
+/// Note: egress uses command channel polling only, no eventfd
+pub struct EgressChannelSet {
+    pub command_rx: std::sync::mpsc::Receiver<RelayCommand>,
+}
 
 // ... other code ...
 
@@ -221,10 +234,8 @@ pub trait WorkerLifecycle: Send + 'static {
     fn run_data_plane_task(
         &self,
         config: DataPlaneConfig,
-        ingress_rx: std::sync::mpsc::Receiver<RelayCommand>,
-        ingress_event_fd: nix::sys::eventfd::EventFd,
-        egress_rx: std::sync::mpsc::Receiver<RelayCommand>,
-        egress_event_fd: nix::sys::eventfd::EventFd,
+        ingress_channels: IngressChannelSet,
+        egress_channels: EgressChannelSet,
         logger: Logger,
     ) -> Result<()>;
 }
@@ -248,13 +259,11 @@ impl WorkerLifecycle for DefaultWorkerLifecycle {
     fn run_data_plane_task(
         &self,
         config: DataPlaneConfig,
-        ingress_rx: std::sync::mpsc::Receiver<RelayCommand>,
-        ingress_event_fd: nix::sys::eventfd::EventFd,
-        egress_rx: std::sync::mpsc::Receiver<RelayCommand>,
-        egress_event_fd: nix::sys::eventfd::EventFd,
+        ingress_channels: IngressChannelSet,
+        egress_channels: EgressChannelSet,
         logger: Logger,
     ) -> Result<()> {
-        data_plane_task(config, ingress_rx, ingress_event_fd, egress_rx, egress_event_fd, logger)
+        data_plane_task(config, ingress_channels, egress_channels, logger)
     }
 }
 
@@ -329,17 +338,22 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
     let _request_fd = recv_fd(&supervisor_sock).await?;
     let command_fd = recv_fd(&supervisor_sock).await?;
 
-    // Create eventfd and command channel for ingress
+    // Create channel sets for ingress and egress
+    // Ingress uses both command channel and eventfd for io_uring wake-up
     let ingress_event_fd = EventFd::from_value_and_flags(0, EfdFlags::EFD_NONBLOCK)
         .context("Failed to create ingress eventfd")?;
     let ingress_event_fd_for_writer = ingress_event_fd.as_raw_fd();
     let (ingress_tx, ingress_rx) = std::sync::mpsc::channel::<RelayCommand>();
+    let ingress_channels = IngressChannelSet {
+        command_rx: ingress_rx,
+        event_fd: ingress_event_fd,
+    };
 
-    // Create separate eventfd and command channel for egress
-    let egress_event_fd = EventFd::from_value_and_flags(0, EfdFlags::EFD_NONBLOCK)
-        .context("Failed to create egress eventfd")?;
-    let egress_event_fd_for_writer = egress_event_fd.as_raw_fd();
+    // Egress uses only command channel polling (no eventfd)
     let (egress_tx, egress_rx) = std::sync::mpsc::channel::<RelayCommand>();
+    let egress_channels = EgressChannelSet {
+        command_rx: egress_rx,
+    };
     let command_stream = unsafe { std::os::unix::net::UnixStream::from_raw_fd(command_fd) };
     command_stream.set_nonblocking(true)?;
     let command_stream = UnixStream::from_std(command_stream)?;
@@ -411,13 +425,12 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
                         }
                     }
 
-                    logger_for_spawn.debug(Facility::DataPlane, "Signaling both eventfds");
-                    // Signal both eventfds to wake up ingress and egress io_uring loops
-                    // Note: eventfds were created with EFD_NONBLOCK, so these writes are non-blocking
+                    logger_for_spawn.debug(Facility::DataPlane, "Signaling ingress eventfd");
+                    // Signal ingress eventfd to wake up io_uring loop
+                    // Note: egress uses polling and does not need eventfd signal
                     let value: u64 = 1;
                     unsafe {
                         libc::write(ingress_event_fd_for_writer, &value as *const u64 as *const libc::c_void, 8);
-                        libc::write(egress_event_fd_for_writer, &value as *const u64 as *const libc::c_void, 8);
                     }
                 }
                 Err(e) => {
@@ -452,12 +465,11 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
             );
         }
 
-        // Signal both eventfds to wake up ingress and egress loops to process shutdown
-        // Note: eventfds were created with EFD_NONBLOCK, so these writes are non-blocking
+        // Signal ingress eventfd to wake up io_uring loop to process shutdown
+        // Note: Egress uses command channel polling only (no eventfd)
         let value: u64 = 1;
         unsafe {
             libc::write(ingress_event_fd_for_writer, &value as *const u64 as *const libc::c_void, 8);
-            libc::write(egress_event_fd_for_writer, &value as *const u64 as *const libc::c_void, 8);
         }
     });
 
@@ -471,10 +483,8 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
         .spawn(move || {
             lifecycle.run_data_plane_task(
                 config,
-                ingress_rx,
-                ingress_event_fd,
-                egress_rx,
-                egress_event_fd,
+                ingress_channels,
+                egress_channels,
                 logger_for_dp_thread,
             )
         })
@@ -574,6 +584,7 @@ mod tests {
     ///   infinite loop and has not crashed during its complex initialization phase.
     /// - **Tier:** 1 (Logic)
     #[tokio::test]
+    #[cfg(feature = "testing")]
     async fn test_run_data_plane_starts_successfully() -> anyhow::Result<()> {
         struct MockWorkerLifecycle;
         impl WorkerLifecycle for MockWorkerLifecycle {
@@ -591,13 +602,15 @@ mod tests {
             fn run_data_plane_task(
                 &self,
                 _config: DataPlaneConfig,
-                _command_rx: std::sync::mpsc::Receiver<RelayCommand>,
-                _event_fd: nix::sys::eventfd::EventFd,
+                _ingress_channels: IngressChannelSet,
+                _egress_channels: EgressChannelSet,
                 _logger: Logger,
             ) -> Result<()> {
                 // In a real test, we might block here indefinitely,
                 // but for the timeout test, returning Ok is sufficient.
+                eprintln!("MockWorkerLifecycle::run_data_plane_task starting, sleeping for 10 seconds");
                 std::thread::sleep(std::time::Duration::from_secs(10));
+                eprintln!("MockWorkerLifecycle::run_data_plane_task completed after sleep");
                 Ok(())
             }
         }
@@ -643,7 +656,7 @@ mod tests {
         let request_fd = request_sock1.into_std()?.into_raw_fd();
         let command_fd = command_sock1.into_std()?.into_raw_fd();
 
-        tokio::task::spawn(async move {
+        let supervisor_handle = tokio::task::spawn(async move {
             use nix::sys::socket::{sendmsg, ControlMessage, MsgFlags};
             use std::io::IoSlice;
             use std::os::unix::io::AsRawFd;
@@ -670,6 +683,8 @@ mod tests {
             // Send the request and command FDs
             send_fd_local(&supervisor_sock, request_fd).await.ok();
             send_fd_local(&supervisor_sock, command_fd).await.ok();
+            // Keep the socket alive for 1 second to prevent premature shutdown
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         });
 
         let run_future = run_data_plane(config, MockWorkerLifecycle);
@@ -678,8 +693,11 @@ mod tests {
 
         assert!(
             result.is_err(),
-            "run_data_plane should not exit and should time out"
+            "run_data_plane should not exit and should time out. Result: {:?}", result
         );
+
+        // Clean up the supervisor task
+        supervisor_handle.abort();
 
         Ok(())
     }

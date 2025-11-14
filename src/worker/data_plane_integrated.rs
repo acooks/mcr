@@ -5,7 +5,8 @@
 //! to select between a Mutex-based backend and a high-performance lock-free backend.
 
 use crate::logging::{Facility, Logger};
-use crate::{DataPlaneConfig, RelayCommand};
+use crate::worker::{EgressChannelSet, IngressChannelSet};
+use crate::DataPlaneConfig;
 use anyhow::Result;
 
 // =================================================================================
@@ -14,21 +15,19 @@ use anyhow::Result;
 
 pub fn run_data_plane(
     config: DataPlaneConfig,
-    ingress_command_rx: std::sync::mpsc::Receiver<RelayCommand>,
-    ingress_event_fd: nix::sys::eventfd::EventFd,
-    egress_command_rx: std::sync::mpsc::Receiver<RelayCommand>,
-    egress_event_fd: nix::sys::eventfd::EventFd,
+    ingress_channels: IngressChannelSet,
+    egress_channels: EgressChannelSet,
     logger: Logger,
 ) -> Result<()> {
     #[cfg(feature = "lock_free_buffer_pool")]
     {
         logger.info(Facility::DataPlane, "Using Lock-Free Backend");
-        lock_free_backend::run(config, ingress_command_rx, ingress_event_fd, egress_command_rx, egress_event_fd, logger)
+        lock_free_backend::run(config, ingress_channels, egress_channels, logger)
     }
     #[cfg(not(feature = "lock_free_buffer_pool"))]
     {
         logger.info(Facility::DataPlane, "Using Mutex Backend");
-        mutex_backend::run(config, ingress_command_rx, ingress_event_fd, egress_command_rx, egress_event_fd, logger)
+        mutex_backend::run(config, ingress_channels, egress_channels, logger)
     }
 }
 
@@ -53,12 +52,14 @@ mod mutex_backend {
 
     pub fn run(
         config: DataPlaneConfig,
-        ingress_command_rx: mpsc::Receiver<RelayCommand>,
-        ingress_event_fd: nix::sys::eventfd::EventFd,
-        egress_command_rx: mpsc::Receiver<RelayCommand>,
-        egress_event_fd: nix::sys::eventfd::EventFd,
+        ingress_channels: super::IngressChannelSet,
+        egress_channels: super::EgressChannelSet,
         logger: Logger,
     ) -> Result<()> {
+        // Destructure channel sets
+        let ingress_command_rx = ingress_channels.command_rx;
+        let ingress_event_fd = ingress_channels.event_fd;
+        let egress_command_rx = egress_channels.command_rx;
 
         let buffer_pool_small = std::env::var("MCR_BUFFER_POOL_SMALL")
             .ok()
@@ -128,7 +129,7 @@ mod mutex_backend {
                 .name("egress".to_string())
                 .spawn(move || -> Result<()> {
                     let mut egress =
-                        EgressLoop::new(egress_config.clone(), buffer_pool.clone(), egress_command_rx, egress_event_fd, egress_logger_clone)?;
+                        EgressLoop::new(egress_config.clone(), buffer_pool.clone(), egress_command_rx, egress_logger_clone)?;
 
                     // Event-driven loop with single blocking point: io_uring's submit_and_wait
                     loop {
@@ -217,14 +218,14 @@ mod lock_free_backend {
 
     pub fn run(
         config: DataPlaneConfig,
-        ingress_command_rx: mpsc::Receiver<RelayCommand>,
-        ingress_event_fd: nix::sys::eventfd::EventFd,
-        egress_command_rx: mpsc::Receiver<RelayCommand>,
-        egress_event_fd: nix::sys::eventfd::EventFd,
+        ingress_channels: super::IngressChannelSet,
+        egress_channels: super::EgressChannelSet,
         logger: Logger,
     ) -> Result<()> {
-        use nix::sys::eventfd::EventFd;
-        use std::os::fd::{AsFd, FromRawFd};
+        // Destructure channel sets
+        let ingress_command_rx = ingress_channels.command_rx;
+        let ingress_event_fd = ingress_channels.event_fd;
+        let egress_command_rx = egress_channels.command_rx;
 
         let buffer_pool_small = std::env::var("MCR_BUFFER_POOL_SMALL")
             .ok()
@@ -289,7 +290,7 @@ mod lock_free_backend {
                 .name("egress".to_string())
                 .spawn(move || -> Result<()> {
                     let mut egress =
-                        EgressLoop::new(egress_config.clone(), buffer_pool.clone(), egress_command_rx, egress_event_fd, egress_logger)?;
+                        EgressLoop::new(egress_config.clone(), buffer_pool.clone(), egress_command_rx, egress_logger)?;
 
                     // Event-driven loop with single blocking point: io_uring's submit_and_wait
                     loop {
