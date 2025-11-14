@@ -36,9 +36,9 @@ pub struct IngressChannelSet {
 }
 
 /// Channel set for egress thread communication
-/// Note: egress uses command channel polling only, no eventfd
 pub struct EgressChannelSet {
     pub command_rx: std::sync::mpsc::Receiver<RelayCommand>,
+    pub event_fd: nix::sys::eventfd::EventFd,
 }
 
 // ... other code ...
@@ -349,10 +349,14 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
         event_fd: ingress_event_fd,
     };
 
-    // Egress uses only command channel polling (no eventfd)
+    // Egress uses both command channel and eventfd for io_uring wake-up
+    let egress_event_fd = EventFd::from_value_and_flags(0, EfdFlags::EFD_NONBLOCK)
+        .context("Failed to create egress eventfd")?;
+    let egress_event_fd_for_writer = egress_event_fd.as_raw_fd();
     let (egress_tx, egress_rx) = std::sync::mpsc::channel::<RelayCommand>();
     let egress_channels = EgressChannelSet {
         command_rx: egress_rx,
+        event_fd: egress_event_fd,
     };
     let command_stream = unsafe { std::os::unix::net::UnixStream::from_raw_fd(command_fd) };
     command_stream.set_nonblocking(true)?;
@@ -425,12 +429,12 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
                         }
                     }
 
-                    logger_for_spawn.debug(Facility::DataPlane, "Signaling ingress eventfd");
-                    // Signal ingress eventfd to wake up io_uring loop
-                    // Note: egress uses polling and does not need eventfd signal
+                    logger_for_spawn.debug(Facility::DataPlane, "Signaling ingress and egress eventfds");
+                    // Signal eventfds to wake up io_uring loops
                     let value: u64 = 1;
                     unsafe {
                         libc::write(ingress_event_fd_for_writer, &value as *const u64 as *const libc::c_void, 8);
+                        libc::write(egress_event_fd_for_writer, &value as *const u64 as *const libc::c_void, 8);
                     }
                 }
                 Err(e) => {

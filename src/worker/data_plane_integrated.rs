@@ -134,7 +134,7 @@ mod mutex_backend {
                     // Event-driven loop with single blocking point: io_uring's submit_and_wait
                     loop {
                         // Process any commands (non-blocking)
-                        egress.process_commands();
+                        let _ = egress.process_commands();
 
                         // Check if shutdown was requested (either via command or eventfd)
                         if egress.shutdown_requested() {
@@ -204,9 +204,8 @@ mod mutex_backend {
 mod lock_free_backend {
     use anyhow::{Context, Result};
     use crossbeam_queue::SegQueue;
-    use std::sync::{mpsc, Arc};
+    use std::sync::Arc;
     use std::thread;
-    use std::time::Duration;
 
     use crate::logging::Logger;
     use crate::worker::{
@@ -214,7 +213,7 @@ mod lock_free_backend {
         egress::{EgressConfig, EgressLoop, EgressWorkItem},
         ingress::{IngressConfig, IngressLoop},
     };
-    use crate::{DataPlaneConfig, RelayCommand};
+    use crate::DataPlaneConfig;
 
     pub fn run(
         config: DataPlaneConfig,
@@ -225,7 +224,7 @@ mod lock_free_backend {
         // Destructure channel sets
         let ingress_command_rx = ingress_channels.command_rx;
         let ingress_event_fd = ingress_channels.event_fd;
-        let egress_command_rx = egress_channels.command_rx;
+        // Note: egress_channels is moved as a whole to EgressLoop::new()
 
         let buffer_pool_small = std::env::var("MCR_BUFFER_POOL_SMALL")
             .ok()
@@ -289,45 +288,13 @@ mod lock_free_backend {
             thread::Builder::new()
                 .name("egress".to_string())
                 .spawn(move || -> Result<()> {
-                    let mut egress =
-                        EgressLoop::new(egress_config.clone(), buffer_pool.clone(), egress_command_rx, egress_logger)?;
-
-                    // Event-driven loop with single blocking point: io_uring's submit_and_wait
-                    loop {
-                        // Process any commands (non-blocking)
-                        egress.process_commands();
-
-                        // Check if shutdown was requested (either via command or eventfd)
-                        if egress.shutdown_requested() {
-                            break;
-                        }
-
-                        // Process io_uring completions (non-blocking)
-                        egress.reap_available_completions()?;
-
-                        // Try to pop packets from the lock-free queue (non-blocking)
-                        match egress_rx.pop() {
-                            Some(packet) => {
-                                egress.add_destination(&packet.interface_name, packet.dest_addr)?;
-                                egress.queue_packet(packet);
-                                if egress.queue_len() >= egress_config.batch_size {
-                                    egress.send_batch()?;
-                                }
-                            }
-                            None => {
-                                // Queue is empty - flush any queued packets
-                                if !egress.is_queue_empty() {
-                                    egress.send_batch()?;
-                                }
-                            }
-                        }
-
-                        // Brief sleep to avoid busy-waiting
-                        // The io_uring eventfd read will wake us up on shutdown signals
-                        thread::sleep(Duration::from_micros(10));
-                    }
-
-                    egress.print_final_stats();
+                    let mut egress = EgressLoop::new(
+                        egress_config.clone(),
+                        buffer_pool.clone(),
+                        egress_channels,  // Pass the whole struct
+                        egress_logger
+                    )?;
+                    egress.run(&egress_rx)?;
                     Ok(())
                 })
                 .context("Failed to spawn egress thread")?

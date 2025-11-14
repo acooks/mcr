@@ -11,6 +11,9 @@ use crate::logging::{Facility, Logger};
 use crate::RelayCommand;
 use std::sync::mpsc;
 
+#[cfg(feature = "lock_free_buffer_pool")]
+const SHUTDOWN_USER_DATA: u64 = u64::MAX;
+
 // Conditional imports and type definitions
 #[cfg(feature = "lock_free_buffer_pool")]
 use crate::worker::buffer_pool::{BufferPool as LockFreeBufferPool, ManagedBuffer};
@@ -108,6 +111,10 @@ pub struct EgressLoop<B, P> {
     shutdown_requested: bool,
     logger: Logger,
     first_packet_logged: bool,
+    #[cfg(feature = "lock_free_buffer_pool")]
+    shutdown_event_fd: OwnedFd,
+    #[cfg(feature = "lock_free_buffer_pool")]
+    shutdown_buffer: [u8; 8],
 }
 
 // Common implementation for both backends
@@ -220,11 +227,37 @@ where
     }
 
     fn process_cqe_batch(&mut self) -> Result<usize> {
-        let mut count = 0;
+        // Collect completion events to avoid borrow checker issues
+        let mut completions = Vec::new();
         for cqe in self.ring.completion() {
+            completions.push((cqe.user_data(), cqe.result()));
+        }
+
+        let mut count = 0;
+        #[cfg(feature = "lock_free_buffer_pool")]
+        let mut need_shutdown_resubmit = false;
+
+        for (user_data, result) in completions {
             count += 1;
-            let user_data = cqe.user_data();
-            let result = cqe.result();
+
+            #[cfg(feature = "lock_free_buffer_pool")]
+            {
+                // Handle shutdown event completions
+                if user_data == SHUTDOWN_USER_DATA {
+                    if result < 0 {
+                        self.logger.error(
+                            Facility::Egress,
+                            &format!("Shutdown event read error: errno={}", -result),
+                        );
+                    }
+                    // Process commands to check for shutdown
+                    let shutdown = self.process_commands();
+                    if !shutdown {
+                        need_shutdown_resubmit = true;
+                    }
+                    continue;
+                }
+            }
 
             // Handle packet send completions
             let _buffer_item = self
@@ -263,6 +296,12 @@ where
                 }
             }
         }
+
+        #[cfg(feature = "lock_free_buffer_pool")]
+        if need_shutdown_resubmit {
+            self.handle_shutdown_resubmit()?;
+        }
+
         Ok(count)
     }
 
@@ -283,13 +322,14 @@ where
     }
 
     /// Process commands from the command channel (non-blocking)
-    pub fn process_commands(&mut self) {
+    /// Returns true if shutdown was requested
+    pub fn process_commands(&mut self) -> bool {
         loop {
             match self.command_rx.try_recv() {
                 Ok(RelayCommand::Shutdown) => {
                     self.logger.info(Facility::Egress, "Shutdown command received");
                     self.shutdown_requested = true;
-                    return;
+                    return true;
                 }
                 Ok(cmd) => {
                     self.logger.debug(
@@ -299,12 +339,12 @@ where
                 }
                 Err(mpsc::TryRecvError::Empty) => {
                     // No more commands to process
-                    return;
+                    return false;
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {
                     self.logger.error(Facility::Egress, "Command channel disconnected");
                     self.shutdown_requested = true;
-                    return;
+                    return true;
                 }
             }
         }
@@ -320,6 +360,22 @@ where
             self.stats.bytes_sent
         );
         self.logger.info(Facility::Egress, &msg);
+    }
+
+    #[cfg(feature = "lock_free_buffer_pool")]
+    fn handle_shutdown_resubmit(&mut self) -> Result<()> {
+        let read_op = opcode::Read::new(
+            types::Fd(self.shutdown_event_fd.as_raw_fd()),
+            self.shutdown_buffer.as_mut_ptr(),
+            8,
+        )
+        .build()
+        .user_data(SHUTDOWN_USER_DATA);
+
+        unsafe {
+            self.ring.submission().push(&read_op)?;
+        }
+        Ok(())
     }
 }
 
@@ -359,12 +415,19 @@ impl EgressLoop<EgressWorkItem, Arc<LockFreeBufferPool>> {
     pub fn new(
         config: EgressConfig,
         buffer_pool: Arc<LockFreeBufferPool>,
-        command_rx: mpsc::Receiver<RelayCommand>,
+        egress_channels: crate::worker::EgressChannelSet,
         logger: Logger,
     ) -> Result<Self> {
         logger.info(Facility::Egress, "Egress loop starting (lock-free)");
 
-        let egress_loop = Self {
+        // Extract command_rx and event_fd from the channel set
+        let command_rx = egress_channels.command_rx;
+        let event_fd = egress_channels.event_fd;
+
+        // Convert EventFd to OwnedFd using Into trait (consumes EventFd)
+        let shutdown_event_fd: OwnedFd = event_fd.into();
+
+        let mut egress_loop = Self {
             ring: IoUring::new(config.queue_depth)?,
             sockets: HashMap::new(),
             egress_queue: Vec::with_capacity(config.batch_size),
@@ -377,9 +440,67 @@ impl EgressLoop<EgressWorkItem, Arc<LockFreeBufferPool>> {
             shutdown_requested: false,
             logger,
             first_packet_logged: false,
+            shutdown_event_fd,
+            shutdown_buffer: [0u8; 8],
         };
 
+        // Submit initial shutdown read operation
+        egress_loop.submit_shutdown_read()?;
+        egress_loop.ring.submit()?;
+
         Ok(egress_loop)
+    }
+
+    fn submit_shutdown_read(&mut self) -> Result<()> {
+        let read_op = opcode::Read::new(
+            types::Fd(self.shutdown_event_fd.as_raw_fd()),
+            self.shutdown_buffer.as_mut_ptr(),
+            8,
+        )
+        .build()
+        .user_data(SHUTDOWN_USER_DATA);
+
+        unsafe {
+            self.ring.submission().push(&read_op)?;
+        }
+        Ok(())
+    }
+
+    pub fn run(&mut self, packet_rx: &crossbeam_queue::SegQueue<EgressWorkItem>) -> Result<()> {
+        loop {
+            // Single blocking point
+            self.ring.submit_and_wait(1)?;
+
+            // Process completions
+            self.process_cqe_batch()?;
+
+            // Check shutdown
+            if self.shutdown_requested() {
+                // Drain remaining packets
+                while let Some(packet) = packet_rx.pop() {
+                    self.add_destination(&packet.interface_name, packet.dest_addr)?;
+                    self.queue_packet(packet);
+                }
+                if !self.is_queue_empty() {
+                    self.send_batch()?;
+                }
+                break;
+            }
+
+            // Drain packet queue
+            while let Some(packet) = packet_rx.pop() {
+                self.add_destination(&packet.interface_name, packet.dest_addr)?;
+                self.queue_packet(packet);
+            }
+
+            // Send if we have packets
+            if !self.is_queue_empty() {
+                self.send_batch()?;
+            }
+        }
+
+        self.print_final_stats();
+        Ok(())
     }
 }
 
