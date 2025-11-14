@@ -90,7 +90,12 @@ impl SharedMemoryLogManager {
     ///
     /// Creates SharedSPSCRingBuffer for each data plane facility.
     /// The worker will attach to these using the same shm_id.
-    pub fn create_for_worker(core_id: u8, capacity: usize) -> Result<Self, nix::Error> {
+    ///
+    /// # Arguments
+    /// * `supervisor_pid` - PID of the supervisor process (to create unique paths)
+    /// * `core_id` - CPU core ID for this worker
+    /// * `capacity` - Ring buffer capacity (must be power of 2)
+    pub fn create_for_worker(supervisor_pid: u32, core_id: u8, capacity: usize) -> Result<Self, nix::Error> {
         let mut shared_buffers = HashMap::new();
 
         // Create shared memory ring buffers for data plane facilities
@@ -102,7 +107,7 @@ impl SharedMemoryLogManager {
         ];
 
         for facility in &facilities {
-            let shm_id = shm_id_for_facility(core_id, *facility);
+            let shm_id = shm_id_for_facility(supervisor_pid, core_id, *facility);
             let buffer = SharedSPSCRingBuffer::create(&shm_id, capacity, core_id)?;
             shared_buffers.insert(shm_id, Arc::new(buffer));
         }
@@ -166,8 +171,9 @@ impl SharedMemoryLogManager {
     /// left behind by crashed or killed previous instances.
     ///
     /// # Arguments
+    /// * `supervisor_pid` - PID of the supervisor process
     /// * `max_workers` - Maximum number of workers to clean up (defaults to 16)
-    pub fn cleanup_stale_shared_memory(max_workers: Option<u8>) {
+    pub fn cleanup_stale_shared_memory(supervisor_pid: u32, max_workers: Option<u8>) {
         use nix::sys::mman::shm_unlink;
 
         let max_workers = max_workers.unwrap_or(16);
@@ -180,7 +186,7 @@ impl SharedMemoryLogManager {
 
         for core_id in 0..max_workers {
             for facility in &facilities {
-                let shm_id = shm_id_for_facility(core_id, *facility);
+                let shm_id = shm_id_for_facility(supervisor_pid, core_id, *facility);
                 // Ignore errors - the shared memory may not exist
                 let _ = shm_unlink(shm_id.as_str());
             }
@@ -202,7 +208,11 @@ impl DataPlaneLogging {
     ///
     /// The supervisor must have already created these shared memory regions
     /// before the worker process starts.
-    pub fn attach(core_id: u8) -> Result<Self, nix::Error> {
+    ///
+    /// # Arguments
+    /// * `supervisor_pid` - PID of the supervisor process
+    /// * `core_id` - CPU core ID for this worker
+    pub fn attach(supervisor_pid: u32, core_id: u8) -> Result<Self, nix::Error> {
         let mut shared_buffers = HashMap::new();
 
         // Attach to shared memory ring buffers for data plane facilities
@@ -214,7 +224,7 @@ impl DataPlaneLogging {
         ];
 
         for facility in &facilities {
-            let shm_id = shm_id_for_facility(core_id, *facility);
+            let shm_id = shm_id_for_facility(supervisor_pid, core_id, *facility);
             let buffer = SharedSPSCRingBuffer::attach(&shm_id)?;
             shared_buffers.insert(*facility, Arc::new(buffer));
         }
@@ -317,15 +327,18 @@ mod tests {
 
     #[test]
     fn test_data_plane_logging() {
+        // Use test PID for shared memory paths
+        let test_pid = std::process::id();
+
         // Clean up any leftover shared memory from previous test runs
         // Use the centralized cleanup method to ensure consistency
-        SharedMemoryLogManager::cleanup_stale_shared_memory(Some(1));
+        SharedMemoryLogManager::cleanup_stale_shared_memory(test_pid, Some(1));
 
         // Create shared memory (supervisor side)
-        let manager = SharedMemoryLogManager::create_for_worker(0, 1024).unwrap();
+        let manager = SharedMemoryLogManager::create_for_worker(test_pid, 0, 1024).unwrap();
 
         // Attach to shared memory (worker side)
-        let logging = DataPlaneLogging::attach(0).unwrap();
+        let logging = DataPlaneLogging::attach(test_pid, 0).unwrap();
         let logger = logging.logger(Facility::DataPlane).unwrap();
 
         // Log a message

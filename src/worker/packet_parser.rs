@@ -161,6 +161,18 @@ pub fn parse_packet(data: &[u8], validate_checksums: bool) -> Result<PacketHeade
     let payload_offset = udp_offset + 8; // UDP header is always 8 bytes
     let payload_len = (udp.length as usize).saturating_sub(8); // UDP length includes header
 
+    // CRITICAL: Validate that we actually have enough data in the packet.
+    // The UDP length field tells us how much data SHOULD be present, but we must
+    // verify the packet buffer actually contains that much data.
+    // This prevents out-of-bounds access when packets are truncated (e.g., by snaplen).
+    let expected_total = payload_offset + payload_len;
+    if data.len() < expected_total {
+        return Err(ParseError::PacketTooShort {
+            expected: expected_total,
+            actual: data.len(),
+        });
+    }
+
     Ok(PacketHeaders {
         ethernet,
         ipv4,

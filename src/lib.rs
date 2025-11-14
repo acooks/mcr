@@ -99,6 +99,7 @@ pub struct ControlPlaneConfig {
 pub struct DataPlaneConfig {
     pub uid: Option<u32>,
     pub gid: Option<u32>,
+    pub supervisor_pid: u32,  // PID of the supervisor process (for shared memory paths)
     pub core_id: Option<u32>,
     pub prometheus_addr: std::net::SocketAddr,
     pub input_interface_name: Option<String>,

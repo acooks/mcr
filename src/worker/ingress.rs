@@ -4,6 +4,7 @@ use io_uring::{opcode, types, IoUring};
 use nix::sys::eventfd::EventFd;
 use socket2::{Domain, Protocol, Socket, Type};
 use std::collections::HashMap;
+use std::io::Write;
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket as StdUdpSocket};
 use std::ops::{Deref, DerefMut};
 use std::os::fd::{AsRawFd, OwnedFd};
@@ -74,14 +75,34 @@ impl EgressChannel for EgressQueueWithWakeup {
     type Item = EgressWorkItem;
     fn send(&self, item: Self::Item) -> Result<(), ()> {
         self.queue.push(item);
-        // Signal egress thread to wake up
+
+        // Signal egress thread to wake up - CRITICAL: must be robust
+        // The eventfd write can fail with EAGAIN if the kernel's internal buffer is full.
+        // This is a transient error in high-throughput scenarios. We MUST retry to ensure
+        // the wakeup signal is delivered, otherwise packets pile up in the queue but the
+        // egress thread never wakes to process them, leading to buffer exhaustion.
         let value: u64 = 1;
-        unsafe {
-            libc::write(
-                self.wakeup_fd,
-                &value as *const u64 as *const libc::c_void,
-                8,
-            );
+        loop {
+            let ret = unsafe {
+                libc::write(
+                    self.wakeup_fd,
+                    &value as *const u64 as *const libc::c_void,
+                    8,
+                )
+            };
+            if ret == 8 {
+                break; // Success
+            }
+            if ret < 0 {
+                let errno = std::io::Error::last_os_error();
+                if errno.raw_os_error() == Some(libc::EAGAIN) || errno.raw_os_error() == Some(libc::EWOULDBLOCK) {
+                    // Buffer is full, spin briefly and retry
+                    std::hint::spin_loop();
+                    continue;
+                }
+                // A real error occurred - this is extremely rare but fatal
+                return Err(());
+            }
         }
         Ok(())
     }
@@ -183,15 +204,30 @@ where
         Ok(())
     }
 
+    /// Process a single command. Returns true if shutdown was requested.
+    fn process_single_command(&mut self, command: RelayCommand) -> Result<bool> {
+        match command {
+            RelayCommand::AddRule(rule) => {
+                self.add_rule(Arc::new(rule))?;
+                Ok(false)
+            }
+            RelayCommand::RemoveRule { rule_id } => {
+                self.remove_rule(&rule_id)?;
+                Ok(false)
+            }
+            RelayCommand::Shutdown => {
+                self.logger.info(Facility::Ingress, "Shutdown requested");
+                Ok(true)
+            }
+        }
+    }
+
+    /// Process all pending commands from the channel (non-blocking).
+    /// Returns true if shutdown was requested.
     fn process_commands(&mut self) -> Result<bool> {
         while let Ok(command) = self.command_rx.try_recv() {
-            match command {
-                RelayCommand::AddRule(rule) => self.add_rule(Arc::new(rule))?,
-                RelayCommand::RemoveRule { rule_id } => self.remove_rule(&rule_id)?,
-                RelayCommand::Shutdown => {
-                    self.logger.info(Facility::Ingress, "Shutdown requested");
-                    return Ok(true);
-                }
+            if self.process_single_command(command)? {
+                return Ok(true);
             }
         }
         Ok(false)
@@ -210,15 +246,15 @@ where
         // Periodic stats logging (every 10,000 packets)
         if self.stats.packets_received % 10000 == 0 {
             let msg = format!(
-                "Stats: rx={} matched={} filtered={} no_match={} buf_exhausted={} egress_err={}",
+                "[STATS:Ingress] recv={} matched={} egr_sent={} filtered={} no_match={} buf_exhaust={}",
                 self.stats.packets_received,
                 self.stats.packets_matched,
+                self.stats.egress_packets_sent,
                 self.stats.filtered,
                 self.stats.no_rule_match,
-                self.stats.buffer_exhaustion,
-                self.stats.egress_channel_errors
+                self.stats.buffer_exhaustion
             );
-            self.logger.debug(Facility::Ingress, &msg);
+            self.logger.info(Facility::Ingress, &msg);
         }
 
         let headers = match parse_packet(packet_data, false) {
@@ -313,22 +349,67 @@ where
     }
 
     pub fn run(&mut self) -> Result<()> {
+        eprintln!("[ingress-run] ENTRY: run() method started");
+        std::io::stderr().flush().ok();
+
         let mut recv_buffers: Vec<Vec<u8>> = (0..self.config.batch_size)
             .map(|_| vec![0u8; 9000])
             .collect();
         let mut command_notify_buf = [0u8; 8];
-        self.submit_command_read(&mut command_notify_buf)?;
 
-        // CRITICAL: Process any pending commands BEFORE entering the main blocking loop.
-        // This prevents deadlock where we block waiting for packets, but can't receive
-        // packets until we process the AddRule command that joins multicast groups.
-        if self.process_commands()? {
-            self.logger.info(
-                Facility::Ingress,
-                "Shutdown requested before main loop started",
-            );
-            return Ok(());
+        eprintln!("[ingress-run] Buffers allocated");
+        std::io::stderr().flush().ok();
+
+        // *** STARTUP SYNCHRONIZATION: Wait for initial configuration ***
+        // Block on the command channel until we receive at least one command.
+        // This prevents a race condition where:
+        // 1. Worker starts and enters io_uring submit_and_wait(1)
+        // 2. Test/supervisor sends AddRule command
+        // 3. Worker is blocked, can't process command
+        // 4. Command would join multicast group, but never processed
+        // 5. No packets arrive because group not joined -> DEADLOCK
+
+        eprintln!("[ingress-run] About to log 'Waiting for initial configuration'");
+        std::io::stderr().flush().ok();
+
+        self.logger.info(Facility::Ingress, "Waiting for initial configuration...");
+
+        eprintln!("[ingress-run] Logged 'Waiting for initial configuration', about to call recv()");
+        std::io::stderr().flush().ok();
+
+        match self.command_rx.recv() {
+            Ok(cmd) => {
+                // Process first command
+                if self.process_single_command(cmd)? {
+                    self.logger.info(Facility::Ingress, "Shutdown during initialization");
+                    return Ok(());
+                }
+            }
+            Err(_) => {
+                return Err(anyhow::anyhow!("Command channel closed during initialization"));
+            }
         }
+
+        // Drain any other pending commands that arrived during init (non-blocking)
+        loop {
+            match self.command_rx.try_recv() {
+                Ok(cmd) => {
+                    if self.process_single_command(cmd)? {
+                        self.logger.info(Facility::Ingress, "Shutdown during initialization");
+                        return Ok(());
+                    }
+                }
+                Err(mpsc::TryRecvError::Empty) => break, // No more pending commands
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    return Err(anyhow::anyhow!("Command channel disconnected during initialization"));
+                }
+            }
+        }
+
+        self.logger.info(Facility::Ingress, "Initial configuration complete, entering main loop");
+
+        // Now submit the eventfd read for runtime command notifications
+        self.submit_command_read(&mut command_notify_buf)?;
 
         loop {
             let available_buffers = self.config.batch_size - self.ring.submission().len();

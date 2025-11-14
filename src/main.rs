@@ -75,7 +75,7 @@ fn main() -> Result<()> {
                 #[cfg(not(feature = "testing"))]
                 {
                     use multicast_relay::logging::SharedMemoryLogManager;
-                    SharedMemoryLogManager::cleanup_stale_shared_memory(num_workers.map(|n| n as u8));
+                    SharedMemoryLogManager::cleanup_stale_shared_memory(std::process::id(), num_workers.map(|n| n as u8));
                     eprintln!("[Supervisor] Shared memory cleaned up");
                 }
 
@@ -98,9 +98,13 @@ fn main() -> Result<()> {
             reporting_interval,
         } => {
             if data_plane {
+                // Get parent process ID (supervisor PID) for shared memory paths
+                let supervisor_pid = std::os::unix::process::parent_id();
+
                 let config = multicast_relay::DataPlaneConfig {
                     uid,
                     gid,
+                    supervisor_pid,
                     core_id,
                     // Data plane workers do not expose prometheus, so we can safely unwrap here.
                     prometheus_addr: prometheus_addr.unwrap_or("0.0.0.0:0".parse().unwrap()),

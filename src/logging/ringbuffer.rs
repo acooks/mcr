@@ -474,10 +474,13 @@ use std::os::fd::OwnedFd;
 
 /// Generate shared memory ID for a data plane worker's ring buffer
 ///
-/// Format: `/mcr_dp_c{core_id}_{facility_code}`
-/// Example: `/mcr_dp_c0_ingress` for core 0's ingress facility
-pub fn shm_id_for_facility(core_id: u8, facility: crate::logging::Facility) -> String {
-    format!("/mcr_dp_c{}_{}", core_id, facility.as_str().to_lowercase())
+/// Format: `/mcr_{supervisor_pid}_dp_c{core_id}_{facility_code}`
+/// Example: `/mcr_12345_dp_c0_ingress` for supervisor PID 12345, core 0's ingress facility
+///
+/// The supervisor PID is included to prevent collisions when multiple MCR instances run
+/// concurrently (e.g., in different network namespaces for testing).
+pub fn shm_id_for_facility(supervisor_pid: u32, core_id: u8, facility: crate::logging::Facility) -> String {
+    format!("/mcr_{}_dp_c{}_{}", supervisor_pid, core_id, facility.as_str().to_lowercase())
 }
 
 /// Header structure stored at the beginning of shared memory
@@ -528,19 +531,25 @@ impl SharedSPSCRingBuffer {
     /// Create a new shared memory ring buffer (supervisor side)
     ///
     /// # Arguments
-    /// * `shm_id` - Shared memory ID (e.g., "/mcr_log_dp0")
+    /// * `shm_id` - Shared memory ID (e.g., "/mcr_12345_dp_c0_ingress")
     /// * `capacity` - Number of entries (must be power of 2)
     /// * `core_id` - CPU core ID for this buffer
+    ///
+    /// # Errors
+    /// Returns EEXIST if shared memory already exists. This prevents collisions
+    /// between multiple MCR instances.
     pub fn create(shm_id: &str, capacity: usize, core_id: u8) -> Result<Self, nix::Error> {
+        use std::io::Write;
         assert!(capacity.is_power_of_two(), "Capacity must be power of 2");
 
         let size = calc_shm_size(capacity);
 
-        // Remove any stale shared memory object from previous crashed instances
-        // Ignore ENOENT (file doesn't exist) - that's the expected case
-        let _ = shm_unlink(shm_id);
+        // Log which shared memory file we're creating
+        eprintln!("[SharedMemory] Creating shared memory: {}", shm_id);
+        std::io::stderr().flush().ok();
 
-        // Create shared memory object
+        // Create shared memory object with O_EXCL to fail if it already exists.
+        // This catches collisions between multiple MCR instances immediately.
         let fd = shm_open(
             shm_id,
             OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_RDWR,
@@ -604,6 +613,12 @@ impl SharedSPSCRingBuffer {
     /// # Arguments
     /// * `shm_id` - Shared memory ID to attach to
     pub fn attach(shm_id: &str) -> Result<Self, nix::Error> {
+        use std::io::Write;
+
+        // Log which shared memory file we're attaching to
+        eprintln!("[SharedMemory] Attaching to shared memory: {}", shm_id);
+        std::io::stderr().flush().ok();
+
         // Open existing shared memory
         let fd = shm_open(shm_id, OFlag::O_RDWR, Mode::empty())?;
 
@@ -848,10 +863,10 @@ mod shared_tests {
 
     #[test]
     fn test_shm_id_generation() {
-        let id = shm_id_for_facility(0, Facility::Ingress);
-        assert_eq!(id, "/mcr_dp_c0_ingress");
+        let id = shm_id_for_facility(12345, 0, Facility::Ingress);
+        assert_eq!(id, "/mcr_12345_dp_c0_ingress");
 
-        let id = shm_id_for_facility(7, Facility::Egress);
-        assert_eq!(id, "/mcr_dp_c7_egress");
+        let id = shm_id_for_facility(67890, 7, Facility::Egress);
+        assert_eq!(id, "/mcr_67890_dp_c7_egress");
     }
 }

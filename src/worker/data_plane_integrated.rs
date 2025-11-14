@@ -13,6 +13,7 @@ use crate::worker::{
 use crate::DataPlaneConfig;
 use anyhow::{Context, Result};
 use crossbeam_queue::SegQueue;
+use std::io::Write;
 use std::os::fd::AsRawFd;
 use std::sync::Arc;
 use std::thread;
@@ -23,11 +24,20 @@ pub fn run_data_plane(
     egress_channels: EgressChannelSet,
     logger: Logger,
 ) -> Result<()> {
+    eprintln!("[run_data_plane] Entry point reached");
+    std::io::stderr().flush().ok();
+
     logger.info(Facility::DataPlane, "Data plane starting (lock-free mode)");
+
+    eprintln!("[run_data_plane] About to destructure channel sets");
+    std::io::stderr().flush().ok();
 
     // Destructure channel sets
     let ingress_command_rx = ingress_channels.command_rx;
     let ingress_event_fd = ingress_channels.event_fd;
+
+    eprintln!("[run_data_plane] Ingress channels destructured");
+    std::io::stderr().flush().ok();
 
     // Get raw FD for egress wakeup before moving egress_channels
     let egress_wakeup_fd = egress_channels.event_fd.as_raw_fd();
@@ -66,6 +76,9 @@ pub fn run_data_plane(
         .clone()
         .unwrap_or_else(|| "lo".to_string());
 
+    eprintln!("[run_data_plane] About to spawn ingress thread");
+    std::io::stderr().flush().ok();
+
     let ingress_handle = {
         let interface_name = interface_name.clone();
         let egress_queue_for_ingress = egress_queue.clone();
@@ -74,9 +87,15 @@ pub fn run_data_plane(
         thread::Builder::new()
             .name("ingress".to_string())
             .spawn(move || -> Result<()> {
+                eprintln!("[ingress-thread] Thread started");
+                std::io::stderr().flush().ok();
+
                 // Wrap the queue with wakeup eventfd
                 let egress_channel =
                     EgressQueueWithWakeup::new(egress_queue_for_ingress, egress_wakeup_fd);
+
+                eprintln!("[ingress-thread] About to create IngressLoop");
+                std::io::stderr().flush().ok();
 
                 let mut ingress = IngressLoop::new(
                     &interface_name,
@@ -87,10 +106,22 @@ pub fn run_data_plane(
                     ingress_event_fd,
                     ingress_logger,
                 )?;
-                ingress.run()
+
+                eprintln!("[ingress-thread] IngressLoop created, calling run()");
+                std::io::stderr().flush().ok();
+
+                let result = ingress.run();
+
+                eprintln!("[ingress-thread] run() returned: {:?}", result);
+                std::io::stderr().flush().ok();
+
+                result
             })
             .context("Failed to spawn ingress thread")?
     };
+
+    eprintln!("[run_data_plane] Ingress thread spawned");
+    std::io::stderr().flush().ok();
 
     let egress_handle = {
         let egress_rx = egress_queue;

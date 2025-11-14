@@ -254,7 +254,9 @@ extract_stat() {
     fi
 
     # Fall back to last periodic stat
-    tail -50 "$log_file" | \
+    # Use tail -100000 to handle high-volume trace logs that bury stats
+    # With TRACE logging enabled, logs can exceed 300k lines, so stats may be 50k+ lines from end
+    tail -100000 "$log_file" | \
         grep "\[$stat_type\]" | \
         tail -1 | \
         grep -oP "$field=\K[0-9]+" || echo "0"

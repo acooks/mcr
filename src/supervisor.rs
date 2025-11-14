@@ -382,9 +382,11 @@ impl WorkerManager {
 
     /// Spawn a data plane worker for the given core
     async fn spawn_data_plane(&mut self, core_id: u32) -> Result<()> {
+        let supervisor_pid = std::process::id();
+
         // Create shared memory for this worker's logging (REQUIRED in production)
         #[cfg(not(feature = "testing"))]
-        let log_manager = SharedMemoryLogManager::create_for_worker(core_id as u8, 16384)
+        let log_manager = SharedMemoryLogManager::create_for_worker(supervisor_pid, core_id as u8, 16384)
             .with_context(|| format!("Failed to create shared memory for worker {}", core_id))?;
 
         let (child, cmd_stream, req_stream) = spawn_data_plane_worker(
@@ -440,7 +442,7 @@ impl WorkerManager {
 
         // Clean up any stale shared memory from previous crashed/killed instances
         #[cfg(not(feature = "testing"))]
-        SharedMemoryLogManager::cleanup_stale_shared_memory(Some(self.num_cores as u8));
+        SharedMemoryLogManager::cleanup_stale_shared_memory(std::process::id(), Some(self.num_cores as u8));
 
         // Spawn data plane workers
         for core_id in 0..self.num_cores as u32 {

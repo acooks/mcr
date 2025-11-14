@@ -238,10 +238,10 @@ where
 
                 // Periodic stats logging (every 10,000 packets)
                 if self.stats.packets_sent % 10000 == 0 {
-                    self.logger.debug(
+                    self.logger.info(
                         Facility::Egress,
                         &format!(
-                            "Stats: sent={} submitted={} errors={} bytes={}",
+                            "[STATS:Egress] sent={} submitted={} errors={} bytes={}",
                             self.stats.packets_sent,
                             self.stats.packets_submitted,
                             self.stats.send_errors,

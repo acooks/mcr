@@ -319,19 +319,19 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
         })?;
 
     eprintln!("[DataPlane] Got core_id: {}", core_id);
-    eprintln!("[DataPlane] Calling DataPlaneLogging::attach({})...", core_id);
+    eprintln!("[DataPlane] Calling DataPlaneLogging::attach(supervisor_pid={}, core_id={})...", config.supervisor_pid, core_id);
     use std::io::Write;
     std::io::stderr().flush().ok();
 
     #[cfg(not(feature = "testing"))]
-    let logging = match DataPlaneLogging::attach(core_id as u8) {
+    let logging = match DataPlaneLogging::attach(config.supervisor_pid, core_id as u8) {
         Ok(log) => {
             eprintln!("[DataPlane] Successfully attached to shared memory logging");
             std::io::stderr().flush().ok();
             log
         },
         Err(e) => {
-            eprintln!("[DataPlane] FATAL: Failed to attach to shared memory logging for core {}: {:?}", core_id, e);
+            eprintln!("[DataPlane] FATAL: Failed to attach to shared memory logging for supervisor PID {}, core {}: {:?}", config.supervisor_pid, core_id, e);
             std::io::stderr().flush().ok();
             return Err(e).context("Failed to attach to shared memory logging - supervisor must create shared memory before spawning workers");
         }
