@@ -43,7 +43,7 @@ cleanup() {
     sudo killall -q multicast_relay || true
     sudo killall -q traffic_generator || true
     killall -q nc || true
-    rm -f "$SUPERVISOR_SOCKET"
+    sudo rm -f "$SUPERVISOR_SOCKET" || true
     echo "Cleanup complete."
 }
 trap cleanup EXIT

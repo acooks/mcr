@@ -51,7 +51,8 @@ cleanup() {
     sudo killall -q multicast_relay socat || true
     sudo ip netns pids "$NS_NAME" 2>/dev/null | xargs -r sudo kill 2>/dev/null || true
     sudo ip netns del "$NS_NAME" 2>/dev/null || true
-    rm -f "$SUPERVISOR_SOCKET" "$LISTENER_OUTPUT_FILE"
+    sudo rm -f "$SUPERVISOR_SOCKET" || true
+    rm -f "$LISTENER_OUTPUT_FILE" || true
     echo "Cleanup complete."
 }
 trap cleanup EXIT
