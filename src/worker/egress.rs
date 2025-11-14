@@ -14,6 +14,7 @@ use crate::RelayCommand;
 const SHUTDOWN_USER_DATA: u64 = u64::MAX;
 const COMMAND_USER_DATA: u64 = u64::MAX - 1;
 
+use crate::worker::adaptive_wakeup::WakeupStrategy;
 use crate::worker::buffer_pool::{BufferPool, ManagedBuffer};
 use crate::worker::ingress::BufferPoolTrait;
 
@@ -74,6 +75,7 @@ pub struct EgressLoop<B, P> {
     first_packet_logged: bool,
     shutdown_event_fd: OwnedFd,
     shutdown_buffer: [u8; 8],
+    wakeup_strategy: Arc<dyn WakeupStrategy>,
 }
 
 // Common implementation for both backends
@@ -373,6 +375,7 @@ impl EgressLoop<EgressWorkItem, Arc<BufferPool>> {
         buffer_pool: Arc<BufferPool>,
         shutdown_event_fd: OwnedFd,
         cmd_stream_fd: OwnedFd,
+        wakeup_strategy: Arc<dyn WakeupStrategy>,
         logger: Logger,
     ) -> Result<Self> {
         logger.info(Facility::Egress, "Egress loop starting");
@@ -394,6 +397,7 @@ impl EgressLoop<EgressWorkItem, Arc<BufferPool>> {
             first_packet_logged: false,
             shutdown_event_fd,
             shutdown_buffer: [0u8; 8],
+            wakeup_strategy,
         };
 
         // Submit initial reads for both shutdown and command streams
@@ -421,34 +425,63 @@ impl EgressLoop<EgressWorkItem, Arc<BufferPool>> {
 
     pub fn run(&mut self, packet_rx: &crossbeam_queue::SegQueue<EgressWorkItem>) -> Result<()> {
         loop {
-            // Single blocking point
-            self.ring.submit_and_wait(1)?;
-
-            // Process completions
-            self.process_cqe_batch()?;
-
-            // Check shutdown
-            if self.shutdown_requested() {
-                // Drain remaining packets
-                while let Some(packet) = packet_rx.pop() {
-                    self.add_destination(&packet.interface_name, packet.dest_addr)?;
-                    self.queue_packet(packet);
-                }
-                if !self.is_queue_empty() {
-                    self.send_batch()?;
-                }
-                break;
-            }
-
-            // Drain packet queue
+            // 1. Non-blockingly drain the packet queue and submit sends
             while let Some(packet) = packet_rx.pop() {
                 self.add_destination(&packet.interface_name, packet.dest_addr)?;
                 self.queue_packet(packet);
             }
-
-            // Send if we have packets
             if !self.is_queue_empty() {
                 self.send_batch()?;
+            }
+
+            // 2. Check for completions (non-blocking)
+            self.process_cqe_batch()?;
+
+            // 3. Check shutdown
+            if self.shutdown_requested() {
+                // Drain remaining packets from queue
+                while let Some(packet) = packet_rx.pop() {
+                    self.add_destination(&packet.interface_name, packet.dest_addr)?;
+                    self.queue_packet(packet);
+                }
+
+                // Send all queued packets
+                while !self.is_queue_empty() {
+                    self.send_batch()?;
+                    // Submit periodically to avoid overflowing io_uring submission queue
+                    // The submission queue has limited capacity (queue_depth=64)
+                    if self.in_flight.len() >= (self.config.queue_depth as usize / 2) {
+                        self.ring.submit()?;
+                        // Process completions to make room in the queue
+                        self.process_cqe_batch()?;
+                    }
+                }
+
+                // Submit any remaining operations
+                self.ring.submit()?;
+
+                // Wait for all in-flight operations to complete
+                while !self.in_flight.is_empty() {
+                    self.process_cqe_batch()?;
+                    if !self.in_flight.is_empty() {
+                        self.ring.submit_and_wait(1)?;
+                    }
+                }
+
+                break;
+            }
+
+            // 4. Always submit pending I/O operations (non-blocking)
+            self.ring.submit()?;
+
+            // 5. Idle handling based on wakeup strategy
+            if !self.in_flight.is_empty() || !packet_rx.is_empty() {
+                // We have work in flight OR packets in the queue - stay hot
+                std::hint::spin_loop();
+            } else {
+                // Truly idle - delegate to wakeup strategy
+                // (spin mode: spins, eventfd mode: blocks on eventfd read)
+                self.wakeup_strategy.wait();
             }
         }
 

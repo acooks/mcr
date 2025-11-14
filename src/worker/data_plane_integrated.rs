@@ -5,9 +5,10 @@
 
 use crate::logging::{Facility, Logger};
 use crate::worker::{
+    adaptive_wakeup::HybridWakeup,
     buffer_pool::BufferPool,
     egress::{EgressConfig, EgressLoop, EgressWorkItem},
-    ingress::{EgressQueueWithWakeup, IngressConfig, IngressLoop},
+    ingress::{EgressQueueDirect, IngressConfig, IngressLoop},
     EgressChannelSet, IngressChannelSet,
 };
 use crate::DataPlaneConfig;
@@ -41,7 +42,6 @@ pub fn run_data_plane(
     // Extract egress channel components
     let egress_cmd_stream_fd = egress_channels.cmd_stream_fd;
     let egress_shutdown_eventfd = egress_channels.shutdown_event_fd;
-    let egress_wakeup_fd = egress_shutdown_eventfd.as_raw_fd();
 
     let buffer_pool_small = std::env::var("MCR_BUFFER_POOL_SMALL")
         .ok()
@@ -77,6 +77,19 @@ pub fn run_data_plane(
         .clone()
         .unwrap_or_else(|| "lo".to_string());
 
+    // Create eventfd for wakeup strategy (blocking mode for wait())
+    let wakeup_fd = unsafe {
+        let fd = libc::eventfd(0, libc::EFD_CLOEXEC); // No EFD_NONBLOCK
+        if fd < 0 {
+            return Err(anyhow::anyhow!("Failed to create wakeup eventfd"));
+        }
+        OwnedFd::from_raw_fd(fd)
+    };
+    let wakeup_fd = Arc::new(wakeup_fd);
+
+    // Create hybrid wakeup strategy
+    let wakeup_strategy = Arc::new(HybridWakeup::new(wakeup_fd.clone()));
+
     eprintln!("[run_data_plane] About to spawn ingress thread");
     std::io::stderr().flush().ok();
 
@@ -85,15 +98,18 @@ pub fn run_data_plane(
         let egress_queue_for_ingress = egress_queue.clone();
         let buffer_pool_for_ingress = buffer_pool.clone();
         let ingress_logger = logger.clone();
+        let wakeup_strategy_for_ingress = wakeup_strategy.clone();
         thread::Builder::new()
             .name("ingress".to_string())
             .spawn(move || -> Result<()> {
                 eprintln!("[ingress-thread] Thread started");
                 std::io::stderr().flush().ok();
 
-                // Wrap the queue with wakeup eventfd
-                let egress_channel =
-                    EgressQueueWithWakeup::new(egress_queue_for_ingress, egress_wakeup_fd);
+                // Queue with wakeup strategy signaling
+                let egress_channel = EgressQueueDirect::new(
+                    egress_queue_for_ingress,
+                    wakeup_strategy_for_ingress,
+                );
 
                 eprintln!("[ingress-thread] About to create IngressLoop");
                 std::io::stderr().flush().ok();
@@ -135,6 +151,7 @@ pub fn run_data_plane(
                     buffer_pool.clone(),
                     shutdown_event_fd,
                     egress_cmd_stream_fd,
+                    wakeup_strategy,
                     egress_logger,
                 )?;
                 egress.run(&egress_rx)?;

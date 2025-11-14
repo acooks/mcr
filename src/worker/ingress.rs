@@ -58,28 +58,32 @@ impl BufferPoolTrait for Arc<BufferPool> {
     }
 }
 
-/// Wrapper that combines a lock-free queue with adaptive eventfd wakeup
-pub struct EgressQueueWithWakeup {
-    adaptive: crate::worker::adaptive_wakeup::AdaptiveWakeup,
+/// Wrapper that combines a lock-free queue with wakeup strategy signaling
+pub struct EgressQueueDirect {
+    queue: Arc<SegQueue<EgressWorkItem>>,
+    wakeup_strategy: Arc<dyn crate::worker::adaptive_wakeup::WakeupStrategy>,
 }
 
-impl EgressQueueWithWakeup {
-    pub fn new(queue: Arc<SegQueue<EgressWorkItem>>, wakeup_fd: i32) -> Self {
-        let config = crate::worker::adaptive_wakeup::AdaptiveConfig::default();
+impl EgressQueueDirect {
+    pub fn new(
+        queue: Arc<SegQueue<EgressWorkItem>>,
+        wakeup_strategy: Arc<dyn crate::worker::adaptive_wakeup::WakeupStrategy>,
+    ) -> Self {
         Self {
-            adaptive: crate::worker::adaptive_wakeup::AdaptiveWakeup::new(
-                queue,
-                wakeup_fd,
-                config,
-            ),
+            queue,
+            wakeup_strategy,
         }
     }
 }
 
-impl EgressChannel for EgressQueueWithWakeup {
+impl EgressChannel for EgressQueueDirect {
     type Item = EgressWorkItem;
     fn send(&self, item: Self::Item) -> Result<(), ()> {
-        self.adaptive.send(item)
+        // Push to queue
+        self.queue.push(item);
+        // Signal the wakeup strategy
+        self.wakeup_strategy.signal();
+        Ok(())
     }
 }
 
@@ -493,12 +497,12 @@ where
 
 // --- Backend-specific `new` implementation ---
 
-impl IngressLoop<Arc<BufferPool>, EgressQueueWithWakeup> {
+impl IngressLoop<Arc<BufferPool>, EgressQueueDirect> {
     pub fn new(
         interface_name: &str,
         config: IngressConfig,
         buffer_pool: Arc<BufferPool>,
-        egress_tx: Option<EgressQueueWithWakeup>,
+        egress_tx: Option<EgressQueueDirect>,
         cmd_stream_fd: OwnedFd,
         logger: Logger,
     ) -> Result<Self> {
