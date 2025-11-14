@@ -107,10 +107,33 @@ impl BufferPoolTrait for Arc<LockFreeBufferPool> {
 }
 
 #[cfg(feature = "lock_free_buffer_pool")]
-impl EgressChannel for Arc<SegQueue<EgressWorkItem>> {
+/// Wrapper that combines a lock-free queue with an eventfd for waking egress
+pub struct EgressQueueWithWakeup {
+    queue: Arc<SegQueue<EgressWorkItem>>,
+    wakeup_fd: i32,  // Raw FD for the egress eventfd
+}
+
+#[cfg(feature = "lock_free_buffer_pool")]
+impl EgressQueueWithWakeup {
+    pub fn new(queue: Arc<SegQueue<EgressWorkItem>>, wakeup_fd: i32) -> Self {
+        Self { queue, wakeup_fd }
+    }
+}
+
+#[cfg(feature = "lock_free_buffer_pool")]
+impl EgressChannel for EgressQueueWithWakeup {
     type Item = EgressWorkItem;
     fn send(&self, item: Self::Item) -> Result<(), ()> {
-        self.push(item);
+        self.queue.push(item);
+        // Signal egress thread to wake up
+        let value: u64 = 1;
+        unsafe {
+            libc::write(
+                self.wakeup_fd,
+                &value as *const u64 as *const libc::c_void,
+                8,
+            );
+        }
         Ok(())
     }
 }
@@ -450,12 +473,12 @@ impl IngressLoop<Arc<Mutex<MutexBufferPool>>, mpsc::Sender<EgressPacket>> {
 }
 
 #[cfg(feature = "lock_free_buffer_pool")]
-impl IngressLoop<Arc<LockFreeBufferPool>, Arc<SegQueue<EgressWorkItem>>> {
+impl IngressLoop<Arc<LockFreeBufferPool>, EgressQueueWithWakeup> {
     pub fn new(
         interface_name: &str,
         config: IngressConfig,
         buffer_pool: Arc<LockFreeBufferPool>,
-        egress_tx: Option<Arc<SegQueue<EgressWorkItem>>>,
+        egress_tx: Option<EgressQueueWithWakeup>,
         command_rx: mpsc::Receiver<RelayCommand>,
         command_event_fd: EventFd,
         logger: Logger,
