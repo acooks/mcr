@@ -14,19 +14,21 @@ use anyhow::Result;
 
 pub fn run_data_plane(
     config: DataPlaneConfig,
-    command_rx: std::sync::mpsc::Receiver<RelayCommand>,
-    event_fd: nix::sys::eventfd::EventFd,
+    ingress_command_rx: std::sync::mpsc::Receiver<RelayCommand>,
+    ingress_event_fd: nix::sys::eventfd::EventFd,
+    egress_command_rx: std::sync::mpsc::Receiver<RelayCommand>,
+    egress_event_fd: nix::sys::eventfd::EventFd,
     logger: Logger,
 ) -> Result<()> {
     #[cfg(feature = "lock_free_buffer_pool")]
     {
         logger.info(Facility::DataPlane, "Using Lock-Free Backend");
-        lock_free_backend::run(config, command_rx, event_fd, logger)
+        lock_free_backend::run(config, ingress_command_rx, ingress_event_fd, egress_command_rx, egress_event_fd, logger)
     }
     #[cfg(not(feature = "lock_free_buffer_pool"))]
     {
         logger.info(Facility::DataPlane, "Using Mutex Backend");
-        mutex_backend::run(config, command_rx, event_fd, logger)
+        mutex_backend::run(config, ingress_command_rx, ingress_event_fd, egress_command_rx, egress_event_fd, logger)
     }
 }
 
@@ -51,10 +53,13 @@ mod mutex_backend {
 
     pub fn run(
         config: DataPlaneConfig,
-        command_rx: mpsc::Receiver<RelayCommand>,
-        event_fd: nix::sys::eventfd::EventFd,
+        ingress_command_rx: mpsc::Receiver<RelayCommand>,
+        ingress_event_fd: nix::sys::eventfd::EventFd,
+        egress_command_rx: mpsc::Receiver<RelayCommand>,
+        egress_event_fd: nix::sys::eventfd::EventFd,
         logger: Logger,
     ) -> Result<()> {
+
         let buffer_pool_small = std::env::var("MCR_BUFFER_POOL_SMALL")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -105,8 +110,8 @@ mod mutex_backend {
                         ingress_config,
                         buffer_pool_for_ingress,
                         Some(egress_tx),
-                        command_rx,
-                        event_fd,
+                        ingress_command_rx,
+                        ingress_event_fd,
                         ingress_logger,
                     )?;
                     ingress.run()
@@ -123,10 +128,22 @@ mod mutex_backend {
                 .name("egress".to_string())
                 .spawn(move || -> Result<()> {
                     let mut egress =
-                        EgressLoop::new(egress_config.clone(), buffer_pool.clone(), egress_logger_clone)?;
-                    let mut running = true;
-                    while running {
+                        EgressLoop::new(egress_config.clone(), buffer_pool.clone(), egress_command_rx, egress_event_fd, egress_logger_clone)?;
+
+                    // Event-driven loop with single blocking point: io_uring's submit_and_wait
+                    loop {
+                        // Process any commands (non-blocking)
+                        egress.process_commands();
+
+                        // Check if shutdown was requested (either via command or eventfd)
+                        if egress.shutdown_requested() {
+                            break;
+                        }
+
+                        // Process io_uring completions (non-blocking)
                         egress.reap_available_completions()?;
+
+                        // Try to receive packets from ingress (non-blocking)
                         match egress_rx.try_recv() {
                             Ok(packet) => {
                                 egress.add_destination(&packet.interface_name, packet.dest_addr)?;
@@ -136,30 +153,22 @@ mod mutex_backend {
                                 }
                             }
                             Err(mpsc::TryRecvError::Empty) => {
+                                // No packets available - flush any queued packets
                                 if !egress.is_queue_empty() {
                                     egress.send_batch()?;
-                                } else {
-                                    match egress_rx.recv_timeout(Duration::from_micros(50)) {
-                                        Ok(packet) => {
-                                            egress.add_destination(
-                                                &packet.interface_name,
-                                                packet.dest_addr,
-                                            )?;
-                                            egress.queue_packet(packet);
-                                        }
-                                        Err(mpsc::RecvTimeoutError::Disconnected) => {
-                                            running = false;
-                                        }
-                                        _ => {}
-                                    }
                                 }
                             }
                             Err(mpsc::TryRecvError::Disconnected) => {
                                 egress_logger.info(crate::logging::Facility::Egress, "Ingress disconnected, shutting down");
-                                running = false;
+                                break;
                             }
                         }
+
+                        // Brief sleep to avoid busy-waiting
+                        // The io_uring eventfd read will wake us up on shutdown signals
+                        thread::sleep(Duration::from_micros(10));
                     }
+
                     egress_logger.info(crate::logging::Facility::Egress, "Egress loop exiting");
                     egress.print_final_stats();
                     egress_logger.info(crate::logging::Facility::Egress, "Egress shutdown complete");
@@ -208,10 +217,15 @@ mod lock_free_backend {
 
     pub fn run(
         config: DataPlaneConfig,
-        command_rx: mpsc::Receiver<RelayCommand>,
-        event_fd: nix::sys::eventfd::EventFd,
+        ingress_command_rx: mpsc::Receiver<RelayCommand>,
+        ingress_event_fd: nix::sys::eventfd::EventFd,
+        egress_command_rx: mpsc::Receiver<RelayCommand>,
+        egress_event_fd: nix::sys::eventfd::EventFd,
         logger: Logger,
     ) -> Result<()> {
+        use nix::sys::eventfd::EventFd;
+        use std::os::fd::{AsFd, FromRawFd};
+
         let buffer_pool_small = std::env::var("MCR_BUFFER_POOL_SMALL")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -259,8 +273,8 @@ mod lock_free_backend {
                         ingress_config,
                         buffer_pool_for_ingress,
                         Some(egress_queue),
-                        command_rx,
-                        event_fd,
+                        ingress_command_rx,
+                        ingress_event_fd,
                         ingress_logger,
                     )?;
                     ingress.run()
@@ -275,9 +289,22 @@ mod lock_free_backend {
                 .name("egress".to_string())
                 .spawn(move || -> Result<()> {
                     let mut egress =
-                        EgressLoop::new(egress_config.clone(), buffer_pool.clone(), egress_logger)?;
+                        EgressLoop::new(egress_config.clone(), buffer_pool.clone(), egress_command_rx, egress_event_fd, egress_logger)?;
+
+                    // Event-driven loop with single blocking point: io_uring's submit_and_wait
                     loop {
+                        // Process any commands (non-blocking)
+                        egress.process_commands();
+
+                        // Check if shutdown was requested (either via command or eventfd)
+                        if egress.shutdown_requested() {
+                            break;
+                        }
+
+                        // Process io_uring completions (non-blocking)
                         egress.reap_available_completions()?;
+
+                        // Try to pop packets from the lock-free queue (non-blocking)
                         match egress_rx.pop() {
                             Some(packet) => {
                                 egress.add_destination(&packet.interface_name, packet.dest_addr)?;
@@ -287,18 +314,20 @@ mod lock_free_backend {
                                 }
                             }
                             None => {
-                                // The queue is empty
+                                // Queue is empty - flush any queued packets
                                 if !egress.is_queue_empty() {
                                     egress.send_batch()?;
-                                } else {
-                                    // Wait briefly for new packets.
-                                    // This is a simple spin-wait with a short sleep to prevent pegging the CPU.
-                                    // A more advanced implementation might use a condvar or other notification mechanism.
-                                    thread::sleep(Duration::from_micros(10));
                                 }
                             }
                         }
+
+                        // Brief sleep to avoid busy-waiting
+                        // The io_uring eventfd read will wake us up on shutdown signals
+                        thread::sleep(Duration::from_micros(10));
                     }
+
+                    egress.print_final_stats();
+                    Ok(())
                 })
                 .context("Failed to spawn egress thread")?
         };

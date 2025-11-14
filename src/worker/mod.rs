@@ -221,8 +221,10 @@ pub trait WorkerLifecycle: Send + 'static {
     fn run_data_plane_task(
         &self,
         config: DataPlaneConfig,
-        command_rx: std::sync::mpsc::Receiver<RelayCommand>,
-        event_fd: nix::sys::eventfd::EventFd,
+        ingress_rx: std::sync::mpsc::Receiver<RelayCommand>,
+        ingress_event_fd: nix::sys::eventfd::EventFd,
+        egress_rx: std::sync::mpsc::Receiver<RelayCommand>,
+        egress_event_fd: nix::sys::eventfd::EventFd,
         logger: Logger,
     ) -> Result<()>;
 }
@@ -246,11 +248,13 @@ impl WorkerLifecycle for DefaultWorkerLifecycle {
     fn run_data_plane_task(
         &self,
         config: DataPlaneConfig,
-        command_rx: std::sync::mpsc::Receiver<RelayCommand>,
-        event_fd: nix::sys::eventfd::EventFd,
+        ingress_rx: std::sync::mpsc::Receiver<RelayCommand>,
+        ingress_event_fd: nix::sys::eventfd::EventFd,
+        egress_rx: std::sync::mpsc::Receiver<RelayCommand>,
+        egress_event_fd: nix::sys::eventfd::EventFd,
         logger: Logger,
     ) -> Result<()> {
-        data_plane_task(config, command_rx, event_fd, logger)
+        data_plane_task(config, ingress_rx, ingress_event_fd, egress_rx, egress_event_fd, logger)
     }
 }
 
@@ -325,13 +329,17 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
     let _request_fd = recv_fd(&supervisor_sock).await?;
     let command_fd = recv_fd(&supervisor_sock).await?;
 
-    // Create eventfd for command notifications to ingress
-    let event_fd = EventFd::from_value_and_flags(0, EfdFlags::EFD_NONBLOCK)
-        .context("Failed to create eventfd")?;
-    let event_fd_for_writer = event_fd.as_raw_fd();
+    // Create eventfd and command channel for ingress
+    let ingress_event_fd = EventFd::from_value_and_flags(0, EfdFlags::EFD_NONBLOCK)
+        .context("Failed to create ingress eventfd")?;
+    let ingress_event_fd_for_writer = ingress_event_fd.as_raw_fd();
+    let (ingress_tx, ingress_rx) = std::sync::mpsc::channel::<RelayCommand>();
 
-    // Bridge from the async command stream (tokio) to the sync data plane task (std::thread)
-    let (std_tx, std_rx) = std::sync::mpsc::channel::<RelayCommand>();
+    // Create separate eventfd and command channel for egress
+    let egress_event_fd = EventFd::from_value_and_flags(0, EfdFlags::EFD_NONBLOCK)
+        .context("Failed to create egress eventfd")?;
+    let egress_event_fd_for_writer = egress_event_fd.as_raw_fd();
+    let (egress_tx, egress_rx) = std::sync::mpsc::channel::<RelayCommand>();
     let command_stream = unsafe { std::os::unix::net::UnixStream::from_raw_fd(command_fd) };
     command_stream.set_nonblocking(true)?;
     let command_stream = UnixStream::from_std(command_stream)?;
@@ -354,18 +362,21 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
                         Facility::DataPlane,
                         &format!("Received command: {:?}", command),
                     );
-                    match std_tx.send(command) {
+
+                    // Send command to both ingress and egress threads
+                    let command_clone = command.clone();
+                    match ingress_tx.send(command) {
                         Ok(_) => {
                             logger_for_spawn.debug(
                                 Facility::DataPlane,
-                                "Command sent to data plane thread successfully",
+                                "Command sent to ingress thread successfully",
                             );
                         }
                         Err(e) => {
                             logger_for_spawn.error(
                                 Facility::DataPlane,
                                 &format!(
-                                    "FATAL: Failed to send command to data plane thread: {:?}",
+                                    "FATAL: Failed to send command to ingress thread: {:?}",
                                     e
                                 ),
                             );
@@ -376,13 +387,37 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
                             break;
                         }
                     }
-                    logger_for_spawn.debug(Facility::DataPlane, "Signaling eventfd");
-                    // Signal the eventfd to wake up ingress io_uring loop
-                    // Note: eventfd was created with EFD_NONBLOCK, so this write is non-blocking
-                    // and doesn't need spawn_blocking
+
+                    match egress_tx.send(command_clone) {
+                        Ok(_) => {
+                            logger_for_spawn.debug(
+                                Facility::DataPlane,
+                                "Command sent to egress thread successfully",
+                            );
+                        }
+                        Err(e) => {
+                            logger_for_spawn.error(
+                                Facility::DataPlane,
+                                &format!(
+                                    "FATAL: Failed to send command to egress thread: {:?}",
+                                    e
+                                ),
+                            );
+                            logger_for_spawn.error(
+                                Facility::DataPlane,
+                                "This means the egress thread has exited or panicked",
+                            );
+                            break;
+                        }
+                    }
+
+                    logger_for_spawn.debug(Facility::DataPlane, "Signaling both eventfds");
+                    // Signal both eventfds to wake up ingress and egress io_uring loops
+                    // Note: eventfds were created with EFD_NONBLOCK, so these writes are non-blocking
                     let value: u64 = 1;
                     unsafe {
-                        libc::write(event_fd_for_writer, &value as *const u64 as *const libc::c_void, 8);
+                        libc::write(ingress_event_fd_for_writer, &value as *const u64 as *const libc::c_void, 8);
+                        libc::write(egress_event_fd_for_writer, &value as *const u64 as *const libc::c_void, 8);
                     }
                 }
                 Err(e) => {
@@ -394,24 +429,35 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
             }
         }
 
-        // Stream closed - supervisor has exited, send shutdown command to data plane
+        // Stream closed - supervisor has exited, send shutdown command to both threads
         logger_for_spawn.info(Facility::DataPlane, "Supervisor stream closed.");
         logger_for_spawn.info(
             Facility::DataPlane,
-            "Supervisor stream closed, sending shutdown to data plane",
+            "Supervisor stream closed, sending shutdown to both ingress and egress threads",
         );
-        if let Err(e) = std_tx.send(RelayCommand::Shutdown) {
+
+        // Send shutdown to ingress
+        if let Err(e) = ingress_tx.send(RelayCommand::Shutdown) {
             logger_for_spawn.error(
                 Facility::DataPlane,
-                &format!("Failed to send shutdown command: {:?}", e),
+                &format!("Failed to send shutdown command to ingress: {:?}", e),
             );
-        } else {
-            // Signal eventfd to wake up ingress loop to process shutdown
-            // Note: eventfd was created with EFD_NONBLOCK, so this write is non-blocking
-            let value: u64 = 1;
-            unsafe {
-                libc::write(event_fd_for_writer, &value as *const u64 as *const libc::c_void, 8);
-            }
+        }
+
+        // Send shutdown to egress
+        if let Err(e) = egress_tx.send(RelayCommand::Shutdown) {
+            logger_for_spawn.error(
+                Facility::DataPlane,
+                &format!("Failed to send shutdown command to egress: {:?}", e),
+            );
+        }
+
+        // Signal both eventfds to wake up ingress and egress loops to process shutdown
+        // Note: eventfds were created with EFD_NONBLOCK, so these writes are non-blocking
+        let value: u64 = 1;
+        unsafe {
+            libc::write(ingress_event_fd_for_writer, &value as *const u64 as *const libc::c_void, 8);
+            libc::write(egress_event_fd_for_writer, &value as *const u64 as *const libc::c_void, 8);
         }
     });
 
@@ -423,7 +469,14 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
     let handle = std::thread::Builder::new()
         .name("data_plane".to_string())
         .spawn(move || {
-            lifecycle.run_data_plane_task(config, std_rx, event_fd, logger_for_dp_thread)
+            lifecycle.run_data_plane_task(
+                config,
+                ingress_rx,
+                ingress_event_fd,
+                egress_rx,
+                egress_event_fd,
+                logger_for_dp_thread,
+            )
         })
         .context("Failed to spawn data plane thread")?;
 
