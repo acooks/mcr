@@ -22,6 +22,9 @@ fn main() -> Result<()> {
             // It will be removed in a future commit.
             let (_relay_command_tx, relay_command_rx) = mpsc::channel(100);
 
+            // Create oneshot channel for graceful shutdown
+            let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+
             // The supervisor runs in a standard tokio runtime.
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(async {
@@ -31,7 +34,8 @@ fn main() -> Result<()> {
                 let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
                     .expect("Failed to install SIGINT handler");
 
-                let shutdown_future = async move {
+                // Spawn a task to handle signals and trigger shutdown
+                tokio::spawn(async move {
                     tokio::select! {
                         _ = sigterm.recv() => {
                             eprintln!("[Supervisor] Received SIGTERM, initiating graceful shutdown");
@@ -40,9 +44,12 @@ fn main() -> Result<()> {
                             eprintln!("[Supervisor] Received SIGINT, initiating graceful shutdown");
                         }
                     }
-                };
+                    // Send shutdown signal to supervisor
+                    let _ = shutdown_tx.send(());
+                });
 
-                let supervisor_future = supervisor::run(
+                // Run supervisor - it will exit when shutdown_rx is triggered
+                let result = supervisor::run(
                     &user,
                     &group,
                     &interface,
@@ -52,32 +59,27 @@ fn main() -> Result<()> {
                     control_socket_path,
                     Arc::new(Mutex::new(HashMap::new())),
                     num_workers,
-                );
+                    shutdown_rx,
+                )
+                .await;
 
-                // Run supervisor until either it exits or we receive a shutdown signal
-                tokio::select! {
-                    result = supervisor_future => {
-                        if let Err(e) = result {
-                            eprintln!("[Supervisor] Error: {}", e);
-                            std::process::exit(1);
-                        }
-                    }
-                    _ = shutdown_future => {
-                        // Shutdown signal received - give workers time to flush logs and shut down gracefully
-                        eprintln!("[Supervisor] Shutdown signal received, waiting for workers to exit...");
-                        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
-
-                        // Clean up shared memory on shutdown
-                        #[cfg(not(feature = "testing"))]
-                        {
-                            use multicast_relay::logging::SharedMemoryLogManager;
-                            SharedMemoryLogManager::cleanup_stale_shared_memory(num_workers.map(|n| n as u8));
-                            eprintln!("[Supervisor] Shared memory cleaned up");
-                        }
-
-                        eprintln!("[Supervisor] Shutdown complete");
-                    }
+                if let Err(e) = result {
+                    eprintln!("[Supervisor] Error: {}", e);
+                    std::process::exit(1);
                 }
+
+                // Give workers a brief moment to flush final logs
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+                // Clean up shared memory on shutdown
+                #[cfg(not(feature = "testing"))]
+                {
+                    use multicast_relay::logging::SharedMemoryLogManager;
+                    SharedMemoryLogManager::cleanup_stale_shared_memory(num_workers.map(|n| n as u8));
+                    eprintln!("[Supervisor] Shared memory cleaned up");
+                }
+
+                eprintln!("[Supervisor] Shutdown complete");
             });
         }
         Command::Worker {
