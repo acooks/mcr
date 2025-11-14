@@ -113,13 +113,27 @@ impl SharedMemoryLogManager {
         let consumer_stop_clone = consumer_stop.clone();
 
         let consumer_handle = Some(thread::spawn(move || {
+            use std::io::Write;
+            eprintln!("[LogConsumer] Consumer thread started for data plane worker");
+            std::io::stderr().flush().ok();
+
             let sink = Box::new(StdoutSink::new());
             let mut consumer = SharedBlockingConsumer::new(buffers_for_consumer, sink);
 
+            let mut iterations = 0;
             while consumer_stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
                 consumer.process_once();
                 thread::sleep(std::time::Duration::from_millis(10));
+
+                iterations += 1;
+                if iterations % 100 == 0 {
+                    eprintln!("[LogConsumer] Still running... (iteration {})", iterations);
+                    std::io::stderr().flush().ok();
+                }
             }
+
+            eprintln!("[LogConsumer] Consumer thread exiting");
+            std::io::stderr().flush().ok();
         }));
 
         Ok(Self {

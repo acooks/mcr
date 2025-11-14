@@ -30,7 +30,7 @@ log_section() {
 
 # --- Network Setup Functions ---
 
-# Create and configure a veth pair
+# Create and configure a veth pair (legacy - prefer setup_bridge_topology for tests)
 # Usage: setup_veth_pair <name1> <name2> <ip1/prefix> <ip2/prefix>
 setup_veth_pair() {
     local name1="$1"
@@ -52,32 +52,83 @@ enable_loopback() {
     ip link set lo up
 }
 
+# Create a bridge topology with dual veth pairs to eliminate AF_PACKET duplication
+# This creates a virtual switch with two separate "cables" - one for traffic generator,
+# one for MCR - preventing MCR from seeing its own TX traffic on RX.
+#
+# Topology:
+#   [Generator: gen_ip] <--veth-gen--veth-gen-p--> [BRIDGE] <--veth-mcr-p--veth-mcr--> [MCR: mcr_ip]
+#
+# Usage: setup_bridge_topology <netns> <bridge_name> <gen_veth> <mcr_veth> <gen_ip/prefix> <mcr_ip/prefix>
+# Example: setup_bridge_topology "$NS" br0 veth-gen veth-mcr 10.0.0.1/24 10.0.0.2/24
+setup_bridge_topology() {
+    local netns="$1"
+    local bridge="$2"
+    local gen_veth="$3"     # Generator-side veth (e.g., veth-gen)
+    local mcr_veth="$4"     # MCR-side veth (e.g., veth-mcr)
+    local gen_ip="$5"       # Generator IP with prefix (e.g., 10.0.0.1/24)
+    local mcr_ip="$6"       # MCR IP with prefix (e.g., 10.0.0.2/24)
+
+    local gen_veth_peer="${gen_veth}-p"
+    local mcr_veth_peer="${mcr_veth}-p"
+
+    log_info "Creating bridge topology: $bridge with $gen_veth and $mcr_veth"
+
+    # Create bridge
+    sudo ip netns exec "$netns" ip link add name "$bridge" type bridge
+    sudo ip netns exec "$netns" ip link set "$bridge" up
+
+    # Create veth pair for traffic generator
+    sudo ip netns exec "$netns" ip link add "$gen_veth" type veth peer name "$gen_veth_peer"
+    sudo ip netns exec "$netns" ip addr add "$gen_ip" dev "$gen_veth"
+    sudo ip netns exec "$netns" ip link set "$gen_veth" up
+    sudo ip netns exec "$netns" ip link set "$gen_veth_peer" up
+
+    # Create veth pair for MCR
+    sudo ip netns exec "$netns" ip link add "$mcr_veth" type veth peer name "$mcr_veth_peer"
+    sudo ip netns exec "$netns" ip addr add "$mcr_ip" dev "$mcr_veth"
+    sudo ip netns exec "$netns" ip link set "$mcr_veth" up
+    sudo ip netns exec "$netns" ip link set "$mcr_veth_peer" up
+
+    # Attach peer ends to bridge
+    sudo ip netns exec "$netns" ip link set "$gen_veth_peer" master "$bridge"
+    sudo ip netns exec "$netns" ip link set "$mcr_veth_peer" master "$bridge"
+
+    log_info "Bridge topology created: Generator($gen_veth:$gen_ip) <-> Bridge($bridge) <-> MCR($mcr_veth:$mcr_ip)"
+}
+
 # --- MCR Instance Management ---
 
 # Start an MCR instance
-# Usage: start_mcr <name> <interface> <control_socket> [log_file] [core_id]
+# Usage: start_mcr <name> <interface> <control_socket> [log_file] [core_id] [netns]
 start_mcr() {
     local name="$1"
     local interface="$2"
     local control_socket="$3"
     local log_file="${4:-/tmp/${name}.log}"
     local core_id="${5:-0}"
-    local relay_socket="/tmp/${name}_relay.sock"
+    local netns="${6:-}"  # Optional network namespace
 
     log_info "Starting $name (interface: $interface, socket: $control_socket, CPU core: $core_id)"
 
     # Clean up any existing sockets
-    rm -f "$control_socket" "$relay_socket"
+    rm -f "$control_socket"
 
-    # Use taskset to pin the supervisor process tree to a specific CPU core
-    # This ensures the data plane worker (which would normally be pinned to core 0)
-    # inherits the affinity from the supervisor instead
-    taskset -c "$core_id" "$RELAY_BINARY" supervisor \
-        --relay-command-socket-path "$relay_socket" \
-        --control-socket-path "$control_socket" \
-        --interface "$interface" \
-        --num-workers 1 \
-        > "$log_file" 2>&1 &
+    # If namespace specified, run in that namespace
+    # Note: sudo is required for ip netns exec, and the redirection must be inside the sudo context
+    if [ -n "$netns" ]; then
+        sudo ip netns exec "$netns" taskset -c "$core_id" "$RELAY_BINARY" supervisor \
+            --control-socket-path "$control_socket" \
+            --interface "$interface" \
+            --num-workers 1 \
+            > "$log_file" 2>&1 &
+    else
+        taskset -c "$core_id" "$RELAY_BINARY" supervisor \
+            --control-socket-path "$control_socket" \
+            --interface "$interface" \
+            --num-workers 1 \
+            > "$log_file" 2>&1 &
+    fi
 
     local pid=$!
     log_info "$name started with PID $pid"

@@ -13,20 +13,9 @@ use crate::logging::{Facility, Logger};
 use crate::worker::packet_parser::parse_packet;
 use crate::{ForwardingRule, RelayCommand};
 
-// Conditional imports based on the feature flag
-#[cfg(feature = "lock_free_buffer_pool")]
-use crate::worker::buffer_pool::{BufferPool as LockFreeBufferPool, ManagedBuffer};
-#[cfg(feature = "lock_free_buffer_pool")]
+use crate::worker::buffer_pool::{BufferPool, ManagedBuffer};
 use crate::worker::egress::EgressWorkItem;
-#[cfg(feature = "lock_free_buffer_pool")]
 use crossbeam_queue::SegQueue;
-
-#[cfg(not(feature = "lock_free_buffer_pool"))]
-use crate::worker::buffer_pool::{Buffer, BufferPool as MutexBufferPool};
-#[cfg(not(feature = "lock_free_buffer_pool"))]
-use crate::worker::egress::EgressPacket;
-#[cfg(not(feature = "lock_free_buffer_pool"))]
-use std::sync::Mutex;
 
 // --- Traits for abstracting over backend implementations ---
 
@@ -51,48 +40,11 @@ pub trait EgressItemFactory<B> {
     fn new(buffer: B, payload_len: usize, interface_name: String, dest_addr: SocketAddr) -> Self;
 }
 
-// --- Concrete implementations for the Mutex backend ---
+// --- Concrete implementations ---
 
-#[cfg(not(feature = "lock_free_buffer_pool"))]
-impl BufferPoolTrait for Arc<Mutex<MutexBufferPool>> {
-    type Buffer = Buffer;
-    fn allocate(&self, size: usize) -> Option<Self::Buffer> {
-        self.lock().expect("Mutex poisoned").allocate(size)
-    }
-}
-
-#[cfg(not(feature = "lock_free_buffer_pool"))]
-impl EgressChannel for mpsc::Sender<EgressPacket> {
-    type Item = EgressPacket;
-    fn send(&self, item: Self::Item) -> Result<(), ()> {
-        self.send(item).map_err(|_| ())
-    }
-}
-
-#[cfg(not(feature = "lock_free_buffer_pool"))]
-impl EgressItemFactory<Buffer> for EgressPacket {
-    fn new(
-        buffer: Buffer,
-        payload_len: usize,
-        interface_name: String,
-        dest_addr: SocketAddr,
-    ) -> Self {
-        Self {
-            buffer,
-            payload_len,
-            interface_name,
-            dest_addr,
-        }
-    }
-}
-
-// --- Concrete implementations for the Lock-Free backend ---
-
-#[cfg(feature = "lock_free_buffer_pool")]
 use crate::worker::buffer_pool::BufferSize;
 
-#[cfg(feature = "lock_free_buffer_pool")]
-impl BufferPoolTrait for Arc<LockFreeBufferPool> {
+impl BufferPoolTrait for Arc<BufferPool> {
     type Buffer = ManagedBuffer;
     fn allocate(&self, size: usize) -> Option<Self::Buffer> {
         let size_cat = if size <= 2048 {
@@ -106,21 +58,18 @@ impl BufferPoolTrait for Arc<LockFreeBufferPool> {
     }
 }
 
-#[cfg(feature = "lock_free_buffer_pool")]
 /// Wrapper that combines a lock-free queue with an eventfd for waking egress
 pub struct EgressQueueWithWakeup {
     queue: Arc<SegQueue<EgressWorkItem>>,
     wakeup_fd: i32,  // Raw FD for the egress eventfd
 }
 
-#[cfg(feature = "lock_free_buffer_pool")]
 impl EgressQueueWithWakeup {
     pub fn new(queue: Arc<SegQueue<EgressWorkItem>>, wakeup_fd: i32) -> Self {
         Self { queue, wakeup_fd }
     }
 }
 
-#[cfg(feature = "lock_free_buffer_pool")]
 impl EgressChannel for EgressQueueWithWakeup {
     type Item = EgressWorkItem;
     fn send(&self, item: Self::Item) -> Result<(), ()> {
@@ -138,7 +87,6 @@ impl EgressChannel for EgressQueueWithWakeup {
     }
 }
 
-#[cfg(feature = "lock_free_buffer_pool")]
 impl EgressItemFactory<ManagedBuffer> for EgressWorkItem {
     fn new(
         buffer: ManagedBuffer,
@@ -371,6 +319,17 @@ where
         let mut command_notify_buf = [0u8; 8];
         self.submit_command_read(&mut command_notify_buf)?;
 
+        // CRITICAL: Process any pending commands BEFORE entering the main blocking loop.
+        // This prevents deadlock where we block waiting for packets, but can't receive
+        // packets until we process the AddRule command that joins multicast groups.
+        if self.process_commands()? {
+            self.logger.info(
+                Facility::Ingress,
+                "Shutdown requested before main loop started",
+            );
+            return Ok(());
+        }
+
         loop {
             let available_buffers = self.config.batch_size - self.ring.submission().len();
             for (i, buf) in recv_buffers.iter_mut().enumerate().take(available_buffers) {
@@ -441,43 +400,13 @@ where
     }
 }
 
-// --- Backend-specific `new` and `process_packet` implementations ---
+// --- Backend-specific `new` implementation ---
 
-#[cfg(not(feature = "lock_free_buffer_pool"))]
-impl IngressLoop<Arc<Mutex<MutexBufferPool>>, mpsc::Sender<EgressPacket>> {
+impl IngressLoop<Arc<BufferPool>, EgressQueueWithWakeup> {
     pub fn new(
         interface_name: &str,
         config: IngressConfig,
-        buffer_pool: Arc<Mutex<MutexBufferPool>>,
-        egress_tx: Option<mpsc::Sender<EgressPacket>>,
-        command_rx: mpsc::Receiver<RelayCommand>,
-        command_event_fd: EventFd,
-        logger: Logger,
-    ) -> Result<Self> {
-        logger.info(Facility::Ingress, "Ingress loop starting");
-        Ok(Self {
-            af_packet_socket: setup_af_packet_socket(interface_name)?,
-            ring: IoUring::new(config.queue_depth)?,
-            helper_sockets: HashMap::new(),
-            buffer_pool,
-            rules: HashMap::new(),
-            config,
-            stats: IngressStats::default(),
-            egress_tx,
-            command_rx,
-            command_event_fd: command_event_fd.into(),
-            logger,
-            first_packet_logged: false,
-        })
-    }
-}
-
-#[cfg(feature = "lock_free_buffer_pool")]
-impl IngressLoop<Arc<LockFreeBufferPool>, EgressQueueWithWakeup> {
-    pub fn new(
-        interface_name: &str,
-        config: IngressConfig,
-        buffer_pool: Arc<LockFreeBufferPool>,
+        buffer_pool: Arc<BufferPool>,
         egress_tx: Option<EgressQueueWithWakeup>,
         command_rx: mpsc::Receiver<RelayCommand>,
         command_event_fd: EventFd,

@@ -1,0 +1,5 @@
+docs: Consolidate devlog and remove strategy documents
+
+Concatenated the content of `.devlog_draft_2025-11-07.md` into `DEVLOG.md` to centralize development logs and removed the temporary draft file.
+
+Also removed the entire `strategy/` directory and its contents, as these documents (business strategy, market analysis, GTM plans) are not considered part of the source code repository and are better suited for a separate documentation system.

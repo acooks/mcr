@@ -12,7 +12,7 @@
 # - No kernel drops expected
 # - Validates happy path where capacity is not exceeded
 #
-# Network isolation: Runs in isolated network namespace (unshare --net)
+# Network isolation: Runs in isolated network namespace (ip netns)
 
 set -euo pipefail
 
@@ -26,6 +26,9 @@ PACKET_SIZE=1400
 PACKET_COUNT=100000   # 100k packets total
 SEND_RATE=50000       # 50k pps - well within single-core capacity
 
+# Namespace name
+NETNS="mcr_baseline_test"
+
 # --- Check for root ---
 if [ "$EUID" -ne 0 ]; then
     echo "ERROR: This test requires root privileges for network namespace isolation"
@@ -38,36 +41,50 @@ echo "=== Building Release Binaries ==="
 cargo build --release
 echo ""
 
-# --- Run test in isolated network namespace ---
+# --- Create named network namespace ---
 echo "=== Baseline Performance Test (50k pps) ==="
-echo "Expected: ~100% packet forwarding (no drops)"
+echo "Expected: 100% packet forwarding (no drops)"
+echo "Topology: Bridge + dual veth pairs (eliminates AF_PACKET duplication)"
 echo ""
 
-unshare --net bash -c "
-set -euo pipefail
+# Clean up any existing namespace
+ip netns del "$NETNS" 2>/dev/null || true
+
+# Create new namespace
+ip netns add "$NETNS"
 
 # Source common functions
-source $SCRIPT_DIR/common.sh
+source "$SCRIPT_DIR/common.sh"
 
 # Set up cleanup trap
-trap cleanup_all EXIT
+cleanup_namespace() {
+    echo "[INFO] Running cleanup"
+    sudo ip netns pids "$NETNS" 2>/dev/null | xargs -r sudo kill 2>/dev/null || true
+    sudo ip netns del "$NETNS" 2>/dev/null || true
+    echo "[INFO] Cleanup complete"
+}
+trap cleanup_namespace EXIT
 
 log_section 'Network Namespace Setup'
 
-# Enable loopback
-enable_loopback
+# Enable loopback in namespace
+sudo ip netns exec "$NETNS" ip link set lo up
 
-# Create veth pairs for 2-hop chain
-# Traffic Gen → veth0 → veth0p (MCR-1 ingress)
-# MCR-1 egress → veth1a → veth1b (MCR-2 ingress)
-setup_veth_pair veth0 veth0p 10.0.0.1/24 10.0.0.2/24
-setup_veth_pair veth1a veth1b 10.0.1.1/24 10.0.1.2/24
+# Create bridge topology for hop 1: Traffic Generator → MCR-1 ingress
+# This eliminates AF_PACKET duplication by using separate veth pairs for generator and MCR
+setup_bridge_topology "$NETNS" br0 veth-gen0 veth-mcr0 10.0.0.1/24 10.0.0.2/24
+
+# Create bridge topology for hop 2: MCR-1 egress → MCR-2 ingress
+# MCR-1 uses veth-mcr1a for egress, MCR-2 uses veth-mcr1b for ingress
+setup_bridge_topology "$NETNS" br1 veth-mcr1a veth-mcr1b 10.0.1.1/24 10.0.1.2/24
 
 log_section 'Starting MCR Instances'
 
-# Start on separate cores (though shouldn't matter at 50k pps)
-start_mcr mcr1 veth0p /tmp/mcr1.sock /tmp/mcr1.log 0
-start_mcr mcr2 veth1b /tmp/mcr2.sock /tmp/mcr2.log 1
+# Start MCR instances in the namespace
+# MCR-1 listens on veth-mcr0 (ingress from br0), sends on veth-mcr1a (egress to br1)
+# MCR-2 listens on veth-mcr1b (ingress from br1)
+start_mcr mcr1 veth-mcr0 /tmp/mcr1.sock /tmp/mcr1.log 0 "$NETNS"
+start_mcr mcr2 veth-mcr1b /tmp/mcr2.sock /tmp/mcr2.log 1 "$NETNS"
 
 # Wait for instances to be ready
 wait_for_sockets /tmp/mcr1.sock /tmp/mcr2.sock
@@ -75,17 +92,28 @@ sleep 2
 
 log_section 'Configuring Forwarding Rules'
 
-# MCR-1: Forward 239.1.1.1:5001 → 239.2.2.2:5002 via veth1a
-add_rule /tmp/mcr1.sock veth0p 239.1.1.1 5001 '239.2.2.2:5002:veth1a'
+# MCR-1: Forward 239.1.1.1:5001 → 239.2.2.2:5002 via veth-mcr1a (egress to br1)
+add_rule /tmp/mcr1.sock veth-mcr0 239.1.1.1 5001 '239.2.2.2:5002:veth-mcr1a'
 
 # MCR-2: Receive 239.2.2.2:5002 → forward to loopback (sink)
-add_rule /tmp/mcr2.sock veth1b 239.2.2.2 5002 '239.9.9.9:5099:lo'
+add_rule /tmp/mcr2.sock veth-mcr1b 239.2.2.2 5002 '239.9.9.9:5099:lo'
 
 sleep 2
 
-# Run traffic generator
-run_traffic 10.0.0.1 239.1.1.1 5001 $PACKET_COUNT $PACKET_SIZE $SEND_RATE
+# Run traffic generator in the namespace
+log_section "Running Traffic Generator"
+log_info "Target: 239.1.1.1:5001 via 10.0.0.1"
+log_info "Parameters: $PACKET_COUNT packets @ $PACKET_SIZE bytes, rate $SEND_RATE pps"
 
+sudo ip netns exec "$NETNS" "$TRAFFIC_GENERATOR_BINARY" \
+    --interface 10.0.0.1 \
+    --group 239.1.1.1 \
+    --port 5001 \
+    --rate "$SEND_RATE" \
+    --size "$PACKET_SIZE" \
+    --count "$PACKET_COUNT"
+
+log_info 'Traffic generation complete'
 log_info 'Waiting for pipeline to flush...'
 sleep 3
 
@@ -98,68 +126,58 @@ log_section 'Validating Results'
 
 VALIDATION_PASSED=0
 
-# KNOWN ISSUE: AF_PACKET on veth interfaces sees both RX and TX packets
-# This causes ~50% apparent loss as kernel delivers packets at half the expected rate
-# Generator sends 100k → MCR-1 sees ~50k → MCR-2 sees ~25k
-# This is expected behavior with current AF_PACKET setup on veth pairs
-# TODO: Investigate using PACKET_RX_RING or BPF filter to handle veth properly
+# With bridge topology, AF_PACKET duplication is eliminated
+# We expect 100% packet forwarding with minimal variance
+# Generator sends 100k → MCR-1 sees 100k → MCR-2 sees 100k
 
-# Validate MCR-1: With veth, expect ~50k received (50% of sent due to kernel behavior)
-validate_stat /tmp/mcr1.log 'STATS:Ingress' 'matched' 45000 'MCR-1 ingress matched (~50k)' || VALIDATION_PASSED=1
+# Validate MCR-1: Expect ~100k received (allow 5% variance for timing)
+validate_stat /tmp/mcr1.log 'STATS:Ingress' 'matched' 95000 'MCR-1 ingress matched (100k)' || VALIDATION_PASSED=1
 
 # Egress should match ingress (1:1 forwarding)
-MCR1_INGRESS=\$(extract_stat /tmp/mcr1.log 'STATS:Ingress' 'matched')
-MCR1_EGRESS=\$(extract_stat /tmp/mcr1.log 'STATS:Egress' 'sent')
-log_info \"MCR-1: ingress matched=\$MCR1_INGRESS, egress sent=\$MCR1_EGRESS\"
+MCR1_INGRESS=$(extract_stat /tmp/mcr1.log 'STATS:Ingress' 'matched')
+MCR1_EGRESS=$(extract_stat /tmp/mcr1.log 'STATS:Egress' 'sent')
+log_info "MCR-1: ingress matched=$MCR1_INGRESS, egress sent=$MCR1_EGRESS"
 
-# Allow 10% variance between ingress and egress
-EGRESS_MIN=\$((MCR1_INGRESS * 9 / 10))
-EGRESS_MAX=\$((MCR1_INGRESS * 11 / 10))
-if [ \$MCR1_EGRESS -lt \$EGRESS_MIN ] || [ \$MCR1_EGRESS -gt \$EGRESS_MAX ]; then
-    log_error \"❌ Egress/ingress mismatch: expected \$MCR1_INGRESS ± 10%, got \$MCR1_EGRESS\"
+# Allow 5% variance between ingress and egress
+EGRESS_MIN=$((MCR1_INGRESS * 95 / 100))
+EGRESS_MAX=$((MCR1_INGRESS * 105 / 100))
+if [ $MCR1_EGRESS -lt $EGRESS_MIN ] || [ $MCR1_EGRESS -gt $EGRESS_MAX ]; then
+    log_error "❌ Egress/ingress mismatch: expected $MCR1_INGRESS ± 5%, got $MCR1_EGRESS"
     VALIDATION_PASSED=1
 else
-    log_info \"✅ Egress matches ingress: \$MCR1_EGRESS ≈ \$MCR1_INGRESS\"
+    log_info "✅ Egress matches ingress: $MCR1_EGRESS ≈ $MCR1_INGRESS"
 fi
 
-# MCR-2 should receive what MCR-1 sent (with veth losses)
-validate_stat /tmp/mcr2.log 'STATS:Ingress' 'matched' 20000 'MCR-2 ingress matched (~25k)' || VALIDATION_PASSED=1
+# MCR-2 should receive what MCR-1 sent (100% forwarding)
+validate_stat /tmp/mcr2.log 'STATS:Ingress' 'matched' 95000 'MCR-2 ingress matched (100k)' || VALIDATION_PASSED=1
 
 # Check buffer exhaustion on MCR-1 (should be zero or near-zero)
-BUFFER_EXHAUSTION=\$(extract_stat /tmp/mcr1.log 'STATS:Ingress' 'buf_exhaust')
-log_info \"MCR-1 buffer exhaustion: \$BUFFER_EXHAUSTION packets\"
-if [ \$BUFFER_EXHAUSTION -gt 1000 ]; then
-    log_error \"❌ Unexpected buffer exhaustion at 50k pps: \$BUFFER_EXHAUSTION packets (>1%)\"
+BUFFER_EXHAUSTION=$(extract_stat /tmp/mcr1.log 'STATS:Ingress' 'buf_exhaust')
+log_info "MCR-1 buffer exhaustion: $BUFFER_EXHAUSTION packets"
+if [ $BUFFER_EXHAUSTION -gt 1000 ]; then
+    log_error "❌ Unexpected buffer exhaustion at 50k pps: $BUFFER_EXHAUSTION packets (>1%)"
     VALIDATION_PASSED=1
 else
-    log_info \"✅ Buffer exhaustion acceptable: \$BUFFER_EXHAUSTION packets (<1%)\"
+    log_info "✅ Buffer exhaustion acceptable: $BUFFER_EXHAUSTION packets (<1%)"
 fi
 
 log_section 'Test Complete'
 
-if [ \$VALIDATION_PASSED -eq 0 ]; then
-    log_info '✅ All validations passed - ~100% forwarding at 50k pps'
+if [ $VALIDATION_PASSED -eq 0 ]; then
+    log_info '✅ All validations passed - 100% forwarding at 50k pps'
     log_info 'Full logs available at: /tmp/mcr{1,2}.log'
+    echo ""
+    echo "=== ✅ BASELINE TEST PASSED ==="
+    echo "System achieved 100% packet forwarding at 50k pps"
+    echo "Bridge topology successfully eliminated AF_PACKET duplication"
+    echo "Network namespace destroyed - no host pollution"
     exit 0
 else
     log_error '❌ Some validations failed - check logs'
     log_info 'Full logs available at: /tmp/mcr{1,2}.log'
+    echo ""
+    echo "=== ❌ BASELINE TEST FAILED ==="
+    echo "System did not achieve 100% forwarding - investigate packet loss"
+    echo "Network namespace destroyed - no host pollution"
     exit 1
 fi
-
-# Cleanup happens via trap (namespace auto-destroyed)
-"
-
-RESULT=$?
-
-echo ""
-if [ $RESULT -eq 0 ]; then
-    echo "=== ✅ BASELINE TEST PASSED ==="
-    echo "System can forward ~100% of packets at 50k pps"
-else
-    echo "=== ❌ BASELINE TEST FAILED ==="
-    echo "System cannot handle 50k pps without drops - investigate capacity issues"
-fi
-
-echo "Network namespace destroyed - no host pollution"
-exit $RESULT

@@ -308,26 +308,62 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
         );
     }
 
+    eprintln!("[DataPlane] About to attach to shared memory logging...");
+
     // Attach to shared memory ring buffers for logging (REQUIRED in production)
     let core_id = config
         .core_id
-        .ok_or_else(|| anyhow::anyhow!("Data plane worker requires core_id"))?;
+        .ok_or_else(|| {
+            eprintln!("[DataPlane] FATAL: core_id is None!");
+            anyhow::anyhow!("Data plane worker requires core_id")
+        })?;
+
+    eprintln!("[DataPlane] Got core_id: {}", core_id);
+    eprintln!("[DataPlane] Calling DataPlaneLogging::attach({})...", core_id);
+    use std::io::Write;
+    std::io::stderr().flush().ok();
 
     #[cfg(not(feature = "testing"))]
-    let logging = DataPlaneLogging::attach(core_id as u8)
-        .context("Failed to attach to shared memory logging - supervisor must create shared memory before spawning workers")?;
+    let logging = match DataPlaneLogging::attach(core_id as u8) {
+        Ok(log) => {
+            eprintln!("[DataPlane] Successfully attached to shared memory logging");
+            std::io::stderr().flush().ok();
+            log
+        },
+        Err(e) => {
+            eprintln!("[DataPlane] FATAL: Failed to attach to shared memory logging for core {}: {:?}", core_id, e);
+            std::io::stderr().flush().ok();
+            return Err(e).context("Failed to attach to shared memory logging - supervisor must create shared memory before spawning workers");
+        }
+    };
 
     #[cfg(feature = "testing")]
     let logging = ControlPlaneLogging::new();
 
+    eprintln!("[DataPlane] Getting logger for DataPlane facility...");
+    std::io::stderr().flush().ok();
+
     let logger = logging
         .logger(Facility::DataPlane)
-        .ok_or_else(|| anyhow::anyhow!("Failed to get logger for DataPlane facility"))?;
+        .ok_or_else(|| {
+            eprintln!("[DataPlane] FATAL: Failed to get logger for DataPlane facility");
+            std::io::stderr().flush().ok();
+            anyhow::anyhow!("Failed to get logger for DataPlane facility")
+        })?;
+
+    eprintln!("[DataPlane] Got logger, about to log startup message...");
+    std::io::stderr().flush().ok();
 
     logger.info(
         Facility::DataPlane,
         &format!("Data plane worker started on core {}", core_id),
     );
+
+    eprintln!("[DataPlane] Logged startup message");
+    std::io::stderr().flush().ok();
+
+    eprintln!("[DataPlane] Getting FD 3 from supervisor...");
+    std::io::stderr().flush().ok();
 
     // Get FD 3 from supervisor and set it to non-blocking before wrapping in tokio UnixStream
     let supervisor_sock = unsafe {
@@ -335,8 +371,19 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
         std_sock.set_nonblocking(true)?;
         UnixStream::from_std(std_sock)?
     };
+
+    eprintln!("[DataPlane] Receiving request FD...");
+    std::io::stderr().flush().ok();
+
     let _request_fd = recv_fd(&supervisor_sock).await?;
+
+    eprintln!("[DataPlane] Receiving command FD...");
+    std::io::stderr().flush().ok();
+
     let command_fd = recv_fd(&supervisor_sock).await?;
+
+    eprintln!("[DataPlane] Got both FDs from supervisor");
+    std::io::stderr().flush().ok();
 
     // Create channel sets for ingress and egress
     // Ingress uses both command channel and eventfd for io_uring wake-up
@@ -365,6 +412,9 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
         command_stream,
         tokio_util::codec::LengthDelimitedCodec::new(),
     );
+
+    eprintln!("[DataPlane] Creating channels and eventfds complete, spawning command bridge task...");
+    std::io::stderr().flush().ok();
 
     let logger_for_dp_thread = logger.clone();
     let logger_for_spawn = logger.clone();
@@ -477,6 +527,9 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
         }
     });
 
+    eprintln!("[DataPlane] About to spawn data plane thread...");
+    std::io::stderr().flush().ok();
+
     // The data plane task is synchronous and blocking.
     // CRITICAL: We must use std::thread::spawn instead of tokio::task::spawn_blocking
     // because the tokio thread pool was created BEFORE we dropped privileges,
@@ -485,6 +538,8 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
     let handle = std::thread::Builder::new()
         .name("data_plane".to_string())
         .spawn(move || {
+            eprintln!("[DataPlane-Thread] Data plane thread started, calling run_data_plane_task...");
+            std::io::stderr().flush().ok();
             lifecycle.run_data_plane_task(
                 config,
                 ingress_channels,
@@ -493,6 +548,9 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
             )
         })
         .context("Failed to spawn data plane thread")?;
+
+    eprintln!("[DataPlane] Data plane thread spawned successfully");
+    std::io::stderr().flush().ok();
 
     // Wait for the data plane thread in a blocking task so the async runtime can continue
     // processing commands. This is critical - if we block the runtime here, the async

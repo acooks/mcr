@@ -6,40 +6,20 @@ use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::ops::Deref;
 use std::os::fd::{AsRawFd, OwnedFd};
+use std::sync::Arc;
 
 use crate::logging::{Facility, Logger};
 use crate::RelayCommand;
 use std::sync::mpsc;
 
-#[cfg(feature = "lock_free_buffer_pool")]
 const SHUTDOWN_USER_DATA: u64 = u64::MAX;
 
-// Conditional imports and type definitions
-#[cfg(feature = "lock_free_buffer_pool")]
-use crate::worker::buffer_pool::{BufferPool as LockFreeBufferPool, ManagedBuffer};
-#[cfg(feature = "lock_free_buffer_pool")]
-use std::sync::Arc;
-
-#[cfg(not(feature = "lock_free_buffer_pool"))]
-use crate::worker::buffer_pool::{Buffer, BufferPool as MutexBufferPool};
-#[cfg(not(feature = "lock_free_buffer_pool"))]
-use std::sync::{Arc, Mutex};
-
+use crate::worker::buffer_pool::{BufferPool, ManagedBuffer};
 use crate::worker::ingress::BufferPoolTrait;
 
 // --- Structs for Egress Payloads ---
 
-/// A packet ready for egress (Mutex backend)
-#[cfg(not(feature = "lock_free_buffer_pool"))]
-pub struct EgressPacket {
-    pub buffer: Buffer,
-    pub payload_len: usize,
-    pub dest_addr: SocketAddr,
-    pub interface_name: String,
-}
-
-/// A work item for the egress queue (Lock-Free backend)
-#[cfg(feature = "lock_free_buffer_pool")]
+/// A work item for the egress queue
 pub struct EgressWorkItem {
     pub buffer: ManagedBuffer,
     pub payload_len: usize,
@@ -56,27 +36,6 @@ pub trait EgressBuffer: Deref<Target = [u8]> {
     fn interface_name(&self) -> &str;
 }
 
-#[cfg(not(feature = "lock_free_buffer_pool"))]
-impl EgressBuffer for EgressPacket {
-    fn payload_len(&self) -> usize {
-        self.payload_len
-    }
-    fn dest_addr(&self) -> SocketAddr {
-        self.dest_addr
-    }
-    fn interface_name(&self) -> &str {
-        &self.interface_name
-    }
-}
-#[cfg(not(feature = "lock_free_buffer_pool"))]
-impl Deref for EgressPacket {
-    type Target = [u8];
-    fn deref(&self) -> &Self::Target {
-        &self.buffer.as_slice()[..self.payload_len]
-    }
-}
-
-#[cfg(feature = "lock_free_buffer_pool")]
 impl EgressBuffer for EgressWorkItem {
     fn payload_len(&self) -> usize {
         self.payload_len
@@ -88,7 +47,7 @@ impl EgressBuffer for EgressWorkItem {
         &self.interface_name
     }
 }
-#[cfg(feature = "lock_free_buffer_pool")]
+
 impl Deref for EgressWorkItem {
     type Target = [u8];
     fn deref(&self) -> &Self::Target {
@@ -111,9 +70,7 @@ pub struct EgressLoop<B, P> {
     shutdown_requested: bool,
     logger: Logger,
     first_packet_logged: bool,
-    #[cfg(feature = "lock_free_buffer_pool")]
     shutdown_event_fd: OwnedFd,
-    #[cfg(feature = "lock_free_buffer_pool")]
     shutdown_buffer: [u8; 8],
 }
 
@@ -160,8 +117,10 @@ where
             let packet = self.egress_queue.remove(0);
             self.submit_send(packet)?;
         }
-        self.ring.submit().context("Failed to submit send ops")?;
-        self.reap_completions(batch_size)
+        // NOTE: We do NOT call ring.submit() or reap_completions() here.
+        // The main event loop is the ONLY place that calls submit_and_wait().
+        // This keeps the event loop non-blocking and ensures we continuously drain packet_rx.
+        Ok(batch_size)
     }
 
     fn submit_send(&mut self, packet: B) -> Result<()> {
@@ -234,29 +193,25 @@ where
         }
 
         let mut count = 0;
-        #[cfg(feature = "lock_free_buffer_pool")]
         let mut need_shutdown_resubmit = false;
 
         for (user_data, result) in completions {
             count += 1;
 
-            #[cfg(feature = "lock_free_buffer_pool")]
-            {
-                // Handle shutdown event completions
-                if user_data == SHUTDOWN_USER_DATA {
-                    if result < 0 {
-                        self.logger.error(
-                            Facility::Egress,
-                            &format!("Shutdown event read error: errno={}", -result),
-                        );
-                    }
-                    // Process commands to check for shutdown
-                    let shutdown = self.process_commands();
-                    if !shutdown {
-                        need_shutdown_resubmit = true;
-                    }
-                    continue;
+            // Handle shutdown event completions
+            if user_data == SHUTDOWN_USER_DATA {
+                if result < 0 {
+                    self.logger.error(
+                        Facility::Egress,
+                        &format!("Shutdown event read error: errno={}", -result),
+                    );
                 }
+                // Process commands to check for shutdown
+                let shutdown = self.process_commands();
+                if !shutdown {
+                    need_shutdown_resubmit = true;
+                }
+                continue;
             }
 
             // Handle packet send completions
@@ -297,7 +252,6 @@ where
             }
         }
 
-        #[cfg(feature = "lock_free_buffer_pool")]
         if need_shutdown_resubmit {
             self.handle_shutdown_resubmit()?;
         }
@@ -362,7 +316,6 @@ where
         self.logger.info(Facility::Egress, &msg);
     }
 
-    #[cfg(feature = "lock_free_buffer_pool")]
     fn handle_shutdown_resubmit(&mut self) -> Result<()> {
         let read_op = opcode::Read::new(
             types::Fd(self.shutdown_event_fd.as_raw_fd()),
@@ -379,46 +332,16 @@ where
     }
 }
 
-// --- Backend-specific `new` implementations ---
+// --- Backend-specific `new` implementation ---
 
-#[cfg(not(feature = "lock_free_buffer_pool"))]
-impl EgressLoop<EgressPacket, Arc<Mutex<MutexBufferPool>>> {
+impl EgressLoop<EgressWorkItem, Arc<BufferPool>> {
     pub fn new(
         config: EgressConfig,
-        buffer_pool: Arc<Mutex<MutexBufferPool>>,
-        command_rx: mpsc::Receiver<RelayCommand>,
-        logger: Logger,
-    ) -> Result<Self> {
-        logger.info(Facility::Egress, "Egress loop starting");
-
-        let egress_loop = Self {
-            ring: IoUring::new(config.queue_depth)?,
-            sockets: HashMap::new(),
-            egress_queue: Vec::with_capacity(config.batch_size),
-            buffer_pool,
-            config,
-            stats: EgressStats::default(),
-            in_flight: HashMap::new(),
-            next_user_data: 0,
-            command_rx,
-            shutdown_requested: false,
-            logger,
-            first_packet_logged: false,
-        };
-
-        Ok(egress_loop)
-    }
-}
-
-#[cfg(feature = "lock_free_buffer_pool")]
-impl EgressLoop<EgressWorkItem, Arc<LockFreeBufferPool>> {
-    pub fn new(
-        config: EgressConfig,
-        buffer_pool: Arc<LockFreeBufferPool>,
+        buffer_pool: Arc<BufferPool>,
         egress_channels: crate::worker::EgressChannelSet,
         logger: Logger,
     ) -> Result<Self> {
-        logger.info(Facility::Egress, "Egress loop starting (lock-free)");
+        logger.info(Facility::Egress, "Egress loop starting");
 
         // Extract command_rx and event_fd from the channel set
         let command_rx = egress_channels.command_rx;
