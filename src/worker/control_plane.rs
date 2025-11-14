@@ -8,7 +8,7 @@ use tokio::sync::Mutex;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 use crate::logging::{Facility, Logger};
-use crate::{FlowStats, ForwardingRule, Response, SupervisorCommand};
+use crate::{FlowStats, ForwardingRule, RelayCommand, Response, SupervisorCommand};
 
 type SharedFlows = Arc<Mutex<HashMap<String, (ForwardingRule, FlowStats)>>>;
 
@@ -122,20 +122,39 @@ pub async fn control_plane_task<S: AsyncRead + AsyncWrite + Unpin>(
                         break;
                     }
                     Ok(n) => {
-                        let command: Result<SupervisorCommand, _> = serde_json::from_slice(&buffer[..n]);
-                        let response = match command {
-                            Ok(cmd) => {
-                                let flows = shared_flows.lock().await;
-                                handle_worker_command(cmd, &flows)
+                        // Try to parse as RelayCommand first (for Shutdown)
+                        if let Ok(relay_cmd) = serde_json::from_slice::<RelayCommand>(&buffer[..n]) {
+                            match relay_cmd {
+                                RelayCommand::Shutdown => {
+                                    if let Some(ref log) = logger {
+                                        log.info(Facility::ControlPlane, "Received explicit Shutdown command");
+                                    }
+                                    break;
+                                }
+                                _ => {
+                                    // RelayCommand variants other than Shutdown are not expected here
+                                    if let Some(ref log) = logger {
+                                        log.error(Facility::ControlPlane, "Received unexpected RelayCommand variant");
+                                    }
+                                }
                             }
-                            Err(e) => Response::Error(e.to_string()),
-                        };
-                        let response_bytes = serde_json::to_vec(&response).unwrap();
-                        if supervisor_stream.write_all(&response_bytes).await.is_err() {
-                            if let Some(ref log) = logger {
-                                log.error(Facility::ControlPlane, "Failed to write response to supervisor");
+                        } else {
+                            // Fall back to SupervisorCommand handling
+                            let command: Result<SupervisorCommand, _> = serde_json::from_slice(&buffer[..n]);
+                            let response = match command {
+                                Ok(cmd) => {
+                                    let flows = shared_flows.lock().await;
+                                    handle_worker_command(cmd, &flows)
+                                }
+                                Err(e) => Response::Error(e.to_string()),
+                            };
+                            let response_bytes = serde_json::to_vec(&response).unwrap();
+                            if supervisor_stream.write_all(&response_bytes).await.is_err() {
+                                if let Some(ref log) = logger {
+                                    log.error(Facility::ControlPlane, "Failed to write response to supervisor");
+                                }
+                                break;
                             }
-                            break;
                         }
                     }
                     Err(e) => {

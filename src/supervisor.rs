@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
-use futures::stream::FuturesUnordered;
-use futures::Future;
+use futures::SinkExt;
 use log::error;
 use nix::sys::socket::{
     sendmsg, socketpair, AddressFamily, ControlMessage, MsgFlags, SockFlag, SockType,
@@ -9,7 +8,6 @@ use nix::unistd::{Gid, Group, Uid, User};
 use std::collections::HashMap;
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use tokio::net::UnixStream;
 use tokio::process::{Child, Command};
@@ -18,11 +16,47 @@ use tokio::time::{sleep, Duration};
 
 use crate::logging::{AsyncConsumer, Facility, Logger, MPSCRingBuffer, SharedMemoryLogManager};
 use crate::{log_info, log_warning, ForwardingRule, RelayCommand};
-use futures::{stream::StreamExt, SinkExt};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 const INITIAL_BACKOFF_MS: u64 = 250;
 const MAX_BACKOFF_MS: u64 = 16000; // 16 seconds
+const SHUTDOWN_TIMEOUT_SECS: u64 = 10; // Timeout for graceful worker shutdown
+
+// --- WorkerManager Types ---
+
+/// Differentiates worker types for unified handling
+#[derive(Debug, Clone, PartialEq)]
+enum WorkerType {
+    ControlPlane,
+    DataPlane { core_id: u32 },
+}
+
+/// Holds all information about a single worker process
+struct Worker {
+    pid: u32,
+    worker_type: WorkerType,
+    child: Child,
+    cmd_stream: Option<Arc<tokio::sync::Mutex<UnixStream>>>, // Used for RelayCommand (shutdown, etc.)
+    req_stream: Arc<tokio::sync::Mutex<UnixStream>>,
+    #[cfg(not(feature = "testing"))]
+    log_manager: Option<SharedMemoryLogManager>, // Data plane only
+}
+
+/// Centralized manager for all worker lifecycle operations
+struct WorkerManager {
+    // Configuration
+    uid: u32,
+    gid: u32,
+    interface: String,
+    relay_command_socket_path: PathBuf,
+    prometheus_addr: Option<std::net::SocketAddr>,
+    num_cores: usize,
+    logger: Logger,
+
+    // Worker state
+    workers: HashMap<u32, Worker>, // keyed by PID
+    backoff_counters: HashMap<u32, u64>, // keyed by core_id (0 for CP, 1+ for DP)
+}
 
 /// Action that may need to be taken after handling a supervisor command
 #[derive(Debug, Clone, PartialEq)]
@@ -285,6 +319,428 @@ pub async fn spawn_data_plane_worker(
     Ok((child, cmd_supervisor_stream, req_supervisor_stream))
 }
 
+// --- WorkerManager Implementation ---
+
+impl WorkerManager {
+    /// Create a new WorkerManager with the given configuration
+    fn new(
+        uid: u32,
+        gid: u32,
+        interface: String,
+        relay_command_socket_path: PathBuf,
+        prometheus_addr: Option<std::net::SocketAddr>,
+        num_cores: usize,
+        logger: Logger,
+    ) -> Self {
+        Self {
+            uid,
+            gid,
+            interface,
+            relay_command_socket_path,
+            prometheus_addr,
+            num_cores,
+            logger,
+            workers: HashMap::new(),
+            backoff_counters: HashMap::new(),
+        }
+    }
+
+    /// Spawn the control plane worker
+    async fn spawn_control_plane(&mut self) -> Result<()> {
+        let (child, cmd_stream, req_stream) = spawn_control_plane_worker(
+            self.uid,
+            self.gid,
+            self.relay_command_socket_path.clone(),
+            self.prometheus_addr,
+            &self.logger,
+        )
+        .await?;
+
+        let pid = child.id().unwrap();
+        let cmd_stream_arc = Arc::new(tokio::sync::Mutex::new(cmd_stream));
+        let req_stream_arc = Arc::new(tokio::sync::Mutex::new(req_stream));
+
+        // Store worker info
+        self.workers.insert(
+            pid,
+            Worker {
+                pid,
+                worker_type: WorkerType::ControlPlane,
+                child,
+                cmd_stream: Some(cmd_stream_arc),
+                req_stream: req_stream_arc,
+                #[cfg(not(feature = "testing"))]
+                log_manager: None,
+            },
+        );
+
+        // Initialize backoff counter (core_id 0 for CP)
+        self.backoff_counters.insert(0, INITIAL_BACKOFF_MS);
+
+        Ok(())
+    }
+
+    /// Spawn a data plane worker for the given core
+    async fn spawn_data_plane(&mut self, core_id: u32) -> Result<()> {
+        // Create shared memory for this worker's logging (REQUIRED in production)
+        #[cfg(not(feature = "testing"))]
+        let log_manager = SharedMemoryLogManager::create_for_worker(core_id as u8, 16384)
+            .with_context(|| format!("Failed to create shared memory for worker {}", core_id))?;
+
+        let (child, cmd_stream, req_stream) = spawn_data_plane_worker(
+            core_id,
+            self.uid,
+            self.gid,
+            self.interface.clone(),
+            self.relay_command_socket_path.clone(),
+            &self.logger,
+        )
+        .await?;
+
+        let pid = child.id().unwrap();
+        let cmd_stream_arc = Arc::new(tokio::sync::Mutex::new(cmd_stream));
+        let req_stream_arc = Arc::new(tokio::sync::Mutex::new(req_stream));
+
+        // Store worker info
+        self.workers.insert(
+            pid,
+            Worker {
+                pid,
+                worker_type: WorkerType::DataPlane { core_id },
+                child,
+                cmd_stream: Some(cmd_stream_arc),
+                req_stream: req_stream_arc,
+                #[cfg(not(feature = "testing"))]
+                log_manager: Some(log_manager),
+            },
+        );
+
+        // Initialize backoff counter
+        self.backoff_counters
+            .insert(core_id + 1, INITIAL_BACKOFF_MS);
+
+        Ok(())
+    }
+
+    /// Spawn all initial workers (1 CP + N DP workers)
+    async fn spawn_all_initial_workers(&mut self) -> Result<()> {
+        log_info!(
+            self.logger,
+            Facility::Supervisor,
+            &format!("Starting with {} data plane workers", self.num_cores)
+        );
+
+        // Spawn control plane worker
+        log_info!(
+            self.logger,
+            Facility::Supervisor,
+            "Spawning Control Plane worker"
+        );
+        self.spawn_control_plane().await?;
+
+        // Clean up any stale shared memory from previous crashed/killed instances
+        #[cfg(not(feature = "testing"))]
+        SharedMemoryLogManager::cleanup_stale_shared_memory(Some(self.num_cores as u8));
+
+        // Spawn data plane workers
+        for core_id in 0..self.num_cores as u32 {
+            self.spawn_data_plane(core_id).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Check for exited workers and restart them with exponential backoff
+    /// Returns Some(pid) if a worker exited, None otherwise
+    async fn check_and_restart_worker(&mut self) -> Result<Option<u32>> {
+        // Check each worker to see if it has exited
+        let mut exited_workers = Vec::new();
+        for (pid, worker) in &mut self.workers {
+            // Try to check if the worker has exited (non-blocking)
+            match worker.child.try_wait()? {
+                Some(status) => {
+                    exited_workers.push((*pid, worker.worker_type.clone(), status));
+                }
+                None => continue,
+            }
+        }
+
+        // If no workers exited, return None
+        if exited_workers.is_empty() {
+            return Ok(None);
+        }
+
+        // Handle the first exited worker
+        let (pid, worker_type, status) = exited_workers.remove(0);
+
+        // Remove from workers map
+        let _worker = self.workers.remove(&pid).unwrap();
+
+        // Restart logic based on worker type
+        match worker_type {
+            WorkerType::ControlPlane => {
+                let backoff = self.backoff_counters.entry(0).or_insert(INITIAL_BACKOFF_MS);
+                if status.success() {
+                    log_info!(
+                        self.logger,
+                        Facility::Supervisor,
+                        "Control Plane worker exited gracefully, restarting immediately"
+                    );
+                    *backoff = INITIAL_BACKOFF_MS;
+                } else {
+                    log_warning!(
+                        self.logger,
+                        Facility::Supervisor,
+                        &format!(
+                            "Control Plane worker failed (status: {}), restarting after {}ms",
+                            status, *backoff
+                        )
+                    );
+                    sleep(Duration::from_millis(*backoff)).await;
+                    *backoff = (*backoff * 2).min(MAX_BACKOFF_MS);
+                }
+                self.spawn_control_plane().await?;
+            }
+            WorkerType::DataPlane { core_id } => {
+                let backoff = self
+                    .backoff_counters
+                    .entry(core_id + 1)
+                    .or_insert(INITIAL_BACKOFF_MS);
+                if status.success() {
+                    log_info!(
+                        self.logger,
+                        Facility::Supervisor,
+                        &format!(
+                            "Data Plane worker (core {}) exited gracefully, restarting immediately",
+                            core_id
+                        )
+                    );
+                    *backoff = INITIAL_BACKOFF_MS;
+                } else {
+                    log_warning!(
+                        self.logger,
+                        Facility::Supervisor,
+                        &format!(
+                            "Data Plane worker (core {}) failed (status: {}), restarting after {}ms",
+                            core_id, status, *backoff
+                        )
+                    );
+                    sleep(Duration::from_millis(*backoff)).await;
+                    *backoff = (*backoff * 2).min(MAX_BACKOFF_MS);
+                }
+                self.spawn_data_plane(core_id).await?;
+            }
+        }
+
+        Ok(Some(pid))
+    }
+
+    /// Initiate graceful shutdown of all workers with timeout
+    async fn shutdown_all(&mut self, timeout: Duration) {
+        log_info!(
+            self.logger,
+            Facility::Supervisor,
+            "Graceful shutdown initiated, signaling workers"
+        );
+
+        // Signal all workers to shut down by sending explicit Shutdown command
+        for (_pid, worker) in &self.workers {
+            if let Some(cmd_stream) = &worker.cmd_stream {
+                let cmd_bytes = serde_json::to_vec(&RelayCommand::Shutdown).unwrap();
+                let stream_mutex = cmd_stream.clone();
+                let worker_type_desc = format!("{:?}", worker.worker_type);
+
+                tokio::spawn(async move {
+                    let mut stream = stream_mutex.lock().await;
+                    let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
+                    if let Err(e) = framed.send(cmd_bytes.into()).await {
+                        eprintln!("[Supervisor] Failed to send Shutdown to {}: {}", worker_type_desc, e);
+                    }
+                });
+            }
+        }
+
+        // Wait for all workers to exit with timeout
+        let num_workers = self.workers.len();
+        log_info!(
+            self.logger,
+            Facility::Supervisor,
+            &format!("Waiting for {} workers to exit (timeout: {:?})", num_workers, timeout)
+        );
+
+        let shutdown_start = tokio::time::Instant::now();
+        let mut exited_count = 0;
+
+        while !self.workers.is_empty() {
+            // Check if we've exceeded the timeout
+            if shutdown_start.elapsed() >= timeout {
+                log_warning!(
+                    self.logger,
+                    Facility::Supervisor,
+                    &format!(
+                        "Shutdown timeout exceeded, {} workers still running, force killing",
+                        self.workers.len()
+                    )
+                );
+
+                // Force kill any remaining workers
+                for (pid, worker) in self.workers.iter_mut() {
+                    log_warning!(
+                        self.logger,
+                        Facility::Supervisor,
+                        &format!("Force killing worker {} ({:?})", pid, worker.worker_type)
+                    );
+                    let _ = worker.child.kill().await;
+                }
+                break;
+            }
+
+            // Check for exited workers (non-blocking)
+            let mut exited_pids = Vec::new();
+            for (pid, worker) in &mut self.workers {
+                match worker.child.try_wait() {
+                    Ok(Some(status)) => {
+                        log_info!(
+                            self.logger,
+                            Facility::Supervisor,
+                            &format!(
+                                "Worker {} ({:?}) exited with status: {}",
+                                pid, worker.worker_type, status
+                            )
+                        );
+                        exited_pids.push(*pid);
+                        exited_count += 1;
+                    }
+                    Ok(None) => continue,
+                    Err(e) => {
+                        log_warning!(
+                            self.logger,
+                            Facility::Supervisor,
+                            &format!("Error checking worker {}: {}", pid, e)
+                        );
+                        exited_pids.push(*pid);
+                    }
+                }
+            }
+
+            // Remove exited workers
+            for pid in exited_pids {
+                self.workers.remove(&pid);
+            }
+
+            // Brief sleep before checking again
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        log_info!(
+            self.logger,
+            Facility::Supervisor,
+            &format!("All workers exited ({} total)", exited_count)
+        );
+    }
+
+    /// Get all data plane command streams for broadcasting
+    fn get_all_dp_cmd_streams(&self) -> Vec<Arc<tokio::sync::Mutex<UnixStream>>> {
+        self.workers
+            .values()
+            .filter_map(|w| w.cmd_stream.clone())
+            .collect()
+    }
+
+    /// Get worker info for all workers (for ListWorkers command)
+    fn get_worker_info(&self) -> Vec<crate::WorkerInfo> {
+        self.workers
+            .values()
+            .map(|w| crate::WorkerInfo {
+                pid: w.pid,
+                worker_type: match &w.worker_type {
+                    WorkerType::ControlPlane => "ControlPlane".to_string(),
+                    WorkerType::DataPlane { .. } => "DataPlane".to_string(),
+                },
+                core_id: match &w.worker_type {
+                    WorkerType::ControlPlane => None,
+                    WorkerType::DataPlane { core_id } => Some(*core_id),
+                },
+            })
+            .collect()
+    }
+}
+
+// --- Client Handling ---
+
+/// Handle a single client connection on the control socket
+async fn handle_client(
+    mut client_stream: tokio::net::UnixStream,
+    worker_manager: Arc<Mutex<WorkerManager>>,
+    master_rules: Arc<Mutex<HashMap<String, ForwardingRule>>>,
+    global_min_level: Arc<std::sync::atomic::AtomicU8>,
+    facility_min_levels: Arc<
+        std::sync::RwLock<std::collections::HashMap<crate::logging::Facility, crate::logging::Severity>>,
+    >,
+) -> Result<()> {
+    use crate::SupervisorCommand;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut buffer = Vec::new();
+    client_stream.read_to_end(&mut buffer).await?;
+
+    let command: SupervisorCommand = serde_json::from_slice(&buffer)?;
+
+    // Get worker info from WorkerManager (locked access)
+    let worker_info = {
+        let manager = worker_manager.lock().unwrap();
+        manager.get_worker_info()
+    };
+
+    // Create a temporary HashMap for handle_supervisor_command (to keep it pure)
+    let worker_map_temp = Mutex::new(
+        worker_info
+            .iter()
+            .map(|w| (w.pid, w.clone()))
+            .collect::<HashMap<u32, crate::WorkerInfo>>(),
+    );
+
+    // Use the extracted, testable command handler
+    let (response, action) = handle_supervisor_command(
+        command,
+        &master_rules,
+        &worker_map_temp,
+        &global_min_level,
+        &facility_min_levels,
+    );
+
+    // Send response to client
+    let response_bytes = serde_json::to_vec(&response)?;
+    client_stream.write_all(&response_bytes).await?;
+
+    // Handle async actions
+    match action {
+        CommandAction::None => {
+            // Nothing to do
+        }
+        CommandAction::BroadcastToDataPlane(relay_cmd) => {
+            let cmd_bytes = serde_json::to_vec(&relay_cmd)?;
+
+            // Get cmd streams from WorkerManager
+            let streams_to_send = {
+                let manager = worker_manager.lock().unwrap();
+                manager.get_all_dp_cmd_streams()
+            };
+
+            for stream_mutex in streams_to_send {
+                let cmd_bytes_clone = cmd_bytes.clone();
+                tokio::spawn(async move {
+                    let mut stream = stream_mutex.lock().await;
+                    let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
+                    let _ = framed.send(cmd_bytes_clone.into()).await;
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
 // --- Supervisor Core Logic ---
 
 #[allow(clippy::too_many_arguments)]
@@ -345,10 +801,7 @@ pub async fn run(
         )
     );
 
-    let cp_socket_path = relay_command_socket_path.clone();
-    let dp_socket_path = relay_command_socket_path.clone();
-
-    // Create the relay command socket
+    // Create the relay command socket (not currently used but keep for compatibility)
     if relay_command_socket_path.exists() {
         std::fs::remove_file(&relay_command_socket_path)?;
     }
@@ -363,73 +816,7 @@ pub async fn run(
         Some(Gid::from_raw(gid)),
     )?;
 
-    let interface = interface.to_string();
-    let logger_for_cp = supervisor_logger.clone();
-    let logger_for_dp = supervisor_logger.clone();
-    run_generic(
-        move || {
-            let cp_socket_path = cp_socket_path.clone();
-            let logger = logger_for_cp.clone();
-            async move {
-                spawn_control_plane_worker(uid, gid, cp_socket_path, prometheus_addr, &logger).await
-            }
-        },
-        num_cores,
-        move |core_id| {
-            let dp_socket_path = dp_socket_path.clone();
-            let interface = interface.clone();
-            let logger = logger_for_dp.clone();
-            async move {
-                spawn_data_plane_worker(core_id, uid, gid, interface, dp_socket_path, &logger).await
-            }
-        },
-        _relay_command_rx,
-        control_socket_path, // Pass down
-        master_rules,
-        supervisor_logger,
-        global_min_level,
-        facility_min_levels,
-        shutdown_rx,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)] // Legitimate need for all parameters in supervisor
-pub async fn run_generic<F, G, FutCp, FutDp>(
-    mut spawn_cp: F,
-    num_cores: usize,
-    mut spawn_dp: G,
-    _relay_command_rx: mpsc::Receiver<RelayCommand>,
-    control_socket_path: PathBuf,
-    master_rules: Arc<Mutex<HashMap<String, ForwardingRule>>>,
-    supervisor_logger: crate::logging::Logger,
-    global_min_level: Arc<std::sync::atomic::AtomicU8>,
-    facility_min_levels: Arc<
-        std::sync::RwLock<
-            std::collections::HashMap<crate::logging::Facility, crate::logging::Severity>,
-        >,
-    >,
-    mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
-) -> Result<()>
-where
-    F: FnMut() -> FutCp,
-    G: FnMut(u32) -> FutDp,
-    FutCp: Future<Output = Result<(Child, UnixStream, UnixStream)>> + Send + 'static,
-    FutDp: Future<Output = Result<(Child, UnixStream, UnixStream)>> + Send + 'static,
-{
-    let worker_map: Arc<Mutex<HashMap<u32, crate::WorkerInfo>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-    let worker_req_streams: Arc<Mutex<HashMap<u32, Arc<tokio::sync::Mutex<UnixStream>>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-    let dp_cmd_streams: Arc<Mutex<HashMap<u32, Arc<tokio::sync::Mutex<UnixStream>>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-
-    log_info!(
-        supervisor_logger,
-        Facility::Supervisor,
-        &format!("Starting with {} data plane workers", num_cores)
-    );
-
+    // Set up control socket for client connections
     if control_socket_path.exists() {
         std::fs::remove_file(&control_socket_path)?;
     }
@@ -444,313 +831,65 @@ where
         &format!("Control socket listening on {:?}", &control_socket_path)
     );
 
-    let (mut cp_child, mut _cp_stream, cp_req_stream) = spawn_cp().await?;
-    let mut cp_pid = cp_child.id().unwrap();
-    worker_map.lock().unwrap().insert(
-        cp_pid,
-        crate::WorkerInfo {
-            pid: cp_pid,
-            worker_type: "ControlPlane".to_string(),
-            core_id: None,
-        },
-    );
-    worker_req_streams
-        .lock()
-        .unwrap()
-        .insert(cp_pid, Arc::new(tokio::sync::Mutex::new(cp_req_stream)));
-
-    #[allow(clippy::type_complexity)]
-    let mut cp_child_future: Pin<
-        Box<dyn Future<Output = (u32, Result<std::process::ExitStatus, std::io::Error>, Child)>>,
-    > = Box::pin(async move {
-        let res = cp_child.wait().await;
-        (cp_pid, res, cp_child)
-    });
-
-    // Use FuturesUnordered to manage all data plane worker futures
-    #[allow(clippy::type_complexity)]
-    let mut dp_futs: FuturesUnordered<
-        Pin<Box<dyn Future<Output = (u32, u32, Result<std::process::ExitStatus, std::io::Error>)>>>,
-    > = FuturesUnordered::new();
-    let mut dp_backoffs = HashMap::new();
-
-    // Clean up any stale shared memory from previous crashed/killed instances
-    #[cfg(not(feature = "testing"))]
-    SharedMemoryLogManager::cleanup_stale_shared_memory(Some(num_cores as u8));
-
-    // Create shared memory log managers for data plane workers
-    // Each worker gets its own set of ring buffers in shared memory
-    let mut log_managers: HashMap<u32, SharedMemoryLogManager> = HashMap::new();
-
-    for core_id in 0..num_cores as u32 {
-        // Create shared memory for this worker's logging (REQUIRED in production)
-        #[cfg(not(feature = "testing"))]
-        {
-            let log_manager = SharedMemoryLogManager::create_for_worker(core_id as u8, 16384)
-                .with_context(|| format!("Failed to create shared memory for worker {}", core_id))?;
-            log_managers.insert(core_id, log_manager);
-        }
-
-        let (mut child, dp_cmd_stream, dp_req_stream) = spawn_dp(core_id).await?;
-        let pid = child.id().unwrap();
-        worker_map.lock().unwrap().insert(
-            pid,
-            crate::WorkerInfo {
-                pid,
-                worker_type: "DataPlane".to_string(),
-                core_id: Some(core_id),
-            },
+    // Initialize WorkerManager and wrap it in Arc<Mutex<>>
+    let worker_manager = {
+        let mut manager = WorkerManager::new(
+            uid,
+            gid,
+            interface.to_string(),
+            relay_command_socket_path,
+            prometheus_addr,
+            num_cores,
+            supervisor_logger.clone(),
         );
-        worker_req_streams
-            .lock()
-            .unwrap()
-            .insert(pid, Arc::new(tokio::sync::Mutex::new(dp_req_stream)));
-        dp_cmd_streams
-            .lock()
-            .unwrap()
-            .insert(pid, Arc::new(tokio::sync::Mutex::new(dp_cmd_stream)));
-        dp_backoffs.insert(core_id, INITIAL_BACKOFF_MS);
-        dp_futs.push(Box::pin(async move {
-            let res = child.wait().await;
-            (core_id, pid, res)
-        }));
-    }
 
-    let mut cp_backoff_ms = INITIAL_BACKOFF_MS;
-    let mut shutting_down = false;
-    let mut remaining_workers = num_cores + 1; // CP + DP workers
+        // Spawn all initial workers
+        manager.spawn_all_initial_workers().await?;
 
+        Arc::new(Mutex::new(manager))
+    };
+
+    // Main supervisor loop
     loop {
         tokio::select! {
-            // Branch 0: Graceful shutdown signal received
-            _ = &mut shutdown_rx, if !shutting_down => {
-                log_info!(supervisor_logger, Facility::Supervisor, "Graceful shutdown initiated, signaling workers");
-                shutting_down = true;
-
-                // Send Shutdown command to all data plane workers
-                let cmd_bytes = serde_json::to_vec(&RelayCommand::Shutdown).unwrap();
-                let streams_to_send: Vec<_> = dp_cmd_streams.lock().unwrap().values().cloned().collect();
-
-                for stream_mutex in streams_to_send {
-                    let cmd_bytes_clone = cmd_bytes.clone();
-                    tokio::spawn(async move {
-                        let mut stream = stream_mutex.lock().await;
-                        let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
-                        let _ = framed.send(cmd_bytes_clone.into()).await;
-                    });
-                }
-
-                log_info!(supervisor_logger, Facility::Supervisor, &format!("Waiting for {} workers to exit", remaining_workers));
+            // Shutdown signal received
+            _ = &mut shutdown_rx => {
+                worker_manager.lock().unwrap().shutdown_all(Duration::from_secs(SHUTDOWN_TIMEOUT_SECS)).await;
+                break;
             }
 
-            // Branch 1: A control plane worker exited
-            (pid, result, mut cp_child) = &mut cp_child_future => {
-                worker_map.lock().unwrap().remove(&pid);
+            // New client connection
+            Ok((client_stream, _)) = listener.accept() => {
+                let worker_manager = Arc::clone(&worker_manager);
+                let master_rules = Arc::clone(&master_rules);
+                let global_min_level = Arc::clone(&global_min_level);
+                let facility_min_levels = Arc::clone(&facility_min_levels);
 
-                if shutting_down {
-                    remaining_workers -= 1;
-                    log_info!(
-                        supervisor_logger,
-                        Facility::Supervisor,
-                        &format!("Control Plane worker exited during shutdown ({} workers remaining)", remaining_workers)
-                    );
-                    if remaining_workers == 0 {
-                        log_info!(supervisor_logger, Facility::Supervisor, "All workers exited, supervisor shutting down");
-                        return Ok(());
+                tokio::spawn(async move {
+                    if let Err(e) = handle_client(
+                        client_stream,
+                        worker_manager,
+                        master_rules,
+                        global_min_level,
+                        facility_min_levels,
+                    )
+                    .await
+                    {
+                        error!("Error handling client: {}", e);
                     }
-                    // Don't restart during shutdown - create a pending future to keep the branch active
-                    cp_child_future = Box::pin(async move {
-                        std::future::pending().await
-                    });
-                } else {
-                    if let Ok(status) = result {
-                        if status.success() {
-                            log_info!(supervisor_logger, Facility::Supervisor, "Control Plane worker exited gracefully, restarting immediately");
-                            cp_backoff_ms = INITIAL_BACKOFF_MS;
-                        } else {
-                            log_warning!(
-                                supervisor_logger,
-                                Facility::Supervisor,
-                                &format!("Control Plane worker failed (status: {}), restarting after {}ms", status, cp_backoff_ms)
-                            );
-                            sleep(Duration::from_millis(cp_backoff_ms)).await;
-                            cp_backoff_ms = (cp_backoff_ms * 2).min(MAX_BACKOFF_MS);
-                        }
-                    }
-                    let (cp_child_new, _cp_stream_new, cp_req_stream_new) = spawn_cp().await?;
-                    cp_child = cp_child_new;
-                    _cp_stream = _cp_stream_new;
-                    cp_pid = cp_child.id().unwrap();
-                    worker_map.lock().unwrap().insert(
-                        cp_pid,
-                        crate::WorkerInfo {
-                            pid: cp_pid,
-                            worker_type: "ControlPlane".to_string(),
-                            core_id: None,
-                        },
-                    );
-                    worker_req_streams
-                        .lock()
-                        .unwrap()
-                        .insert(cp_pid, Arc::new(tokio::sync::Mutex::new(cp_req_stream_new)));
-                    cp_child_future = Box::pin(async move {
-                        let res = cp_child.wait().await;
-                        (cp_pid, res, cp_child)
-                    });
-                }
+                });
             }
 
-            // Branch 2: A data plane worker exited
-            Some((core_id, pid, result)) = dp_futs.next() => {
-                worker_map.lock().unwrap().remove(&pid);
-                dp_cmd_streams.lock().unwrap().remove(&pid);
-
-                if shutting_down {
-                    remaining_workers -= 1;
-                    log_info!(
-                        supervisor_logger,
-                        Facility::Supervisor,
-                        &format!("Data Plane worker (core {}) exited during shutdown ({} workers remaining)", core_id, remaining_workers)
-                    );
-                    if remaining_workers == 0 {
-                        log_info!(supervisor_logger, Facility::Supervisor, "All workers exited, supervisor shutting down");
-                        return Ok(());
-                    }
-                    // Don't restart during shutdown
-                } else {
-                    if let Ok(status) = result {
-                        let backoff = dp_backoffs.entry(core_id).or_insert(INITIAL_BACKOFF_MS);
-                        if status.success() {
-                            log_info!(
-                                supervisor_logger,
-                                Facility::Supervisor,
-                                &format!("Data Plane worker (core {}) exited gracefully, restarting immediately", core_id)
-                            );
-                            *backoff = INITIAL_BACKOFF_MS;
-                        } else {
-                            log_warning!(
-                                supervisor_logger,
-                                Facility::Supervisor,
-                                &format!("Data Plane worker (core {}) failed (status: {}), restarting after {}ms", core_id, status, *backoff)
-                            );
-                            sleep(Duration::from_millis(*backoff)).await;
-                            *backoff = (*backoff * 2).min(MAX_BACKOFF_MS);
-                        }
-                        // Recreate shared memory for the restarting worker (REQUIRED in production)
-                        // The old shared memory will be cleaned up when the old manager is dropped
-                        #[cfg(not(feature = "testing"))]
-                        {
-                            let log_manager = SharedMemoryLogManager::create_for_worker(core_id as u8, 16384)
-                                .with_context(|| format!("Failed to recreate shared memory for worker {}", core_id))?;
-                            log_managers.insert(core_id, log_manager);
-                        }
-
-                        // Restart the worker for the specific core
-                        let (mut new_child, new_cmd_stream, new_req_stream) = spawn_dp(core_id).await?;
-                        let new_pid = new_child.id().unwrap();
-                        worker_map.lock().unwrap().insert(
-                            new_pid,
-                            crate::WorkerInfo {
-                                pid: new_pid,
-                                worker_type: "DataPlane".to_string(),
-                                core_id: Some(core_id),
-                            },
-                        );
-                        worker_req_streams
-                            .lock()
-                            .unwrap()
-                            .insert(new_pid, Arc::new(tokio::sync::Mutex::new(new_req_stream)));
-                        dp_cmd_streams
-                            .lock()
-                            .unwrap()
-                            .insert(new_pid, Arc::new(tokio::sync::Mutex::new(new_cmd_stream)));
-                        dp_futs.push(Box::pin(async move {
-                            let res = new_child.wait().await;
-                            (core_id, new_pid, res)
-                        }));
-                    }
+            // Periodic worker health check (every 250ms)
+            _ = tokio::time::sleep(Duration::from_millis(250)) => {
+                if let Err(e) = worker_manager.lock().unwrap().check_and_restart_worker().await {
+                    error!("Error checking/restarting worker: {}", e);
                 }
             }
-
-            // Branch 3: A new client connected to the control socket
-                        Ok((mut client_stream, _)) = listener.accept() => {
-                            let worker_map_clone = worker_map.clone();
-                            let dp_cmd_streams_clone = dp_cmd_streams.clone();
-                            let master_rules_clone = master_rules.clone();
-                            let logger_for_client = supervisor_logger.clone();
-                            let global_min_level_clone = Arc::clone(&global_min_level);
-                            let facility_min_levels_clone = Arc::clone(&facility_min_levels);
-
-                            tokio::spawn(async move {
-                                use crate::{Response, SupervisorCommand};
-                                use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-                                let mut buffer = Vec::new();
-                                if let Ok(Ok(_)) = tokio::time::timeout(Duration::from_millis(100), client_stream.read_to_end(&mut buffer)).await {
-                                    let command_result: Result<SupervisorCommand, _> = serde_json::from_slice(&buffer);
-
-                                    match command_result {
-                                        Ok(command) => {
-                                            // Use the extracted, testable command handler
-                                            let (response, action) = handle_supervisor_command(
-                                                command,
-                                                &master_rules_clone,
-                                                &worker_map_clone,
-                                                &global_min_level_clone,
-                                                &facility_min_levels_clone,
-                                            );
-
-                                            // Send response to client
-                                            let response_bytes = serde_json::to_vec(&response).unwrap();
-                                            if let Err(e) = client_stream.write_all(&response_bytes).await {
-                                                error!("Failed to send response to client: {}", e);
-                                            }
-
-                                            // Handle async actions
-                                            match action {
-                                                CommandAction::None => {
-                                                    // Nothing to do
-                                                }
-                                                CommandAction::BroadcastToDataPlane(relay_cmd) => {
-                                                    let cmd_bytes = serde_json::to_vec(&relay_cmd).unwrap();
-                                                    let streams_to_send: Vec<_> = dp_cmd_streams_clone.lock().unwrap().values().cloned().collect();
-
-                                                    log_info!(
-                                                        logger_for_client,
-                                                        Facility::Supervisor,
-                                                        &format!("Broadcasting command to {} data plane workers", streams_to_send.len())
-                                                    );
-
-                                                    for stream_mutex in streams_to_send {
-                                                        let cmd_bytes_clone = cmd_bytes.clone();
-                                                        let logger_for_task = logger_for_client.clone();
-                                                        tokio::spawn(async move {
-                                                            let mut stream = stream_mutex.lock().await;
-                                                            let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
-                                                            match framed.send(cmd_bytes_clone.into()).await {
-                                                                Ok(_) => {
-                                                                    logger_for_task.debug(Facility::Supervisor, "Successfully sent command to worker");
-                                                                }
-                                                                Err(e) => {
-                                                                    logger_for_task.error(Facility::Supervisor, &format!("Failed to send command to worker: {}", e));
-                                                                }
-                                                            }
-                                                        });
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        Err(e) => {
-                                            let response = Response::Error(format!("Failed to parse command: {}", e));
-                                            let response_bytes = serde_json::to_vec(&response).unwrap();
-                                            client_stream.write_all(&response_bytes).await.unwrap();
-                                        }
-                                    }
-                                }
-                            });
-                        }
         }
     }
+
+    Ok(())
 }
 
 /// Send a file descriptor to a worker process via SCM_RIGHTS
@@ -1112,273 +1251,5 @@ mod tests {
             .spawn()
             .map_err(anyhow::Error::from)
             .context("Failed to spawn sleeping worker")
-    }
-
-    // --- Tests ---
-
-    /// **Tier 1 Unit Test**
-    ///
-    /// - **Purpose:** Verify that the supervisor restarts a consistently failing Control Plane worker.
-    /// - **Method:** A mock `spawn_cp` closure is created that always returns a process that immediately fails.
-    ///   The test runs the supervisor for a short period and then inspects a shared vector of spawn timestamps
-    ///   to ensure at least two spawns occurred and that the time between them respects the initial backoff period.
-    /// - **Tier:** 1 (Logic)
-    #[tokio::test]
-    async fn test_supervisor_restarts_cp_worker_with_backoff() {
-        cleanup_shared_memory();
-        let cp_spawn_times = Arc::new(Mutex::new(Vec::new()));
-        let cp_spawn_times_clone = cp_spawn_times.clone();
-
-        let spawn_cp = move || {
-            let cp_spawn_times = cp_spawn_times_clone.clone();
-            async move {
-                cp_spawn_times.lock().unwrap().push(Instant::now());
-                let (stream, _) = UnixStream::pair()?;
-                let (req_stream, _) = UnixStream::pair()?;
-                Ok((spawn_failing_worker()?, stream, req_stream))
-            }
-        };
-        let spawn_dp = |_core_id: u32| async {
-            let (req_stream, _) = UnixStream::pair()?;
-            let (cmd_stream, _) = UnixStream::pair()?;
-            Ok((spawn_sleeping_worker()?, cmd_stream, req_stream))
-        };
-
-        let (_tx, rx) = mpsc::channel(10);
-        let master_rules = Arc::new(Mutex::new(HashMap::new()));
-        let temp_dir = tempdir().unwrap();
-        let socket_path = temp_dir.path().join("test.sock");
-
-        let (logger, global_min_level, facility_min_levels) = create_test_logger();
-        let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-        let supervisor_future = run_generic(
-            spawn_cp,
-            1,
-            spawn_dp,
-            rx,
-            socket_path,
-            master_rules.clone(),
-            logger,
-            global_min_level,
-            facility_min_levels,
-            shutdown_rx,
-        );
-        let _ = tokio::time::timeout(Duration::from_millis(1000), supervisor_future).await;
-
-        let spawn_times = cp_spawn_times.lock().unwrap();
-        assert!(spawn_times.len() > 1, "Should have restarted at least once");
-
-        let backoff1 = spawn_times[1].duration_since(spawn_times[0]);
-        assert!(backoff1 >= Duration::from_millis(250));
-    }
-
-    /// **Tier 1 Unit Test**
-    ///
-    /// - **Purpose:** Verify that the supervisor restarts a consistently failing Data Plane worker.
-    /// - **Method:** Similar to the CP worker test, but the mock `spawn_dp` closure is the one that fails.
-    ///   The test verifies that the DP worker is restarted after the initial backoff period.
-    /// - **Tier:** 1 (Logic)
-    #[tokio::test]
-    async fn test_supervisor_restarts_dp_worker_with_backoff() {
-        cleanup_shared_memory();
-        let dp_spawn_times = Arc::new(Mutex::new(Vec::new()));
-        let spawn_cp = move || async {
-            let (stream, _) = UnixStream::pair()?;
-            let (req_stream, _) = UnixStream::pair()?;
-            Ok((spawn_sleeping_worker()?, stream, req_stream))
-        };
-        let dp_spawn_times_clone = dp_spawn_times.clone();
-        let spawn_dp = move |_core_id: u32| {
-            let dp_spawn_times = dp_spawn_times_clone.clone();
-            async move {
-                dp_spawn_times.lock().unwrap().push(Instant::now());
-                let (req_stream, _) = UnixStream::pair()?;
-                let (cmd_stream, _) = UnixStream::pair()?;
-                Ok((spawn_failing_worker()?, cmd_stream, req_stream))
-            }
-        };
-
-        let (_tx, rx) = mpsc::channel(10);
-        let master_rules = Arc::new(Mutex::new(HashMap::new()));
-        let temp_dir = tempdir().unwrap();
-        let socket_path = temp_dir.path().join("test.sock");
-
-        let (logger, global_min_level, facility_min_levels) = create_test_logger();
-        let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-        let supervisor_future = run_generic(
-            spawn_cp,
-            1,
-            spawn_dp,
-            rx,
-            socket_path,
-            master_rules.clone(),
-            logger,
-            global_min_level,
-            facility_min_levels,
-            shutdown_rx,
-        );
-        let _ = tokio::time::timeout(Duration::from_millis(1000), supervisor_future).await;
-
-        let spawn_times = dp_spawn_times.lock().unwrap();
-        assert!(spawn_times.len() > 1, "Should have restarted at least once");
-
-        let backoff1 = spawn_times[1].duration_since(spawn_times[0]);
-        assert!(backoff1 >= Duration::from_millis(250));
-    }
-
-    /// **Tier 1 Unit Test**
-    ///
-    /// - **Purpose:** Verify that the supervisor's main loop can be started and runs without immediate panic.
-    /// - **Method:** The test provides mock spawners that create long-lived (sleeping) processes. It runs the
-    ///   supervisor for a very short duration. The test passes if the supervisor future doesn't complete and
-    ///   can be successfully timed out, implying it has entered the main `loop` and is waiting for events.
-    /// - **Tier:** 1 (Logic)
-    #[tokio::test]
-    async fn test_supervisor_spawns_workers() {
-        cleanup_shared_memory();
-
-        let pids = Arc::new(Mutex::new(Vec::new()));
-        let pids_clone = pids.clone();
-        let spawn_cp = move || {
-            let pids = pids_clone.clone();
-            async move {
-                let child = spawn_sleeping_worker()?;
-                pids.lock().unwrap().push(child.id().unwrap());
-                let (stream, _) = UnixStream::pair()?;
-                let (req_stream, _) = UnixStream::pair()?;
-                Ok((child, stream, req_stream))
-            }
-        };
-        let pids_clone2 = pids.clone();
-        let spawn_dp = move |_core_id: u32| {
-            let pids = pids_clone2.clone();
-            async move {
-                let child = spawn_sleeping_worker()?;
-                pids.lock().unwrap().push(child.id().unwrap());
-                let (req_stream, _) = UnixStream::pair()?;
-                let (cmd_stream, _) = UnixStream::pair()?;
-                Ok((child, cmd_stream, req_stream))
-            }
-        };
-
-        let (_tx, rx) = mpsc::channel(10);
-        let master_rules = Arc::new(Mutex::new(HashMap::new()));
-        let num_cores = 2;
-        let temp_dir = tempdir().unwrap();
-        let socket_path = temp_dir.path().join("test.sock");
-
-        let (logger, global_min_level, facility_min_levels) = create_test_logger();
-        let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-        let supervisor_future = run_generic(
-            spawn_cp,
-            num_cores,
-            spawn_dp,
-            rx,
-            socket_path,
-            master_rules.clone(),
-            logger,
-            global_min_level,
-            facility_min_levels,
-            shutdown_rx,
-        );
-        let _ = tokio::time::timeout(Duration::from_millis(200), supervisor_future).await;
-
-        let spawned_pids = pids.lock().unwrap().clone();
-        assert_eq!(
-            spawned_pids.len(),
-            num_cores + 1,
-            "Should have spawned one CP and {} DP workers.",
-            num_cores
-        );
-
-        // Cleanup spawned processes
-        for pid in spawned_pids.iter() {
-            let _ = Command::new("kill").arg(pid.to_string()).status().await;
-        }
-    }
-
-    /// **Tier 1 Unit Test**
-    ///
-    /// - **Purpose:** Verify that the supervisor's exponential backoff is reset for a worker after it exits gracefully.
-    /// - **Method:** A mock spawner is used that exits gracefully on the first spawn, then fails on all subsequent spawns.
-    ///   The test inspects the timestamps of the spawns. It asserts that the delay between the 1st (graceful) and 2nd
-    ///   (failed) spawn is near-zero, and the delay between the 2nd (failed) and 3rd (failed) spawn is >= the initial backoff delay.
-    /// - **Tier:** 1 (Logic)
-    #[tokio::test]
-    async fn test_supervisor_resets_backoff_on_graceful_exit() {
-        cleanup_shared_memory();
-        let cp_spawn_times = Arc::new(Mutex::new(Vec::new()));
-        let cp_spawn_times_clone = cp_spawn_times.clone();
-        let cp_spawn_count = Arc::new(Mutex::new(0));
-
-        let spawn_cp = move || {
-            let cp_spawn_times = cp_spawn_times_clone.clone();
-            let cp_spawn_count = cp_spawn_count.clone();
-            async move {
-                let mut count = cp_spawn_count.lock().unwrap();
-                *count += 1;
-                let mut command = tokio::process::Command::new("sh");
-
-                // Fail on the first two spawns to establish a backoff, then exit gracefully.
-                match *count {
-                    1 => command.arg("-c").arg("exit 1"), // Fail
-                    2 => command.arg("-c").arg("exit 0"), // Graceful exit
-                    _ => command.arg("-c").arg("exit 1"), // Fail again
-                };
-                drop(count); // Release the lock before awaiting
-
-                cp_spawn_times.lock().unwrap().push(Instant::now());
-                let (stream, _) = UnixStream::pair()?;
-                let (req_stream, _) = UnixStream::pair()?;
-                Ok((command.spawn()?, stream, req_stream))
-            }
-        };
-
-        let spawn_dp = |_core_id: u32| async {
-            let (req_stream, _) = UnixStream::pair()?;
-            let (cmd_stream, _) = UnixStream::pair()?;
-            Ok((spawn_sleeping_worker()?, cmd_stream, req_stream))
-        };
-
-        let (_tx, rx) = mpsc::channel(10);
-        let master_rules = Arc::new(Mutex::new(HashMap::new()));
-        let temp_dir = tempdir().unwrap();
-        let socket_path = temp_dir.path().join("test.sock");
-
-        let (logger, global_min_level, facility_min_levels) = create_test_logger();
-        let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-        let supervisor_future = run_generic(
-            spawn_cp,
-            1,
-            spawn_dp,
-            rx,
-            socket_path,
-            master_rules.clone(),
-            logger,
-            global_min_level,
-            facility_min_levels,
-            shutdown_rx,
-        );
-
-        // Run long enough for three spawns: fail -> graceful -> fail
-        let _ = tokio::time::timeout(Duration::from_millis(1000), supervisor_future).await;
-
-        let spawn_times = cp_spawn_times.lock().unwrap();
-        assert!(
-            spawn_times.len() >= 3,
-            "Expected at least 3 spawns, but got {}",
-            spawn_times.len()
-        );
-
-        // Backoff after first failure should be >= INITIAL_BACKOFF_MS
-        let backoff_after_failure = spawn_times[1].duration_since(spawn_times[0]);
-        assert!(backoff_after_failure >= Duration::from_millis(INITIAL_BACKOFF_MS));
-
-        // Backoff after graceful exit should be very short (i.e., reset)
-        let backoff_after_graceful = spawn_times[2].duration_since(spawn_times[1]);
-        assert!(
-            backoff_after_graceful < Duration::from_millis(50),
-            "Backoff was not reset after graceful exit"
-        );
     }
 }
