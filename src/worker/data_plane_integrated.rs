@@ -14,7 +14,7 @@ use crate::DataPlaneConfig;
 use anyhow::{Context, Result};
 use crossbeam_queue::SegQueue;
 use std::io::Write;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::Arc;
 use std::thread;
 
@@ -33,14 +33,15 @@ pub fn run_data_plane(
     std::io::stderr().flush().ok();
 
     // Destructure channel sets
-    let ingress_command_rx = ingress_channels.command_rx;
-    let ingress_event_fd = ingress_channels.event_fd;
+    let ingress_cmd_stream_fd = ingress_channels.cmd_stream_fd;
 
     eprintln!("[run_data_plane] Ingress channels destructured");
     std::io::stderr().flush().ok();
 
-    // Get raw FD for egress wakeup before moving egress_channels
-    let egress_wakeup_fd = egress_channels.event_fd.as_raw_fd();
+    // Extract egress channel components
+    let egress_cmd_stream_fd = egress_channels.cmd_stream_fd;
+    let egress_shutdown_eventfd = egress_channels.shutdown_event_fd;
+    let egress_wakeup_fd = egress_shutdown_eventfd.as_raw_fd();
 
     let buffer_pool_small = std::env::var("MCR_BUFFER_POOL_SMALL")
         .ok()
@@ -102,8 +103,7 @@ pub fn run_data_plane(
                     ingress_config,
                     buffer_pool_for_ingress,
                     Some(egress_channel),
-                    ingress_command_rx,
-                    ingress_event_fd,
+                    ingress_cmd_stream_fd,
                     ingress_logger,
                 )?;
 
@@ -126,13 +126,15 @@ pub fn run_data_plane(
     let egress_handle = {
         let egress_rx = egress_queue;
         let egress_logger = logger.clone();
+        let shutdown_event_fd: OwnedFd = egress_shutdown_eventfd.into();
         thread::Builder::new()
             .name("egress".to_string())
             .spawn(move || -> Result<()> {
                 let mut egress = EgressLoop::new(
                     egress_config.clone(),
                     buffer_pool.clone(),
-                    egress_channels, // Pass the whole struct
+                    shutdown_event_fd,
+                    egress_cmd_stream_fd,
                     egress_logger,
                 )?;
                 egress.run(&egress_rx)?;

@@ -14,7 +14,7 @@ use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
 
-use crate::logging::{AsyncConsumer, Facility, Logger, MPSCRingBuffer, SharedMemoryLogManager};
+use crate::logging::{AsyncConsumer, Facility, Logger, MPSCRingBuffer};
 use crate::{log_info, log_warning, ForwardingRule, RelayCommand};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
@@ -36,10 +36,13 @@ struct Worker {
     pid: u32,
     worker_type: WorkerType,
     child: Child,
-    cmd_stream: Option<Arc<tokio::sync::Mutex<UnixStream>>>, // Used for RelayCommand (shutdown, etc.)
+    // Data plane workers have TWO command streams (ingress + egress)
+    // Control plane workers have ONE command stream
+    ingress_cmd_stream: Option<Arc<tokio::sync::Mutex<UnixStream>>>,
+    egress_cmd_stream: Option<Arc<tokio::sync::Mutex<UnixStream>>>,
     req_stream: Arc<tokio::sync::Mutex<UnixStream>>,
     #[cfg(not(feature = "testing"))]
-    log_manager: Option<SharedMemoryLogManager>, // Data plane only
+    log_pipe: Option<std::os::unix::io::OwnedFd>, // Pipe for reading worker's stderr (JSON logs)
 }
 
 /// Centralized manager for all worker lifecycle operations
@@ -267,11 +270,23 @@ pub async fn spawn_data_plane_worker(
     interface: String,
     relay_command_socket_path: PathBuf,
     logger: &crate::logging::Logger,
-) -> Result<(Child, UnixStream, UnixStream)> {
+) -> Result<(Child, UnixStream, UnixStream, UnixStream, Option<std::os::unix::io::OwnedFd>)> {
     logger.info(
         Facility::Supervisor,
         &format!("Spawning Data Plane worker for core {}", core_id),
     );
+
+    // Create pipe for worker stderr (for JSON logging)
+    #[cfg(not(feature = "testing"))]
+    let (log_read_fd, log_write_fd) = {
+        use nix::unistd::pipe;
+        use std::os::unix::io::IntoRawFd;
+        let (read_fd, write_fd) = pipe()?;
+        // Convert to raw FDs to prevent auto-close when OwnedFd goes out of scope
+        (Some(read_fd.into_raw_fd()), Some(write_fd.into_raw_fd()))
+    };
+    #[cfg(feature = "testing")]
+    let (log_read_fd, log_write_fd): (Option<RawFd>, Option<RawFd>) = (None, None);
 
     // Create the supervisor-worker communication socket pair
     // This will be passed as FD 3 to the worker
@@ -292,7 +307,7 @@ pub async fn spawn_data_plane_worker(
         .arg("--input-interface-name")
         .arg(interface);
 
-    // Ensure worker_sock becomes FD 3 in the child
+    // Ensure worker_sock becomes FD 3 in the child, and redirect stderr to pipe
     unsafe {
         command.pre_exec(move || {
             // Dup worker_fd to FD 3
@@ -304,19 +319,51 @@ pub async fn spawn_data_plane_worker(
                     return Err(std::io::Error::last_os_error());
                 }
             }
+
+            // Redirect stderr to pipe write end (for JSON logging)
+            #[cfg(not(feature = "testing"))]
+            if let Some(write_fd) = log_write_fd {
+                if libc::dup2(write_fd, 2) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::close(write_fd) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                // Also close read end in child (not needed)
+                if let Some(read_fd) = log_read_fd {
+                    if libc::close(read_fd) == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+            }
+
             Ok(())
         });
     }
 
     let child = command.spawn()?;
 
+    // Close write end in parent (child has it via FD 2)
+    // Keep read end open - we'll use it to read worker logs
+    #[cfg(not(feature = "testing"))]
+    if let Some(write_fd) = log_write_fd {
+        nix::unistd::close(write_fd).ok();
+    }
+
+    // Convert read end to OwnedFd (it's still open, we didn't close it)
+    #[cfg(not(feature = "testing"))]
+    let log_pipe = log_read_fd.map(|fd| unsafe { std::os::unix::io::OwnedFd::from_raw_fd(fd) });
+    #[cfg(feature = "testing")]
+    let log_pipe = None;
+
     // Send the request/response socket to the child process
     let req_supervisor_stream = create_and_send_socketpair(&supervisor_sock).await?;
 
-    // Send the command socket to the child process
-    let cmd_supervisor_stream = create_and_send_socketpair(&supervisor_sock).await?;
+    // Send TWO command sockets to the child process (one for ingress, one for egress)
+    let ingress_cmd_supervisor_stream = create_and_send_socketpair(&supervisor_sock).await?;
+    let egress_cmd_supervisor_stream = create_and_send_socketpair(&supervisor_sock).await?;
 
-    Ok((child, cmd_supervisor_stream, req_supervisor_stream))
+    Ok((child, ingress_cmd_supervisor_stream, egress_cmd_supervisor_stream, req_supervisor_stream, log_pipe))
 }
 
 // --- WorkerManager Implementation ---
@@ -360,17 +407,18 @@ impl WorkerManager {
         let cmd_stream_arc = Arc::new(tokio::sync::Mutex::new(cmd_stream));
         let req_stream_arc = Arc::new(tokio::sync::Mutex::new(req_stream));
 
-        // Store worker info
+        // Store worker info - control plane only has one command stream
         self.workers.insert(
             pid,
             Worker {
                 pid,
                 worker_type: WorkerType::ControlPlane,
                 child,
-                cmd_stream: Some(cmd_stream_arc),
+                ingress_cmd_stream: Some(cmd_stream_arc.clone()),
+                egress_cmd_stream: Some(cmd_stream_arc), // Same stream for CP
                 req_stream: req_stream_arc,
                 #[cfg(not(feature = "testing"))]
-                log_manager: None,
+                log_pipe: None, // Control plane uses MPSC ring buffer
             },
         );
 
@@ -382,14 +430,7 @@ impl WorkerManager {
 
     /// Spawn a data plane worker for the given core
     async fn spawn_data_plane(&mut self, core_id: u32) -> Result<()> {
-        let supervisor_pid = std::process::id();
-
-        // Create shared memory for this worker's logging (REQUIRED in production)
-        #[cfg(not(feature = "testing"))]
-        let log_manager = SharedMemoryLogManager::create_for_worker(supervisor_pid, core_id as u8, 16384)
-            .with_context(|| format!("Failed to create shared memory for worker {}", core_id))?;
-
-        let (child, cmd_stream, req_stream) = spawn_data_plane_worker(
+        let (child, ingress_cmd_stream, egress_cmd_stream, req_stream, log_pipe) = spawn_data_plane_worker(
             core_id,
             self.uid,
             self.gid,
@@ -400,26 +441,34 @@ impl WorkerManager {
         .await?;
 
         let pid = child.id().unwrap();
-        let cmd_stream_arc = Arc::new(tokio::sync::Mutex::new(cmd_stream));
+        let ingress_cmd_stream_arc = Arc::new(tokio::sync::Mutex::new(ingress_cmd_stream));
+        let egress_cmd_stream_arc = Arc::new(tokio::sync::Mutex::new(egress_cmd_stream));
         let req_stream_arc = Arc::new(tokio::sync::Mutex::new(req_stream));
 
-        // Store worker info
+        // Store worker info with separate command streams
         self.workers.insert(
             pid,
             Worker {
                 pid,
                 worker_type: WorkerType::DataPlane { core_id },
                 child,
-                cmd_stream: Some(cmd_stream_arc),
+                ingress_cmd_stream: Some(ingress_cmd_stream_arc),
+                egress_cmd_stream: Some(egress_cmd_stream_arc),
                 req_stream: req_stream_arc,
                 #[cfg(not(feature = "testing"))]
-                log_manager: Some(log_manager),
+                log_pipe,
             },
         );
 
         // Initialize backoff counter
         self.backoff_counters
             .insert(core_id + 1, INITIAL_BACKOFF_MS);
+
+        // Spawn log consumer task for this worker
+        #[cfg(not(feature = "testing"))]
+        if let Some(ref pipe_fd) = self.workers.get(&pid).and_then(|w| w.log_pipe.as_ref()) {
+            self.spawn_log_consumer(pid, pipe_fd)?;
+        }
 
         Ok(())
     }
@@ -439,10 +488,6 @@ impl WorkerManager {
             "Spawning Control Plane worker"
         );
         self.spawn_control_plane().await?;
-
-        // Clean up any stale shared memory from previous crashed/killed instances
-        #[cfg(not(feature = "testing"))]
-        SharedMemoryLogManager::cleanup_stale_shared_memory(std::process::id(), Some(self.num_cores as u8));
 
         // Spawn data plane workers
         for core_id in 0..self.num_cores as u32 {
@@ -547,16 +592,34 @@ impl WorkerManager {
 
         // Signal all workers to shut down by sending explicit Shutdown command
         for (_pid, worker) in &self.workers {
-            if let Some(cmd_stream) = &worker.cmd_stream {
-                let cmd_bytes = serde_json::to_vec(&RelayCommand::Shutdown).unwrap();
-                let stream_mutex = cmd_stream.clone();
+            let cmd_bytes = serde_json::to_vec(&RelayCommand::Shutdown).unwrap();
+
+            // Send to ingress stream if present
+            if let Some(ingress_stream) = &worker.ingress_cmd_stream {
+                let stream_mutex = ingress_stream.clone();
                 let worker_type_desc = format!("{:?}", worker.worker_type);
+                let cmd_bytes_clone = cmd_bytes.clone();
 
                 tokio::spawn(async move {
                     let mut stream = stream_mutex.lock().await;
                     let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
-                    if let Err(e) = framed.send(cmd_bytes.into()).await {
-                        eprintln!("[Supervisor] Failed to send Shutdown to {}: {}", worker_type_desc, e);
+                    if let Err(e) = framed.send(cmd_bytes_clone.into()).await {
+                        eprintln!("[Supervisor] Failed to send Shutdown to {} ingress: {}", worker_type_desc, e);
+                    }
+                });
+            }
+
+            // Send to egress stream if present (for data plane workers, this is a separate stream)
+            if let Some(egress_stream) = &worker.egress_cmd_stream {
+                let stream_mutex = egress_stream.clone();
+                let worker_type_desc = format!("{:?}", worker.worker_type);
+                let cmd_bytes_clone = cmd_bytes.clone();
+
+                tokio::spawn(async move {
+                    let mut stream = stream_mutex.lock().await;
+                    let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
+                    if let Err(e) = framed.send(cmd_bytes_clone.into()).await {
+                        eprintln!("[Supervisor] Failed to send Shutdown to {} egress: {}", worker_type_desc, e);
                     }
                 });
             }
@@ -642,10 +705,17 @@ impl WorkerManager {
     }
 
     /// Get all data plane command streams for broadcasting
-    fn get_all_dp_cmd_streams(&self) -> Vec<Arc<tokio::sync::Mutex<UnixStream>>> {
+    /// Returns pairs of (ingress_stream, egress_stream) for each worker
+    fn get_all_dp_cmd_streams(&self) -> Vec<(Arc<tokio::sync::Mutex<UnixStream>>, Arc<tokio::sync::Mutex<UnixStream>>)> {
         self.workers
             .values()
-            .filter_map(|w| w.cmd_stream.clone())
+            .filter(|w| matches!(w.worker_type, WorkerType::DataPlane { .. }))
+            .filter_map(|w| {
+                match (&w.ingress_cmd_stream, &w.egress_cmd_stream) {
+                    (Some(ingress), Some(egress)) => Some((ingress.clone(), egress.clone())),
+                    _ => None,
+                }
+            })
             .collect()
     }
 
@@ -665,6 +735,34 @@ impl WorkerManager {
                 },
             })
             .collect()
+    }
+
+    /// Spawn async task to consume JSON logs from worker's stderr pipe
+    #[cfg(not(feature = "testing"))]
+    fn spawn_log_consumer(&self, worker_pid: u32, pipe_fd: &std::os::unix::io::OwnedFd) -> Result<()> {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        use std::os::unix::io::{FromRawFd, IntoRawFd};
+
+        // Duplicate the FD so we can convert to tokio File
+        let dup_fd_owned = nix::unistd::dup(pipe_fd)?;
+        let dup_fd = dup_fd_owned.into_raw_fd(); // Transfer ownership out of OwnedFd
+
+        // Convert to tokio async file
+        let std_file = unsafe { std::fs::File::from_raw_fd(dup_fd) };
+        let tokio_file = tokio::fs::File::from_std(std_file);
+        let reader = BufReader::new(tokio_file);
+        let mut lines = reader.lines();
+
+        tokio::spawn(async move {
+            while let Ok(Some(line)) = lines.next_line().await {
+                // For now, just print raw lines to supervisor's stderr
+                // In Phase 2.2, worker will output JSON and we'll parse it here
+                eprintln!("[Worker {}] {}", worker_pid, line);
+            }
+            eprintln!("[Supervisor] Worker {} log stream closed", worker_pid);
+        });
+
+        Ok(())
     }
 }
 
@@ -723,16 +821,26 @@ async fn handle_client(
         CommandAction::BroadcastToDataPlane(relay_cmd) => {
             let cmd_bytes = serde_json::to_vec(&relay_cmd)?;
 
-            // Get cmd streams from WorkerManager
-            let streams_to_send = {
+            // Get cmd stream pairs from WorkerManager
+            let stream_pairs = {
                 let manager = worker_manager.lock().unwrap();
                 manager.get_all_dp_cmd_streams()
             };
 
-            for stream_mutex in streams_to_send {
+            // Send to both ingress and egress streams for each worker
+            for (ingress_stream, egress_stream) in stream_pairs {
+                // Send to ingress
                 let cmd_bytes_clone = cmd_bytes.clone();
                 tokio::spawn(async move {
-                    let mut stream = stream_mutex.lock().await;
+                    let mut stream = ingress_stream.lock().await;
+                    let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
+                    let _ = framed.send(cmd_bytes_clone.into()).await;
+                });
+
+                // Send to egress
+                let cmd_bytes_clone = cmd_bytes.clone();
+                tokio::spawn(async move {
+                    let mut stream = egress_stream.lock().await;
                     let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
                     let _ = framed.send(cmd_bytes_clone.into()).await;
                 });

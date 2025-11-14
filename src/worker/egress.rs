@@ -10,9 +10,9 @@ use std::sync::Arc;
 
 use crate::logging::{Facility, Logger};
 use crate::RelayCommand;
-use std::sync::mpsc;
 
 const SHUTDOWN_USER_DATA: u64 = u64::MAX;
+const COMMAND_USER_DATA: u64 = u64::MAX - 1;
 
 use crate::worker::buffer_pool::{BufferPool, ManagedBuffer};
 use crate::worker::ingress::BufferPoolTrait;
@@ -66,7 +66,9 @@ pub struct EgressLoop<B, P> {
     stats: EgressStats,
     in_flight: HashMap<u64, B>,
     next_user_data: u64,
-    command_rx: mpsc::Receiver<RelayCommand>,
+    cmd_stream_fd: OwnedFd,
+    cmd_reader: crate::worker::command_reader::CommandReader,
+    cmd_buffer: Vec<u8>,
     shutdown_requested: bool,
     logger: Logger,
     first_packet_logged: bool,
@@ -198,7 +200,7 @@ where
         for (user_data, result) in completions {
             count += 1;
 
-            // Handle shutdown event completions
+            // Handle shutdown event completions (data path wakeup from ingress)
             if user_data == SHUTDOWN_USER_DATA {
                 if result < 0 {
                     self.logger.error(
@@ -206,10 +208,31 @@ where
                         &format!("Shutdown event read error: errno={}", -result),
                     );
                 }
-                // Process commands to check for shutdown
-                let shutdown = self.process_commands();
-                if !shutdown {
-                    need_shutdown_resubmit = true;
+                // Just resubmit - no command processing here
+                need_shutdown_resubmit = true;
+                continue;
+            }
+
+            // Handle command stream completions
+            if user_data == COMMAND_USER_DATA {
+                if result > 0 {
+                    // Process commands from buffer
+                    if self.process_commands_from_buffer(result as usize)? {
+                        // Shutdown requested, don't resubmit
+                        continue;
+                    }
+                    // Resubmit command read for next command
+                    self.submit_command_read()?;
+                } else if result == 0 {
+                    // Stream closed - supervisor disconnected
+                    self.logger.info(Facility::Egress, "Command stream closed");
+                    self.shutdown_requested = true;
+                } else {
+                    // Error
+                    self.logger.error(
+                        Facility::Egress,
+                        &format!("Command read error: {}", std::io::Error::from_raw_os_error(-result))
+                    );
                 }
                 continue;
             }
@@ -275,33 +298,28 @@ where
         self.shutdown_requested
     }
 
-    /// Process commands from the command channel (non-blocking)
+    /// Process commands from command reader buffer
     /// Returns true if shutdown was requested
-    pub fn process_commands(&mut self) -> bool {
-        loop {
-            match self.command_rx.try_recv() {
-                Ok(RelayCommand::Shutdown) => {
+    fn process_commands_from_buffer(&mut self, bytes_read: usize) -> anyhow::Result<bool> {
+        let commands = self.cmd_reader.process_bytes(&self.cmd_buffer[..bytes_read])
+            .context("Failed to parse commands")?;
+
+        for command in commands {
+            match command {
+                RelayCommand::Shutdown => {
                     self.logger.info(Facility::Egress, "Shutdown command received");
                     self.shutdown_requested = true;
-                    return true;
+                    return Ok(true);
                 }
-                Ok(cmd) => {
+                cmd => {
                     self.logger.debug(
                         Facility::Egress,
                         &format!("Ignoring unhandled command: {:?}", cmd),
                     );
                 }
-                Err(mpsc::TryRecvError::Empty) => {
-                    // No more commands to process
-                    return false;
-                }
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    self.logger.error(Facility::Egress, "Command channel disconnected");
-                    self.shutdown_requested = true;
-                    return true;
-                }
             }
         }
+        Ok(false)
     }
 
     pub fn print_final_stats(&self) {
@@ -314,6 +332,21 @@ where
             self.stats.bytes_sent
         );
         self.logger.info(Facility::Egress, &msg);
+    }
+
+    fn submit_command_read(&mut self) -> Result<()> {
+        let read_op = opcode::Read::new(
+            types::Fd(self.cmd_stream_fd.as_raw_fd()),
+            self.cmd_buffer.as_mut_ptr(),
+            self.cmd_buffer.len() as u32,
+        )
+        .build()
+        .user_data(COMMAND_USER_DATA);
+
+        unsafe {
+            self.ring.submission().push(&read_op)?;
+        }
+        Ok(())
     }
 
     fn handle_shutdown_resubmit(&mut self) -> Result<()> {
@@ -338,17 +371,11 @@ impl EgressLoop<EgressWorkItem, Arc<BufferPool>> {
     pub fn new(
         config: EgressConfig,
         buffer_pool: Arc<BufferPool>,
-        egress_channels: crate::worker::EgressChannelSet,
+        shutdown_event_fd: OwnedFd,
+        cmd_stream_fd: OwnedFd,
         logger: Logger,
     ) -> Result<Self> {
         logger.info(Facility::Egress, "Egress loop starting");
-
-        // Extract command_rx and event_fd from the channel set
-        let command_rx = egress_channels.command_rx;
-        let event_fd = egress_channels.event_fd;
-
-        // Convert EventFd to OwnedFd using Into trait (consumes EventFd)
-        let shutdown_event_fd: OwnedFd = event_fd.into();
 
         let mut egress_loop = Self {
             ring: IoUring::new(config.queue_depth)?,
@@ -359,7 +386,9 @@ impl EgressLoop<EgressWorkItem, Arc<BufferPool>> {
             stats: EgressStats::default(),
             in_flight: HashMap::new(),
             next_user_data: 0,
-            command_rx,
+            cmd_stream_fd,
+            cmd_reader: crate::worker::command_reader::CommandReader::new(),
+            cmd_buffer: vec![0u8; 4096],
             shutdown_requested: false,
             logger,
             first_packet_logged: false,
@@ -367,8 +396,9 @@ impl EgressLoop<EgressWorkItem, Arc<BufferPool>> {
             shutdown_buffer: [0u8; 8],
         };
 
-        // Submit initial shutdown read operation
+        // Submit initial reads for both shutdown and command streams
         egress_loop.submit_shutdown_read()?;
+        egress_loop.submit_command_read()?;
         egress_loop.ring.submit()?;
 
         Ok(egress_loop)

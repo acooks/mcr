@@ -1,12 +1,13 @@
 use anyhow::{Context, Result};
 use nix::sched::{sched_setaffinity, CpuSet};
 use nix::unistd::{getpid, Gid, Uid};
-use std::os::unix::io::{FromRawFd, RawFd};
+use std::os::unix::io::{FromRawFd, OwnedFd, RawFd};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
 
 pub mod buffer_pool;
+pub mod command_reader;
 pub mod control_plane;
 pub mod data_plane;
 pub mod data_plane_integrated;
@@ -16,9 +17,7 @@ pub mod metrics;
 pub mod packet_parser;
 pub mod stats;
 
-use crate::logging::{DataPlaneLogging, Facility, Logger};
-#[cfg(feature = "testing")]
-use crate::logging::ControlPlaneLogging;
+use crate::logging::{ControlPlaneLogging, Facility, Logger};
 use crate::{ControlPlaneConfig, DataPlaneConfig, RelayCommand};
 use control_plane::ControlPlane;
 use data_plane_integrated::run_data_plane as data_plane_task;
@@ -31,14 +30,13 @@ use std::os::unix::io::AsRawFd;
 
 /// Channel set for ingress thread communication
 pub struct IngressChannelSet {
-    pub command_rx: std::sync::mpsc::Receiver<RelayCommand>,
-    pub event_fd: EventFd,
+    pub cmd_stream_fd: OwnedFd,
 }
 
 /// Channel set for egress thread communication
 pub struct EgressChannelSet {
-    pub command_rx: std::sync::mpsc::Receiver<RelayCommand>,
-    pub event_fd: nix::sys::eventfd::EventFd,
+    pub cmd_stream_fd: OwnedFd,
+    pub shutdown_event_fd: EventFd,  // For data path wakeup (from ingress)
 }
 
 // ... other code ...
@@ -308,9 +306,7 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
         );
     }
 
-    eprintln!("[DataPlane] About to attach to shared memory logging...");
-
-    // Attach to shared memory ring buffers for logging (REQUIRED in production)
+    // Phase 2: Pipe-based JSON logging to stderr (shared memory deleted!)
     let core_id = config
         .core_id
         .ok_or_else(|| {
@@ -318,40 +314,32 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
             anyhow::anyhow!("Data plane worker requires core_id")
         })?;
 
-    eprintln!("[DataPlane] Got core_id: {}", core_id);
-    eprintln!("[DataPlane] Calling DataPlaneLogging::attach(supervisor_pid={}, core_id={})...", config.supervisor_pid, core_id);
+    // Create a simple logger that writes JSON to stderr
+    // (stderr is redirected to pipe by supervisor)
     use std::io::Write;
-    std::io::stderr().flush().ok();
 
-    #[cfg(not(feature = "testing"))]
-    let logging = match DataPlaneLogging::attach(config.supervisor_pid, core_id as u8) {
-        Ok(log) => {
-            eprintln!("[DataPlane] Successfully attached to shared memory logging");
-            std::io::stderr().flush().ok();
-            log
-        },
-        Err(e) => {
-            eprintln!("[DataPlane] FATAL: Failed to attach to shared memory logging for supervisor PID {}, core {}: {:?}", config.supervisor_pid, core_id, e);
-            std::io::stderr().flush().ok();
-            return Err(e).context("Failed to attach to shared memory logging - supervisor must create shared memory before spawning workers");
-        }
-    };
-
+    // For testing, use ControlPlaneLogging (MPSC ring buffer)
     #[cfg(feature = "testing")]
     let logging = ControlPlaneLogging::new();
 
-    eprintln!("[DataPlane] Getting logger for DataPlane facility...");
-    std::io::stderr().flush().ok();
-
+    #[cfg(feature = "testing")]
     let logger = logging
         .logger(Facility::DataPlane)
-        .ok_or_else(|| {
-            eprintln!("[DataPlane] FATAL: Failed to get logger for DataPlane facility");
-            std::io::stderr().flush().ok();
-            anyhow::anyhow!("Failed to get logger for DataPlane facility")
-        })?;
+        .ok_or_else(|| anyhow::anyhow!("Failed to get logger for DataPlane facility"))?;
 
-    eprintln!("[DataPlane] Got logger, about to log startup message...");
+    // For production, create a minimal stderr logger
+    #[cfg(not(feature = "testing"))]
+    let logger = Logger::stderr_json();
+
+    // Log startup message
+    let log_msg = serde_json::json!({
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "level": "INFO",
+        "facility": "DataPlane",
+        "message": format!("Data plane worker started on core {}", core_id),
+        "core_id": core_id
+    });
+    eprintln!("{}", log_msg);
     std::io::stderr().flush().ok();
 
     logger.info(
@@ -377,192 +365,48 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
 
     let _request_fd = recv_fd(&supervisor_sock).await?;
 
-    eprintln!("[DataPlane] Receiving command FD...");
+    eprintln!("[DataPlane] Receiving ingress command FD...");
     std::io::stderr().flush().ok();
 
-    let command_fd = recv_fd(&supervisor_sock).await?;
+    let ingress_cmd_fd = recv_fd(&supervisor_sock).await?;
 
-    eprintln!("[DataPlane] Got both FDs from supervisor");
+    eprintln!("[DataPlane] Receiving egress command FD...");
     std::io::stderr().flush().ok();
 
-    // Create channel sets for ingress and egress
-    // Ingress uses both command channel and eventfd for io_uring wake-up
-    let ingress_event_fd = EventFd::from_value_and_flags(0, EfdFlags::EFD_NONBLOCK)
-        .context("Failed to create ingress eventfd")?;
-    let ingress_event_fd_for_writer = ingress_event_fd.as_raw_fd();
-    let (ingress_tx, ingress_rx) = std::sync::mpsc::channel::<RelayCommand>();
+    let egress_cmd_fd = recv_fd(&supervisor_sock).await?;
+
+    eprintln!("[DataPlane] Got all FDs from supervisor (request, ingress_cmd, egress_cmd)");
+    std::io::stderr().flush().ok();
+
+    // Create shutdown eventfd for egress (data path wakeup from ingress)
+    let egress_shutdown_event_fd = EventFd::from_value_and_flags(0, EfdFlags::EFD_NONBLOCK)
+        .context("Failed to create egress shutdown eventfd")?;
+
+    // Convert raw FDs to OwnedFd for channel sets
+    let ingress_cmd_owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(ingress_cmd_fd) };
+    let egress_cmd_owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(egress_cmd_fd) };
+
+    // Create channel sets (no more mpsc or tokio bridge!)
     let ingress_channels = IngressChannelSet {
-        command_rx: ingress_rx,
-        event_fd: ingress_event_fd,
+        cmd_stream_fd: ingress_cmd_owned,
     };
 
-    // Egress uses both command channel and eventfd for io_uring wake-up
-    let egress_event_fd = EventFd::from_value_and_flags(0, EfdFlags::EFD_NONBLOCK)
-        .context("Failed to create egress eventfd")?;
-    let egress_event_fd_for_writer = egress_event_fd.as_raw_fd();
-    let (egress_tx, egress_rx) = std::sync::mpsc::channel::<RelayCommand>();
     let egress_channels = EgressChannelSet {
-        command_rx: egress_rx,
-        event_fd: egress_event_fd,
+        cmd_stream_fd: egress_cmd_owned,
+        shutdown_event_fd: egress_shutdown_event_fd,
     };
-    let command_stream = unsafe { std::os::unix::net::UnixStream::from_raw_fd(command_fd) };
-    command_stream.set_nonblocking(true)?;
-    let command_stream = UnixStream::from_std(command_stream)?;
-    let mut framed = tokio_util::codec::Framed::new(
-        command_stream,
-        tokio_util::codec::LengthDelimitedCodec::new(),
-    );
 
-    eprintln!("[DataPlane] Creating channels and eventfds complete, spawning command bridge task...");
+    eprintln!("[DataPlane] Channel sets created, calling run_data_plane_task directly (no bridge)...");
     std::io::stderr().flush().ok();
 
-    let logger_for_dp_thread = logger.clone();
-    let logger_for_spawn = logger.clone();
-    let logger = logger;
-    logger_for_spawn.debug(Facility::DataPlane, "Starting command bridge task");
-    tokio::spawn(async move {
-        logger_for_spawn.debug(Facility::DataPlane, "Command bridge task started, waiting for commands");
-        use futures::StreamExt;
-        while let Some(Ok(bytes)) = framed.next().await {
-            match serde_json::from_slice::<RelayCommand>(&bytes) {
-                Ok(command) => {
-                    logger_for_spawn.debug(
-                        Facility::DataPlane,
-                        &format!("Received command: {:?}", command),
-                    );
-
-                    // Send command to both ingress and egress threads
-                    let command_clone = command.clone();
-                    match ingress_tx.send(command) {
-                        Ok(_) => {
-                            logger_for_spawn.debug(
-                                Facility::DataPlane,
-                                "Command sent to ingress thread successfully",
-                            );
-                        }
-                        Err(e) => {
-                            logger_for_spawn.error(
-                                Facility::DataPlane,
-                                &format!(
-                                    "FATAL: Failed to send command to ingress thread: {:?}",
-                                    e
-                                ),
-                            );
-                            logger_for_spawn.error(
-                                Facility::DataPlane,
-                                "This means the ingress thread has exited or panicked",
-                            );
-                            break;
-                        }
-                    }
-
-                    match egress_tx.send(command_clone) {
-                        Ok(_) => {
-                            logger_for_spawn.debug(
-                                Facility::DataPlane,
-                                "Command sent to egress thread successfully",
-                            );
-                        }
-                        Err(e) => {
-                            logger_for_spawn.error(
-                                Facility::DataPlane,
-                                &format!(
-                                    "FATAL: Failed to send command to egress thread: {:?}",
-                                    e
-                                ),
-                            );
-                            logger_for_spawn.error(
-                                Facility::DataPlane,
-                                "This means the egress thread has exited or panicked",
-                            );
-                            break;
-                        }
-                    }
-
-                    logger_for_spawn.debug(Facility::DataPlane, "Signaling ingress and egress eventfds");
-                    // Signal eventfds to wake up io_uring loops
-                    let value: u64 = 1;
-                    unsafe {
-                        libc::write(ingress_event_fd_for_writer, &value as *const u64 as *const libc::c_void, 8);
-                        libc::write(egress_event_fd_for_writer, &value as *const u64 as *const libc::c_void, 8);
-                    }
-                }
-                Err(e) => {
-                    logger_for_spawn.error(
-                        Facility::DataPlane,
-                        &format!("Failed to deserialize RelayCommand: {}", e),
-                    );
-                }
-            }
-        }
-
-        // Stream closed - supervisor has exited, send shutdown command to both threads
-        logger_for_spawn.info(Facility::DataPlane, "Supervisor stream closed.");
-        logger_for_spawn.info(
-            Facility::DataPlane,
-            "Supervisor stream closed, sending shutdown to both ingress and egress threads",
-        );
-
-        // Send shutdown to ingress
-        if let Err(e) = ingress_tx.send(RelayCommand::Shutdown) {
-            logger_for_spawn.error(
-                Facility::DataPlane,
-                &format!("Failed to send shutdown command to ingress: {:?}", e),
-            );
-        }
-
-        // Send shutdown to egress
-        if let Err(e) = egress_tx.send(RelayCommand::Shutdown) {
-            logger_for_spawn.error(
-                Facility::DataPlane,
-                &format!("Failed to send shutdown command to egress: {:?}", e),
-            );
-        }
-
-        // Signal ingress eventfd to wake up io_uring loop to process shutdown
-        // Note: Egress uses command channel polling only (no eventfd)
-        let value: u64 = 1;
-        unsafe {
-            libc::write(ingress_event_fd_for_writer, &value as *const u64 as *const libc::c_void, 8);
-        }
-    });
-
-    eprintln!("[DataPlane] About to spawn data plane thread...");
-    std::io::stderr().flush().ok();
-
-    // The data plane task is synchronous and blocking.
-    // CRITICAL: We must use std::thread::spawn instead of tokio::task::spawn_blocking
-    // because the tokio thread pool was created BEFORE we dropped privileges,
-    // so its threads don't have our Ambient capabilities (CAP_NET_RAW).
-    // Creating a new thread ensures it inherits the ambient capabilities.
-    let handle = std::thread::Builder::new()
-        .name("data_plane".to_string())
-        .spawn(move || {
-            eprintln!("[DataPlane-Thread] Data plane thread started, calling run_data_plane_task...");
-            std::io::stderr().flush().ok();
-            lifecycle.run_data_plane_task(
-                config,
-                ingress_channels,
-                egress_channels,
-                logger_for_dp_thread,
-            )
-        })
-        .context("Failed to spawn data plane thread")?;
-
-    eprintln!("[DataPlane] Data plane thread spawned successfully");
-    std::io::stderr().flush().ok();
-
-    // Wait for the data plane thread in a blocking task so the async runtime can continue
-    // processing commands. This is critical - if we block the runtime here, the async
-    // task receiving commands from the supervisor cannot make progress!
-    tokio::task::spawn_blocking(move || {
-        handle
-            .join()
-            .map_err(|e| anyhow::anyhow!("Data plane thread panicked: {:?}", e))?
-            .context("Data plane task failed")
-    })
-    .await
-    .context("Failed to join data plane thread")?
+    // Call run_data_plane_task directly - no more tokio bridge, no more async wrapper!
+    // This function is synchronous and blocking, which is correct for our io_uring-based design.
+    lifecycle.run_data_plane_task(
+        config,
+        ingress_channels,
+        egress_channels,
+        logger,
+    )
 }
 
 #[cfg(test)]

@@ -41,6 +41,22 @@ impl RingBuffer for SharedSPSCRingBuffer {
     }
 }
 
+/// Simple stderr JSON logger (no ring buffer, direct output)
+pub struct StderrJsonLogger;
+
+impl RingBuffer for StderrJsonLogger {
+    fn write(&self, entry: LogEntry) {
+        let log_msg = serde_json::json!({
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "level": format!("{:?}", entry.severity),
+            "facility": format!("{:?}", entry.facility),
+            "message": entry.get_message(),
+        });
+        eprintln!("{}", log_msg);
+        // No flush() - let stderr buffer naturally for better performance
+    }
+}
+
 impl Logger {
     /// Create a new logger from an SPSC ring buffer
     pub fn from_spsc(
@@ -82,6 +98,21 @@ impl Logger {
 
         Self {
             ringbuffer: ringbuffer as Arc<dyn RingBuffer>,
+            global_min_level,
+            facility_min_levels,
+        }
+    }
+
+    /// Create a logger that writes JSON directly to stderr
+    ///
+    /// This is used for pipe-based logging where the supervisor reads
+    /// worker stderr through a pipe. All messages are written (no filtering).
+    pub fn stderr_json() -> Self {
+        let global_min_level = Arc::new(AtomicU8::new(Severity::Info as u8));
+        let facility_min_levels = Arc::new(RwLock::new(std::collections::HashMap::new()));
+
+        Self {
+            ringbuffer: Arc::new(StderrJsonLogger) as Arc<dyn RingBuffer>,
             global_min_level,
             facility_min_levels,
         }

@@ -1,14 +1,13 @@
 //! Ingress I/O Loop
 use anyhow::{Context, Result};
 use io_uring::{opcode, types, IoUring};
-use nix::sys::eventfd::EventFd;
 use socket2::{Domain, Protocol, Socket, Type};
 use std::collections::HashMap;
 use std::io::Write;
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket as StdUdpSocket};
 use std::ops::{Deref, DerefMut};
 use std::os::fd::{AsRawFd, OwnedFd};
-use std::sync::{mpsc, Arc};
+use std::sync::Arc;
 
 use crate::logging::{Facility, Logger};
 use crate::worker::packet_parser::parse_packet;
@@ -135,8 +134,8 @@ pub struct IngressLoop<P, C> {
     config: IngressConfig,
     stats: IngressStats,
     egress_tx: Option<C>,
-    command_rx: mpsc::Receiver<RelayCommand>,
-    command_event_fd: OwnedFd,
+    cmd_stream_fd: OwnedFd,
+    cmd_reader: crate::worker::command_reader::CommandReader,
     logger: Logger,
     first_packet_logged: bool,
 }
@@ -187,9 +186,9 @@ where
         Ok(())
     }
 
-    fn submit_command_read(&mut self, buf: &mut [u8; 8]) -> Result<()> {
+    fn submit_command_read(&mut self, buf: &mut [u8]) -> Result<()> {
         let read_op = opcode::Read::new(
-            types::Fd(self.command_event_fd.as_raw_fd()),
+            types::Fd(self.cmd_stream_fd.as_raw_fd()),
             buf.as_mut_ptr(),
             buf.len() as u32,
         )
@@ -222,10 +221,13 @@ where
         }
     }
 
-    /// Process all pending commands from the channel (non-blocking).
+    /// Process commands from command reader buffer
     /// Returns true if shutdown was requested.
-    fn process_commands(&mut self) -> Result<bool> {
-        while let Ok(command) = self.command_rx.try_recv() {
+    fn process_commands_from_buffer(&mut self, bytes_read: usize, cmd_buffer: &[u8]) -> Result<bool> {
+        let commands = self.cmd_reader.process_bytes(&cmd_buffer[..bytes_read])
+            .context("Failed to parse commands")?;
+
+        for command in commands {
             if self.process_single_command(command)? {
                 return Ok(true);
             }
@@ -355,17 +357,17 @@ where
         let mut recv_buffers: Vec<Vec<u8>> = (0..self.config.batch_size)
             .map(|_| vec![0u8; 9000])
             .collect();
-        let mut command_notify_buf = [0u8; 8];
+        let mut command_buffer = vec![0u8; 4096];
 
         eprintln!("[ingress-run] Buffers allocated");
         std::io::stderr().flush().ok();
 
         // *** STARTUP SYNCHRONIZATION: Wait for initial configuration ***
-        // Block on the command channel until we receive at least one command.
+        // Submit command read and wait for first command via io_uring.
         // This prevents a race condition where:
-        // 1. Worker starts and enters io_uring submit_and_wait(1)
+        // 1. Worker starts and enters io_uring submit_and_wait(1) for packets
         // 2. Test/supervisor sends AddRule command
-        // 3. Worker is blocked, can't process command
+        // 3. Worker is blocked on packets, can't process command
         // 4. Command would join multicast group, but never processed
         // 5. No packets arrive because group not joined -> DEADLOCK
 
@@ -374,42 +376,59 @@ where
 
         self.logger.info(Facility::Ingress, "Waiting for initial configuration...");
 
-        eprintln!("[ingress-run] Logged 'Waiting for initial configuration', about to call recv()");
+        eprintln!("[ingress-run] Submitting command read and waiting for initial configuration");
         std::io::stderr().flush().ok();
 
-        match self.command_rx.recv() {
-            Ok(cmd) => {
-                // Process first command
-                if self.process_single_command(cmd)? {
-                    self.logger.info(Facility::Ingress, "Shutdown during initialization");
-                    return Ok(());
-                }
-            }
-            Err(_) => {
-                return Err(anyhow::anyhow!("Command channel closed during initialization"));
-            }
-        }
+        // Submit command read and block until we get a command
+        self.submit_command_read(&mut command_buffer)?;
 
-        // Drain any other pending commands that arrived during init (non-blocking)
         loop {
-            match self.command_rx.try_recv() {
-                Ok(cmd) => {
-                    if self.process_single_command(cmd)? {
-                        self.logger.info(Facility::Ingress, "Shutdown during initialization");
-                        return Ok(());
+            self.ring.submit_and_wait(1)?;
+
+            // Look for command completion
+            let cqes: Vec<_> = self
+                .ring
+                .completion()
+                .map(|cqe| (cqe.user_data(), cqe.result()))
+                .collect();
+
+            for (user_data, result) in cqes {
+                if user_data == COMMAND_NOTIFY {
+                    if result > 0 {
+                        // Process commands from buffer
+                        if self.process_commands_from_buffer(result as usize, &command_buffer)? {
+                            self.logger.info(Facility::Ingress, "Shutdown during initialization");
+                            return Ok(());
+                        }
+
+                        // If we have rules now, we're initialized
+                        if !self.rules.is_empty() {
+                            self.logger.info(Facility::Ingress, "Initial configuration complete, entering main loop");
+                            // Re-submit command read for main loop
+                            self.submit_command_read(&mut command_buffer)?;
+                            break;
+                        } else {
+                            // No rules yet, keep waiting
+                            self.submit_command_read(&mut command_buffer)?;
+                        }
+                    } else if result == 0 {
+                        // Stream closed
+                        return Err(anyhow::anyhow!("Command stream closed during initialization"));
+                    } else {
+                        // Error
+                        return Err(anyhow::anyhow!("Command read error: {}", std::io::Error::from_raw_os_error(-result)));
                     }
                 }
-                Err(mpsc::TryRecvError::Empty) => break, // No more pending commands
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    return Err(anyhow::anyhow!("Command channel disconnected during initialization"));
-                }
+            }
+
+            // Break out of init loop once we have rules
+            if !self.rules.is_empty() {
+                break;
             }
         }
 
-        self.logger.info(Facility::Ingress, "Initial configuration complete, entering main loop");
-
-        // Now submit the eventfd read for runtime command notifications
-        self.submit_command_read(&mut command_notify_buf)?;
+        eprintln!("[ingress-run] Initial configuration complete, entering main loop");
+        std::io::stderr().flush().ok();
 
         loop {
             let available_buffers = self.config.batch_size - self.ring.submission().len();
@@ -441,15 +460,30 @@ where
             for (user_data, result) in cqes {
                 match user_data {
                     COMMAND_NOTIFY => {
-                        if self.process_commands()? {
-                            self.logger.info(
-                                Facility::Ingress,
-                                "Exiting run loop due to shutdown command",
-                            );
+                        if result > 0 {
+                            // Process commands from buffer
+                            if self.process_commands_from_buffer(result as usize, &command_buffer)? {
+                                self.logger.info(
+                                    Facility::Ingress,
+                                    "Exiting run loop due to shutdown command",
+                                );
+                                self.print_final_stats();
+                                return Ok(());
+                            }
+                            // Re-submit command read
+                            self.submit_command_read(&mut command_buffer)?;
+                        } else if result == 0 {
+                            // Stream closed - supervisor disconnected
+                            self.logger.info(Facility::Ingress, "Command stream closed");
                             self.print_final_stats();
                             return Ok(());
+                        } else {
+                            // Error
+                            self.logger.error(
+                                Facility::Ingress,
+                                &format!("Command read error: {}", std::io::Error::from_raw_os_error(-result))
+                            );
                         }
-                        self.submit_command_read(&mut command_notify_buf)?;
                     }
                     ud if ud >= PACKET_RECV_BASE => {
                         let buffer_idx = (ud - PACKET_RECV_BASE) as usize;
@@ -489,8 +523,7 @@ impl IngressLoop<Arc<BufferPool>, EgressQueueWithWakeup> {
         config: IngressConfig,
         buffer_pool: Arc<BufferPool>,
         egress_tx: Option<EgressQueueWithWakeup>,
-        command_rx: mpsc::Receiver<RelayCommand>,
-        command_event_fd: EventFd,
+        cmd_stream_fd: OwnedFd,
         logger: Logger,
     ) -> Result<Self> {
         logger.info(Facility::Ingress, "Ingress loop starting");
@@ -503,8 +536,8 @@ impl IngressLoop<Arc<BufferPool>, EgressQueueWithWakeup> {
             config,
             stats: IngressStats::default(),
             egress_tx,
-            command_rx,
-            command_event_fd: command_event_fd.into(),
+            cmd_stream_fd,
+            cmd_reader: crate::worker::command_reader::CommandReader::new(),
             logger,
             first_packet_logged: false,
         })
