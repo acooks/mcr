@@ -138,11 +138,13 @@ run_mcr_test() {
     # Start MCR
     echo "[1] Starting MCR in relay-ns"
     rm -f "$MCR_SOCK"
+    NUM_WORKERS="${MCR_NUM_WORKERS:-1}"
     ip netns exec relay-ns "$MCR_SUPERVISOR" supervisor \
         --control-socket-path "$MCR_SOCK" \
-        --num-workers 1 \
+        --num-workers "$NUM_WORKERS" \
         --interface veth1 &
     local mcr_pid=$!
+    echo "[INFO] MCR starting with $NUM_WORKERS workers"
 
     # Wait for MCR socket to be created
     for i in {1..20}; do
