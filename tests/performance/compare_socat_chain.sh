@@ -39,7 +39,6 @@ MCR_SUPERVISOR="$PROJECT_ROOT/target/release/multicast_relay"
 CONTROL_CLIENT="$PROJECT_ROOT/target/release/control_client"
 
 # File paths
-MCR_LOG="/tmp/mcr_chain.log"
 MCR_SOCK="/tmp/mcr_chain.sock"
 SOCAT_SINK_FILE="/tmp/socat_sink_chain.bin"
 MCR_RESULTS_FILE="/tmp/mcr_chain_results.txt"
@@ -72,7 +71,7 @@ cleanup_all() {
     ip netns del sink-ns 2>/dev/null || true
     
     # Clean up temp files (but not results files)
-    rm -f "$MCR_LOG" "$MCR_SOCK" "$SOCAT_SINK_FILE"
+    rm -f "$MCR_SOCK" "$SOCAT_SINK_FILE"
     
     echo "[INFO] Cleanup complete"
 }
@@ -138,29 +137,41 @@ run_mcr_test() {
     
     # Start MCR
     echo "[1] Starting MCR in relay-ns"
-    rm -f "$MCR_LOG" "$MCR_SOCK"
-    ip netns exec relay-ns "$MCR_SUPERVISOR" \
-        --socket-path "$MCR_SOCK" \
-        --log-file "$MCR_LOG" &
+    rm -f "$MCR_SOCK"
+    ip netns exec relay-ns "$MCR_SUPERVISOR" supervisor \
+        --control-socket-path "$MCR_SOCK" \
+        --num-workers 1 \
+        --interface veth1 &
     local mcr_pid=$!
-    
-    # Wait for MCR to be ready
-    for i in {1..10}; do
+
+    # Wait for MCR socket to be created
+    for i in {1..20}; do
         if [ -S "$MCR_SOCK" ]; then
             break
         fi
         sleep 0.5
     done
-    
+
     if [ ! -S "$MCR_SOCK" ]; then
-        echo "[ERROR] MCR failed to start"
+        echo "[ERROR] MCR socket not created"
         return 1
     fi
+
+    # Wait for MCR to be ready to accept commands
+    for i in {1..20}; do
+        if ip netns exec relay-ns "$CONTROL_CLIENT" --socket-path "$MCR_SOCK" list-rules >/dev/null 2>&1; then
+            break
+        fi
+        sleep 0.5
+    done
     
     # Configure MCR relay
     echo "[2] Configuring MCR relay"
-    "$CONTROL_CLIENT" --socket "$MCR_SOCK" \
-        add-relay veth1 "$MCAST_IN" "$PORT_IN" veth2 "$MCAST_OUT" "$PORT_OUT"
+    ip netns exec relay-ns "$CONTROL_CLIENT" --socket-path "$MCR_SOCK" add \
+        --input-interface veth1 \
+        --input-group "$MCAST_IN" \
+        --input-port "$PORT_IN" \
+        --outputs "$MCAST_OUT:$PORT_OUT:veth2"
     
     sleep 1
     echo "[INFO] MCR ready (PID: $mcr_pid)"
@@ -188,19 +199,19 @@ run_mcr_test() {
     
     # Get statistics
     echo "[5] Retrieving MCR statistics..."
-    "$CONTROL_CLIENT" --socket "$MCR_SOCK" stats > "$MCR_RESULTS_FILE"
-    
-    # Count received bytes
+    ip netns exec relay-ns "$CONTROL_CLIENT" --socket-path "$MCR_SOCK" stats > "$MCR_RESULTS_FILE"
+
+    # Count received bytes at sink
     local bytes_received=0
     if [ -f /tmp/mcr_sink_chain.bin ]; then
         bytes_received=$(wc -c < /tmp/mcr_sink_chain.bin)
     fi
-    
-    local packets_received=$((bytes_received / PACKET_SIZE))
-    
+
+    MCR_PACKETS_RECEIVED=$((bytes_received / PACKET_SIZE))
+
     echo "[INFO] MCR test complete"
     echo "      Sent: $PACKET_COUNT packets"
-    echo "      Received: $packets_received packets"
+    echo "      Received: $MCR_PACKETS_RECEIVED packets"
     
     # Stop MCR
     kill $mcr_pid 2>/dev/null || true
@@ -297,15 +308,6 @@ echo ""
 echo "Workload: $(printf "%'d" $PACKET_COUNT) packets @ $(printf "%'d" $SEND_RATE) pps ($PACKET_SIZE bytes/packet)"
 echo ""
 
-# Parse MCR results
-if [ -f "$MCR_RESULTS_FILE" ]; then
-    MCR_INGRESS=$(grep "packets_received" "$MCR_RESULTS_FILE" | head -1 | cut -d'=' -f2 || echo "0")
-    MCR_EGRESS=$(grep "packets_sent" "$MCR_RESULTS_FILE" | tail -1 | cut -d'=' -f2 || echo "0")
-else
-    MCR_INGRESS=0
-    MCR_EGRESS=0
-fi
-
 # Parse socat results
 if [ -f "$SOCAT_RESULTS_FILE" ]; then
     SOCAT_RECEIVED=$(grep "packets_received" "$SOCAT_RESULTS_FILE" | cut -d'=' -f2 || echo "0")
@@ -313,38 +315,40 @@ else
     SOCAT_RECEIVED=0
 fi
 
+# Use sink-measured packet counts (most reliable metric)
+MCR_DELIVERED=${MCR_PACKETS_RECEIVED:-0}
+
 # Calculate metrics
-mcr_loss_pct=$(awk "BEGIN {printf \"%.2f\", (1 - $MCR_EGRESS / $PACKET_COUNT) * 100}")
+mcr_loss_pct=$(awk "BEGIN {printf \"%.2f\", (1 - $MCR_DELIVERED / $PACKET_COUNT) * 100}")
 socat_loss_pct=$(awk "BEGIN {printf \"%.2f\", (1 - $SOCAT_RECEIVED / $PACKET_COUNT) * 100}")
 
 echo "--- MCR Results ---"
-echo "  Ingress:  $(printf "%'d" $MCR_INGRESS) packets received"
-echo "  Egress:   $(printf "%'d" $MCR_EGRESS) packets forwarded"
-echo "  Loss:     $mcr_loss_pct%"
+echo "  Delivered: $(printf "%'d" $MCR_DELIVERED) packets"
+echo "  Loss:      $mcr_loss_pct%"
 echo ""
 
 echo "--- socat Results ---"
-echo "  Received: $(printf "%'d" $SOCAT_RECEIVED) packets"
-echo "  Loss:     $socat_loss_pct%"
+echo "  Delivered: $(printf "%'d" $SOCAT_RECEIVED) packets"
+echo "  Loss:      $socat_loss_pct%"
 echo ""
 
 # Performance comparison
-if (( MCR_EGRESS > SOCAT_RECEIVED )); then
-    improvement=$(awk "BEGIN {printf \"%.1f\", ($MCR_EGRESS / ($SOCAT_RECEIVED + 1)) * 100 - 100}")
-    echo "🏆 MCR forwarded $improvement% more packets than socat"
-elif (( SOCAT_RECEIVED > MCR_EGRESS )); then
-    difference=$(awk "BEGIN {printf \"%.1f\", ($SOCAT_RECEIVED / ($MCR_EGRESS + 1)) * 100 - 100}")
-    echo "⚖️  socat forwarded $difference% more packets than MCR"
+if (( MCR_DELIVERED > SOCAT_RECEIVED )); then
+    improvement=$(awk "BEGIN {printf \"%.1f\", ($MCR_DELIVERED / ($SOCAT_RECEIVED + 1)) * 100 - 100}")
+    echo "MCR delivered $improvement% more packets than socat"
+elif (( SOCAT_RECEIVED > MCR_DELIVERED )); then
+    difference=$(awk "BEGIN {printf \"%.1f\", ($SOCAT_RECEIVED / ($MCR_DELIVERED + 1)) * 100 - 100}")
+    echo "socat delivered $difference% more packets than MCR"
 else
-    echo "⚖️  MCR and socat achieved equivalent performance at this load level."
+    echo "MCR and socat achieved equivalent performance at this load level."
 fi
 
 echo ""
 echo "=========================================="
 echo ""
-echo "Log files:"
-echo "  MCR:   $MCR_LOG"
-echo "  Stats: $MCR_RESULTS_FILE"
+echo "Results saved to:"
+echo "  MCR stats:   $MCR_RESULTS_FILE"
+echo "  socat stats: $SOCAT_RESULTS_FILE"
 echo ""
 
 exit 0
