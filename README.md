@@ -1,5 +1,7 @@
 # Multicast Relay (MCR)
 
+**Note: MCR is currently under active development.**
+
 MCR is a high-performance, userspace multicast relay for Linux. It is a purpose-built tool for network architects, broadcast/media engineers, and financial services developers who need to reliably bridge multicast traffic between isolated or unroutable network segments.
 
 If you have ever been blocked by the kernel's Reverse Path Forwarding (RPF) check when trying to forward multicast traffic across network boundaries, MCR is the tool for you. It uses a low-level `AF_PACKET` and `io_uring` architecture to bypass these limitations and achieve millions of packets per second of throughput.
