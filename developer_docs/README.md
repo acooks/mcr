@@ -20,6 +20,9 @@ This directory contains all documentation relevant to contributors and developer
 
 *   **[Reports](./reports/README.md):** Comprehensive reports on major investigations and resolutions.
     *   **[Multi-Stream Scaling Report](./reports/MULTI_STREAM_SCALING_REPORT.md):** Full report on the investigation and fix for multi-stream and multi-worker scaling issues.
+*   **[Devnull Egress Sink Proposal](./reports/DEVNULL_EGRESS_SINK_PROPOSAL.md):** A proposal for implementing a /dev/null egress sink to aid performance testing and debugging.
+*   **[Test Framework Validation Results](./reports/TEST_FRAMEWORK_VALIDATION_RESULTS.md):** Report on the implementation and validation of the network namespace test framework, including test failure analysis.
+*   **[Session Summary: Test Framework Implementation](./reports/SESSION_SUMMARY_TEST_FRAMEWORK_IMPLEMENTATION.md):** Recap of a development session focused on test framework implementation and test failure analysis.
 
 *   **[Testing Strategy](./testing/README.md):** The high-level philosophy and tiered strategy guiding how we test MCR.
     *   **[Developer Testing Strategy](./testing/DEVELOPER_TESTING_STRATEGY.md):** In-depth guide for developers on writing and maintaining tests.
