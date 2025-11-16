@@ -41,7 +41,7 @@ struct Worker {
     egress_cmd_stream: Option<Arc<tokio::sync::Mutex<UnixStream>>>,
     #[allow(dead_code)]
     req_stream: Arc<tokio::sync::Mutex<UnixStream>>,
-    #[cfg(not(feature = "testing"))]
+    #[allow(dead_code)]
     log_pipe: Option<std::os::unix::io::OwnedFd>, // Pipe for reading worker's stderr (JSON logs)
 }
 
@@ -436,7 +436,6 @@ impl WorkerManager {
                 ingress_cmd_stream: Some(cmd_stream_arc.clone()),
                 egress_cmd_stream: Some(cmd_stream_arc), // Same stream for CP
                 req_stream: req_stream_arc,
-                #[cfg(not(feature = "testing"))]
                 log_pipe: None, // Control plane uses MPSC ring buffer
             },
         );
@@ -476,7 +475,6 @@ impl WorkerManager {
                 ingress_cmd_stream: Some(ingress_cmd_stream_arc),
                 egress_cmd_stream: Some(egress_cmd_stream_arc),
                 req_stream: req_stream_arc,
-                #[cfg(not(feature = "testing"))]
                 log_pipe,
             },
         );
@@ -487,7 +485,7 @@ impl WorkerManager {
 
         // Spawn log consumer task for this worker
         #[cfg(not(feature = "testing"))]
-        if let Some(ref pipe_fd) = self.workers.get(&pid).and_then(|w| w.log_pipe.as_ref()) {
+        if let Some(pipe_fd) = self.workers.get(&pid).and_then(|w| w.log_pipe.as_ref()) {
             self.spawn_log_consumer(pid, pipe_fd)?;
         }
 
@@ -736,13 +734,13 @@ impl WorkerManager {
 
     /// Get all data plane command streams for broadcasting
     /// Returns pairs of (ingress_stream, egress_stream) for each worker
+    #[allow(clippy::type_complexity)]
     fn get_all_dp_cmd_streams(
         &self,
     ) -> Vec<(
         Arc<tokio::sync::Mutex<UnixStream>>,
         Arc<tokio::sync::Mutex<UnixStream>>,
     )> {
-        #[allow(clippy::type_complexity)]
         self.workers
             .values()
             .filter(|w| matches!(w.worker_type, WorkerType::DataPlane { .. }))

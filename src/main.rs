@@ -190,8 +190,8 @@ mod tests {
         assert_eq!(
             args.command,
             Command::Worker {
-                uid: 0,
-                gid: 0,
+                uid: Some(0),
+                gid: Some(0),
                 relay_command_socket_path: PathBuf::from("/tmp/worker_relay.sock"),
                 data_plane: true,
                 core_id: Some(0),
@@ -203,6 +203,7 @@ mod tests {
                 output_port: Some(5001),
                 output_interface: Some("eth1".to_string()),
                 reporting_interval: Some(5),
+                fanout_group_id: None,
             }
         );
 
@@ -219,8 +220,8 @@ mod tests {
         assert_eq!(
             args.command,
             Command::Worker {
-                uid: 0,
-                gid: 0,
+                uid: Some(0),
+                gid: Some(0),
                 relay_command_socket_path: PathBuf::from("/tmp/worker_relay.sock"),
                 data_plane: false,
                 core_id: None,
@@ -232,6 +233,7 @@ mod tests {
                 output_port: None,
                 output_interface: None,
                 reporting_interval: None,
+                fanout_group_id: None,
             }
         );
     }

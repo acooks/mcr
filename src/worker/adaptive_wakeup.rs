@@ -103,7 +103,7 @@ impl WakeupStrategy for EventfdWakeup {
                 )
             } {
                 n if n > 0 => written += n as usize,
-                n if n == 0 => break,
+                0 => break,
                 _ => {
                     let err = std::io::Error::last_os_error();
                     if err.kind() != std::io::ErrorKind::Interrupted {
@@ -190,7 +190,7 @@ impl HybridWakeup {
     fn maybe_adapt(&self) {
         // Fast path: only check adaptation every 1024 packets to reduce lock contention
         let count = self.packet_count.fetch_add(1, Ordering::Relaxed);
-        if count % 1024 != 0 {
+        if !count.is_multiple_of(1024) {
             return;
         }
 

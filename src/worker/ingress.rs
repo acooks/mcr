@@ -32,6 +32,7 @@ pub trait BufferPoolTrait {
 
 pub trait EgressChannel {
     type Item;
+    #[allow(clippy::result_unit_err)]
     fn send(&self, item: Self::Item) -> Result<(), ()>;
 }
 
@@ -347,7 +348,7 @@ where
         }
 
         // Periodic stats logging (every 10,000 packets)
-        if self.stats.packets_received % 10000 == 0 {
+        if self.stats.packets_received.is_multiple_of(10000) {
             let msg = format!(
                 "[STATS:Ingress] recv={} matched={} egr_sent={} filtered={} no_match={} buf_exhaust={}",
                 self.stats.packets_received,
@@ -365,7 +366,7 @@ where
             Err(_) => {
                 self.stats.filtered += 1;
                 // Sample logging: log every 100th filtered packet
-                if self.stats.filtered % 100 == 0 {
+                if self.stats.filtered.is_multiple_of(100) {
                     let msg = format!("Filtered packets (non-UDP): {}", self.stats.filtered);
                     self.logger.debug(Facility::Ingress, &msg);
                 }
@@ -389,7 +390,7 @@ where
             None => {
                 self.stats.no_rule_match += 1;
                 // Sample logging: log every 100th miss
-                if self.stats.no_rule_match % 100 == 0 {
+                if self.stats.no_rule_match.is_multiple_of(100) {
                     let msg = format!(
                         "No rule match for {}:{} (total misses: {})",
                         headers.ipv4.dst_ip, headers.udp.dst_port, self.stats.no_rule_match
@@ -710,7 +711,7 @@ pub fn setup_af_packet_socket(interface_name: &str, fanout_group_id: u16) -> Res
     let socket = Socket::new(
         Domain::PACKET,
         Type::RAW,
-        Some(Protocol::from(libc::ETH_P_ALL as i32)),
+        Some(Protocol::from(libc::ETH_P_ALL)),
     )?;
     socket.set_recv_buffer_size(32 * 1024 * 1024)?;
     let iface_index = get_interface_index(interface_name)?;
@@ -731,7 +732,7 @@ pub fn setup_af_packet_socket(interface_name: &str, fanout_group_id: u16) -> Res
 
     // Configure PACKET_FANOUT if fanout_group_id is non-zero
     if fanout_group_id > 0 {
-        let fanout_arg: u32 = (fanout_group_id as u32) | ((libc::PACKET_FANOUT_CPU as u32) << 16);
+        let fanout_arg: u32 = (fanout_group_id as u32) | (libc::PACKET_FANOUT_CPU << 16);
 
         unsafe {
             if libc::setsockopt(

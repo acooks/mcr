@@ -18,6 +18,8 @@ pub mod metrics;
 pub mod packet_parser;
 pub mod stats;
 
+#[cfg(feature = "testing")]
+use crate::logging::ControlPlaneLogging;
 use crate::logging::{Facility, Logger};
 use crate::{ControlPlaneConfig, DataPlaneConfig, RelayCommand};
 use control_plane::ControlPlane;

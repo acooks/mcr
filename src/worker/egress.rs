@@ -271,7 +271,7 @@ where
                 }
 
                 // Periodic stats logging (every 10,000 packets)
-                if self.stats.packets_sent % 10000 == 0 {
+                if self.stats.packets_sent.is_multiple_of(10000) {
                     self.logger.info(
                         Facility::Egress,
                         &format!(
