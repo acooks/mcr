@@ -34,6 +34,15 @@ This allows MCR to create a clean, one-way bridge for multicast traffic between 
 
 ![](<DIAGRAM: The same network setup, but this time MCR is running on the server. MCR receives the packet on eth0 via AF_PACKET, bypassing the RPF check. It then takes the payload and re-transmits it as a new packet from eth1 to the Corporate Network, where viewers can now see the stream.>)
 
+## Why a Userspace Relay is the Practical Solution
+
+The "unroutable source" problem is fundamentally a **routing challenge**. While technically possible to address within the Linux kernel (e.g., via a custom kernel module), or through extensions to general-purpose tools like Netfilter, such approaches present significant practical barriers for most operational environments:
+
+*   **Complexity and Risk of Custom Kernels:** Implementing solutions as custom kernel modules introduces high complexity, requires specialized kernel development expertise, and can pose significant system stability and security risks. Maintaining a non-standard kernel version or custom modules adds a considerable operational burden.
+*   **Lack of Current Functionality in Standard Tools:** Standard kernel tools, such as Netfilter, currently **do not provide** the necessary functionality to perform Network Address Translation (NAT) on incoming multicast streams. This is due to fundamental design constraints (e.g., Netfilter's `conntrack` subsystem not handling connectionless multicast traffic), as demonstrated by extensive research.
+
+MCR, as a high-performance **userspace relay**, offers an accessible, flexible, and rapidly deployable solution that works *today*. It delivers the necessary functionality directly to the user in a self-contained application, overcoming these practical barriers to multicast routing without requiring kernel modifications or reliance on unimplemented features in standard tools.
+
 ## What About `socat`?
 
 For simpler, lower-rate scenarios, the versatile `socat` tool can sometimes be used to achieve a similar outcome. However, `socat` is a general-purpose tool, whereas MCR is a purpose-built, high-performance application designed specifically for this problem.
