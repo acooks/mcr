@@ -5,10 +5,26 @@
 # Tests how MCR and socat performance scales with increasing numbers of concurrent
 # multicast streams. Based on the verified compare_socat_chain.sh implementation.
 #
-# Usage: sudo ./multi_stream_scaling.sh [max_streams]
-# Example: sudo ./multi_stream_scaling.sh 20
+# Usage: sudo [ENV_VARS] ./multi_stream_scaling.sh [max_streams]
 #
-# Default: Tests 1, 2, 5, 10, 20 streams
+# Environment Variables:
+#   PER_STREAM_PACKETS  - Number of packets per stream (default: 10000)
+#                         For steady-state tests, use 100000+ for ~50s+ per stream
+#   PER_STREAM_RATE     - Packets per second per stream (default: 2000)
+#   NUM_WORKERS         - Number of MCR worker processes (default: 4)
+#   PACKET_SIZE         - Packet payload size in bytes (default: 1024)
+#
+# Examples:
+#   sudo ./multi_stream_scaling.sh 20
+#     - Tests up to 20 streams with default settings (10k packets/stream @ 2k pps)
+#
+#   sudo PER_STREAM_PACKETS=100000 ./multi_stream_scaling.sh 50
+#     - Tests up to 50 streams with 100k packets/stream for longer steady-state observation
+#
+#   sudo NUM_WORKERS=8 PER_STREAM_RATE=5000 ./multi_stream_scaling.sh 150
+#     - Tests up to 150 streams with 8 workers @ 5k pps per stream (750k pps aggregate)
+#
+# Default: Tests 1, 2, 5, 10, 20 streams (adds 50, 100, 150 if max_streams allows)
 #
 
 set -euo pipefail
@@ -20,8 +36,9 @@ cd "$PROJECT_ROOT"
 # Test parameters
 PACKET_SIZE="${PACKET_SIZE:-1024}"
 PER_STREAM_PACKETS="${PER_STREAM_PACKETS:-10000}"  # 10k packets per stream
-PER_STREAM_RATE="${PER_STREAM_RATE:-2000}"         # 2k pps per stream
-MAX_STREAMS="${1:-20}"
+PER_STREAM_RATE="${PER_STREAM_RATE:-2000}"         # 2k pps per stream (150 streams × 2000 = 300k pps)
+MAX_STREAMS="${1:-150}"
+NUM_WORKERS="${NUM_WORKERS:-4}"  # 4 workers (can scale up with environment variable)
 
 # Binary paths
 TRAFFIC_GEN="$PROJECT_ROOT/target/release/traffic_generator"
@@ -38,6 +55,15 @@ if [ "$EUID" -ne 0 ]; then
     echo "Please run with: sudo $0"
     exit 1
 fi
+
+# --- Increase IGMP membership limit ---
+# Default Linux limit is 20, we need to support 150+ streams
+ORIGINAL_IGMP_LIMIT=$(cat /proc/sys/net/ipv4/igmp_max_memberships)
+echo 200 > /proc/sys/net/ipv4/igmp_max_memberships
+echo "[INFO] Increased IGMP membership limit from $ORIGINAL_IGMP_LIMIT to 200"
+
+# Restore original limit on exit
+trap "echo $ORIGINAL_IGMP_LIMIT > /proc/sys/net/ipv4/igmp_max_memberships 2>/dev/null || true" EXIT
 
 # --- Build binaries ---
 echo "=== Building Release Binaries ==="
@@ -65,6 +91,17 @@ cleanup_all() {
 }
 
 trap cleanup_all EXIT INT TERM
+
+# --- Generate multicast address for stream number ---
+# For streams 1-254: 239.1.1.N
+# For streams 255-508: 239.1.2.N-254
+get_mcast_addr() {
+    local stream=$1
+    local prefix="239.1"
+    local third_octet=$(( (stream - 1) / 254 + 1 ))
+    local fourth_octet=$(( (stream - 1) % 254 + 1 ))
+    echo "$prefix.$third_octet.$fourth_octet"
+}
 
 # --- Setup Chain Topology ---
 setup_topology() {
@@ -116,12 +153,12 @@ run_mcr_test() {
     echo "=== MCR Test: $num_streams stream(s) ==="
 
     # Start MCR
-    echo "[1] Starting MCR in relay-ns"
+    echo "[1] Starting MCR in relay-ns with $NUM_WORKERS workers"
     rm -f "$MCR_SOCK"
     ip netns exec relay-ns "$MCR_SUPERVISOR" supervisor \
         --control-socket-path "$MCR_SOCK" \
-        --num-workers 1 \
-        --interface veth1 >/dev/null 2>&1 &
+        --num-workers "$NUM_WORKERS" \
+        --interface veth1 >"$test_dir/mcr.log" 2>&1 &
     local mcr_pid=$!
 
     # Wait for MCR socket
@@ -142,25 +179,40 @@ run_mcr_test() {
 
     # Configure forwarding rules for all streams
     echo "[2] Configuring $num_streams forwarding rule(s)"
+    local rules_added=0
     for stream in $(seq 1 $num_streams); do
-        local in_group="239.1.1.$stream"
+        local in_group=$(get_mcast_addr $stream)
         local in_port=$((5000 + stream))
-        local out_group="239.10.1.$stream"
+        local out_group=$(get_mcast_addr $stream | sed 's/^239\.1\./239.10./')
         local out_port=$((6000 + stream))
 
-        ip netns exec relay-ns "$CONTROL_CLIENT" --socket-path "$MCR_SOCK" add \
+        if ip netns exec relay-ns "$CONTROL_CLIENT" --socket-path "$MCR_SOCK" add \
             --input-interface veth1 \
             --input-group "$in_group" \
             --input-port "$in_port" \
-            --outputs "$out_group:$out_port:veth2" >/dev/null
+            --outputs "$out_group:$out_port:veth2" >/dev/null 2>&1; then
+            rules_added=$((rules_added + 1))
+        else
+            echo "[ERROR] Failed to add rule $stream ($in_group:$in_port)"
+            echo "[ERROR] Only $rules_added of $num_streams rules were added"
+            return 1
+        fi
+
+        # Add small delay between rules for stability
+        [ $((stream % 10)) -eq 0 ] && sleep 0.1
     done
+
+    if [ $rules_added -ne $num_streams ]; then
+        echo "[ERROR] Rule configuration incomplete: $rules_added/$num_streams"
+        return 1
+    fi
 
     sleep 1
 
     # Start sink receivers for all streams
     echo "[3] Starting $num_streams sink receiver(s)"
     for stream in $(seq 1 $num_streams); do
-        local out_group="239.10.1.$stream"
+        local out_group=$(get_mcast_addr $stream | sed 's/^239\.1\./239.10./')
         local out_port=$((6000 + stream))
         local sink_file="$test_dir/sink_$stream.bin"
 
@@ -174,10 +226,12 @@ run_mcr_test() {
     # Run traffic generators in parallel
     echo "[4] Sending traffic on $num_streams stream(s) ($PER_STREAM_PACKETS packets each @ $PER_STREAM_RATE pps)"
     local total_expected=$((num_streams * PER_STREAM_PACKETS))
+    local aggregate_rate=$((num_streams * PER_STREAM_RATE))
+    echo "     Aggregate: $aggregate_rate pps"
     local gen_pids=()
 
     for stream in $(seq 1 $num_streams); do
-        local in_group="239.1.1.$stream"
+        local in_group=$(get_mcast_addr $stream)
         local in_port=$((5000 + stream))
 
         ip netns exec gen-ns "$TRAFFIC_GEN" \
@@ -186,7 +240,7 @@ run_mcr_test() {
             --port "$in_port" \
             --rate "$PER_STREAM_RATE" \
             --count "$PER_STREAM_PACKETS" \
-            --size "$PACKET_SIZE" >/dev/null 2>&1 &
+            --size "$PACKET_SIZE" >>"$test_dir/generator_$stream.log" 2>&1 &
         gen_pids+=($!)
     done
 
@@ -233,7 +287,7 @@ run_socat_test() {
     # Start sink receivers for all streams
     echo "[1] Starting $num_streams socat sink(s)"
     for stream in $(seq 1 $num_streams); do
-        local out_group="239.10.1.$stream"
+        local out_group=$(get_mcast_addr $stream | sed 's/^239\.1\./239.10./')
         local out_port=$((6000 + stream))
         local sink_file="$test_dir/sink_$stream.bin"
 
@@ -247,9 +301,9 @@ run_socat_test() {
     # Start relay processes for all streams
     echo "[2] Starting $num_streams socat relay process(es)"
     for stream in $(seq 1 $num_streams); do
-        local in_group="239.1.1.$stream"
+        local in_group=$(get_mcast_addr $stream)
         local in_port=$((5000 + stream))
-        local out_group="239.10.1.$stream"
+        local out_group=$(get_mcast_addr $stream | sed 's/^239\.1\./239.10./')
         local out_port=$((6000 + stream))
 
         ip netns exec relay-ns socat -u \
@@ -262,10 +316,12 @@ run_socat_test() {
     # Run traffic generators in parallel
     echo "[3] Sending traffic on $num_streams stream(s) ($PER_STREAM_PACKETS packets each @ $PER_STREAM_RATE pps)"
     local total_expected=$((num_streams * PER_STREAM_PACKETS))
+    local aggregate_rate=$((num_streams * PER_STREAM_RATE))
+    echo "     Aggregate: $aggregate_rate pps"
     local gen_pids=()
 
     for stream in $(seq 1 $num_streams); do
-        local in_group="239.1.1.$stream"
+        local in_group=$(get_mcast_addr $stream)
         local in_port=$((5000 + stream))
 
         ip netns exec gen-ns "$TRAFFIC_GEN" \
@@ -324,10 +380,16 @@ mkdir -p "$RESULTS_DIR"
 echo "streams,expected,received,loss_pct" > "$RESULTS_DIR/mcr_results.csv"
 echo "streams,expected,received,loss_pct" > "$RESULTS_DIR/socat_results.csv"
 
-# Test at different stream counts: 1, 2, 5, 10, 20, ...
+# Test at different stream counts: 1, 2, 5, 10, 20, 50, 100, 150
 STREAM_COUNTS=(1 2 5 10 20)
-if [ $MAX_STREAMS -gt 20 ]; then
+if [ $MAX_STREAMS -ge 50 ]; then
     STREAM_COUNTS+=(50)
+fi
+if [ $MAX_STREAMS -ge 100 ]; then
+    STREAM_COUNTS+=(100)
+fi
+if [ $MAX_STREAMS -ge 150 ]; then
+    STREAM_COUNTS+=(150)
 fi
 
 for num_streams in "${STREAM_COUNTS[@]}"; do
