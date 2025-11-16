@@ -18,7 +18,7 @@ pub mod metrics;
 pub mod packet_parser;
 pub mod stats;
 
-use crate::logging::{ControlPlaneLogging, Facility, Logger};
+use crate::logging::{Facility, Logger};
 use crate::{ControlPlaneConfig, DataPlaneConfig, RelayCommand};
 use control_plane::ControlPlane;
 use data_plane_integrated::run_data_plane as data_plane_task;
@@ -408,7 +408,7 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ControlPlaneConfig, DataPlaneConfig, ForwardingRule, RelayCommand};
+    use crate::{ControlPlaneConfig, ForwardingRule, RelayCommand};
     use std::time::Duration;
     use tempfile::tempdir;
     use tokio::net::UnixStream;

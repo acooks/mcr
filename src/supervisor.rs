@@ -449,7 +449,7 @@ impl WorkerManager {
 
     /// Spawn a data plane worker for the given core
     async fn spawn_data_plane(&mut self, core_id: u32) -> Result<()> {
-        let (child, ingress_cmd_stream, egress_cmd_stream, req_stream, _log_pipe) =
+        let (child, ingress_cmd_stream, egress_cmd_stream, req_stream, log_pipe) =
             spawn_data_plane_worker(
                 core_id,
                 self.uid,
