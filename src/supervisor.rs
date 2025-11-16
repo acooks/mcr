@@ -208,8 +208,13 @@ pub fn handle_supervisor_command(
         }
 
         SupervisorCommand::Ping => {
-            // Simple health check - if we can process this command, we're ready
-            (Response::Success("pong".to_string()), CommandAction::None)
+            // Health check - broadcast ping to all data plane workers
+            // If they can receive and process this command, they're ready
+            eprintln!("[PING] Supervisor received ping, broadcasting to workers");
+            (
+                Response::Success("pong".to_string()),
+                CommandAction::BroadcastToDataPlane(RelayCommand::Ping),
+            )
         }
     }
 }

@@ -193,6 +193,8 @@ pub enum RelayCommand {
     AddRule(ForwardingRule),
     RemoveRule { rule_id: String },
     Shutdown,
+    /// Ping command for readiness check - workers should respond when fully initialized
+    Ping,
 }
 
 impl RelayCommand {
@@ -201,6 +203,7 @@ impl RelayCommand {
             RelayCommand::AddRule(rule) => Some(rule.rule_id.clone()),
             RelayCommand::RemoveRule { rule_id } => Some(rule_id.clone()),
             RelayCommand::Shutdown => None,
+            RelayCommand::Ping => None,
         }
     }
 }

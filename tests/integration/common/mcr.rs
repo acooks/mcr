@@ -155,9 +155,15 @@ impl McrInstance {
     }
 
     /// Wait until MCR is ready to process traffic by polling the ping command
+    ///
+    /// This sends ping commands to the supervisor, which broadcasts them to all
+    /// data plane workers. We need multiple successful pings to ensure workers
+    /// have had time to initialize their event loops and process commands.
     pub fn wait_until_ready(&self, timeout_secs: u64) -> Result<()> {
         let control_bin = binary_path("control_client");
         let start = std::time::Instant::now();
+        let mut successful_pings = 0;
+        const REQUIRED_PINGS: u32 = 3; // Need 3 consecutive successful pings
 
         loop {
             let output = Command::new(&control_bin)
@@ -168,13 +174,24 @@ impl McrInstance {
 
             if let Ok(output) = output {
                 if output.status.success() {
-                    // Got successful pong response
-                    return Ok(());
+                    successful_pings += 1;
+                    if successful_pings >= REQUIRED_PINGS {
+                        // Got enough successful pongs - workers should be ready
+                        return Ok(());
+                    }
+                } else {
+                    // Reset counter on failure
+                    successful_pings = 0;
                 }
+            } else {
+                successful_pings = 0;
             }
 
             if start.elapsed().as_secs() >= timeout_secs {
-                bail!("Timeout waiting for MCR to be ready after {} seconds", timeout_secs);
+                bail!(
+                    "Timeout waiting for MCR to be ready after {} seconds (got {} successful pings, need {})",
+                    timeout_secs, successful_pings, REQUIRED_PINGS
+                );
             }
 
             thread::sleep(Duration::from_millis(100));

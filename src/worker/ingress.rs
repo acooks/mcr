@@ -313,6 +313,11 @@ where
                 self.logger.info(Facility::Ingress, "Shutdown requested");
                 Ok(true)
             }
+            RelayCommand::Ping => {
+                // Ping received - ingress is ready
+                self.logger.info(Facility::Ingress, "Ping received - worker is ready");
+                Ok(false)
+            }
         }
     }
 
