@@ -84,6 +84,8 @@ pub enum Command {
         output_interface: Option<String>,
         #[arg(long)]
         reporting_interval: Option<u64>,
+        #[arg(long)]
+        fanout_group_id: Option<u16>,
     },
 }
 
@@ -109,6 +111,7 @@ pub struct DataPlaneConfig {
     pub output_port: Option<u16>,
     pub output_interface: Option<String>,
     pub reporting_interval: u64,
+    pub fanout_group_id: Option<u16>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Hash)]

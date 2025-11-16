@@ -2,11 +2,11 @@
 use anyhow::{Context, Result};
 use io_uring::{opcode, types, IoUring};
 use socket2::{Domain, Protocol, Socket, Type};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket as StdUdpSocket};
 use std::ops::{Deref, DerefMut};
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::Arc;
 
 use crate::logging::{Facility, Logger};
@@ -107,7 +107,8 @@ impl EgressItemFactory<ManagedBuffer> for EgressWorkItem {
 
 pub struct IngressLoop<P, C> {
     af_packet_socket: OwnedFd,
-    helper_sockets: HashMap<(String, Ipv4Addr), StdUdpSocket>,
+    helper_sockets: HashMap<String, StdUdpSocket>,
+    joined_groups: HashMap<String, HashSet<Ipv4Addr>>,
     ring: IoUring,
     buffer_pool: P,
     rules: HashMap<(Ipv4Addr, u16), Arc<ForwardingRule>>,
@@ -130,12 +131,38 @@ where
     pub fn add_rule(&mut self, rule: Arc<ForwardingRule>) -> Result<()> {
         let key = (rule.input_group, rule.input_port);
         self.rules.insert(key, rule.clone());
-        // Create helper socket to send IGMP joins for this multicast group.
-        // This ensures switches/routers forward the multicast traffic to our interface.
-        let helper_key = (rule.input_interface.clone(), rule.input_group);
-        self.helper_sockets.entry(helper_key).or_insert_with(|| {
-            setup_helper_socket(&rule.input_interface, rule.input_group).unwrap()
-        });
+
+        // Get or create helper socket for this interface (one socket per interface)
+        let interface_name = rule.input_interface.clone();
+        if !self.helper_sockets.contains_key(&interface_name) {
+            let socket = create_bound_udp_socket()
+                .expect("Failed to create helper socket");
+            self.helper_sockets.insert(interface_name.clone(), socket);
+            self.joined_groups.insert(interface_name.clone(), HashSet::new());
+            self.logger.info(
+                Facility::Ingress,
+                &format!("Created helper socket for interface {}", interface_name),
+            );
+        }
+
+        // Join multicast group if not already joined
+        let groups = self.joined_groups.get_mut(&interface_name).unwrap();
+        if !groups.contains(&rule.input_group) {
+            let socket = self.helper_sockets.get(&interface_name).unwrap();
+            join_multicast_group(socket, rule.input_group, &interface_name)?;
+            groups.insert(rule.input_group);
+
+            self.logger.info(
+                Facility::Ingress,
+                &format!(
+                    "IGMP join successful: {} on {} (total groups: {})",
+                    rule.input_group,
+                    interface_name,
+                    groups.len()
+                ),
+            );
+        }
+
         self.logger.info(
             Facility::Ingress,
             &format!(
@@ -150,10 +177,43 @@ where
     }
 
     pub fn remove_rule(&mut self, rule_id: &str) -> Result<()> {
+        // Find the rule before removing it so we can check if group should be left
+        let removed_rule = self.rules.iter()
+            .find(|(_key, rule)| rule.rule_id == rule_id)
+            .map(|(_, rule)| rule.clone());
+
         let before_count = self.rules.len();
         self.rules.retain(|_key, rule| rule.rule_id != rule_id);
         let removed = before_count - self.rules.len();
+
         if removed > 0 {
+            if let Some(rule) = removed_rule {
+                // Check if any remaining rules use this multicast group
+                let group_still_needed = self.rules.values()
+                    .any(|r| r.input_group == rule.input_group && r.input_interface == rule.input_interface);
+
+                if !group_still_needed {
+                    // Leave the multicast group
+                    if let Some(groups) = self.joined_groups.get_mut(&rule.input_interface) {
+                        if groups.remove(&rule.input_group) {
+                            if let Some(socket) = self.helper_sockets.get(&rule.input_interface) {
+                                if let Err(e) = leave_multicast_group(socket, rule.input_group, &rule.input_interface) {
+                                    self.logger.warning(
+                                        Facility::Ingress,
+                                        &format!("Failed to leave multicast group {}: {}", rule.input_group, e),
+                                    );
+                                } else {
+                                    self.logger.info(
+                                        Facility::Ingress,
+                                        &format!("Left multicast group: {} on {}", rule.input_group, rule.input_interface),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             self.logger.info(
                 Facility::Ingress,
                 &format!(
@@ -508,9 +568,10 @@ impl IngressLoop<Arc<BufferPool>, EgressQueueDirect> {
     ) -> Result<Self> {
         logger.info(Facility::Ingress, "Ingress loop starting");
         Ok(Self {
-            af_packet_socket: setup_af_packet_socket(interface_name)?,
+            af_packet_socket: setup_af_packet_socket(interface_name, config.fanout_group_id)?,
             ring: IoUring::new(config.queue_depth)?,
             helper_sockets: HashMap::new(),
+            joined_groups: HashMap::new(),
             buffer_pool,
             rules: HashMap::new(),
             config,
@@ -535,6 +596,9 @@ pub struct IngressStats {
     pub egress_channel_errors: u64,
     pub bytes_received: u64,
     pub egress_packets_sent: u64,
+    pub igmp_joins_attempted: u64,
+    pub igmp_joins_succeeded: u64,
+    pub igmp_joins_failed: u64,
 }
 #[derive(Debug, Clone)]
 pub struct IngressConfig {
@@ -544,6 +608,7 @@ pub struct IngressConfig {
     pub buffer_pool_small: usize,
     pub buffer_pool_standard: usize,
     pub buffer_pool_jumbo: usize,
+    pub fanout_group_id: u16,
 }
 impl Default for IngressConfig {
     fn default() -> Self {
@@ -554,13 +619,14 @@ impl Default for IngressConfig {
             buffer_pool_small: 1000,
             buffer_pool_standard: 500,
             buffer_pool_jumbo: 200,
+            fanout_group_id: 0,
         }
     }
 }
 const COMMAND_NOTIFY: u64 = 0;
 const PACKET_RECV_BASE: u64 = 1;
 
-pub fn setup_af_packet_socket(interface_name: &str) -> Result<OwnedFd> {
+pub fn setup_af_packet_socket(interface_name: &str, fanout_group_id: u16) -> Result<OwnedFd> {
     // Use ETH_P_ALL (0x0003) to receive all packets, including multicast
     // Using ETH_P_IP (0x0800) only receives unicast IPv4 packets
     let socket = Socket::new(Domain::PACKET, Type::RAW, Some(Protocol::from(libc::ETH_P_ALL as i32)))?;
@@ -580,33 +646,87 @@ pub fn setup_af_packet_socket(interface_name: &str) -> Result<OwnedFd> {
             return Err(anyhow::anyhow!("bind failed"));
         }
     }
+
+    // Configure PACKET_FANOUT if fanout_group_id is non-zero
+    if fanout_group_id > 0 {
+        let fanout_arg: u32 =
+            (fanout_group_id as u32) |
+            ((libc::PACKET_FANOUT_CPU as u32) << 16);
+
+        unsafe {
+            if libc::setsockopt(
+                socket.as_raw_fd(),
+                libc::SOL_PACKET,
+                libc::PACKET_FANOUT,
+                &fanout_arg as *const _ as *const _,
+                std::mem::size_of::<u32>() as _,
+            ) < 0
+            {
+                return Err(anyhow::anyhow!("PACKET_FANOUT failed"));
+            }
+        }
+    }
+
     Ok(socket.into())
 }
 
-pub fn setup_helper_socket(
-    interface_name: &str,
-    multicast_group: Ipv4Addr,
-) -> Result<StdUdpSocket> {
-    // Use socket2 to join multicast group by interface index instead of IP address.
-    // This works reliably in network namespaces where interface IPs may not be discoverable.
+/// Create a bound UDP socket for IGMP operations (without joining a group yet)
+fn create_bound_udp_socket() -> Result<StdUdpSocket> {
     let socket = socket2::Socket::new(
         socket2::Domain::IPV4,
         socket2::Type::DGRAM,
         Some(socket2::Protocol::UDP),
     )?;
 
+    // Enable SO_REUSEADDR to allow multiple multicast memberships
+    socket.set_reuse_address(true)?;
+
     socket.bind(&socket2::SockAddr::from(std::net::SocketAddrV4::new(
         Ipv4Addr::UNSPECIFIED,
         0,
     )))?;
 
+    Ok(socket.into())
+}
+
+/// Join a multicast group on an existing UDP socket
+fn join_multicast_group(
+    socket: &StdUdpSocket,
+    multicast_group: Ipv4Addr,
+    interface_name: &str,
+) -> Result<()> {
     let interface_index = get_interface_index(interface_name)?;
-    socket.join_multicast_v4_n(
+
+    // Borrow the file descriptor temporarily to call join_multicast_v4_n
+    let socket2 = unsafe { socket2::Socket::from_raw_fd(socket.as_raw_fd()) };
+    socket2.join_multicast_v4_n(
         &multicast_group,
         &socket2::InterfaceIndexOrAddress::Index(interface_index as u32),
     )?;
+    // Prevent the borrowed socket from closing the FD when dropped
+    std::mem::forget(socket2);
 
-    Ok(socket.into())
+    Ok(())
+}
+
+/// Leave a multicast group on an existing UDP socket
+fn leave_multicast_group(
+    socket: &StdUdpSocket,
+    multicast_group: Ipv4Addr,
+    interface_name: &str,
+) -> Result<()> {
+    let interface_index = get_interface_index(interface_name)?;
+
+    // Borrow the file descriptor temporarily to call leave_multicast_v4_n
+    let socket2 = unsafe { socket2::Socket::from_raw_fd(socket.as_raw_fd()) };
+    socket2.leave_multicast_v4_n(
+        &multicast_group,
+        &socket2::InterfaceIndexOrAddress::Index(interface_index as u32),
+    )?;
+    // Prevent the borrowed socket from closing the FD when dropped
+    std::mem::forget(socket2);
+
+    Ok(())
 }
 fn get_interface_index(name: &str) -> Result<i32> {
     let c_name = std::ffi::CString::new(name)?;

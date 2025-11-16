@@ -82,6 +82,7 @@ fn main() -> Result<()> {
             output_port,
             output_interface,
             reporting_interval,
+            fanout_group_id,
         } => {
             if data_plane {
                 // Get parent process ID (supervisor PID) for shared memory paths
@@ -101,6 +102,7 @@ fn main() -> Result<()> {
                     output_port,
                     output_interface,
                     reporting_interval: reporting_interval.unwrap_or(1),
+                    fanout_group_id,
                 };
                 // D1, D7: The worker process uses a `tokio-uring` runtime
                 // to drive the high-performance data plane.

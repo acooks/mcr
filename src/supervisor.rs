@@ -54,6 +54,7 @@ struct WorkerManager {
     prometheus_addr: Option<std::net::SocketAddr>,
     num_cores: usize,
     logger: Logger,
+    fanout_group_id: u16,
 
     // Worker state
     workers: HashMap<u32, Worker>, // keyed by PID
@@ -268,6 +269,7 @@ pub async fn spawn_data_plane_worker(
     _gid: u32,
     interface: String,
     relay_command_socket_path: PathBuf,
+    fanout_group_id: u16,
     logger: &crate::logging::Logger,
 ) -> Result<(Child, UnixStream, UnixStream, UnixStream, Option<std::os::unix::io::OwnedFd>)> {
     logger.info(
@@ -304,7 +306,9 @@ pub async fn spawn_data_plane_worker(
         .arg("--relay-command-socket-path")
         .arg(relay_command_socket_path)
         .arg("--input-interface-name")
-        .arg(interface);
+        .arg(interface)
+        .arg("--fanout-group-id")
+        .arg(fanout_group_id.to_string());
 
     // Ensure worker_sock becomes FD 3 in the child, and redirect stderr to pipe
     unsafe {
@@ -377,6 +381,7 @@ impl WorkerManager {
         prometheus_addr: Option<std::net::SocketAddr>,
         num_cores: usize,
         logger: Logger,
+        fanout_group_id: u16,
     ) -> Self {
         Self {
             uid,
@@ -386,6 +391,7 @@ impl WorkerManager {
             prometheus_addr,
             num_cores,
             logger,
+            fanout_group_id,
             workers: HashMap::new(),
             backoff_counters: HashMap::new(),
         }
@@ -435,6 +441,7 @@ impl WorkerManager {
             self.gid,
             self.interface.clone(),
             self.relay_command_socket_path.clone(),
+            self.fanout_group_id,
             &self.logger,
         )
         .await?;
@@ -939,6 +946,15 @@ pub async fn run(
         &format!("Control socket listening on {:?}", &control_socket_path)
     );
 
+    // Generate a fanout group ID for all data plane workers
+    // This ensures that only one supervisor's workers join the same group
+    let fanout_group_id = (std::process::id() & 0xFFFF) as u16;
+    log_info!(
+        supervisor_logger,
+        Facility::Supervisor,
+        &format!("PACKET_FANOUT group ID: {}", fanout_group_id)
+    );
+
     // Initialize WorkerManager and wrap it in Arc<Mutex<>>
     let worker_manager = {
         let mut manager = WorkerManager::new(
@@ -949,6 +965,7 @@ pub async fn run(
             prometheus_addr,
             num_cores,
             supervisor_logger.clone(),
+            fanout_group_id,
         );
 
         // Spawn all initial workers

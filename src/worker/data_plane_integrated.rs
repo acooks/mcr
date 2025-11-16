@@ -60,6 +60,7 @@ pub fn run_data_plane(
         buffer_pool_small,
         buffer_pool_standard,
         buffer_pool_jumbo,
+        fanout_group_id: config.fanout_group_id.unwrap_or(0),
         ..Default::default()
     };
     let egress_config = EgressConfig {
