@@ -985,24 +985,19 @@ pub async fn run(
 
             // New client connection
             Ok((client_stream, _)) = listener.accept() => {
-                let worker_manager = Arc::clone(&worker_manager);
-                let master_rules = Arc::clone(&master_rules);
-                let global_min_level = Arc::clone(&global_min_level);
-                let facility_min_levels = Arc::clone(&facility_min_levels);
-
-                tokio::spawn(async move {
-                    if let Err(e) = handle_client(
-                        client_stream,
-                        worker_manager,
-                        master_rules,
-                        global_min_level,
-                        facility_min_levels,
-                    )
-                    .await
-                    {
-                        error!("Error handling client: {}", e);
-                    }
-                });
+                // Handle client inline to avoid unbounded task spawning
+                // Client operations are fast (read, execute, write) and don't block data plane
+                if let Err(e) = handle_client(
+                    client_stream,
+                    Arc::clone(&worker_manager),
+                    Arc::clone(&master_rules),
+                    Arc::clone(&global_min_level),
+                    Arc::clone(&facility_min_levels),
+                )
+                .await
+                {
+                    error!("Error handling client: {}", e);
+                }
             }
 
             // Periodic worker health check (every 250ms)

@@ -186,7 +186,7 @@ pub fn build_command(cli_command: CliCommand) -> Result<multicast_relay::Supervi
 }
 
 #[cfg(not(test))]
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     use multicast_relay::Response;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
