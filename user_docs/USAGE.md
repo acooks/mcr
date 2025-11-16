@@ -12,27 +12,33 @@ The application is built for performance, using an asynchronous, parallel archit
 - **Real-time Monitoring:** Built-in monitoring for packet rates, byte rates, CPU usage, and memory usage, available via console output and a Prometheus exporter.
 - **Standalone Tools:** Includes a high-performance traffic generator for load testing and a control client for interacting with the relay.
 
-## Features## Monitoring and Operations
+## Basic Concepts
 
-For details on how to monitor the application, interpret its statistics, and diagnose common problems, see the [**Operational Guide**](./OPERATIONAL_GUIDE.md).
+MCR operates on a few core concepts:
 
-## Components
+*   **Supervisor:** This is the main process that you launch when you run `multicast_relay`. It is responsible for managing the high-performance workers and handling runtime configuration commands. It does not process any multicast traffic itself.
 
-The project is composed of three binaries:
+*   **Worker (or Data Plane):** These are the high-performance processes that do the actual work of receiving, processing, and re-transmitting multicast packets. The supervisor spawns one or more workers, typically pinning each to a specific CPU core to maximize performance.
 
-- `multicast_relay`: The main relay application.
-- `traffic_generator`: A tool for generating high-rate multicast UDP traffic for testing.
-- `control_client`: A command-line tool for interacting with the `multicast_relay`'s control plane.
+*   **Forwarding Rule:** A forwarding rule is a configuration object that tells a worker what to do. Each rule defines a specific input stream (based on multicast group and port) and a list of one or more outputs where that stream should be re-transmitted. You can manage these rules at runtime using the `control_client`.
 
-## Building the Project
+## Installation
 
-To build all components, run the following command from the project root:
+### Prerequisites
+
+This application is designed for and requires a **Linux** operating system due to its use of modern kernel APIs like `io_uring` and `AF_PACKET`.
+
+You will also need to have the official **Rust toolchain** installed. You can install it from [rustup.rs](https://rustup.rs/).
+
+### Building from Source
+
+To build all components (the relay, the traffic generator, and the control client), run the following command from the project root:
 
 ```bash
 cargo build --release
 ```
 
-The binaries will be available in the `target/release/` directory.
+The compiled binaries will be available in the `target/release/` directory. You may wish to copy them to a location in your system's `PATH` (e.g., `/usr/local/bin/`) for easier access.
 
 ## Running the Relay
 
@@ -102,6 +108,34 @@ The `control_client` is used to manage forwarding rules and log levels at runtim
 Available log levels: `emergency`, `alert`, `critical`, `error`, `warning`, `notice`, `info`, `debug`
 
 Available facilities: `Supervisor`, `RuleDispatch`, `ControlSocket`, `ControlPlane`, `DataPlane`, `Ingress`, `Egress`, `BufferPool`, `PacketParser`, `Stats`, `Security`, `Network`, `Test`
+
+## Examples / Cookbook
+
+Here are some practical examples of how to use the control client to configure the relay.
+
+### Example 1: Simple 1-to-1 Relay
+
+**Goal:** Relay traffic from multicast group `239.10.1.2:8001` to `239.20.3.4:9002` using the network interface with the IP `10.1.5.25`.
+
+```bash
+./target/release/control_client add \
+    --input-group 239.10.1.2 \
+    --input-port 8001 \
+    --outputs 239.20.3.4:9002:10.1.5.25
+```
+
+### Example 2: 1-to-2 Head-End Replication
+
+**Goal:** Take a single input stream and replicate it to two different downstream groups.
+
+```bash
+./target/release/control_client add \
+    --input-group 239.10.1.2 \
+    --input-port 8001 \
+    --outputs 239.30.1.1:7001:10.1.5.25 \
+    --outputs 239.30.1.2:7002:10.1.5.25
+```
+Note that we just provide a second `--outputs` flag for the same input rule.
 
 ## Using the Traffic Generator
 
