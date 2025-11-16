@@ -7,11 +7,25 @@ This directory contains all documentation relevant to contributors and developer
 *   **[ARCHITECTURE.md](./ARCHITECTURE.md):** The definitive, up-to-date guide to the system's design, components, and core technical decisions.
 *   **[DESIGN.md](./DESIGN.md):** The rationale and thought process behind the current architecture, explaining *why* key decisions were made.
 *   **[CONTRIBUTING.md](./CONTRIBUTING.md):** The guide for new contributors, covering development standards, testing requirements, and workflow.
-*   **[DEVELOPER_TESTING_STRATEGY.md](./reference_docs/DEVELOPER_TESTING_STRATEGY.md):** The high-level testing philosophy and tiered strategy guiding how we test MCR.
 
-## Reference Docs
+## Thematic Guides
 
-For more specific deep-dives, see the `reference_docs/` directory, which contains:
-*   Detailed reports on bug investigations.
-*   Archived historical documents.
-*   In-depth guides on specific subsystems.
+*   **[Design Documents](./design/README.md):** Detailed design specifications for various MCR subsystems.
+    *   **[Architecture Diagrams](./design/ARCHITECTURE_DIAGRAMS.md):** Visual representations of the MCR architecture.
+    *   **[Logging Design](./design/LOGGING.md):** Details on MCR's logging subsystem.
+
+*   **[Policies](./policies/README.md):** Important policy documents governing development.
+    *   **[Unsafe Code Policy](./policies/UNSAFE_CODE_POLICY.md):** Guidelines and rationale for using `unsafe` Rust code in MCR.
+
+*   **[Reports](./reports/README.md):** Comprehensive reports on major investigations and resolutions.
+    *   **[Multi-Stream Scaling Report](./reports/MULTI_STREAM_SCALING_REPORT.md):** Full report on the investigation and fix for multi-stream and multi-worker scaling issues.
+
+*   **[Testing Strategy](./testing/README.md):** The high-level philosophy and tiered strategy guiding how we test MCR.
+    *   **[Developer Testing Strategy](./testing/DEVELOPER_TESTING_STRATEGY.md):** In-depth guide for developers on writing and maintaining tests.
+
+*   **[Comparisons](./comparisons/README.md):** Analysis and comparison of MCR with other networking tools.
+    *   **[MCR vs. socat](./comparisons/MCR_vs_socat.md):** A detailed comparison of MCR's architecture and performance against `socat`.
+
+## Reference Docs (Archived & Historical)
+
+For more specific deep-dives into older plans, experiments, or completed phase reports, see the `reference_docs/` directory.
