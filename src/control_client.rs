@@ -28,7 +28,7 @@ pub enum CliCommand {
         input_group: Ipv4Addr,
         #[arg(long)]
         input_port: u16,
-        #[arg(long, value_parser = parse_output_destination)]
+        #[arg(long, value_parser = parse_output_destination, value_delimiter = ',')]
         outputs: Vec<OutputDestination>,
     },
     /// Remove a forwarding rule
