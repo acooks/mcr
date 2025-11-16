@@ -66,10 +66,10 @@ The `control_client` is used to manage forwarding rules and log levels at runtim
 
 ```bash
 ./target/release/control_client add \
-    --input-group 224.1.1.1 \
+    --input-group 239.1.1.1 \
     --input-port 5000 \
-    --outputs 225.1.1.1:5001:127.0.0.1 \
-    --outputs 225.1.1.2:5002:127.0.0.1
+    --outputs 239.10.1.1:5001:10.1.5.25 \
+    --outputs 239.10.1.2:5002:10.1.5.25
 ```
 
 **Remove a Rule:**
@@ -143,9 +143,9 @@ The `traffic_generator` can be used to send multicast traffic for testing purpos
 
 ```bash
 ./target/release/traffic_generator \
-    --group 224.1.1.1 \
+    --group 239.1.1.1 \
     --port 5000 \
-    --interface 127.0.0.1 \
+    --interface 10.0.0.1 \
     --rate 100000 \
     --size 1200
 ```
