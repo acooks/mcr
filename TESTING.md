@@ -2,33 +2,31 @@
 
 This guide provides everything you need to know to run the tests for the Multicast Relay (MCR). For the high-level testing *philosophy* and tiered strategy guiding developers, see [`docs/DEVELOPER_TESTING_STRATEGY.md`](docs/DEVELOPER_TESTING_STRATEGY.md).
 
-## Quick Start
+## Test Types
 
-Follow these steps to run the most common test suites.
+MCR employs a three-tiered testing strategy. All testing is orchestrated via `just` commands. For a detailed explanation of the philosophy and methodology behind these tiers, see the [Developer Testing Strategy](developer_docs/testing/DEVELOPER_TESTING_STRATEGY.md).
 
-**Step 1: Build the Binaries (as a regular user)**
+### Tier 1: Unit Tests
 
-It is critical to build first as a non-privileged user to prevent file permission issues in your `target/` directory and Cargo cache.
+*   **Purpose:** To test pure, internal business logic in isolation.
+*   **Scope:** Individual functions, logic, protocol parsing.
+*   **Command:** `just test-unit`
 
-```bash
-cargo build --release --bins
-```
+### Tier 2: Rust Integration Tests
 
-**Step 2: Run Unit Tests (no sudo needed)**
+*   **Purpose:** To test the interaction between the application's Rust components, either unprivileged or in isolated network namespaces.
+*   **Scope:** Control plane functionality, supervisor/worker lifecycle, multi-worker scenarios.
+*   **Commands:**
+    *   `just test-integration-light` (unprivileged tests)
+    *   `just test-integration-privileged` (privileged tests requiring `sudo`)
 
-These are Rust-based tests that verify core logic without requiring special permissions.
+### Tier 3: E2E Bash Tests
 
-```bash
-cargo test --lib
-```
-
-**Step 3: Run All E2E Shell Script Tests (requires sudo)**
-
-These scripts test the complete, compiled application in realistic scenarios involving network namespaces and raw sockets.
-
-```bash
-sudo ./tests/test_all_scripts.sh
-```
+*   **Purpose:** To validate the final, compiled release binaries in realistic, multi-hop network topologies.
+*   **Scope:** Packet forwarding correctness, performance benchmarking, complex network scenarios.
+*   **Commands:**
+    *   `just test-e2e-bash` (runs a single, representative E2E script)
+    *   `just test-topologies` (runs the full suite of multi-hop topology tests, requires `sudo`)
 
 ## Running Specific Tests
 
@@ -47,30 +45,6 @@ The multi-hop topology tests are located in a subdirectory.
 ```bash
 cd tests/topologies
 sudo ./baseline_50k.sh
-```
-
-## E2E Test Catalog
-
-The E2E tests are shell scripts located in `tests/` and organized by purpose.
-
-*   **Debug Tests (`debug_*.sh`):** Small packet counts for basic validation and easy debugging.
-*   **End-to-End Tests (`data_plane_e2e.sh`, etc.):** Complete system validation in isolated environments.
-*   **Performance & Scaling Tests (`data_plane_performance.sh`, `scaling_test.sh`):** Benchmarks and high-load validation.
-*   **Topology Tests (`tests/topologies/`):** Multi-instance, multi-hop forwarding scenarios (e.g., chains, fan-out trees).
-
-## Debugging Failed Tests
-
-Each E2E test script writes detailed logs to the `/tmp/` directory.
-
-```bash
-# Example: Run a test that is failing
-sudo ./tests/debug_10_packets.sh
-
-# Check the MCR process log for errors, statistics, and panics
-cat /tmp/test_mcr.log
-
-# Check the test script's own output log for validation failures
-cat /tmp/test_debug_10_packets.log
 ```
 
 ## Important Patterns for E2E Tests (Fragile Commands)
@@ -136,23 +110,4 @@ INGRESS_EGR_SENT=$(grep 'STATS:Ingress FINAL' $LOG | grep -oP 'egr_sent=\K[0-9]+
 # ✅ CORRECT: Use last periodic stat for Egress
 EGRESS_SENT=$(grep 'STATS:Egress' $LOG | tail -1 | grep -oP 'sent=\K[0-9]+' || echo 0)
 EGRESS_CH_RECV=$(grep 'STATS:Egress' $LOG | tail -1 | grep -oP 'ch_recv=\K[0-9]+' || echo 0)
-```
-
-## CI/Automation
-
-For CI environments, use the following pattern to run tests safely.
-
-```bash
-# Build step (as regular user)
-cargo build --release --bins
-
-# Unit test step (no root needed)
-cargo test --lib
-
-# Integration test step (requires root)
-if [ "$EUID" -eq 0 ]; then
-    ./tests/test_all_scripts.sh
-else
-    echo "Skipping E2E tests (no root privileges)"
-fi
 ```
