@@ -116,3 +116,55 @@ unsafe-report:
 clean:
     @echo "--- Cleaning Project ---"
     cargo clean
+
+# --- New Test Framework Targets ---
+
+# Tier 0: Build all application and test binaries (as regular user).
+# This is the first step in the testing workflow, separating build from execution.
+build-test:
+    @echo "--- Building Test Binaries ---"
+    cargo test --no-run --all-targets --features integration_test
+    cargo build --release --bins
+
+# Tier 1: Run fast, unprivileged unit tests (as regular user).
+test-unit:
+    @echo "--- Running Unit Tests ---"
+    cargo test --lib --features integration_test
+
+# Tier 2 (Part A): Run unprivileged Rust integration tests (as regular user).
+test-integration-light:
+    @echo "--- Running Integration Tests (non-privileged) ---"
+    cargo test --test integration --features integration_test
+
+# Tier 2 (Part B): Run privileged Rust integration tests (requires root).
+# Finds the pre-built test binary and runs only the tests marked `#[ignore]`.
+test-integration-privileged:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "--- Running Privileged Integration Tests (requires root) ---"
+
+    # Find integration test binary
+    TEST_BINARY=$(find target/debug/deps -name 'integration-*' -type f -executable ! -name '*.d' | head -1)
+
+    if [ -z "$TEST_BINARY" ]; then
+        echo "ERROR: Integration test binary not found. Run 'just build-test' first."
+        exit 1
+    fi
+
+    echo "Running ignored tests from: $(basename $TEST_BINARY)"
+    echo ""
+    sudo -E "$TEST_BINARY" --ignored --test-threads=1 --nocapture
+
+# Tier 3: Run a representative E2E Bash script test (requires root).
+test-e2e-bash:
+    @echo "--- Running Bash E2E Tests (requires root) ---"
+    @if [ "$EUID" -ne 0 ]; then echo "ERROR: Requires root (sudo just test-e2e-bash)"; exit 1; fi
+    @bash tests/data_plane_e2e.sh
+
+# Meta-Target: Run the complete test suite.
+# This is the primary command for contributors to validate changes before a PR.
+test-all: build-test test-unit test-integration-light test-integration-privileged
+
+# Meta-Target: Run all fast, unprivileged tests.
+# This is useful for a quick feedback loop during development.
+test-quick: test-unit test-integration-light
