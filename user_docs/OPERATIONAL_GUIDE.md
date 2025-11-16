@@ -1,0 +1,87 @@
+# MCR Operational Guide
+
+This guide explains how to monitor the Multicast Relay (MCR) application, understand its statistical output, and diagnose common operational issues.
+
+## Monitoring MCR
+
+MCR is designed for "at-a-glance" observability. All key metrics are regularly printed to the console (or log file) as structured, single-line messages. For most use cases, monitoring the application is as simple as using `tail -f` on the log output.
+
+```bash
+# Example: Watch MCR's live statistics
+tail -f /var/log/mcr.log | grep STATS
+```
+
+## Understanding the Statistics Output
+
+MCR outputs separate statistics lines for the Ingress (receiving) and Egress (sending) paths. These are typically printed every second.
+
+### Ingress Statistics
+
+The Ingress stats line shows how many packets are being received from the network.
+
+**Example:**
+`[STATS:Ingress] recv=6129022 matched=3881980 parse_err=1 no_match=21 buf_exhaust=2247020 (490000 pps)`
+
+*   **`recv`**: The total number of raw frames (packets) received by the network card's `AF_PACKET` socket since the worker started. This is the highest-level view of incoming traffic.
+*   **`matched`**: The number of received packets that successfully matched a configured forwarding rule (i.e., correct multicast group and port). This is the count of "useful" packets.
+*   **`parse_err`**: The number of packets that were dropped because they were not valid Ethernet/IP/UDP frames. A high number may indicate non-IP traffic on the network.
+*   **`no_match`**: The number of valid UDP packets that did not match any active forwarding rule. This is expected if there is other multicast traffic on the network that you don't intend to relay.
+*   **`buf_exhaust` (Buffer Exhaustion):** This is a critical health metric. It counts how many incoming packets were dropped because the internal memory buffers were all in use. This is the primary indicator of **back-pressure**.
+*   **`pps` (Packets Per Second):** The current rate of *received* packets.
+
+### Egress Statistics
+
+The Egress stats line shows how many packets are being sent out.
+
+**Example:**
+`[STATS:Egress] sent=4176384 submitted=4176384 errors=0 bytes=5846937600 (307000 pps)`
+
+*   **`sent`**: The total number of packets that have been successfully sent by the operating system since the worker started.
+*   **`submitted`**: The total number of packets that the MCR application has submitted to the `io_uring` kernel interface for sending.
+*   **`errors`**: The number of packets that the kernel reported as failing to send. This counter **should always be 0** in a healthy system.
+*   **`bytes`**: The total number of bytes sent.
+*   **`pps` (Packets Per Second):** The current rate of *sent* packets.
+
+## Interpreting Common Scenarios
+
+By comparing the Ingress and Egress stats, you can quickly diagnose the health of the system.
+
+### Healthy Operation (At Capacity)
+
+**Scenario:** You are intentionally sending more traffic than MCR can handle.
+
+```
+[STATS:Ingress] recv=1000 matched=1000 ... buf_exhaust=200 ... (500k pps)
+[STATS:Egress]  sent=800  submitted=800  errors=0 ... (300k pps)
+```
+
+**Interpretation:**
+*   The Ingress path is faster than the Egress path (500k pps vs. 300k pps).
+*   **`buf_exhaust > 0`**: This is **expected and healthy**. It shows that the system's back-pressure mechanism is working correctly. Packets that cannot be processed are being dropped at the earliest stage (Ingress) to protect the rest of the system.
+*   **`errors = 0`**: This is the key health indicator. It means the Egress path is running at its maximum capacity without failures.
+
+### Egress Path Failure
+
+**Scenario:** The network downstream of MCR is having problems (e.g., a saturated switch, a disconnected cable).
+
+```
+[STATS:Ingress] recv=1000 matched=1000 ... buf_exhaust=0 ...
+[STATS:Egress]  sent=750  submitted=800  errors=50 ...
+```
+
+**Interpretation:**
+*   **`errors > 0` and `submitted > sent`**: This is a critical alert. It means the application is trying to send packets (`submitted`), but the OS is failing to transmit them (`errors`). This points to a problem external to MCR, in the downstream network or kernel.
+*   **`buf_exhaust = 0`**: Because the problem is downstream, the internal buffers are not exhausted.
+
+### No Matching Rules
+
+**Scenario:** MCR is running, but no traffic is being forwarded.
+
+```
+[STATS:Ingress] recv=1000 matched=0 no_match=1000 ...
+[STATS:Egress]  sent=0   submitted=0   errors=0 ...
+```
+
+**Interpretation:**
+*   **`matched = 0` and `no_match > 0`**: This is a configuration issue. Packets are arriving at the MCR host, but their destination multicast group and/or port do not match any of the forwarding rules you have configured.
+*   **Action:** Use the `control_client list` command to verify your rules and compare them against the source traffic.

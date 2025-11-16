@@ -12,7 +12,11 @@ The application is built for performance, using an asynchronous, parallel archit
 - **Real-time Monitoring:** Built-in monitoring for packet rates, byte rates, CPU usage, and memory usage, available via console output and a Prometheus exporter.
 - **Standalone Tools:** Includes a high-performance traffic generator for load testing and a control client for interacting with the relay.
 
-## Features## Components
+## Features## Monitoring and Operations
+
+For details on how to monitor the application, interpret its statistics, and diagnose common problems, see the [**Operational Guide**](./OPERATIONAL_GUIDE.md).
+
+## Components
 
 The project is composed of three binaries:
 
