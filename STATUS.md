@@ -5,16 +5,20 @@
 
 ---
 
-## Current State: Active Development - Architectural Refactor In Progress
+## Current State: Core Functionality Complete, Test Coverage & Hardening In Progress
 
-The MCR data plane has achieved functional completeness for its core purpose and demonstrated strong performance, with critical scaling limitations resolved. The project is currently in an active development phase, focusing on key architectural refinements.
+The core data plane of MCR is functional and its basic performance has been validated. The project is currently in a phase of active development focused on two key areas:
+1.  **Expanding Test Coverage:** Systematically increasing unit and integration test coverage to harden the existing codebase and prevent regressions.
+2.  **Architectural Hardening:** Executing a series of planned refactoring tasks to improve security, scalability, and maintainability.
 
-### Key Achievements
+While the basics are working, the project is still "rough around the edges" and is not yet considered production-ready.
 
-*   **Performance Targets Exceeded:** The data plane has been validated in a realistic 3-hop pipeline test, achieving **490k pps ingress** and **307k pps egress**.
-*   **Multi-Stream & Multi-Worker Scaling Fixed:** The system now demonstrates correct scaling behavior with multiple concurrent streams and workers. See the full report in [`developer_docs/reports/MULTI_STREAM_SCALING_REPORT.md`](./developer_docs/reports/MULTI_STREAM_SCALING_REPORT.md).
-*   **Pipe-Based Logging Implemented:** The complex shared memory logging system has been replaced with a standard, robust pipe-based mechanism.
-*   **Technical Investigation Complete:** A `codebase_investigator` analysis of all high-priority refactoring tasks has been completed, providing a solid technical foundation as the project moves into its next implementation phase.
+### Recent Milestones
+
+*   **Initial Performance Validation:** The data plane has demonstrated high throughput in a 3-hop pipeline test (**490k pps ingress**, **307k pps egress**).
+*   **Scaling Bugs Addressed:** Critical bugs preventing scaling beyond a single stream or worker have been fixed. The system now demonstrates correct scaling behavior. A full report is in [`developer_docs/reports/MULTI_STREAM_SCALING_REPORT.md`](./developer_docs/reports/MULTI_STREAM_SCALING_REPORT.md).
+*   **Logging System Refactored:** The original, complex shared memory logging system has been replaced with a simpler, more robust pipe-based mechanism.
+*   **Technical Investigation Completed:** A detailed investigation of the remaining high-priority architectural refactoring tasks is complete, providing a clear technical baseline for the work outlined in the roadmap.
 
 ---
 

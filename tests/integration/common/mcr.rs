@@ -23,9 +23,15 @@ impl McrInstance {
     /// * `interface` - Network interface to listen on
     /// * `core` - CPU core to pin to (optional)
     pub fn start(interface: &str, core: Option<u32>) -> Result<Self> {
-        let relay_socket = format!("/tmp/test_relay_{}.sock", std::process::id());
-        let control_socket = format!("/tmp/test_mcr_{}.sock", std::process::id());
-        let log_file = format!("/tmp/test_mcr_{}.log", std::process::id());
+        // Use a unique ID combining PID and a random component to avoid collisions
+        // when multiple MCR instances are started from the same test process
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static INSTANCE_COUNTER: AtomicU32 = AtomicU32::new(0);
+        let instance_id = INSTANCE_COUNTER.fetch_add(1, Ordering::SeqCst);
+
+        let relay_socket = format!("/tmp/test_relay_{}_{}.sock", std::process::id(), instance_id);
+        let control_socket = format!("/tmp/test_mcr_{}_{}.sock", std::process::id(), instance_id);
+        let log_file = format!("/tmp/test_mcr_{}_{}.log", std::process::id(), instance_id);
 
         // Clean up any existing sockets
         let _ = std::fs::remove_file(&relay_socket);
