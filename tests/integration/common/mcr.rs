@@ -73,6 +73,25 @@ impl McrInstance {
         let stderr = child.stderr.take().context("Failed to get stderr")?;
         println!("[DEBUG] Captured stdout/stderr, starting logging thread");
 
+        // Spawn separate threads for stdout and stderr to avoid blocking
+        let log_file_stdout = log_file_clone.clone();
+        thread::spawn(move || {
+            use std::io::{BufRead, BufReader, Write};
+            let mut log = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log_file_stdout)
+                .expect("Failed to open log file");
+
+            let stdout_reader = BufReader::new(stdout);
+            for line in stdout_reader.lines() {
+                if let Ok(line) = line {
+                    writeln!(log, "{}", line).ok();
+                    log.flush().ok();  // Flush after each line
+                }
+            }
+        });
+
         thread::spawn(move || {
             use std::io::{BufRead, BufReader, Write};
             let mut log = std::fs::OpenOptions::new()
@@ -81,10 +100,8 @@ impl McrInstance {
                 .open(&log_file_clone)
                 .expect("Failed to open log file");
 
-            let stdout_reader = BufReader::new(stdout);
             let stderr_reader = BufReader::new(stderr);
-
-            for line in stdout_reader.lines().chain(stderr_reader.lines()) {
+            for line in stderr_reader.lines() {
                 if let Ok(line) = line {
                     writeln!(log, "{}", line).ok();
                     log.flush().ok();  // Flush after each line
