@@ -1,84 +1,147 @@
-# Testing Guide
+# How to Run Tests
+
+This guide provides everything you need to know to run the tests for the Multicast Relay (MCR). For the high-level testing *philosophy* and tiered strategy guiding developers, see [`docs/DEVELOPER_TESTING_STRATEGY.md`](docs/DEVELOPER_TESTING_STRATEGY.md).
 
 ## Quick Start
 
-```bash
-# 1. Build everything as regular user
-cargo build --release --bins
+Follow these steps to run the most common test suites.
 
-# 2. Run unit tests (no sudo needed)
+**Step 1: Build the Binaries (as a regular user)**
+
+It is critical to build first as a non-privileged user to prevent file permission issues in your `target/` directory and Cargo cache.
+
+```bash
+cargo build --release --bins
+```
+
+**Step 2: Run Unit Tests (no sudo needed)**
+
+These are Rust-based tests that verify core logic without requiring special permissions.
+
+```bash
 cargo test --lib
-
-# 3. Run shell integration tests (requires sudo)
-sudo ./tests/test_all_scripts.sh
 ```
 
-## Test Types
+**Step 3: Run All E2E Shell Script Tests (requires sudo)**
 
-### Unit Tests (~122 tests)
-- **Location:** `src/**/*.rs` with `#[cfg(test)]`
-- **Requirements:** None (run as regular user)
-- **Run:** `cargo test --lib`
-- **What they test:** Individual functions, logic, protocol parsing
-- **Status:** ✅ All passing
+These scripts test the complete, compiled application in realistic scenarios involving network namespaces and raw sockets.
 
-### Shell Integration Tests
-- **Location:** `tests/*.sh` and `tests/topologies/*.sh`
-- **Requirements:** Root privileges (AF_PACKET, network namespaces)
-- **Run:** `sudo ./tests/test_all_scripts.sh` (runs all tests)
-- **What they test:**
-  - Basic forwarding validation (debug_10_packets.sh)
-  - End-to-end packet delivery (data_plane_e2e.sh)
-  - Performance and scaling (scaling_test.sh, data_plane_performance.sh)
-  - Multi-hop topologies (topologies/baseline_50k.sh, chain_3hop.sh, tree_fanout.sh)
-- **Documentation:** See [tests/README.md](tests/README.md)
-
-## Why Build Before Running Tests?
-
-**Always build as regular user first:**
-```bash
-cargo build --release --bins
-```
-
-**Then run tests with sudo:**
 ```bash
 sudo ./tests/test_all_scripts.sh
 ```
 
-This prevents:
-- Root-owned files in `target/` directory
-- Permission errors in cargo cache
-- Toolchain confusion
+## Running Specific Tests
 
-## Test Standards
+### Running a Single E2E Test
 
-Shell integration tests follow standardized patterns:
-- Network namespace isolation (no host pollution)
-- Graceful shutdown with final stats logging
-- Consistent pass/fail reporting (✅/❌)
-- Individual test logs in `/tmp/`
+For debugging, you can run any test script individually.
 
-See [tests/TEST_STANDARDS.md](tests/TEST_STANDARDS.md) for detailed patterns and templates.
+```bash
+sudo ./tests/debug_10_packets.sh
+```
+
+### Running a Topology Test
+
+The multi-hop topology tests are located in a subdirectory.
+
+```bash
+cd tests/topologies
+sudo ./baseline_50k.sh
+```
+
+## E2E Test Catalog
+
+The E2E tests are shell scripts located in `tests/` and organized by purpose.
+
+*   **Debug Tests (`debug_*.sh`):** Small packet counts for basic validation and easy debugging.
+*   **End-to-End Tests (`data_plane_e2e.sh`, etc.):** Complete system validation in isolated environments.
+*   **Performance & Scaling Tests (`data_plane_performance.sh`, `scaling_test.sh`):** Benchmarks and high-load validation.
+*   **Topology Tests (`tests/topologies/`):** Multi-instance, multi-hop forwarding scenarios (e.g., chains, fan-out trees).
 
 ## Debugging Failed Tests
 
-Each test writes detailed logs:
+Each E2E test script writes detailed logs to the `/tmp/` directory.
+
 ```bash
-# Run a test
+# Example: Run a test that is failing
 sudo ./tests/debug_10_packets.sh
 
-# Check logs
-cat /tmp/test_mcr.log        # MCR process log
-cat /tmp/test_debug_10_packets.log  # Test output
+# Check the MCR process log for errors, statistics, and panics
+cat /tmp/test_mcr.log
+
+# Check the test script's own output log for validation failures
+cat /tmp/test_debug_10_packets.log
 ```
 
-## Testing Philosophy
+## Important Patterns for E2E Tests (Fragile Commands)
 
-For the formal testing strategy and 3-tier architecture, see [docs/reference/TESTING.md](docs/reference/TESTING.md).
+The shell scripts rely on specific, fragile command patterns to function correctly. When debugging or writing new tests, these are critical to understand.
+
+### Waiting for MCR to Start
+
+A loop-and-wait pattern must be used to ensure the MCR control socket exists before sending commands. A fixed `sleep` is also required to allow full initialization.
+
+```bash
+# Start MCR in the background
+taskset -c 0 "$RELAY_BIN" supervisor ... &
+MCR_PID=$!
+
+# Wait for control socket (up to 5 seconds)
+for i in {1..50}; do
+    if [ -S /tmp/test_mcr.sock ]; then
+        break
+    fi
+    sleep 0.1
+done
+
+if [ ! -S /tmp/test_mcr.sock ]; then
+    echo "ERROR: Control socket not found after 5 seconds"
+    exit 1
+fi
+
+# Allow time for full initialization before sending commands
+sleep 2
+```
+
+### Graceful Shutdown and Pipeline Drain
+
+To ensure all in-flight packets are processed and final statistics are logged, tests must wait for traffic to finish and then perform a graceful shutdown.
+
+```bash
+# Send traffic with the traffic generator
+"$TRAFFIC_BIN" --count $COUNT --rate $RATE ...
+
+# Wait for the pipeline to drain. Calculation is based on packet count and rate.
+DRAIN_TIME=$(echo "scale=0; ($COUNT / $RATE) + 5" | bc)
+sleep $DRAIN_TIME
+
+# Graceful shutdown (SIGTERM) triggers final stats logging
+kill $MCR_PID 2>/dev/null || true
+wait $MCR_PID 2>/dev/null || true
+sync  # Ensure logs are flushed to disk before parsing
+```
+
+### Accurate Statistics Parsing
+
+Packet counts for validation **must** be parsed from specific log lines to be accurate.
+
+*   **Ingress stats** are definitive and should be read from `STATS:Ingress FINAL` lines.
+*   **Egress stats** do not have a `FINAL` line due to shutdown timing, so the last periodic `STATS:Egress` line must be used.
+
+```bash
+# ✅ CORRECT: Use FINAL stats for Ingress
+INGRESS_MATCHED=$(grep 'STATS:Ingress FINAL' $LOG | grep -oP 'matched=\K[0-9]+' || echo 0)
+INGRESS_EGR_SENT=$(grep 'STATS:Ingress FINAL' $LOG | grep -oP 'egr_sent=\K[0-9]+' || echo 0)
+
+# ✅ CORRECT: Use last periodic stat for Egress
+EGRESS_SENT=$(grep 'STATS:Egress' $LOG | tail -1 | grep -oP 'sent=\K[0-9]+' || echo 0)
+EGRESS_CH_RECV=$(grep 'STATS:Egress' $LOG | tail -1 | grep -oP 'ch_recv=\K[0-9]+' || echo 0)
+```
 
 ## CI/Automation
 
-For CI environments:
+For CI environments, use the following pattern to run tests safely.
+
 ```bash
 # Build step (as regular user)
 cargo build --release --bins
@@ -90,6 +153,6 @@ cargo test --lib
 if [ "$EUID" -eq 0 ]; then
     ./tests/test_all_scripts.sh
 else
-    echo "Skipping integration tests (no root)"
+    echo "Skipping E2E tests (no root privileges)"
 fi
 ```
