@@ -206,6 +206,11 @@ pub fn handle_supervisor_command(
                 CommandAction::None,
             )
         }
+
+        SupervisorCommand::Ping => {
+            // Simple health check - if we can process this command, we're ready
+            (Response::Success("pong".to_string()), CommandAction::None)
+        }
     }
 }
 
@@ -1093,6 +1098,7 @@ mod tests {
 
     // --- Test Helpers ---
 
+    #[allow(dead_code)]
     #[allow(clippy::type_complexity)] // Test helper with intentionally complex return type
     fn create_test_logger() -> (
         Logger,
@@ -1117,6 +1123,7 @@ mod tests {
         (logger, global_min_level, facility_min_levels)
     }
 
+    #[allow(dead_code)]
     fn spawn_failing_worker() -> anyhow::Result<Child> {
         let mut command = tokio::process::Command::new("sh");
         command.arg("-c").arg("exit 1");
@@ -1387,6 +1394,7 @@ mod tests {
 
     // --- Existing Integration Tests ---
 
+    #[allow(dead_code)]
     fn spawn_sleeping_worker() -> anyhow::Result<Child> {
         let mut command = tokio::process::Command::new("sleep");
         command.arg("30");

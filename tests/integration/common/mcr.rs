@@ -64,7 +64,7 @@ impl McrInstance {
         let stderr = child.stderr.take().context("Failed to get stderr")?;
 
         thread::spawn(move || {
-            use std::io::{BufRead, BufReader};
+            use std::io::{BufRead, BufReader, Write};
             let mut log = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
@@ -77,6 +77,7 @@ impl McrInstance {
             for line in stdout_reader.lines().chain(stderr_reader.lines()) {
                 if let Ok(line) = line {
                     writeln!(log, "{}", line).ok();
+                    log.flush().ok();  // Flush after each line
                 }
             }
         });
@@ -146,10 +147,38 @@ impl McrInstance {
             );
         }
 
-        // Give rule time to be applied
-        thread::sleep(Duration::from_secs(1));
+        // Wait for MCR to be ready to process traffic
+        // This ensures IGMP groups are joined and AF_PACKET sockets are set up
+        self.wait_until_ready(10)?;
 
         Ok(())
+    }
+
+    /// Wait until MCR is ready to process traffic by polling the ping command
+    pub fn wait_until_ready(&self, timeout_secs: u64) -> Result<()> {
+        let control_bin = binary_path("control_client");
+        let start = std::time::Instant::now();
+
+        loop {
+            let output = Command::new(&control_bin)
+                .arg("--socket-path")
+                .arg(&self.control_socket)
+                .arg("ping")
+                .output();
+
+            if let Ok(output) = output {
+                if output.status.success() {
+                    // Got successful pong response
+                    return Ok(());
+                }
+            }
+
+            if start.elapsed().as_secs() >= timeout_secs {
+                bail!("Timeout waiting for MCR to be ready after {} seconds", timeout_secs);
+            }
+
+            thread::sleep(Duration::from_millis(100));
+        }
     }
 
     /// Shutdown gracefully and get final stats

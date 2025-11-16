@@ -44,6 +44,8 @@ pub enum CliCommand {
     Stats,
     /// List all worker processes
     ListWorkers,
+    /// Health check - test if supervisor is ready
+    Ping,
     /// Log level control
     LogLevel {
         #[clap(subcommand)]
@@ -160,6 +162,7 @@ pub fn build_command(cli_command: CliCommand) -> Result<multicast_relay::Supervi
         CliCommand::ListRules => multicast_relay::SupervisorCommand::ListRules,
         CliCommand::Stats => multicast_relay::SupervisorCommand::GetStats,
         CliCommand::ListWorkers => multicast_relay::SupervisorCommand::ListWorkers,
+        CliCommand::Ping => multicast_relay::SupervisorCommand::Ping,
         CliCommand::LogLevel { action } => match action {
             LogLevelAction::Get => multicast_relay::SupervisorCommand::GetLogLevels,
             LogLevelAction::Set {
