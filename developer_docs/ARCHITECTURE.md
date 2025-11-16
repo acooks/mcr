@@ -44,7 +44,7 @@ The data plane is the performance-critical heart of the application.
 
 - **Ingress Path (`io_uring` + `AF_PACKET`):**
   - **Problem:** For MCR's role as an RPF-bypassing relay, relying on the kernel's standard IP/UDP stack for ingress processing is problematic. Features like Reverse Path Forwarding (RPF) checks, while crucial for security, can prevent valid multicast traffic from unroutable sources from ever reaching userspace.
-  - **Solution:** Packet reception is handled using `AF_PACKET` sockets to bypass the kernel's IP/UDP stack and RPF checks.
+  - **Solution:** Packet reception is handled using `AF_PACKET` sockets to bypass the kernel's IP/UDP stack and RPF checks. Crucially, `AF_PACKET` enables MCR to receive raw frames even on network interfaces that **do not have an IP address assigned**, providing flexibility for highly isolated network segments.
   - The I/O is driven by the `tokio-uring` runtime, which uses the `io_uring` Linux API. This minimizes system call overhead by submitting and completing I/O operations in batches. `AF_PACKET` provides MCR with raw, unfiltered access to Ethernet frames, enabling granular control and custom Layer 2/3/4 processing independent of the kernel's higher-level network policies. This low-level approach necessitates MCR to perform its own packet parsing and re-transmission with newly constructed IP/UDP headers, ensuring clean and compliant egress traffic.
 
 - **Filtering and Demultiplexing:**
