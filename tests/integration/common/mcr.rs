@@ -13,6 +13,7 @@ pub struct McrInstance {
     process: Child,
     control_socket: PathBuf,
     log_file: PathBuf,
+    interface: String,
 }
 
 impl McrInstance {
@@ -57,11 +58,14 @@ impl McrInstance {
 
         // Redirect output to log file
         let log_file_clone = log_file.clone();
+        println!("[DEBUG] Spawning MCR process...");
         let mut child = cmd.spawn().context("Failed to spawn MCR process")?;
+        println!("[DEBUG] MCR process spawned with PID: {}", child.id());
 
         // Capture stdout/stderr to log file
         let stdout = child.stdout.take().context("Failed to get stdout")?;
         let stderr = child.stderr.take().context("Failed to get stderr")?;
+        println!("[DEBUG] Captured stdout/stderr, starting logging thread");
 
         thread::spawn(move || {
             use std::io::{BufRead, BufReader, Write};
@@ -105,6 +109,7 @@ impl McrInstance {
             process: child,
             control_socket: socket_path,
             log_file: PathBuf::from(log_file),
+            interface: interface.to_string(),
         })
     }
 
@@ -125,12 +130,15 @@ impl McrInstance {
         // Build outputs string
         let outputs_str = outputs.join(",");
 
+        println!("[DEBUG] Adding rule: interface={} input={}:{} outputs={}",
+                 &self.interface, input_parts[0], input_parts[1], outputs_str);
+
         let output = Command::new(control_bin)
             .arg("--socket-path")
             .arg(&self.control_socket)
             .arg("add")
             .arg("--input-interface")
-            .arg("veth0p") // TODO: Make this configurable
+            .arg(&self.interface)
             .arg("--input-group")
             .arg(input_parts[0])
             .arg("--input-port")
@@ -159,13 +167,28 @@ impl McrInstance {
     /// This sends ping commands to the supervisor, which broadcasts them to all
     /// data plane workers. We need multiple successful pings to ensure workers
     /// have had time to initialize their event loops and process commands.
-    pub fn wait_until_ready(&self, timeout_secs: u64) -> Result<()> {
+    pub fn wait_until_ready(&mut self, timeout_secs: u64) -> Result<()> {
         let control_bin = binary_path("control_client");
         let start = std::time::Instant::now();
         let mut successful_pings = 0;
         const REQUIRED_PINGS: u32 = 3; // Need 3 consecutive successful pings
 
+        println!("[DEBUG] Starting readiness check, will send pings for up to {} seconds", timeout_secs);
+
         loop {
+            // Check if process is still alive
+            match self.process.try_wait() {
+                Ok(Some(status)) => {
+                    bail!("MCR process exited with status: {}", status);
+                }
+                Ok(None) => {
+                    // Still running, good
+                }
+                Err(e) => {
+                    bail!("Error checking process status: {}", e);
+                }
+            }
+
             let output = Command::new(&control_bin)
                 .arg("--socket-path")
                 .arg(&self.control_socket)
@@ -175,15 +198,19 @@ impl McrInstance {
             if let Ok(output) = output {
                 if output.status.success() {
                     successful_pings += 1;
+                    println!("[DEBUG] Ping successful ({}/{})", successful_pings, REQUIRED_PINGS);
                     if successful_pings >= REQUIRED_PINGS {
                         // Got enough successful pongs - workers should be ready
+                        println!("[DEBUG] MCR is ready!");
                         return Ok(());
                     }
                 } else {
+                    println!("[DEBUG] Ping failed: {}", String::from_utf8_lossy(&output.stderr));
                     // Reset counter on failure
                     successful_pings = 0;
                 }
             } else {
+                println!("[DEBUG] Ping command failed to execute");
                 successful_pings = 0;
             }
 

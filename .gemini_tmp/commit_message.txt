@@ -1,5 +1,19 @@
-docs: Consolidate devlog and remove strategy documents
+docs: Strengthen AF_PACKET justification in ARCHITECTURE.md
 
-Concatenated the content of `.devlog_draft_2025-11-07.md` into `DEVLOG.md` to centralize development logs and removed the temporary draft file.
+Enhances the "Ingress Path (`io_uring` + `AF_PACKET`)" section in
+`developer_docs/ARCHITECTURE.md` to provide a more robust justification
+for the architectural choice of `AF_PACKET`.
 
-Also removed the entire `strategy/` directory and its contents, as these documents (business strategy, market analysis, GTM plans) are not considered part of the source code repository and are better suited for a separate documentation system.
+This update directly addresses potential concerns about bypassing the
+kernel's IP stack by:
+- Adding a problem statement that clarifies why a bypass is necessary for
+  MCR's specific RPF-bypassing role.
+- Emphasizing the granular control and raw access `AF_PACKET` provides,
+  enabling custom Layer 2/3/4 processing.
+- Acknowledging the trade-offs and explaining how MCR manages them (e.g.,
+  by performing its own parsing and re-transmitting clean, compliant
+  egress packets).
+
+This makes the documentation more proactive in explaining the design
+rationale and counters arguments regarding fragility or loss of kernel
+benefits.

@@ -49,6 +49,8 @@ fn send_packets(
         anyhow::bail!("Traffic generator failed");
     }
 
+    println!("[DEBUG] Traffic generator stdout: {}", String::from_utf8_lossy(&output.stdout));
+
     Ok(())
 }
 
@@ -440,8 +442,9 @@ async fn test_tree_fanout_1_to_3() -> Result<()> {
     // Print results
     println!("\n=== MCR-1 Results (Head-End Replicator) ===");
     println!(
-        "Ingress: matched={} egr_sent={}",
-        stats1.ingress.matched, stats1.ingress.egr_sent
+        "Ingress: recv={} matched={} egr_sent={} filtered={} no_match={}",
+        stats1.ingress.recv, stats1.ingress.matched, stats1.ingress.egr_sent,
+        stats1.ingress.filtered, stats1.ingress.no_match
     );
     println!(
         "Egress: sent={} ch_recv={}",

@@ -14,7 +14,7 @@ use tokio::process::{Child, Command};
 use tokio::time::{sleep, Duration};
 
 use crate::logging::{AsyncConsumer, Facility, Logger, MPSCRingBuffer};
-use crate::{log_info, log_warning, ForwardingRule, RelayCommand};
+use crate::{log_info, log_warning, ForwardingRule, RelayCommand, Response};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 const INITIAL_BACKOFF_MS: u64 = 250;
@@ -857,16 +857,14 @@ async fn handle_client(
         &facility_min_levels,
     );
 
-    // Send response to client
-    let response_bytes = serde_json::to_vec(&response)?;
-    client_stream.write_all(&response_bytes).await?;
-
-    // Handle async actions
+    // Handle async actions BEFORE sending response for Ping
+    let mut final_response = response;
     match action {
         CommandAction::None => {
             // Nothing to do
         }
         CommandAction::BroadcastToDataPlane(relay_cmd) => {
+            let is_ping = matches!(relay_cmd, RelayCommand::Ping);
             let cmd_bytes = serde_json::to_vec(&relay_cmd)?;
 
             // Get cmd stream pairs from WorkerManager
@@ -875,26 +873,85 @@ async fn handle_client(
                 manager.get_all_dp_cmd_streams()
             };
 
-            // Send to both ingress and egress streams for each worker
-            for (ingress_stream, egress_stream) in stream_pairs {
-                // Send to ingress
-                let cmd_bytes_clone = cmd_bytes.clone();
-                tokio::spawn(async move {
-                    let mut stream = ingress_stream.lock().await;
-                    let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
-                    let _ = framed.send(cmd_bytes_clone.into()).await;
-                });
+            if is_ping {
+                // For ping, wait for all sends to complete and verify success
+                let mut send_tasks = Vec::new();
 
-                // Send to egress
-                let cmd_bytes_clone = cmd_bytes.clone();
-                tokio::spawn(async move {
-                    let mut stream = egress_stream.lock().await;
-                    let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
-                    let _ = framed.send(cmd_bytes_clone.into()).await;
-                });
+                for (ingress_stream, egress_stream) in stream_pairs {
+                    // Send to ingress
+                    let cmd_bytes_clone = cmd_bytes.clone();
+                    let task = tokio::spawn(async move {
+                        let mut stream = ingress_stream.lock().await;
+                        let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
+                        framed.send(cmd_bytes_clone.into()).await
+                    });
+                    send_tasks.push(task);
+
+                    // Send to egress
+                    let cmd_bytes_clone = cmd_bytes.clone();
+                    let task = tokio::spawn(async move {
+                        let mut stream = egress_stream.lock().await;
+                        let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
+                        framed.send(cmd_bytes_clone.into()).await
+                    });
+                    send_tasks.push(task);
+                }
+
+                // Wait for all sends and check for errors
+                let total_streams = send_tasks.len();
+                let mut ready_count = 0;
+                for task in send_tasks {
+                    match task.await {
+                        Ok(Ok(_)) => {
+                            // Send succeeded - worker stream is ready
+                            ready_count += 1;
+                        }
+                        Ok(Err(e)) => {
+                            eprintln!("[PING] Failed to send ping to worker: {}", e);
+                        }
+                        Err(e) => {
+                            eprintln!("[PING] Task join error: {}", e);
+                        }
+                    }
+                }
+
+                if ready_count == total_streams {
+                    final_response = Response::Success(format!(
+                        "pong: {}/{} worker streams ready",
+                        ready_count, total_streams
+                    ));
+                } else {
+                    final_response = Response::Error(format!(
+                        "Only {}/{} worker streams ready",
+                        ready_count, total_streams
+                    ));
+                }
+            } else {
+                // For non-ping commands, fire and forget
+                for (ingress_stream, egress_stream) in stream_pairs {
+                    // Send to ingress
+                    let cmd_bytes_clone = cmd_bytes.clone();
+                    tokio::spawn(async move {
+                        let mut stream = ingress_stream.lock().await;
+                        let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
+                        let _ = framed.send(cmd_bytes_clone.into()).await;
+                    });
+
+                    // Send to egress
+                    let cmd_bytes_clone = cmd_bytes.clone();
+                    tokio::spawn(async move {
+                        let mut stream = egress_stream.lock().await;
+                        let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
+                        let _ = framed.send(cmd_bytes_clone.into()).await;
+                    });
+                }
             }
         }
     }
+
+    // Send final response to client
+    let response_bytes = serde_json::to_vec(&final_response)?;
+    client_stream.write_all(&response_bytes).await?;
 
     Ok(())
 }
