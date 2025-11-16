@@ -43,8 +43,9 @@ The data plane is the performance-critical heart of the application.
 - **Core Affinity:** The application is multi-threaded, but not in a traditional sense. It creates a dedicated OS thread for each CPU core it intends to use and pins each thread to its specific core. Each of these threads runs an independent, single-threaded `tokio` runtime. This ensures that a packet is processed on the same core that received it, maximizing CPU cache locality.
 
 - **Ingress Path (`io_uring` + `AF_PACKET`):**
-  - Packet reception is handled using `AF_PACKET` sockets to bypass the kernel's IP/UDP stack and RPF checks.
-  - The I/O is driven by the `tokio-uring` runtime, which uses the `io_uring` Linux API. This minimizes system call overhead by submitting and completing I/O operations in batches.
+  - **Problem:** For MCR's role as an RPF-bypassing relay, relying on the kernel's standard IP/UDP stack for ingress processing is problematic. Features like Reverse Path Forwarding (RPF) checks, while crucial for security, can prevent valid multicast traffic from unroutable sources from ever reaching userspace.
+  - **Solution:** Packet reception is handled using `AF_PACKET` sockets to bypass the kernel's IP/UDP stack and RPF checks.
+  - The I/O is driven by the `tokio-uring` runtime, which uses the `io_uring` Linux API. This minimizes system call overhead by submitting and completing I/O operations in batches. `AF_PACKET` provides MCR with raw, unfiltered access to Ethernet frames, enabling granular control and custom Layer 2/3/4 processing independent of the kernel's higher-level network policies. This low-level approach necessitates MCR to perform its own packet parsing and re-transmission with newly constructed IP/UDP headers, ensuring clean and compliant egress traffic.
 
 - **Filtering and Demultiplexing:**
   - **Hardware Filtering:** The primary filtering is done by the NIC hardware. For each multicast group we need to receive, a standard `AF_INET` "helper" socket is created solely to trigger the kernel to send an IGMP Join and program the NIC's MAC address filter.
