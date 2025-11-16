@@ -74,7 +74,10 @@ The control plane provides the mechanism for runtime configuration and monitorin
 
 - **(D25) Strict Protocol Versioning:** The control plane protocol will use a strict, fail-fast versioning scheme. A single, shared `PROTOCOL_VERSION` constant will be defined and compiled into both the server and client. The first message on any new connection must be a `VersionCheck` from the client. The server will compare the client's version to its own; if they do not match exactly, the server will respond with a `VersionMismatch` error and close the connection. Any change to the JSON protocol requires incrementing the shared `PROTOCOL_VERSION` constant.
 
-- **(D29) Non-Blocking Command Dispatch:** Communication from the Supervisor to the data plane worker processes will use bounded MPSC channels. The Supervisor will use a non-blocking `try_send()` operation to dispatch commands. If a worker's command channel is full, `try_send()` will fail immediately, and this failure will be propagated back to the operator as an immediate "Worker busy or unresponsive" error, ensuring the control plane remains responsive.
+- **(D29) Command Dispatch via Unix Sockets:** Communication from the Supervisor to the data plane worker processes uses a dedicated `UnixStream` socket pair for each worker.
+  - The Supervisor serializes commands (e.g., `AddRule`) into a length-prefixed JSON payload and writes them to its end of the socket using its `tokio` runtime.
+  - The worker's `io_uring` runtime polls its end of the socket. When data arrives, a command reader parses the length-prefixed JSON back into a command struct for processing.
+  - This mechanism acts as a bridge between the supervisor's `tokio`-based control plane and the worker's `io_uring`-based data plane.
 
 ## 5. Monitoring and Hotspot Management
 
@@ -83,6 +86,16 @@ The control plane provides the mechanism for runtime configuration and monitorin
 - **(D27) Custom Observability via Control Plane:** The application will provide comprehensive observability through its control plane, compensating for the lack of visibility from standard networking tools like `netstat`. A `ListRules` command will expose the forwarding table, and a `GetStats` command will expose a detailed set of metrics with per-core, per-rule, per-buffer-pool, and per-destination granularity.
 
 - **(D28) On-Demand Packet Tracing:** The application will implement a low-impact, on-demand packet tracing capability. Tracing will be configurable on a per-rule basis via control plane commands (`EnableTrace`, `DisableTrace`, `GetTrace`) and disabled by default. Each data plane worker will maintain a pre-allocated, in-memory ring buffer to store key diagnostic events for packets matching an enabled rule. The `GetTrace` command will retrieve these events, providing a detailed, chronological log of a packet's lifecycle or the reason for its drop.
+
+## 5A. Logging Architecture
+
+Worker processes do not log directly to the console or to files. Instead, a simple and robust pipe-based mechanism is used to centralize logging in the supervisor.
+
+- **Pipe Redirection:** When the Supervisor process spawns a new worker, it creates a standard Unix pipe. The worker process's standard error (`stderr`) stream is redirected to the "write end" of this pipe.
+- **Log Aggregation:** The Supervisor holds the "read end" of the pipe for each worker. It uses its main event loop to asynchronously monitor all pipes for data.
+- **Log Flow:** When a worker writes a log message (e.g., via `eprintln!`), the operating system sends that data through the pipe. The Supervisor reads the data, prepends it with worker-specific context (e.g., `[Worker-1]`), and prints the final message to its own standard output.
+
+This design decouples the high-performance workers from the slower I/O of logging. Workers can emit logs as a fast "fire-and-forget" operation, while the supervisor handles the slower aggregation and output tasks.
 
 ## 6. Memory Management
 
@@ -98,8 +111,9 @@ The control plane provides the mechanism for runtime configuration and monitorin
 
 ## 8. Security and Privilege Model
 
-- **(D24) Privilege Separation:** The application uses a multi-process architecture to minimize the attack surface.
-  - The **Supervisor Process** is the only component that runs with elevated privileges (`CAP_NET_RAW`). Its sole responsibilities are managing the lifecycle of the unprivileged worker processes and performing privileged operations (e.g., creating `AF_PACKET` sockets).
+- **(D24) Privilege Separation (Target Architecture):** The application is designed to use a multi-process architecture to minimize attack surface and operate with least-privilege.
+  - The **Supervisor Process** is intended to be the only component that runs with elevated privileges (`CAP_NET_RAW`). Its sole responsibilities are managing the lifecycle of the unprivileged worker processes and performing privileged operations (e.g., creating `AF_PACKET` sockets).
   - The **Control Plane Process** runs as an unprivileged user. It handles all parsing of potentially untrusted user input from the JSON-RPC interface.
-  - The **Data Plane Worker Processes** run as an unprivileged user. They handle all high-volume packet processing. They receive the necessary sockets from the Supervisor via file descriptor passing and never require privileges themselves.
+  - The **Data Plane Worker Processes** should run as a completely unprivileged user. They are intended to handle all high-volume packet processing after receiving the necessary sockets from the Supervisor via file descriptor passing.
+  - **Current Implementation Status:** The Control Plane correctly drops privileges. However, the Data Plane workers currently create their own `AF_PACKET` sockets and therefore must retain `CAP_NET_RAW`, deviating from the target architecture. Migrating socket creation to the Supervisor and using file descriptor passing to achieve a fully unprivileged data plane is a high-priority roadmap item.
 - **(D20) DDoS Amplification Risk (Trusted Network & QoS Mitigation):** The risk of DDoS amplification from external, malicious actors is considered mitigated by the operational requirement that the relay's ingress interfaces are connected only to physically secured, trusted network segments. The risk of accidental overload of a unicast destination due to misconfiguration is fully mitigated by the existing advanced QoS design (D13), which allows for the classification and rate-limiting/prioritized dropping of high-bandwidth flows. No additional security-specific mechanisms are required for this threat vector.
