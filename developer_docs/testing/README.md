@@ -1,15 +1,18 @@
-# Testing Strategy
+# Testing
 
-This directory contains documentation outlining the high-level testing philosophy and the tiered strategy employed for the Multicast Relay (MCR) project. It guides developers on how to approach, write, and maintain tests across different levels of the application.
+This directory contains all documentation related to testing the Multicast Relay (MCR) application.
 
-*   **[Developer Testing Strategy](./DEVELOPER_TESTING_STRATEGY.md):** An in-depth guide for developers, detailing the unit, integration, and end-to-end testing approaches, along with best practices for contributing tests.
+## Core Documents
 
-## Test Coverage & Improvement
+*   **[Developer Testing Strategy](./DEVELOPER_TESTING_STRATEGY.md):** The high-level "why." This document outlines the philosophy, goals, and tiered strategy (Unit, Integration, E2E) for testing MCR. Start here to understand the team's approach to quality.
 
-*   **[Test Coverage Analysis](./test_coverage_analysis.md):** A detailed analysis of current test coverage, identifying critical gaps and areas for improvement across various modules.
-*   **[Test Coverage Improvement Plan](./improvement_plan.md):** A pragmatic, prioritized strategy and action plan for systematically increasing test coverage over time.
+*   **[Practical Testing Guide](./PRACTICAL_TESTING_GUIDE.md):** The hands-on "how-to." This guide provides the specific `just` commands, workflows, and debugging tips needed to actually run the test suites. Use this as a day-to-day reference.
 
-## Test Framework
+## Supporting Documents
 
-*   **[Test Framework Proposal](./test_framework_proposal.md):** A strategic proposal for a `just`-based workflow that separates build and test phases, ensuring consistent and reliable test execution.
-*   **[Network Namespace Test Framework](./netns_test_framework.md):** A detailed technical plan for running Rust-based integration tests in isolated network namespaces.
+These documents provide deeper dives into specific aspects of the MCR testing strategy and framework.
+
+*   **[Test Coverage Analysis](./test_coverage_analysis.md):** A detailed analysis of current Rust code coverage, identifying critical gaps and areas for improvement.
+*   **[Test Coverage Improvement Plan](./improvement_plan.md):** A pragmatic, prioritized action plan for systematically increasing test coverage over time.
+*   **[Test Framework Proposal](./test_framework_proposal.md):** The strategic proposal for a `just`-based workflow that separates build and test phases, ensuring consistent and reliable test execution.
+*   **[Network Namespace Test Framework](./netns_test_framework.md):** The technical plan for implementing the `netns` wrapper script and helpers for Rust integration tests.
