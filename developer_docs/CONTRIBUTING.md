@@ -80,59 +80,23 @@ This project does not prescribe specific developer environment setups or pin exa
 
 ## Local Development Workflow
 
+This project uses `just` as its command runner to orchestrate all development and quality checks. The workflow is designed to be simple, consistent, and repeatable.
 
+### 1. Day-to-Day: Run Checks
 
-This project uses a set of standard Rust tools to ensure code quality and consistency. The workflow is designed to be simple and repeatable.
-
-
-
-### 1. One-Time Setup: Install Developer Tools
-
-
-
-The only prerequisite is the standard [Rust toolchain](https://rustup.rs).
-
-
-
-Once you have `cargo` installed, run the following command from the root of the repository to install all the necessary developer tools (like `just`, `cargo-audit`, etc.):
-
-
+To run the full suite of quality checks, mirroring the CI pipeline, use the `check` command from the project root:
 
 ```bash
-
-cargo install --path ./tools
-
-```
-
-
-
-This command reads the tool manifest at `./tools/Cargo.toml` and installs the exact versions of the tools pinned there. You only need to do this once, or again if the tool manifest is updated.
-
-
-
-### 2. Day-to-Day: Run Checks
-
-
-
-After the one-time setup, you can run the full suite of quality checks using a single command:
-
-
-
-```bash
-
 just check
-
 ```
 
-
-
-This command will format, lint, build, and test the project, mirroring the CI pipeline and ensuring your changes are ready for submission. You can see the `justfile` for other available commands like `just test`.
+This command will format, lint, build, and test the project, ensuring your changes adhere to all standards. For other available commands (e.g., `just test-unit`, `just test-all`), refer to the `justfile`.
 
 ## Enforcement
 
 To ensure all code adheres to these standards, we will implement automated checks:
 
-1.  **CI Pipeline:** A Continuous Integration pipeline will automatically run `cargo fmt --check`, `cargo clippy`, and `cargo test` on every pull request. Pull requests that fail these checks cannot be merged.
-2.  **Pre-commit Hooks (Recommended):** It is highly recommended that developers use a pre-commit hook to run these checks locally before they even commit. This provides faster feedback and helps keep the repository history clean.
+1.  **CI Pipeline:** A Continuous Integration pipeline will automatically run `just check` on every pull request. Pull requests that fail these checks cannot be merged.
+2.  **Pre-commit Hooks (Recommended):** It is highly recommended that developers use a pre-commit hook to run `just check` locally before they even commit. This provides faster feedback and helps keep the repository history clean.
 
 By following these guidelines, we can build a robust, secure, and maintainable application.
