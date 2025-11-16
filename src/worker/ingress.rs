@@ -105,10 +105,13 @@ impl EgressItemFactory<ManagedBuffer> for EgressWorkItem {
 
 // --- Generic IngressLoop and its implementation ---
 
+// Maximum multicast groups per helper socket to avoid ENOBUFS
+const GROUPS_PER_HELPER_SOCKET: usize = 20;
+
 pub struct IngressLoop<P, C> {
     af_packet_socket: OwnedFd,
-    helper_sockets: HashMap<String, StdUdpSocket>,
-    joined_groups: HashMap<String, HashSet<Ipv4Addr>>,
+    helper_sockets: HashMap<String, Vec<StdUdpSocket>>,
+    joined_groups: HashMap<String, Vec<HashSet<Ipv4Addr>>>,
     ring: IoUring,
     buffer_pool: P,
     rules: HashMap<(Ipv4Addr, u16), Arc<ForwardingRule>>,
@@ -132,33 +135,64 @@ where
         let key = (rule.input_group, rule.input_port);
         self.rules.insert(key, rule.clone());
 
-        // Get or create helper socket for this interface (one socket per interface)
         let interface_name = rule.input_interface.clone();
+        let group = rule.input_group;
+
+        // Ensure socket pool exists for this interface
         if !self.helper_sockets.contains_key(&interface_name) {
-            let socket = create_bound_udp_socket()
-                .expect("Failed to create helper socket");
-            self.helper_sockets.insert(interface_name.clone(), socket);
-            self.joined_groups.insert(interface_name.clone(), HashSet::new());
-            self.logger.info(
-                Facility::Ingress,
-                &format!("Created helper socket for interface {}", interface_name),
-            );
+            self.helper_sockets.insert(interface_name.clone(), Vec::new());
+            self.joined_groups.insert(interface_name.clone(), Vec::new());
         }
 
-        // Join multicast group if not already joined
-        let groups = self.joined_groups.get_mut(&interface_name).unwrap();
-        if !groups.contains(&rule.input_group) {
-            let socket = self.helper_sockets.get(&interface_name).unwrap();
-            join_multicast_group(socket, rule.input_group, &interface_name)?;
-            groups.insert(rule.input_group);
+        // Get mutable references to socket and group tracking for this interface
+        let sockets = self.helper_sockets.get_mut(&interface_name).unwrap();
+        let socket_groups = self.joined_groups.get_mut(&interface_name).unwrap();
 
+        // Check if this group is already joined on any socket
+        let mut already_joined = false;
+        for groups in socket_groups.iter() {
+            if groups.contains(&group) {
+                already_joined = true;
+                break;
+            }
+        }
+
+        if !already_joined {
+            // Calculate which socket should handle this group
+            // Use round-robin distribution based on total group count
+            let total_groups: usize = socket_groups.iter().map(|s| s.len()).sum();
+            let socket_idx = total_groups / GROUPS_PER_HELPER_SOCKET;
+
+            // Create new socket if needed
+            while sockets.len() <= socket_idx {
+                let new_socket = create_bound_udp_socket()
+                    .expect("Failed to create helper socket");
+                sockets.push(new_socket);
+                socket_groups.push(HashSet::new());
+                self.logger.info(
+                    Facility::Ingress,
+                    &format!(
+                        "Created helper socket #{} for interface {}",
+                        sockets.len(),
+                        interface_name
+                    ),
+                );
+            }
+
+            // Join group on the assigned socket
+            join_multicast_group(&sockets[socket_idx], group, &interface_name)?;
+            socket_groups[socket_idx].insert(group);
+
+            let total_groups: usize = socket_groups.iter().map(|s| s.len()).sum();
             self.logger.info(
                 Facility::Ingress,
                 &format!(
-                    "IGMP join successful: {} on {} (total groups: {})",
-                    rule.input_group,
+                    "IGMP join successful: {} on {} (socket #{}, groups on socket: {}, total groups: {})",
+                    group,
                     interface_name,
-                    groups.len()
+                    socket_idx + 1,
+                    socket_groups[socket_idx].len(),
+                    total_groups
                 ),
             );
         }
@@ -193,20 +227,24 @@ where
                     .any(|r| r.input_group == rule.input_group && r.input_interface == rule.input_interface);
 
                 if !group_still_needed {
-                    // Leave the multicast group
-                    if let Some(groups) = self.joined_groups.get_mut(&rule.input_interface) {
-                        if groups.remove(&rule.input_group) {
-                            if let Some(socket) = self.helper_sockets.get(&rule.input_interface) {
-                                if let Err(e) = leave_multicast_group(socket, rule.input_group, &rule.input_interface) {
-                                    self.logger.warning(
-                                        Facility::Ingress,
-                                        &format!("Failed to leave multicast group {}: {}", rule.input_group, e),
-                                    );
-                                } else {
-                                    self.logger.info(
-                                        Facility::Ingress,
-                                        &format!("Left multicast group: {} on {}", rule.input_group, rule.input_interface),
-                                    );
+                    // Leave the multicast group - need to find which socket has this group
+                    if let Some(socket_groups) = self.joined_groups.get_mut(&rule.input_interface) {
+                        if let Some(sockets) = self.helper_sockets.get(&rule.input_interface) {
+                            // Find which socket has this group
+                            for (idx, groups) in socket_groups.iter_mut().enumerate() {
+                                if groups.remove(&rule.input_group) {
+                                    if let Err(e) = leave_multicast_group(&sockets[idx], rule.input_group, &rule.input_interface) {
+                                        self.logger.warning(
+                                            Facility::Ingress,
+                                            &format!("Failed to leave multicast group {}: {}", rule.input_group, e),
+                                        );
+                                    } else {
+                                        self.logger.info(
+                                            Facility::Ingress,
+                                            &format!("Left multicast group: {} on {} (socket #{})", rule.input_group, rule.input_interface, idx + 1),
+                                        );
+                                    }
+                                    break;
                                 }
                             }
                         }
@@ -680,6 +718,12 @@ fn create_bound_udp_socket() -> Result<StdUdpSocket> {
 
     // Enable SO_REUSEADDR to allow multiple multicast memberships
     socket.set_reuse_address(true)?;
+
+    // Set large socket buffers to support 100+ multicast group memberships
+    // Default kernel buffers (~208KB) are insufficient for 40+ groups
+    // 8MB should support ~200 concurrent multicast groups
+    socket.set_recv_buffer_size(8 * 1024 * 1024)?;
+    socket.set_send_buffer_size(8 * 1024 * 1024)?;
 
     socket.bind(&socket2::SockAddr::from(std::net::SocketAddrV4::new(
         Ipv4Addr::UNSPECIFIED,
