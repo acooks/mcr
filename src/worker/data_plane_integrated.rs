@@ -15,7 +15,7 @@ use crate::DataPlaneConfig;
 use anyhow::{Context, Result};
 use crossbeam_queue::SegQueue;
 use std::io::Write;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{FromRawFd, OwnedFd};
 use std::sync::Arc;
 use std::thread;
 
@@ -107,10 +107,8 @@ pub fn run_data_plane(
                 std::io::stderr().flush().ok();
 
                 // Queue with wakeup strategy signaling
-                let egress_channel = EgressQueueDirect::new(
-                    egress_queue_for_ingress,
-                    wakeup_strategy_for_ingress,
-                );
+                let egress_channel =
+                    EgressQueueDirect::new(egress_queue_for_ingress, wakeup_strategy_for_ingress);
 
                 eprintln!("[ingress-thread] About to create IngressLoop");
                 std::io::stderr().flush().ok();

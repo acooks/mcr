@@ -226,11 +226,16 @@ impl HybridWakeup {
         // Switch if needed
         let current = self.current_strategy.load(Ordering::Relaxed);
         if current != target_strategy {
-            self.current_strategy.store(target_strategy, Ordering::Relaxed);
+            self.current_strategy
+                .store(target_strategy, Ordering::Relaxed);
             eprintln!(
                 "[HybridWakeup] Rate: {} pps, switching to {}",
                 rate_pps,
-                if target_strategy == STRATEGY_SPIN { "SPIN" } else { "EVENTFD" }
+                if target_strategy == STRATEGY_SPIN {
+                    "SPIN"
+                } else {
+                    "EVENTFD"
+                }
             );
 
             // If switching FROM eventfd TO spin, wake up any blocked reader

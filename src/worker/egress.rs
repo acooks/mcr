@@ -62,6 +62,7 @@ pub struct EgressLoop<B, P> {
     ring: IoUring,
     sockets: HashMap<(String, SocketAddr), (OwnedFd, Ipv4Addr)>,
     egress_queue: Vec<B>,
+    #[allow(dead_code)]
     buffer_pool: P,
     config: EgressConfig,
     stats: EgressStats,
@@ -101,7 +102,9 @@ where
             Facility::Egress,
             &format!(
                 "New destination added: {} -> {} (total sockets: {})",
-                source_ip, dest_addr, self.sockets.len()
+                source_ip,
+                dest_addr,
+                self.sockets.len()
             ),
         );
 
@@ -130,7 +133,8 @@ where
     fn submit_send(&mut self, packet: B) -> Result<()> {
         // Log first packet
         if !self.first_packet_logged {
-            self.logger.debug(Facility::Egress, "First packet submitted");
+            self.logger
+                .debug(Facility::Egress, "First packet submitted");
             self.first_packet_logged = true;
         }
 
@@ -167,9 +171,7 @@ where
             Facility::Egress,
             &format!(
                 "Packet submitted: {} -> {} len={}",
-                key.0,
-                key.1,
-                payload_len
+                key.0, key.1, payload_len
             ),
         );
 
@@ -180,6 +182,7 @@ where
         self.process_cqe_batch()
     }
 
+    #[allow(dead_code)]
     fn reap_completions(&mut self, expected: usize) -> Result<usize> {
         let mut processed = self.process_cqe_batch()?;
         while processed < expected {
@@ -233,7 +236,10 @@ where
                     // Error
                     self.logger.error(
                         Facility::Egress,
-                        &format!("Command read error: {}", std::io::Error::from_raw_os_error(-result))
+                        &format!(
+                            "Command read error: {}",
+                            std::io::Error::from_raw_os_error(-result)
+                        ),
                     );
                 }
                 continue;
@@ -252,7 +258,10 @@ where
                 if self.stats.send_errors % 100 == 1 {
                     self.logger.error(
                         Facility::Egress,
-                        &format!("Send error: errno={} (total errors: {})", -result, self.stats.send_errors),
+                        &format!(
+                            "Send error: errno={} (total errors: {})",
+                            -result, self.stats.send_errors
+                        ),
                     );
                 }
             } else {
@@ -294,7 +303,6 @@ where
         self.egress_queue.is_empty()
     }
 
-
     /// Check if shutdown has been requested
     pub fn shutdown_requested(&self) -> bool {
         self.shutdown_requested
@@ -303,13 +311,16 @@ where
     /// Process commands from command reader buffer
     /// Returns true if shutdown was requested
     fn process_commands_from_buffer(&mut self, bytes_read: usize) -> anyhow::Result<bool> {
-        let commands = self.cmd_reader.process_bytes(&self.cmd_buffer[..bytes_read])
+        let commands = self
+            .cmd_reader
+            .process_bytes(&self.cmd_buffer[..bytes_read])
             .context("Failed to parse commands")?;
 
         for command in commands {
             match command {
                 RelayCommand::Shutdown => {
-                    self.logger.info(Facility::Egress, "Shutdown command received");
+                    self.logger
+                        .info(Facility::Egress, "Shutdown command received");
                     self.shutdown_requested = true;
                     return Ok(true);
                 }

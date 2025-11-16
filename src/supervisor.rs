@@ -39,6 +39,7 @@ struct Worker {
     // Control plane workers have ONE command stream
     ingress_cmd_stream: Option<Arc<tokio::sync::Mutex<UnixStream>>>,
     egress_cmd_stream: Option<Arc<tokio::sync::Mutex<UnixStream>>>,
+    #[allow(dead_code)]
     req_stream: Arc<tokio::sync::Mutex<UnixStream>>,
     #[cfg(not(feature = "testing"))]
     log_pipe: Option<std::os::unix::io::OwnedFd>, // Pipe for reading worker's stderr (JSON logs)
@@ -57,7 +58,7 @@ struct WorkerManager {
     fanout_group_id: u16,
 
     // Worker state
-    workers: HashMap<u32, Worker>, // keyed by PID
+    workers: HashMap<u32, Worker>,       // keyed by PID
     backoff_counters: HashMap<u32, u64>, // keyed by core_id (0 for CP, 1+ for DP)
 }
 
@@ -271,7 +272,13 @@ pub async fn spawn_data_plane_worker(
     relay_command_socket_path: PathBuf,
     fanout_group_id: u16,
     logger: &crate::logging::Logger,
-) -> Result<(Child, UnixStream, UnixStream, UnixStream, Option<std::os::unix::io::OwnedFd>)> {
+) -> Result<(
+    Child,
+    UnixStream,
+    UnixStream,
+    UnixStream,
+    Option<std::os::unix::io::OwnedFd>,
+)> {
     logger.info(
         Facility::Supervisor,
         &format!("Spawning Data Plane worker for core {}", core_id),
@@ -287,7 +294,7 @@ pub async fn spawn_data_plane_worker(
         (Some(read_fd.into_raw_fd()), Some(write_fd.into_raw_fd()))
     };
     #[cfg(feature = "testing")]
-    let (log_read_fd, log_write_fd): (Option<RawFd>, Option<RawFd>) = (None, None);
+    let (_log_read_fd, _log_write_fd): (Option<RawFd>, Option<RawFd>) = (None, None);
 
     // Create the supervisor-worker communication socket pair
     // This will be passed as FD 3 to the worker
@@ -366,13 +373,20 @@ pub async fn spawn_data_plane_worker(
     let ingress_cmd_supervisor_stream = create_and_send_socketpair(&supervisor_sock).await?;
     let egress_cmd_supervisor_stream = create_and_send_socketpair(&supervisor_sock).await?;
 
-    Ok((child, ingress_cmd_supervisor_stream, egress_cmd_supervisor_stream, req_supervisor_stream, log_pipe))
+    Ok((
+        child,
+        ingress_cmd_supervisor_stream,
+        egress_cmd_supervisor_stream,
+        req_supervisor_stream,
+        log_pipe,
+    ))
 }
 
 // --- WorkerManager Implementation ---
 
 impl WorkerManager {
     /// Create a new WorkerManager with the given configuration
+    #[allow(clippy::too_many_arguments)]
     fn new(
         uid: u32,
         gid: u32,
@@ -435,16 +449,17 @@ impl WorkerManager {
 
     /// Spawn a data plane worker for the given core
     async fn spawn_data_plane(&mut self, core_id: u32) -> Result<()> {
-        let (child, ingress_cmd_stream, egress_cmd_stream, req_stream, log_pipe) = spawn_data_plane_worker(
-            core_id,
-            self.uid,
-            self.gid,
-            self.interface.clone(),
-            self.relay_command_socket_path.clone(),
-            self.fanout_group_id,
-            &self.logger,
-        )
-        .await?;
+        let (child, ingress_cmd_stream, egress_cmd_stream, req_stream, _log_pipe) =
+            spawn_data_plane_worker(
+                core_id,
+                self.uid,
+                self.gid,
+                self.interface.clone(),
+                self.relay_command_socket_path.clone(),
+                self.fanout_group_id,
+                &self.logger,
+            )
+            .await?;
 
         let pid = child.id().unwrap();
         let ingress_cmd_stream_arc = Arc::new(tokio::sync::Mutex::new(ingress_cmd_stream));
@@ -597,7 +612,7 @@ impl WorkerManager {
         );
 
         // Signal all workers to shut down by sending explicit Shutdown command
-        for (_pid, worker) in &self.workers {
+        for worker in self.workers.values() {
             let cmd_bytes = serde_json::to_vec(&RelayCommand::Shutdown).unwrap();
 
             // Send to ingress stream if present
@@ -610,7 +625,10 @@ impl WorkerManager {
                     let mut stream = stream_mutex.lock().await;
                     let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
                     if let Err(e) = framed.send(cmd_bytes_clone.into()).await {
-                        eprintln!("[Supervisor] Failed to send Shutdown to {} ingress: {}", worker_type_desc, e);
+                        eprintln!(
+                            "[Supervisor] Failed to send Shutdown to {} ingress: {}",
+                            worker_type_desc, e
+                        );
                     }
                 });
             }
@@ -625,7 +643,10 @@ impl WorkerManager {
                     let mut stream = stream_mutex.lock().await;
                     let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
                     if let Err(e) = framed.send(cmd_bytes_clone.into()).await {
-                        eprintln!("[Supervisor] Failed to send Shutdown to {} egress: {}", worker_type_desc, e);
+                        eprintln!(
+                            "[Supervisor] Failed to send Shutdown to {} egress: {}",
+                            worker_type_desc, e
+                        );
                     }
                 });
             }
@@ -636,7 +657,10 @@ impl WorkerManager {
         log_info!(
             self.logger,
             Facility::Supervisor,
-            &format!("Waiting for {} workers to exit (timeout: {:?})", num_workers, timeout)
+            &format!(
+                "Waiting for {} workers to exit (timeout: {:?})",
+                num_workers, timeout
+            )
         );
 
         let shutdown_start = tokio::time::Instant::now();
@@ -712,15 +736,19 @@ impl WorkerManager {
 
     /// Get all data plane command streams for broadcasting
     /// Returns pairs of (ingress_stream, egress_stream) for each worker
-    fn get_all_dp_cmd_streams(&self) -> Vec<(Arc<tokio::sync::Mutex<UnixStream>>, Arc<tokio::sync::Mutex<UnixStream>>)> {
+    fn get_all_dp_cmd_streams(
+        &self,
+    ) -> Vec<(
+        Arc<tokio::sync::Mutex<UnixStream>>,
+        Arc<tokio::sync::Mutex<UnixStream>>,
+    )> {
+        #[allow(clippy::type_complexity)]
         self.workers
             .values()
             .filter(|w| matches!(w.worker_type, WorkerType::DataPlane { .. }))
-            .filter_map(|w| {
-                match (&w.ingress_cmd_stream, &w.egress_cmd_stream) {
-                    (Some(ingress), Some(egress)) => Some((ingress.clone(), egress.clone())),
-                    _ => None,
-                }
+            .filter_map(|w| match (&w.ingress_cmd_stream, &w.egress_cmd_stream) {
+                (Some(ingress), Some(egress)) => Some((ingress.clone(), egress.clone())),
+                _ => None,
             })
             .collect()
     }
@@ -745,9 +773,13 @@ impl WorkerManager {
 
     /// Spawn async task to consume JSON logs from worker's stderr pipe
     #[cfg(not(feature = "testing"))]
-    fn spawn_log_consumer(&self, worker_pid: u32, pipe_fd: &std::os::unix::io::OwnedFd) -> Result<()> {
-        use tokio::io::{AsyncBufReadExt, BufReader};
+    fn spawn_log_consumer(
+        &self,
+        worker_pid: u32,
+        pipe_fd: &std::os::unix::io::OwnedFd,
+    ) -> Result<()> {
         use std::os::unix::io::{FromRawFd, IntoRawFd};
+        use tokio::io::{AsyncBufReadExt, BufReader};
 
         // Duplicate the FD so we can convert to tokio File
         let dup_fd_owned = nix::unistd::dup(pipe_fd)?;
@@ -781,7 +813,9 @@ async fn handle_client(
     master_rules: Arc<Mutex<HashMap<String, ForwardingRule>>>,
     global_min_level: Arc<std::sync::atomic::AtomicU8>,
     facility_min_levels: Arc<
-        std::sync::RwLock<std::collections::HashMap<crate::logging::Facility, crate::logging::Severity>>,
+        std::sync::RwLock<
+            std::collections::HashMap<crate::logging::Facility, crate::logging::Severity>,
+        >,
     >,
 ) -> Result<()> {
     use crate::SupervisorCommand;
@@ -979,7 +1013,9 @@ pub async fn run(
         tokio::select! {
             // Shutdown signal received
             _ = &mut shutdown_rx => {
-                worker_manager.lock().unwrap().shutdown_all(Duration::from_secs(SHUTDOWN_TIMEOUT_SECS)).await;
+                let mut manager = worker_manager.lock().unwrap();
+                manager.shutdown_all(Duration::from_secs(SHUTDOWN_TIMEOUT_SECS)).await;
+                drop(manager);
                 break;
             }
 
@@ -1056,8 +1092,6 @@ async fn create_and_send_socketpair(supervisor_sock: &UnixStream) -> Result<Unix
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Instant;
-    use tempfile::tempdir;
 
     // --- Test Helpers ---
 

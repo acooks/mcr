@@ -37,7 +37,7 @@ pub struct IngressChannelSet {
 /// Channel set for egress thread communication
 pub struct EgressChannelSet {
     pub cmd_stream_fd: OwnedFd,
-    pub shutdown_event_fd: EventFd,  // For data path wakeup (from ingress)
+    pub shutdown_event_fd: EventFd, // For data path wakeup (from ingress)
 }
 
 // ... other code ...
@@ -308,12 +308,10 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
     }
 
     // Phase 2: Pipe-based JSON logging to stderr (shared memory deleted!)
-    let core_id = config
-        .core_id
-        .ok_or_else(|| {
-            eprintln!("[DataPlane] FATAL: core_id is None!");
-            anyhow::anyhow!("Data plane worker requires core_id")
-        })?;
+    let core_id = config.core_id.ok_or_else(|| {
+        eprintln!("[DataPlane] FATAL: core_id is None!");
+        anyhow::anyhow!("Data plane worker requires core_id")
+    })?;
 
     // Create a simple logger that writes JSON to stderr
     // (stderr is redirected to pipe by supervisor)
@@ -397,17 +395,14 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
         shutdown_event_fd: egress_shutdown_event_fd,
     };
 
-    eprintln!("[DataPlane] Channel sets created, calling run_data_plane_task directly (no bridge)...");
+    eprintln!(
+        "[DataPlane] Channel sets created, calling run_data_plane_task directly (no bridge)..."
+    );
     std::io::stderr().flush().ok();
 
     // Call run_data_plane_task directly - no more tokio bridge, no more async wrapper!
     // This function is synchronous and blocking, which is correct for our io_uring-based design.
-    lifecycle.run_data_plane_task(
-        config,
-        ingress_channels,
-        egress_channels,
-        logger,
-    )
+    lifecycle.run_data_plane_task(config, ingress_channels, egress_channels, logger)
 }
 
 #[cfg(test)]
@@ -515,7 +510,9 @@ mod tests {
             ) -> Result<()> {
                 // In a real test, we might block here indefinitely,
                 // but for the timeout test, returning Ok is sufficient.
-                eprintln!("MockWorkerLifecycle::run_data_plane_task starting, sleeping for 10 seconds");
+                eprintln!(
+                    "MockWorkerLifecycle::run_data_plane_task starting, sleeping for 10 seconds"
+                );
                 std::thread::sleep(std::time::Duration::from_secs(10));
                 eprintln!("MockWorkerLifecycle::run_data_plane_task completed after sleep");
                 Ok(())
@@ -529,6 +526,7 @@ mod tests {
         let config = DataPlaneConfig {
             uid: Some(current_uid),
             gid: Some(current_gid),
+            supervisor_pid: std::process::id(),
             core_id: Some(0),
             prometheus_addr: "127.0.0.1:9002".parse().unwrap(),
             input_interface_name: Some("lo".to_string()),
@@ -538,6 +536,7 @@ mod tests {
             output_port: None,
             output_interface: None,
             reporting_interval: 1,
+            fanout_group_id: None,
         };
 
         // Create socket pairs for the test
@@ -600,7 +599,8 @@ mod tests {
 
         assert!(
             result.is_err(),
-            "run_data_plane should not exit and should time out. Result: {:?}", result
+            "run_data_plane should not exit and should time out. Result: {:?}",
+            result
         );
 
         // Clean up the supervisor task

@@ -479,8 +479,18 @@ use std::os::fd::OwnedFd;
 ///
 /// The supervisor PID is included to prevent collisions when multiple MCR instances run
 /// concurrently (e.g., in different network namespaces for testing).
-pub fn shm_id_for_facility(supervisor_pid: u32, core_id: u8, facility: crate::logging::Facility) -> String {
-    format!("/mcr_{}_dp_c{}_{}", supervisor_pid, core_id, facility.as_str().to_lowercase())
+#[allow(dead_code)]
+pub fn shm_id_for_facility(
+    supervisor_pid: u32,
+    core_id: u8,
+    facility: crate::logging::Facility,
+) -> String {
+    format!(
+        "/mcr_{}_dp_c{}_{}",
+        supervisor_pid,
+        core_id,
+        facility.as_str().to_lowercase()
+    )
 }
 
 /// Header structure stored at the beginning of shared memory

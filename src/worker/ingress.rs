@@ -140,8 +140,10 @@ where
 
         // Ensure socket pool exists for this interface
         if !self.helper_sockets.contains_key(&interface_name) {
-            self.helper_sockets.insert(interface_name.clone(), Vec::new());
-            self.joined_groups.insert(interface_name.clone(), Vec::new());
+            self.helper_sockets
+                .insert(interface_name.clone(), Vec::new());
+            self.joined_groups
+                .insert(interface_name.clone(), Vec::new());
         }
 
         // Get mutable references to socket and group tracking for this interface
@@ -165,8 +167,7 @@ where
 
             // Create new socket if needed
             while sockets.len() <= socket_idx {
-                let new_socket = create_bound_udp_socket()
-                    .expect("Failed to create helper socket");
+                let new_socket = create_bound_udp_socket().expect("Failed to create helper socket");
                 sockets.push(new_socket);
                 socket_groups.push(HashSet::new());
                 self.logger.info(
@@ -212,7 +213,9 @@ where
 
     pub fn remove_rule(&mut self, rule_id: &str) -> Result<()> {
         // Find the rule before removing it so we can check if group should be left
-        let removed_rule = self.rules.iter()
+        let removed_rule = self
+            .rules
+            .iter()
             .find(|(_key, rule)| rule.rule_id == rule_id)
             .map(|(_, rule)| rule.clone());
 
@@ -223,8 +226,9 @@ where
         if removed > 0 {
             if let Some(rule) = removed_rule {
                 // Check if any remaining rules use this multicast group
-                let group_still_needed = self.rules.values()
-                    .any(|r| r.input_group == rule.input_group && r.input_interface == rule.input_interface);
+                let group_still_needed = self.rules.values().any(|r| {
+                    r.input_group == rule.input_group && r.input_interface == rule.input_interface
+                });
 
                 if !group_still_needed {
                     // Leave the multicast group - need to find which socket has this group
@@ -233,15 +237,27 @@ where
                             // Find which socket has this group
                             for (idx, groups) in socket_groups.iter_mut().enumerate() {
                                 if groups.remove(&rule.input_group) {
-                                    if let Err(e) = leave_multicast_group(&sockets[idx], rule.input_group, &rule.input_interface) {
+                                    if let Err(e) = leave_multicast_group(
+                                        &sockets[idx],
+                                        rule.input_group,
+                                        &rule.input_interface,
+                                    ) {
                                         self.logger.warning(
                                             Facility::Ingress,
-                                            &format!("Failed to leave multicast group {}: {}", rule.input_group, e),
+                                            &format!(
+                                                "Failed to leave multicast group {}: {}",
+                                                rule.input_group, e
+                                            ),
                                         );
                                     } else {
                                         self.logger.info(
                                             Facility::Ingress,
-                                            &format!("Left multicast group: {} on {} (socket #{})", rule.input_group, rule.input_interface, idx + 1),
+                                            &format!(
+                                                "Left multicast group: {} on {} (socket #{})",
+                                                rule.input_group,
+                                                rule.input_interface,
+                                                idx + 1
+                                            ),
                                         );
                                     }
                                     break;
@@ -301,8 +317,14 @@ where
 
     /// Process commands from command reader buffer
     /// Returns true if shutdown was requested.
-    fn process_commands_from_buffer(&mut self, bytes_read: usize, cmd_buffer: &[u8]) -> Result<bool> {
-        let commands = self.cmd_reader.process_bytes(&cmd_buffer[..bytes_read])
+    fn process_commands_from_buffer(
+        &mut self,
+        bytes_read: usize,
+        cmd_buffer: &[u8],
+    ) -> Result<bool> {
+        let commands = self
+            .cmd_reader
+            .process_bytes(&cmd_buffer[..bytes_read])
             .context("Failed to parse commands")?;
 
         for command in commands {
@@ -319,7 +341,8 @@ where
 
         // Log first packet received
         if !self.first_packet_logged {
-            self.logger.debug(Facility::Ingress, "First packet received");
+            self.logger
+                .debug(Facility::Ingress, "First packet received");
             self.first_packet_logged = true;
         }
 
@@ -354,7 +377,9 @@ where
             Facility::Ingress,
             &format!(
                 "Packet: dst={}:{} len={}",
-                headers.ipv4.dst_ip, headers.udp.dst_port, packet_data.len()
+                headers.ipv4.dst_ip,
+                headers.udp.dst_port,
+                packet_data.len()
             ),
         );
 
@@ -452,7 +477,8 @@ where
         eprintln!("[ingress-run] About to log 'Waiting for initial configuration'");
         std::io::stderr().flush().ok();
 
-        self.logger.info(Facility::Ingress, "Waiting for initial configuration...");
+        self.logger
+            .info(Facility::Ingress, "Waiting for initial configuration...");
 
         eprintln!("[ingress-run] Submitting command read and waiting for initial configuration");
         std::io::stderr().flush().ok();
@@ -475,13 +501,17 @@ where
                     if result > 0 {
                         // Process commands from buffer
                         if self.process_commands_from_buffer(result as usize, &command_buffer)? {
-                            self.logger.info(Facility::Ingress, "Shutdown during initialization");
+                            self.logger
+                                .info(Facility::Ingress, "Shutdown during initialization");
                             return Ok(());
                         }
 
                         // If we have rules now, we're initialized
                         if !self.rules.is_empty() {
-                            self.logger.info(Facility::Ingress, "Initial configuration complete, entering main loop");
+                            self.logger.info(
+                                Facility::Ingress,
+                                "Initial configuration complete, entering main loop",
+                            );
                             // Re-submit command read for main loop
                             self.submit_command_read(&mut command_buffer)?;
                             break;
@@ -491,10 +521,15 @@ where
                         }
                     } else if result == 0 {
                         // Stream closed
-                        return Err(anyhow::anyhow!("Command stream closed during initialization"));
+                        return Err(anyhow::anyhow!(
+                            "Command stream closed during initialization"
+                        ));
                     } else {
                         // Error
-                        return Err(anyhow::anyhow!("Command read error: {}", std::io::Error::from_raw_os_error(-result)));
+                        return Err(anyhow::anyhow!(
+                            "Command read error: {}",
+                            std::io::Error::from_raw_os_error(-result)
+                        ));
                     }
                 }
             }
@@ -540,7 +575,9 @@ where
                     COMMAND_NOTIFY => {
                         if result > 0 {
                             // Process commands from buffer
-                            if self.process_commands_from_buffer(result as usize, &command_buffer)? {
+                            if self
+                                .process_commands_from_buffer(result as usize, &command_buffer)?
+                            {
                                 self.logger.info(
                                     Facility::Ingress,
                                     "Exiting run loop due to shutdown command",
@@ -559,7 +596,10 @@ where
                             // Error
                             self.logger.error(
                                 Facility::Ingress,
-                                &format!("Command read error: {}", std::io::Error::from_raw_os_error(-result))
+                                &format!(
+                                    "Command read error: {}",
+                                    std::io::Error::from_raw_os_error(-result)
+                                ),
                             );
                         }
                     }
@@ -667,7 +707,11 @@ const PACKET_RECV_BASE: u64 = 1;
 pub fn setup_af_packet_socket(interface_name: &str, fanout_group_id: u16) -> Result<OwnedFd> {
     // Use ETH_P_ALL (0x0003) to receive all packets, including multicast
     // Using ETH_P_IP (0x0800) only receives unicast IPv4 packets
-    let socket = Socket::new(Domain::PACKET, Type::RAW, Some(Protocol::from(libc::ETH_P_ALL as i32)))?;
+    let socket = Socket::new(
+        Domain::PACKET,
+        Type::RAW,
+        Some(Protocol::from(libc::ETH_P_ALL as i32)),
+    )?;
     socket.set_recv_buffer_size(32 * 1024 * 1024)?;
     let iface_index = get_interface_index(interface_name)?;
     let mut addr: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
@@ -687,9 +731,7 @@ pub fn setup_af_packet_socket(interface_name: &str, fanout_group_id: u16) -> Res
 
     // Configure PACKET_FANOUT if fanout_group_id is non-zero
     if fanout_group_id > 0 {
-        let fanout_arg: u32 =
-            (fanout_group_id as u32) |
-            ((libc::PACKET_FANOUT_CPU as u32) << 16);
+        let fanout_arg: u32 = (fanout_group_id as u32) | ((libc::PACKET_FANOUT_CPU as u32) << 16);
 
         unsafe {
             if libc::setsockopt(
@@ -781,6 +823,8 @@ fn get_interface_index(name: &str) -> Result<i32> {
         Ok(index as i32)
     }
 }
+
+#[allow(dead_code)]
 fn get_interface_ip(name: &str) -> Result<Ipv4Addr> {
     for iface in pnet::datalink::interfaces() {
         if iface.name == name {
