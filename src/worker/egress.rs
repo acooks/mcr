@@ -275,9 +275,10 @@ where
                     self.logger.info(
                         Facility::Egress,
                         &format!(
-                            "[STATS:Egress] sent={} submitted={} errors={} bytes={}",
+                            "[STATS:Egress] total: sent={} submitted={} ch_recv={} errors={} bytes={}",
                             self.stats.packets_sent,
                             self.stats.packets_submitted,
+                            self.stats.packets_received,
                             self.stats.send_errors,
                             self.stats.bytes_sent
                         ),
@@ -338,9 +339,10 @@ where
     pub fn print_final_stats(&self) {
         // Print final stats in the format expected by integration tests
         let msg = format!(
-            "[STATS:Egress FINAL] submitted={} sent={} errors={} bytes={}",
-            self.stats.packets_submitted,
+            "[STATS:Egress FINAL] total: sent={} submitted={} ch_recv={} errors={} bytes={}",
             self.stats.packets_sent,
+            self.stats.packets_submitted,
+            self.stats.packets_received,
             self.stats.send_errors,
             self.stats.bytes_sent
         );
@@ -438,6 +440,9 @@ impl EgressLoop<EgressWorkItem, Arc<BufferPool>> {
         loop {
             // 1. Non-blockingly drain the packet queue and submit sends
             while let Some(packet) = packet_rx.pop() {
+                if self.config.track_stats {
+                    self.stats.packets_received += 1;
+                }
                 self.add_destination(&packet.interface_name, packet.dest_addr)?;
                 self.queue_packet(packet);
             }
@@ -452,6 +457,9 @@ impl EgressLoop<EgressWorkItem, Arc<BufferPool>> {
             if self.shutdown_requested() {
                 // Drain remaining packets from queue
                 while let Some(packet) = packet_rx.pop() {
+                    if self.config.track_stats {
+                        self.stats.packets_received += 1;
+                    }
                     self.add_destination(&packet.interface_name, packet.dest_addr)?;
                     self.queue_packet(packet);
                 }
@@ -507,6 +515,7 @@ impl EgressLoop<EgressWorkItem, Arc<BufferPool>> {
 pub struct EgressStats {
     pub packets_submitted: u64,
     pub packets_sent: u64,
+    pub packets_received: u64, // Received from ingress→egress channel
     pub send_errors: u64,
     pub bytes_sent: u64,
 }
