@@ -7,6 +7,7 @@ This directory contains all documentation relevant to contributors and developer
 *   **[ARCHITECTURE.md](./ARCHITECTURE.md):** The definitive, up-to-date guide to the system's design, components, and core technical decisions.
 *   **[DESIGN.md](./DESIGN.md):** The rationale and thought process behind the current architecture, explaining *why* key decisions were made.
 *   **[CONTRIBUTING.md](./CONTRIBUTING.md):** The guide for new contributors, covering development standards, testing requirements, and workflow.
+*   **[DEVELOPER_GUIDE.md](./DEVELOPER_GUIDE.md):** A comprehensive guide to setting up your development environment and understanding the core development workflow.
 
 ## Thematic Guides
 
@@ -22,6 +23,7 @@ This directory contains all documentation relevant to contributors and developer
 
 *   **[Testing Strategy](./testing/README.md):** The high-level philosophy and tiered strategy guiding how we test MCR.
     *   **[Developer Testing Strategy](./testing/DEVELOPER_TESTING_STRATEGY.md):** In-depth guide for developers on writing and maintaining tests.
+    *   **[Practical Testing Guide](./testing/PRACTICAL_TESTING_GUIDE.md):** The hands-on 'how-to' guide for running the test suites.
 
 *   **[Comparisons](./comparisons/README.md):** Analysis and comparison of MCR with other networking tools.
     *   **[MCR vs. socat](./comparisons/MCR_vs_socat.md):** A detailed comparison of MCR's architecture and performance against `socat`.
