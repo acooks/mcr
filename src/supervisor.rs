@@ -1,3 +1,6 @@
+// Allow await_holding_lock for std::sync::Mutex - these are intentional short-lived locks
+#![allow(clippy::await_holding_lock)]
+
 use anyhow::{Context, Result};
 use futures::SinkExt;
 use log::error;
@@ -1046,13 +1049,24 @@ pub async fn run(
     );
 
     // Generate a fanout group ID for all data plane workers
-    // This ensures that only one supervisor's workers join the same group
-    let fanout_group_id = (std::process::id() & 0xFFFF) as u16;
-    log_info!(
-        supervisor_logger,
-        Facility::Supervisor,
-        &format!("PACKET_FANOUT group ID: {}", fanout_group_id)
-    );
+    // Only use PACKET_FANOUT when there are multiple workers (num_cores > 1)
+    // With a single worker, PACKET_FANOUT is not needed and can cause issues
+    let fanout_group_id = if num_cores > 1 {
+        let id = (std::process::id() & 0xFFFF) as u16;
+        log_info!(
+            supervisor_logger,
+            Facility::Supervisor,
+            &format!("PACKET_FANOUT group ID: {} ({} workers)", id, num_cores)
+        );
+        id
+    } else {
+        log_info!(
+            supervisor_logger,
+            Facility::Supervisor,
+            "PACKET_FANOUT disabled (single worker)"
+        );
+        0
+    };
 
     // Initialize WorkerManager and wrap it in Arc<Mutex<>>
     let worker_manager = {

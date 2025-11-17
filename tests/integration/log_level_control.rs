@@ -29,9 +29,9 @@ mod tests {
             .arg("--control-socket-path")
             .arg(socket_path.as_os_str())
             .arg("--user")
-            .arg(&std::env::var("USER").unwrap_or_else(|_| "nobody".to_string()))
+            .arg(std::env::var("USER").unwrap_or_else(|_| "nobody".to_string()))
             .arg("--group")
-            .arg(&std::env::var("USER").unwrap_or_else(|_| "nogroup".to_string()))
+            .arg(std::env::var("USER").unwrap_or_else(|_| "nogroup".to_string()))
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
 

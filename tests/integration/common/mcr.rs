@@ -2,7 +2,6 @@
 
 use super::{binary_path, Stats};
 use anyhow::{Context, Result};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
@@ -29,7 +28,11 @@ impl McrInstance {
         static INSTANCE_COUNTER: AtomicU32 = AtomicU32::new(0);
         let instance_id = INSTANCE_COUNTER.fetch_add(1, Ordering::SeqCst);
 
-        let relay_socket = format!("/tmp/test_relay_{}_{}.sock", std::process::id(), instance_id);
+        let relay_socket = format!(
+            "/tmp/test_relay_{}_{}.sock",
+            std::process::id(),
+            instance_id
+        );
         let control_socket = format!("/tmp/test_mcr_{}_{}.sock", std::process::id(), instance_id);
         let log_file = format!("/tmp/test_mcr_{}_{}.log", std::process::id(), instance_id);
 
@@ -84,11 +87,9 @@ impl McrInstance {
                 .expect("Failed to open log file");
 
             let stdout_reader = BufReader::new(stdout);
-            for line in stdout_reader.lines() {
-                if let Ok(line) = line {
-                    writeln!(log, "{}", line).ok();
-                    log.flush().ok();  // Flush after each line
-                }
+            for line in stdout_reader.lines().map_while(Result::ok) {
+                writeln!(log, "{}", line).ok();
+                log.flush().ok(); // Flush after each line
             }
         });
 
@@ -101,11 +102,9 @@ impl McrInstance {
                 .expect("Failed to open log file");
 
             let stderr_reader = BufReader::new(stderr);
-            for line in stderr_reader.lines() {
-                if let Ok(line) = line {
-                    writeln!(log, "{}", line).ok();
-                    log.flush().ok();  // Flush after each line
-                }
+            for line in stderr_reader.lines().map_while(Result::ok) {
+                writeln!(log, "{}", line).ok();
+                log.flush().ok(); // Flush after each line
             }
         });
 
@@ -153,8 +152,10 @@ impl McrInstance {
         // Build outputs string
         let outputs_str = outputs.join(",");
 
-        println!("[DEBUG] Adding rule: interface={} input={}:{} outputs={}",
-                 &self.interface, input_parts[0], input_parts[1], outputs_str);
+        println!(
+            "[DEBUG] Adding rule: interface={} input={}:{} outputs={}",
+            &self.interface, input_parts[0], input_parts[1], outputs_str
+        );
 
         let output = Command::new(control_bin)
             .arg("--socket-path")
@@ -196,7 +197,10 @@ impl McrInstance {
         let mut successful_pings = 0;
         const REQUIRED_PINGS: u32 = 3; // Need 3 consecutive successful pings
 
-        println!("[DEBUG] Starting readiness check, will send pings for up to {} seconds", timeout_secs);
+        println!(
+            "[DEBUG] Starting readiness check, will send pings for up to {} seconds",
+            timeout_secs
+        );
 
         loop {
             // Check if process is still alive
@@ -221,14 +225,20 @@ impl McrInstance {
             if let Ok(output) = output {
                 if output.status.success() {
                     successful_pings += 1;
-                    println!("[DEBUG] Ping successful ({}/{})", successful_pings, REQUIRED_PINGS);
+                    println!(
+                        "[DEBUG] Ping successful ({}/{})",
+                        successful_pings, REQUIRED_PINGS
+                    );
                     if successful_pings >= REQUIRED_PINGS {
                         // Got enough successful pongs - workers should be ready
                         println!("[DEBUG] MCR is ready!");
                         return Ok(());
                     }
                 } else {
-                    println!("[DEBUG] Ping failed: {}", String::from_utf8_lossy(&output.stderr));
+                    println!(
+                        "[DEBUG] Ping failed: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
                     // Reset counter on failure
                     successful_pings = 0;
                 }
@@ -272,6 +282,7 @@ impl McrInstance {
     }
 
     /// Get the log file path
+    #[allow(dead_code)]
     pub fn log_path(&self) -> &Path {
         &self.log_file
     }

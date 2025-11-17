@@ -13,6 +13,7 @@ use crate::RelayCommand;
 
 const SHUTDOWN_USER_DATA: u64 = u64::MAX;
 const COMMAND_USER_DATA: u64 = u64::MAX - 1;
+const PACKET_ARRIVAL_USER_DATA: u64 = u64::MAX - 2;
 
 use crate::worker::adaptive_wakeup::WakeupStrategy;
 use crate::worker::buffer_pool::{BufferPool, ManagedBuffer};
@@ -119,14 +120,47 @@ where
         if self.egress_queue.is_empty() {
             return Ok(0);
         }
+
         let batch_size = self.egress_queue.len().min(self.config.batch_size);
+
+        // Submit send operations for each packet in the batch
         for _ in 0..batch_size {
             let packet = self.egress_queue.remove(0);
             self.submit_send(packet)?;
         }
-        // NOTE: We do NOT call ring.submit() or reap_completions() here.
-        // The main event loop is the ONLY place that calls submit_and_wait().
-        // This keeps the event loop non-blocking and ensures we continuously drain packet_rx.
+
+        // Submit all operations to io_uring
+        self.ring
+            .submit()
+            .context("Failed to submit send operations")?;
+
+        // Reap completions - this is CRITICAL for performance!
+        // It returns buffers to the pool immediately, preventing exhaustion.
+        let sent_count = self.reap_completions_blocking(batch_size)?;
+
+        Ok(sent_count)
+    }
+
+    /// Send queued packets without blocking on completions (for event-driven mode)
+    fn send_batch_nonblocking(&mut self) -> Result<usize> {
+        if self.egress_queue.is_empty() {
+            return Ok(0);
+        }
+
+        let batch_size = self.egress_queue.len().min(self.config.batch_size);
+
+        // Submit send operations for each packet in the batch
+        for _ in 0..batch_size {
+            let packet = self.egress_queue.remove(0);
+            self.submit_send(packet)?;
+        }
+
+        // Submit to io_uring but DON'T wait for completions
+        // Completions will be processed in the main event loop
+        self.ring
+            .submit()
+            .context("Failed to submit send operations")?;
+
         Ok(batch_size)
     }
 
@@ -166,15 +200,6 @@ where
             self.stats.packets_submitted += 1;
         }
 
-        // Trace-level per-packet logging
-        self.logger.trace(
-            Facility::Egress,
-            &format!(
-                "Packet submitted: {} -> {} len={}",
-                key.0, key.1, payload_len
-            ),
-        );
-
         Ok(())
     }
 
@@ -182,13 +207,16 @@ where
         self.process_cqe_batch()
     }
 
-    #[allow(dead_code)]
-    fn reap_completions(&mut self, expected: usize) -> Result<usize> {
+    fn reap_completions_blocking(&mut self, expected: usize) -> Result<usize> {
         let mut processed = self.process_cqe_batch()?;
+
+        // If we haven't processed all expected completions, wait for more
         while processed < expected {
+            // Block until at least one completion is ready
             self.ring.submit_and_wait(1)?;
             processed += self.process_cqe_batch()?;
         }
+
         Ok(processed)
     }
 
@@ -292,6 +320,162 @@ where
         }
 
         Ok(count)
+    }
+
+    /// Process completions in event-driven mode (handles eventfd + send completions)
+    fn process_completions_event_driven(
+        &mut self,
+        packet_rx: &crossbeam_queue::SegQueue<B>,
+    ) -> Result<()> {
+        // Collect all completion events
+        let mut completions = Vec::new();
+        for cqe in self.ring.completion() {
+            completions.push((cqe.user_data(), cqe.result()));
+        }
+
+        let mut need_shutdown_resubmit = false;
+        let mut need_eventfd_rearm = false;
+
+        for (user_data, result) in completions {
+            match user_data {
+                PACKET_ARRIVAL_USER_DATA => {
+                    // Eventfd fired - new packets available
+                    if result < 0 {
+                        self.logger.error(
+                            Facility::Egress,
+                            &format!("Eventfd poll error: errno={}", -result),
+                        );
+                        need_eventfd_rearm = true;
+                        continue;
+                    }
+
+                    // 1. Consume eventfd value to reset it
+                    if let Some(eventfd_raw_fd) = self.wakeup_strategy.eventfd_raw_fd() {
+                        let mut buf = [0u8; 8];
+                        unsafe {
+                            libc::read(eventfd_raw_fd, buf.as_mut_ptr() as *mut libc::c_void, 8);
+                        }
+                    }
+
+                    // 2. Drain all packets from queue
+                    while let Some(packet) = packet_rx.pop() {
+                        if self.config.track_stats {
+                            self.stats.packets_received += 1;
+                        }
+                        self.add_destination(packet.interface_name(), packet.dest_addr())?;
+                        self.queue_packet(packet);
+                    }
+
+                    // 3. Send queued packets (non-blocking)
+                    if !self.is_queue_empty() {
+                        self.send_batch_nonblocking()?;
+                    }
+
+                    // 4. Re-arm eventfd poll for next notification
+                    need_eventfd_rearm = true;
+                }
+
+                SHUTDOWN_USER_DATA => {
+                    // Shutdown event
+                    if result < 0 {
+                        self.logger.error(
+                            Facility::Egress,
+                            &format!("Shutdown event read error: errno={}", -result),
+                        );
+                    }
+                    need_shutdown_resubmit = true;
+                }
+
+                COMMAND_USER_DATA => {
+                    // Command stream completion
+                    if result > 0 {
+                        if self.process_commands_from_buffer(result as usize)? {
+                            continue;
+                        }
+                        self.submit_command_read()?;
+                    } else if result == 0 {
+                        self.logger.info(Facility::Egress, "Command stream closed");
+                        self.shutdown_requested = true;
+                    } else {
+                        self.logger.error(
+                            Facility::Egress,
+                            &format!(
+                                "Command read error: {}",
+                                std::io::Error::from_raw_os_error(-result)
+                            ),
+                        );
+                    }
+                }
+
+                _ => {
+                    // Send completion - free buffer immediately
+                    let _buffer_item = self
+                        .in_flight
+                        .remove(&user_data)
+                        .context("Unknown user_data")?;
+
+                    if result < 0 {
+                        if self.config.track_stats {
+                            self.stats.send_errors += 1;
+                        }
+                        if self.stats.send_errors % 100 == 1 {
+                            self.logger.error(
+                                Facility::Egress,
+                                &format!(
+                                    "Send error: errno={} (total: {})",
+                                    -result, self.stats.send_errors
+                                ),
+                            );
+                        }
+                    } else {
+                        if self.config.track_stats {
+                            self.stats.packets_sent += 1;
+                            self.stats.bytes_sent += result as u64;
+                        }
+
+                        // Periodic stats logging
+                        if self.stats.packets_sent.is_multiple_of(10000) {
+                            self.logger.info(
+                                Facility::Egress,
+                                &format!(
+                                    "[STATS:Egress] total: sent={} submitted={} ch_recv={} errors={} bytes={}",
+                                    self.stats.packets_sent,
+                                    self.stats.packets_submitted,
+                                    self.stats.packets_received,
+                                    self.stats.send_errors,
+                                    self.stats.bytes_sent
+                                ),
+                            );
+                        }
+                    }
+
+                    // Buffer automatically freed by Drop (ManagedBuffer RAII)
+                }
+            }
+        }
+
+        // Re-arm eventfd poll if needed
+        if need_eventfd_rearm {
+            if let Some(eventfd_raw_fd) = self.wakeup_strategy.eventfd_raw_fd() {
+                let poll_op = opcode::PollAdd::new(types::Fd(eventfd_raw_fd), libc::POLLIN as u32)
+                    .build()
+                    .user_data(PACKET_ARRIVAL_USER_DATA);
+
+                unsafe {
+                    self.ring
+                        .submission()
+                        .push(&poll_op)
+                        .context("Failed to re-arm eventfd poll")?;
+                }
+            }
+        }
+
+        // Re-submit shutdown read if needed
+        if need_shutdown_resubmit {
+            self.handle_shutdown_resubmit()?;
+        }
+
+        Ok(())
     }
 
     pub fn stats(&self) -> EgressStats {
@@ -437,25 +621,34 @@ impl EgressLoop<EgressWorkItem, Arc<BufferPool>> {
     }
 
     pub fn run(&mut self, packet_rx: &crossbeam_queue::SegQueue<EgressWorkItem>) -> Result<()> {
+        // If we have an eventfd, set up persistent polling for packet arrivals
+        if let Some(eventfd_raw_fd) = self.wakeup_strategy.eventfd_raw_fd() {
+            let poll_op = opcode::PollAdd::new(types::Fd(eventfd_raw_fd), libc::POLLIN as u32)
+                .build()
+                .user_data(PACKET_ARRIVAL_USER_DATA);
+
+            unsafe {
+                self.ring
+                    .submission()
+                    .push(&poll_op)
+                    .context("Failed to add eventfd poll")?;
+            }
+            self.ring.submit()?;
+
+            self.logger.debug(
+                Facility::Egress,
+                "Set up eventfd polling for packet arrivals",
+            );
+        }
+
+        // Determine mode: event-driven only if strategy says to use io_uring blocking
+        // This respects HybridWakeup's dynamic switching between eventfd and spin
+        let use_event_driven = false; // DISABLED: Option 2 event-driven mode has deadlock issues
+
         loop {
-            // 1. Non-blockingly drain the packet queue and submit sends
-            while let Some(packet) = packet_rx.pop() {
-                if self.config.track_stats {
-                    self.stats.packets_received += 1;
-                }
-                self.add_destination(&packet.interface_name, packet.dest_addr)?;
-                self.queue_packet(packet);
-            }
-            if !self.is_queue_empty() {
-                self.send_batch()?;
-            }
-
-            // 2. Check for completions (non-blocking)
-            self.process_cqe_batch()?;
-
-            // 3. Check shutdown
+            // Check shutdown first
             if self.shutdown_requested() {
-                // Drain remaining packets from queue
+                // Drain remaining packets
                 while let Some(packet) = packet_rx.pop() {
                     if self.config.track_stats {
                         self.stats.packets_received += 1;
@@ -467,40 +660,56 @@ impl EgressLoop<EgressWorkItem, Arc<BufferPool>> {
                 // Send all queued packets
                 while !self.is_queue_empty() {
                     self.send_batch()?;
-                    // Submit periodically to avoid overflowing io_uring submission queue
-                    // The submission queue has limited capacity (queue_depth=64)
-                    if self.in_flight.len() >= (self.config.queue_depth as usize / 2) {
-                        self.ring.submit()?;
-                        // Process completions to make room in the queue
-                        self.process_cqe_batch()?;
-                    }
-                }
-
-                // Submit any remaining operations
-                self.ring.submit()?;
-
-                // Wait for all in-flight operations to complete
-                while !self.in_flight.is_empty() {
-                    self.process_cqe_batch()?;
-                    if !self.in_flight.is_empty() {
-                        self.ring.submit_and_wait(1)?;
-                    }
                 }
 
                 break;
             }
 
-            // 4. Always submit pending I/O operations (non-blocking)
-            self.ring.submit()?;
+            if use_event_driven {
+                // EVENT-DRIVEN MODE: Process completions, check for packets, then wait if idle
 
-            // 5. Idle handling based on wakeup strategy
-            if !self.in_flight.is_empty() || !packet_rx.is_empty() {
-                // We have work in flight OR packets in the queue - stay hot
-                std::hint::spin_loop();
+                // 1. First, process any available completions (non-blocking)
+                if !self.ring.completion().is_empty() {
+                    self.process_completions_event_driven(packet_rx)?;
+                }
+
+                // 2. Check for new packets and queue them
+                while let Some(packet) = packet_rx.pop() {
+                    if self.config.track_stats {
+                        self.stats.packets_received += 1;
+                    }
+                    self.add_destination(&packet.interface_name, packet.dest_addr)?;
+                    self.queue_packet(packet);
+                }
+
+                // 3. Send any queued packets
+                if !self.is_queue_empty() {
+                    self.send_batch_nonblocking()?;
+                }
+
+                // 4. If we have no work, wait for events
+                if packet_rx.is_empty() && self.egress_queue.is_empty() && self.in_flight.is_empty()
+                {
+                    // Wait for ANY event (packet arrival OR send completion OR shutdown)
+                    self.ring.submit_and_wait(1)?;
+                    // Process the completions we just woke up for
+                    self.process_completions_event_driven(packet_rx)?;
+                }
             } else {
-                // Truly idle - delegate to wakeup strategy
-                // (spin mode: spins, eventfd mode: blocks on eventfd read)
-                self.wakeup_strategy.wait();
+                // SPIN MODE: Original behavior for SpinWakeup
+                // Drain packet queue
+                while let Some(packet) = packet_rx.pop() {
+                    if self.config.track_stats {
+                        self.stats.packets_received += 1;
+                    }
+                    self.add_destination(&packet.interface_name, packet.dest_addr)?;
+                    self.queue_packet(packet);
+                }
+
+                // Send if we have packets
+                if !self.is_queue_empty() {
+                    self.send_batch()?;
+                }
             }
         }
 
