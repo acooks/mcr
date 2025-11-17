@@ -1,11 +1,31 @@
 # justfile for multicast_relay development
 
 # Default recipe, runs when you just type 'just'
-default: check
+# Fast development loop: format, lint, build release, run fast tests
+default: dev
 
-# Run all quality gates, mirroring the CI pipeline
-check: fmt clippy build test audit outdated coverage unsafe-check
-    @echo "\n✅ All checks passed!"
+# Quick development loop (recommended for regular use)
+dev: fmt clippy build-release test-fast
+    @echo "\n✅ Development cycle complete!"
+    @echo ""
+    @echo "Next steps:"
+    @echo "  sudo -E just test-privileged     # Run privileged tests"
+    @echo "  sudo just test-performance       # Run performance tests"
+
+# Run code quality checks (fast, no coverage)
+check: fmt clippy build-release test-fast
+    @echo "\n✅ Code quality checks passed!"
+    @echo ""
+    @echo "Additional test suites:"
+    @echo "  just test-all                    # All unprivileged tests"
+    @echo "  sudo -E just test-privileged     # Privileged Rust tests"
+    @echo "  sudo just test-performance       # Performance validation"
+    @echo ""
+    @echo "For full CI pipeline: just check-full"
+
+# Run ALL quality gates (slow, includes coverage)
+check-full: fmt clippy build test audit outdated coverage unsafe-check
+    @echo "\n✅ All checks passed (full CI pipeline)!"
 
 # Format check
 fmt:
@@ -168,3 +188,31 @@ test-all: build-test test-unit test-integration-light test-integration-privilege
 # Meta-Target: Run all fast, unprivileged tests.
 # This is useful for a quick feedback loop during development.
 test-quick: test-unit test-integration-light
+
+# --- Performance Testing (New) ---
+
+# Build release binaries using build script
+build-release:
+    @echo "--- Building Release Binaries ---"
+    @bash scripts/build_all.sh
+
+# Setup kernel tuning for performance testing
+setup-kernel:
+    @echo "--- Setting Up Kernel Tuning ---"
+    @sudo bash scripts/setup_kernel_tuning.sh
+
+# Run performance tests (requires root and release binaries)
+test-performance: build-release setup-kernel
+    @echo "--- Running Performance Tests ---"
+    @sudo bash tests/data_plane_pipeline_veth.sh
+
+# Quick performance check (10 packets, for debugging)
+test-perf-quick: build-release
+    @echo "--- Running Quick Performance Check ---"
+    @sudo bash tests/debug_10_packets.sh
+
+# --- Fast Development Workflow (New) ---
+
+# Fast tests (unit + unprivileged integration)
+test-fast: test-unit test-integration-light
+    @echo "\n✅ Fast tests passed!"
