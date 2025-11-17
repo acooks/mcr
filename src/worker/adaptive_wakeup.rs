@@ -301,11 +301,155 @@ impl WakeupStrategy for HybridWakeup {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::fd::FromRawFd;
 
     #[test]
     fn test_spin_is_noop_signal() {
         let spin = SpinWakeup;
         spin.signal(); // Should not panic
         assert!(!spin.uses_io_uring_blocking());
+    }
+
+    #[test]
+    fn test_spin_no_eventfd() {
+        let spin = SpinWakeup;
+        assert_eq!(spin.eventfd_raw_fd(), None);
+    }
+
+    #[test]
+    fn test_spin_wait_is_hint() {
+        let spin = SpinWakeup;
+        // Just verify it doesn't panic - can't really test spin loop behavior
+        spin.wait();
+    }
+
+    #[test]
+    fn test_eventfd_creation() {
+        // Create an eventfd for testing
+        let fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
+        assert!(fd >= 0, "Failed to create eventfd");
+
+        let owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        let eventfd = EventfdWakeup::new(Arc::new(owned_fd));
+
+        assert!(!eventfd.uses_io_uring_blocking());
+        assert!(eventfd.eventfd_raw_fd().is_some());
+    }
+
+    #[test]
+    fn test_eventfd_signal_and_read() {
+        // Create an eventfd (non-blocking for testing)
+        let fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
+        assert!(fd >= 0, "Failed to create eventfd");
+
+        let owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        let eventfd = EventfdWakeup::new(Arc::new(owned_fd));
+
+        // Signal
+        eventfd.signal();
+
+        // Read back (non-blocking)
+        let mut buf = [0u8; 8];
+        let result = unsafe {
+            libc::read(
+                eventfd.eventfd_raw_fd().unwrap(),
+                buf.as_mut_ptr() as *mut libc::c_void,
+                8,
+            )
+        };
+
+        assert!(result > 0, "Should read value from eventfd");
+        let value = u64::from_ne_bytes(buf);
+        assert_eq!(value, 1, "Should read value of 1");
+    }
+
+    #[test]
+    fn test_hybrid_starts_with_eventfd() {
+        let fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
+        assert!(fd >= 0);
+
+        let owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        let hybrid = HybridWakeup::new(Arc::new(owned_fd));
+
+        // Should start in EVENTFD mode
+        assert_eq!(
+            hybrid.current_strategy.load(Ordering::Relaxed),
+            STRATEGY_EVENTFD
+        );
+    }
+
+    #[test]
+    fn test_hybrid_has_eventfd() {
+        let fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
+        assert!(fd >= 0);
+
+        let owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        let hybrid = HybridWakeup::new(Arc::new(owned_fd));
+
+        assert!(hybrid.eventfd_raw_fd().is_some());
+    }
+
+    #[test]
+    fn test_hybrid_signal_tracks_packets() {
+        let fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
+        assert!(fd >= 0);
+
+        let owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        let hybrid = HybridWakeup::new(Arc::new(owned_fd));
+
+        // Signal a few packets
+        for _ in 0..10 {
+            hybrid.signal();
+        }
+
+        // Packet count should have increased (but may have been reset by adaptation)
+        // We can't assert exact value due to adaptation, but we can verify no panic
+    }
+
+    #[test]
+    fn test_hybrid_uses_io_uring_blocking_in_eventfd_mode() {
+        let fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
+        assert!(fd >= 0);
+
+        let owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        let hybrid = HybridWakeup::new(Arc::new(owned_fd));
+
+        // Starts in EVENTFD mode
+        assert_eq!(
+            hybrid.current_strategy.load(Ordering::Relaxed),
+            STRATEGY_EVENTFD
+        );
+        // In EVENTFD mode, uses_io_uring_blocking should be true
+        assert!(hybrid.uses_io_uring_blocking());
+    }
+
+    #[test]
+    fn test_hybrid_strategy_switch() {
+        let fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
+        assert!(fd >= 0);
+
+        let owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        let hybrid = HybridWakeup::new(Arc::new(owned_fd));
+
+        // Manually switch to SPIN mode
+        hybrid.current_strategy.store(STRATEGY_SPIN, Ordering::Relaxed);
+
+        // Verify
+        assert_eq!(
+            hybrid.current_strategy.load(Ordering::Relaxed),
+            STRATEGY_SPIN
+        );
+        assert!(!hybrid.uses_io_uring_blocking());
+    }
+
+    #[test]
+    fn test_adaptation_threshold_constant() {
+        assert_eq!(ADAPTATION_THRESHOLD_PPS, 20_000);
+    }
+
+    #[test]
+    fn test_strategy_constants() {
+        assert_eq!(STRATEGY_EVENTFD, 0);
+        assert_eq!(STRATEGY_SPIN, 1);
     }
 }
