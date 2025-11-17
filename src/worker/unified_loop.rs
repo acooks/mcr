@@ -41,6 +41,7 @@
 
 use anyhow::{Context, Result};
 use io_uring::{opcode, types, IoUring};
+use std::sync::Arc;
 use socket2::{Domain, Protocol, Socket, Type};
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -61,8 +62,7 @@ const SEND_MAX: u64 = 2_000_000;
 
 /// Work item for a pending send operation
 struct SendWorkItem {
-    buffer: ManagedBuffer,
-    payload_len: usize,
+    payload: Arc<[u8]>, // Shared payload for zero-copy fan-out
     dest_addr: SocketAddr,
     interface_name: String,
 }
@@ -91,8 +91,8 @@ pub struct UnifiedConfig {
 impl Default for UnifiedConfig {
     fn default() -> Self {
         Self {
-            queue_depth: 1024,  // Increased from 128 for high throughput (300k+ pps)
-            num_recv_buffers: 32,  // Reduced from 64 to avoid buffer pool exhaustion
+            queue_depth: 1024,    // Increased from 128 for high throughput (300k+ pps)
+            num_recv_buffers: 32, // Reduced from 64 to avoid buffer pool exhaustion
             send_batch_size: 64,  // Increased from 32 to reduce syscall overhead
             track_stats: true,
         }
@@ -129,7 +129,7 @@ pub struct UnifiedDataPlane {
     // Egress
     egress_sockets: HashMap<(String, SocketAddr), (OwnedFd, Ipv4Addr)>,
     send_queue: Vec<SendWorkItem>,
-    in_flight_sends: HashMap<u64, ManagedBuffer>,
+    in_flight_sends: HashMap<u64, Arc<[u8]>>,
     next_send_user_data: u64,
 
     // Buffer pool
@@ -244,7 +244,8 @@ impl UnifiedDataPlane {
 
     /// Main event loop
     pub fn run(&mut self) -> Result<()> {
-        self.logger.info(Facility::DataPlane, "Starting unified event loop");
+        self.logger
+            .info(Facility::DataPlane, "Starting unified event loop");
 
         // Pre-post receive buffers
         let initial_recv_count = self.submit_recv_buffers()?;
@@ -257,7 +258,8 @@ impl UnifiedDataPlane {
         loop {
             // Check shutdown
             if self.shutdown_requested {
-                self.logger.info(Facility::DataPlane, "Shutdown requested, draining");
+                self.logger
+                    .info(Facility::DataPlane, "Shutdown requested, draining");
 
                 // Drain send queue
                 while !self.send_queue.is_empty() {
@@ -280,7 +282,7 @@ impl UnifiedDataPlane {
             // Check shutdown again after processing completions
             // This ensures we don't block in submit_and_wait() after shutdown is requested
             if self.shutdown_requested {
-                continue;  // Go back to top of loop to execute shutdown logic
+                continue; // Go back to top of loop to execute shutdown logic
             }
 
             // Replenish receive buffers after processing completions
@@ -295,9 +297,9 @@ impl UnifiedDataPlane {
             // This is the ONLY place the loop blocks, preventing busy-spinning
             // The submit_and_wait(1) atomically submits SQ and waits for 1 CQE
             match self.ring.submit_and_wait(1) {
-                Ok(_) => (),  // At least one event ready
-                Err(e) if e.raw_os_error() == Some(libc::EINTR) => continue,  // Interrupted
-                Err(e) => return Err(e.into()),  // Real error
+                Ok(_) => (),                                                 // At least one event ready
+                Err(e) if e.raw_os_error() == Some(libc::EINTR) => continue, // Interrupted
+                Err(e) => return Err(e.into()),                              // Real error
             }
         }
 
@@ -353,15 +355,20 @@ impl UnifiedDataPlane {
             for command in commands {
                 match command {
                     crate::RelayCommand::Shutdown => {
-                        self.logger.info(Facility::DataPlane, "Shutdown command received");
+                        self.logger
+                            .info(Facility::DataPlane, "Shutdown command received");
                         self.shutdown_requested = true;
                         return Ok(());
                     }
                     crate::RelayCommand::AddRule(rule) => {
                         self.logger.info(
                             Facility::DataPlane,
-                            &format!("Adding rule: input={}:{} outputs={}",
-                                rule.input_group, rule.input_port, rule.outputs.len()),
+                            &format!(
+                                "Adding rule: input={}:{} outputs={}",
+                                rule.input_group,
+                                rule.input_port,
+                                rule.outputs.len()
+                            ),
                         );
                         self.add_rule(rule)?;
                     }
@@ -377,7 +384,8 @@ impl UnifiedDataPlane {
             // Resubmit command read
             self.submit_command_read()?;
         } else if result == 0 {
-            self.logger.info(Facility::DataPlane, "Command stream closed");
+            self.logger
+                .info(Facility::DataPlane, "Command stream closed");
             self.shutdown_requested = true;
         } else {
             self.logger.error(
@@ -424,26 +432,29 @@ impl UnifiedDataPlane {
             self.stats.bytes_received += bytes_received as u64;
         }
 
-        // Parse packet and lookup rule
-        if let Some(target) = self.process_received_packet(&buffer[..bytes_received])? {
-            // Allocate a new buffer for sending the payload
-            let mut send_buffer = self.buffer_pool.acquire(BufferSize::Small)
-                .ok_or_else(|| anyhow::anyhow!("Buffer pool exhausted"))?;
+        // Parse packet and lookup rule(s) - returns Vec for fan-out support
+        let targets = self.process_received_packet(&buffer[..bytes_received])?;
 
-            // Copy payload from receive buffer to send buffer
-            let payload_end = target.payload_offset + target.payload_len;
-            send_buffer[..target.payload_len]
-                .copy_from_slice(&buffer[target.payload_offset..payload_end]);
+        if !targets.is_empty() {
+            // Extract payload once and wrap in Arc for zero-copy sharing across outputs
+            // All targets have the same payload offset/len (from same received packet)
+            let payload_start = targets[0].payload_offset;
+            let payload_len = targets[0].payload_len;
+            let payload: Arc<[u8]> =
+                Arc::from(&buffer[payload_start..payload_start + payload_len]);
 
-            self.send_queue.push(SendWorkItem {
-                buffer: send_buffer,
-                payload_len: target.payload_len,
-                dest_addr: target.dest_addr,
-                interface_name: target.interface_name,
-            });
-
+            // Increment rules_matched once per matched packet (not per output)
             if self.config.track_stats {
                 self.stats.rules_matched += 1;
+            }
+
+            // Queue send operation for each target (Arc clone is cheap - just refcount increment)
+            for target in targets {
+                self.send_queue.push(SendWorkItem {
+                    payload: Arc::clone(&payload),
+                    dest_addr: target.dest_addr,
+                    interface_name: target.interface_name,
+                });
             }
         }
 
@@ -467,7 +478,10 @@ impl UnifiedDataPlane {
             if self.stats.send_errors % 100 == 1 {
                 self.logger.error(
                     Facility::DataPlane,
-                    &format!("Send error: errno={} (total: {})", -result, self.stats.send_errors),
+                    &format!(
+                        "Send error: errno={} (total: {})",
+                        -result, self.stats.send_errors
+                    ),
                 );
             }
         } else {
@@ -498,10 +512,8 @@ impl UnifiedDataPlane {
     }
 
     /// Process a received packet and determine where to forward it
-    fn process_received_packet(
-        &mut self,
-        packet_data: &[u8],
-    ) -> Result<Option<ForwardingTarget>> {
+    /// Returns a vector of forwarding targets (supports fan-out to multiple destinations)
+    fn process_received_packet(&mut self, packet_data: &[u8]) -> Result<Vec<ForwardingTarget>> {
         // Parse packet headers (Ethernet → IPv4 → UDP)
         let headers = match parse_packet(packet_data, false) {
             Ok(h) => h,
@@ -510,7 +522,7 @@ impl UnifiedDataPlane {
                 if self.config.track_stats {
                     self.stats.packets_filtered += 1;
                 }
-                return Ok(None);
+                return Ok(Vec::new());
             }
         };
 
@@ -523,26 +535,28 @@ impl UnifiedDataPlane {
                 if self.config.track_stats {
                     self.stats.rules_not_matched += 1;
                 }
-                return Ok(None);
+                return Ok(Vec::new());
             }
         };
 
         // Check if rule has any outputs
         if rule.outputs.is_empty() {
-            return Ok(None);
+            return Ok(Vec::new());
         }
 
-        // For now, just forward to the first output
-        // TODO: Support multiple outputs (fan-out)
-        let output = &rule.outputs[0];
+        // Create forwarding targets for ALL outputs (fan-out support)
+        let targets: Vec<ForwardingTarget> = rule
+            .outputs
+            .iter()
+            .map(|output| ForwardingTarget {
+                payload_offset: headers.payload_offset,
+                payload_len: headers.payload_len,
+                dest_addr: SocketAddr::new(output.group.into(), output.port),
+                interface_name: output.interface.clone(),
+            })
+            .collect();
 
-        // Return forwarding metadata
-        Ok(Some(ForwardingTarget {
-            payload_offset: headers.payload_offset,
-            payload_len: headers.payload_len,
-            dest_addr: SocketAddr::new(output.group.into(), output.port),
-            interface_name: output.interface.clone(),
-        }))
+        Ok(targets)
     }
 
     /// Submit receive buffers to io_uring
@@ -619,7 +633,9 @@ impl UnifiedDataPlane {
         drop(sq); // Release borrow before loop
 
         // Limit batch size to available space
-        let batch_size = self.send_queue.len()
+        let batch_size = self
+            .send_queue
+            .len()
             .min(self.config.send_batch_size)
             .min(sq_available);
 
@@ -644,8 +660,8 @@ impl UnifiedDataPlane {
 
             let send_op = opcode::Send::new(
                 types::Fd(socket_fd.as_raw_fd()),
-                item.buffer.as_ptr(),
-                item.payload_len as u32,
+                item.payload.as_ptr(),
+                item.payload.len() as u32,
             )
             .build()
             .user_data(user_data);
@@ -654,7 +670,7 @@ impl UnifiedDataPlane {
                 self.ring.submission().push(&send_op)?;
             }
 
-            self.in_flight_sends.insert(user_data, item.buffer);
+            self.in_flight_sends.insert(user_data, item.payload);
         }
 
         self.ring.submit()?;
@@ -697,9 +713,9 @@ impl UnifiedDataPlane {
             Facility::DataPlane,
             &format!(
                 "[STATS:Egress FINAL] total: sent={} submitted={} ch_recv={} errors={} bytes={}",
-                self.stats.packets_sent,  // Actual sends completed
-                self.stats.packets_sent,  // Same as sent (all submissions succeeded)
-                self.stats.packets_sent,  // In unified mode, egr_sent == ch_recv
+                self.stats.packets_sent, // Actual sends completed
+                self.stats.packets_sent, // Same as sent (all submissions succeeded)
+                self.stats.packets_sent, // In unified mode, egr_sent == ch_recv
                 self.stats.send_errors,
                 self.stats.bytes_sent
             ),
@@ -744,9 +760,10 @@ fn create_connected_udp_socket(source_ip: Ipv4Addr, dest_addr: SocketAddr) -> Re
     let send_buffer_size = std::env::var("MCR_SOCKET_SNDBUF")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(4 * 1024 * 1024);  // Default 4 MB
+        .unwrap_or(4 * 1024 * 1024); // Default 4 MB
 
-    socket.set_send_buffer_size(send_buffer_size)
+    socket
+        .set_send_buffer_size(send_buffer_size)
         .context("Failed to set SO_SNDBUF")?;
 
     socket.bind(&SocketAddr::new(source_ip.into(), 0).into())?;
