@@ -17,9 +17,9 @@ set -u
 set -o pipefail
 
 # --- Configuration ---
-RELAY_BINARY="target/debug/multicast_relay"
-CONTROL_CLIENT_BINARY="target/debug/control_client"
-TRAFFIC_GENERATOR_BINARY="target/debug/traffic_generator"
+RELAY_BINARY="target/release/multicast_relay"
+CONTROL_CLIENT_BINARY="target/release/control_client"
+TRAFFIC_GENERATOR_BINARY="target/release/traffic_generator"
 
 # Use unique paths to avoid conflicts between concurrent test runs
 TEST_ID="$$"
@@ -62,9 +62,16 @@ echo "--- Cleaning up stale shared memory files ---"
 sudo rm -f /dev/shm/mcr_*
 echo ""
 
-# --- Build ---
-echo "--- Building binaries ---"
-cargo build
+# --- Check Binaries ---
+echo "--- Checking release binaries ---"
+for binary in "$RELAY_BINARY" "$CONTROL_CLIENT_BINARY" "$TRAFFIC_GENERATOR_BINARY"; do
+    if [ ! -f "$binary" ]; then
+        echo "ERROR: Binary not found: $binary"
+        echo "Build with: cargo build --release --bins"
+        exit 1
+    fi
+    echo "✓ Found: $binary"
+done
 echo ""
 
 # --- Setup Network Namespace ---

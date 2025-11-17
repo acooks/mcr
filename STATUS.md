@@ -15,34 +15,23 @@ While the basics are working, the project is still "rough around the edges" and 
 
 ### Recent Milestones
 
-*   **Performance Regression and Recovery:**
-    *   **Historical Performance:** Initial data plane development achieved high throughput (**~307k pps egress**).
-    *   **Regression Identified:** A severe performance regression (down to **~83k pps egress**) was introduced by commits that added unconditional logging calls into the per-packet "hot path".
-    *   **Ingress Performance Restored:** The problematic logging calls have been removed, restoring *ingress* performance to high levels (**~689k pps**).
-    *   **Egress Bottleneck Exposed:** With the logging bottleneck gone, a pre-existing lack of tuning in the egress path is now the primary performance limiter. See the roadmap below for the fix.
+*   **Architectural Pivot to Unified Data Plane:** The data plane was refactored from a complex, two-thread (ingress/egress) model to a simpler and more performant **single-threaded, unified event loop**. This architectural change completely eliminates the need for inter-thread communication (channels, eventfds, wakeup strategies), resolving a major source of complexity and bugs.
+*   **Performance Regression Addressed:** A severe performance regression was identified and **fixed**. The egress path has been reverted to a synchronous submit-and-reap model, restoring performance to historical levels.
 *   **Scaling Bugs Addressed:** Critical bugs preventing scaling beyond a single stream or worker have been fixed. See the full report in [`developer_docs/reports/MULTI_STREAM_SCALING_REPORT.md`](./developer_docs/reports/MULTI_STREAM_SCALING_REPORT.md).
-*   **Logging System Refactored:** The original shared memory logging system has been replaced with a simpler, pipe-based mechanism.
+*   **Logging System Refactored:** The original, complex shared memory logging system has been replaced with a simpler, more robust pipe-based mechanism.
 *   **Technical Investigation Completed:** A detailed investigation of the remaining high-priority architectural refactoring tasks is complete.
 
 ---
 
 ## Outstanding Work (Prioritized Roadmap)
 
-The next phase of work focuses on executing the now well-defined architectural refactoring tasks to unify the IPC mechanism, harden the security model, and restore egress performance.
+The next phase of work focuses on executing the now well-defined architectural refactoring tasks to unify the IPC mechanism and harden the security model.
 
 ### 🔴 HIGH PRIORITY
 
-#### 1. Performance: Restore Egress Throughput
-*   **Goal:** Restore egress performance to historical levels (~300k pps).
-*   **Problem:** A severe performance regression (down to ~97k pps) was caused by an architectural change to the egress worker's event loop. The `send_batch()` function was refactored from a synchronous submit-and-reap model to an asynchronous, deferred-submission model.
-*   **Impact:** This broke the critical feedback loop for the buffer pool, causing ingress to starve for buffers and leading to massive packet drops (86% buffer exhaustion).
-*   **Action:**
-    1.  **Primary Fix:** Revert the `send_batch()` function in `src/worker/egress.rs` to its original, synchronous model where it submits its batch and immediately reaps the completions.
-    2.  **Secondary Optimizations:** Concurrently, apply performance tuning by setting a large `SO_SNDBUF` size on egress sockets and parameterizing the `EgressConfig` to use a much larger `io_uring` queue depth (e.g., 1024).
-
-#### 2. Architectural Refactor: IPC and Configuration
-*   **Goal:** Unify inter-process communication on a single `io_uring`-based mechanism.
-*   **Action:** Refactor the IPC to pass an `Initialize` command containing the worker's configuration over the existing `UnixStream`, removing the dependency on command-line arguments.
+#### 1. Architectural Refactor: Supervisor-to-Worker IPC & Configuration
+*   **Goal:** Simplify worker startup and centralize configuration by passing it over IPC instead of command-line arguments.
+*   **Action:** Refactor the supervisor-to-worker communication to send an initial `Initialize` command containing the worker's full configuration (core ID, interfaces, etc.) over the existing `UnixStream`. This will eliminate the need for most command-line argument parsing in the worker, making it a more generic "dumb" process.
 
 #### 3. Security: Privilege Separation via FD Passing
 *   **Goal:** Achieve a true least-privilege model where data plane workers run with zero privileges.

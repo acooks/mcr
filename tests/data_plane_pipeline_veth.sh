@@ -60,9 +60,26 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# --- Build ---
-echo "=== Building Release Binaries ==="
-cargo build --release
+# --- Check Binaries ---
+echo "=== Checking Release Binaries ==="
+
+check_binary() {
+    local binary="$1"
+    if [ ! -f "$binary" ]; then
+        echo "ERROR: Binary not found: $binary"
+        echo "Build with: cargo build --release --bins"
+        exit 1
+    fi
+    local timestamp=$(stat -c%y "$binary" 2>/dev/null || stat -f%Sm "$binary" 2>/dev/null)
+    local size=$(stat -c%s "$binary" 2>/dev/null || stat -f%z "$binary" 2>/dev/null)
+    echo "✓ Using: $binary"
+    echo "  Built: $timestamp"
+    echo "  Size: $size bytes"
+}
+
+check_binary "$RELAY_BINARY"
+check_binary "$CONTROL_CLIENT_BINARY"
+check_binary "$TRAFFIC_GENERATOR_BINARY"
 echo ""
 
 # --- Check for root ---

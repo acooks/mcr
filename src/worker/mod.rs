@@ -17,13 +17,18 @@ pub mod ingress;
 pub mod metrics;
 pub mod packet_parser;
 pub mod stats;
+pub mod unified_loop;
 
 #[cfg(feature = "testing")]
 use crate::logging::ControlPlaneLogging;
 use crate::logging::{Facility, Logger};
 use crate::{ControlPlaneConfig, DataPlaneConfig, RelayCommand};
 use control_plane::ControlPlane;
-use data_plane_integrated::run_data_plane as data_plane_task;
+// Option 4: Unified single-threaded loop (default)
+use data_plane_integrated::run_unified_data_plane as data_plane_task;
+
+// Option 3: Two-thread model (legacy)
+// use data_plane_integrated::run_data_plane as data_plane_task;
 
 use caps::{CapSet, Capability};
 use nix::sys::eventfd::EventFd;

@@ -36,24 +36,31 @@ The system is architected as a multi-process application to ensure robust privil
 2.  **A single, unprivileged Control Plane Process.**
 3.  **Multiple, unprivileged Data Plane Worker Processes** (one per CPU core).
 
-## 3. The Data Plane: A Core-Pinned, `io_uring` Architecture
+## 3. The Data Plane: A Unified, Single-Threaded Architecture
 
-The data plane is the performance-critical heart of the application.
+The MCR data plane has been refactored into a single-threaded, unified event loop model to eliminate the complexity and performance issues of inter-thread communication. All data plane logic for a given CPU core runs within a single OS thread.
 
-- **Core Affinity:** The application is multi-threaded, but not in a traditional sense. It creates a dedicated OS thread for each CPU core it intends to use and pins each thread to its specific core. Each of these threads runs an independent, single-threaded `tokio` runtime. This ensures that a packet is processed on the same core that received it, maximizing CPU cache locality.
+- **Core Affinity:** The supervisor spawns one data plane worker process per designated CPU core, and this worker process is pinned to that core.
 
-- **Ingress Path (`io_uring` + `AF_PACKET`):**
-  - **Problem:** For MCR's role as an RPF-bypassing relay, relying on the kernel's standard IP/UDP stack for ingress processing is problematic. Features like Reverse Path Forwarding (RPF) checks, while crucial for security, can prevent valid multicast traffic from unroutable sources from ever reaching userspace.
-  - **Solution:** Packet reception is handled using `AF_PACKET` sockets to bypass the kernel's IP/UDP stack and RPF checks. Crucially, `AF_PACKET` enables MCR to receive raw frames even on network interfaces that **do not have an IP address assigned**, providing flexibility for highly isolated network segments.
-  - The I/O is driven by the `tokio-uring` runtime, which uses the `io_uring` Linux API. This minimizes system call overhead by submitting and completing I/O operations in batches. `AF_PACKET` provides MCR with raw, unfiltered access to Ethernet frames, enabling granular control and custom Layer 2/3/4 processing independent of the kernel's higher-level network policies. This low-level approach necessitates MCR to perform its own packet parsing and re-transmission with newly constructed IP/UDP headers, ensuring clean and compliant egress traffic.
+- **Unified `io_uring` Instance:** Each worker thread uses a **single `io_uring` instance** to manage all asynchronous I/O operations for both ingress and egress. This provides a unified, highly efficient event queue.
+
+- **Event Loop Architecture:**
+    1.  **Ingress (`AF_PACKET`):** The worker submits multiple `RecvMsg` operations to the `io_uring` for its `AF_PACKET` socket.
+    2.  **Egress (`AF_INET`):** When a received packet is processed and ready to be forwarded, the worker submits one or more `Send` operations to the *same* `io_uring` instance for the appropriate `AF_INET` egress sockets.
+    3.  **Unified Completion:** The worker makes a single blocking call (`submit_and_wait()`) that waits for *any* type of event to complete—a packet being received, a packet having been sent, or a command arriving from the supervisor.
+    4.  **Processing:** When the loop wakes, it processes all available completion events, frees buffers from sent packets, forwards newly received packets, and then submits new I/O operations to the ring.
+
+- **Benefits of this Model:**
+    - **No Inter-Thread Communication:** This architecture completely eliminates the need for complex, performance-sapping cross-thread communication mechanisms like channels, eventfds, or wakeup strategies.
+    - **Simplified Buffer Management:** The buffer pool is owned and accessed by a single thread, removing the need for `Arc<Mutex>` or other synchronization primitives around the pool.
+    - **Natural Batching:** The single event loop naturally batches both receive and send operations, maximizing `io_uring`'s efficiency.
 
 - **Filtering and Demultiplexing:**
   - **Hardware Filtering:** The primary filtering is done by the NIC hardware. For each multicast group we need to receive, a standard `AF_INET` "helper" socket is created solely to trigger the kernel to send an IGMP Join and program the NIC's MAC address filter.
-  - **Userspace Demultiplexing:** A single `AF_PACKET` socket per core receives all relevant multicast frames. A userspace task inspects the headers of each packet to identify its destination group/port and looks up the corresponding `ForwardingRule` in a core-local hash map.
+  - **Userspace Demultiplexing:** The `AF_PACKET` socket receives all relevant multicast frames. The unified event loop inspects the headers of each packet to identify its destination group/port and looks up the corresponding `ForwardingRule` in a hash map.
 
-- **Egress Path (`io_uring` + `AF_INET`):**
-  - **Memory Copy Egress:** To change the source IP, the original UDP payload is **copied** from the `AF_PACKET` receive buffer into a new, core-local buffer. This immediately frees the `AF_PACKET` receive buffer for reuse, decoupling the ingress and egress paths. This payload is then sent via `io_uring` `sendto` operations on a standard `AF_INET` `UdpSocket` that has been **bound to the desired source IP address**. The kernel will then construct the new IP/UDP headers, handle routing, ARP, and Ethernet framing.
-  - The `sendto` operations on these sockets are also submitted to `io_uring` in batches to maintain minimal system call overhead.
+- **Egress Path:**
+  - **Memory Copy Egress:** To change the source IP, the UDP payload is **copied** from the `AF_PACKET` receive buffer into a new buffer. This payload is then sent via `io_uring` `Send` operations on a standard `AF_INET` `UdpSocket` that has been bound to the desired source IP address. The kernel then constructs the new IP/UDP headers.
 
 - **Egress Error Handling:** The application will use a "Drop and Count" strategy for transient egress errors. Packets that fail to send due to transient errors will be dropped immediately, with no retry mechanism, to preserve low latency and prevent head-of-line blocking. A new metric, `egress_errors_total`, will be tracked on a per-output-destination basis and exposed via the control plane to provide immediate visibility into egress failures.
 
