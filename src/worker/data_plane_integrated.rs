@@ -202,11 +202,7 @@ pub fn run_unified_data_plane(
         .unwrap_or(200);
 
     // Create buffer pool
-    let buffer_pool = BufferPool::new(
-        buffer_pool_small,
-        buffer_pool_standard,
-        buffer_pool_jumbo,
-    );
+    let buffer_pool = BufferPool::new(buffer_pool_small, buffer_pool_standard, buffer_pool_jumbo);
 
     // Get interface name
     let interface_name = config

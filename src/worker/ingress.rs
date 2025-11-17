@@ -315,7 +315,8 @@ where
             }
             RelayCommand::Ping => {
                 // Ping received - ingress is ready
-                self.logger.info(Facility::Ingress, "Ping received - worker is ready");
+                self.logger
+                    .info(Facility::Ingress, "Ping received - worker is ready");
                 Ok(false)
             }
         }
@@ -379,16 +380,6 @@ where
             }
         };
 
-        self.logger.trace(
-            Facility::Ingress,
-            &format!(
-                "Packet: dst={}:{} len={}",
-                headers.ipv4.dst_ip,
-                headers.udp.dst_port,
-                packet_data.len()
-            ),
-        );
-
         let key = (headers.ipv4.dst_ip, headers.udp.dst_port);
         let rule = match self.rules.get(&key) {
             Some(r) => r.clone(),
@@ -417,13 +408,6 @@ where
                     Some(b) => b,
                     None => {
                         self.stats.buffer_exhaustion += 1;
-                        self.logger.critical(
-                            Facility::Ingress,
-                            &format!(
-                                "Buffer pool exhausted! Total exhaustions: {}",
-                                self.stats.buffer_exhaustion
-                            ),
-                        );
                         return Ok(());
                     }
                 };
@@ -436,23 +420,9 @@ where
                     output.interface.clone(),
                     SocketAddr::new(output.group.into(), output.port),
                 );
-                self.logger.trace(
-                    Facility::Ingress,
-                    &format!(
-                        "Forwarding to {}:{} via {}",
-                        output.group, output.port, output.interface
-                    ),
-                );
                 self.stats.egress_packets_sent += 1;
                 if tx.send(egress_item).is_err() {
                     self.stats.egress_channel_errors += 1;
-                    self.logger.error(
-                        Facility::Ingress,
-                        &format!(
-                            "Egress channel send failed! Total errors: {}",
-                            self.stats.egress_channel_errors
-                        ),
-                    );
                 }
             }
         }

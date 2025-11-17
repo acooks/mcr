@@ -38,6 +38,11 @@ pub trait WakeupStrategy: Send + Sync {
     /// When true, EgressLoop should use submit_and_wait() to block.
     /// When false, EgressLoop should use submit() and rely on wait() for idle handling.
     fn uses_io_uring_blocking(&self) -> bool;
+
+    /// Returns the eventfd raw file descriptor if this strategy uses one.
+    ///
+    /// This allows io_uring to poll the eventfd for packet arrival notifications.
+    fn eventfd_raw_fd(&self) -> Option<std::os::fd::RawFd>;
 }
 
 // ============================================================================
@@ -64,6 +69,10 @@ impl WakeupStrategy for SpinWakeup {
 
     fn uses_io_uring_blocking(&self) -> bool {
         false
+    }
+
+    fn eventfd_raw_fd(&self) -> Option<std::os::fd::RawFd> {
+        None // Spin strategy doesn't use eventfd
     }
 }
 
@@ -141,6 +150,10 @@ impl WakeupStrategy for EventfdWakeup {
 
     fn uses_io_uring_blocking(&self) -> bool {
         false // No longer using io_uring blocking
+    }
+
+    fn eventfd_raw_fd(&self) -> Option<std::os::fd::RawFd> {
+        Some(self.wakeup_fd.as_raw_fd())
     }
 }
 
@@ -273,6 +286,11 @@ impl WakeupStrategy for HybridWakeup {
     fn uses_io_uring_blocking(&self) -> bool {
         // Return true if currently using eventfd
         self.current_strategy.load(Ordering::Relaxed) == STRATEGY_EVENTFD
+    }
+
+    fn eventfd_raw_fd(&self) -> Option<std::os::fd::RawFd> {
+        // Hybrid always has an eventfd (even when in spin mode)
+        self.eventfd.eventfd_raw_fd()
     }
 }
 

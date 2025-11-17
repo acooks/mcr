@@ -54,9 +54,14 @@ impl Stats {
             }
         }
 
-        // Get last egress stat
-        if let Some(egress) = Self::parse_egress_last(content) {
+        // Look for FINAL egress stats first (most accurate)
+        if let Some(egress) = Self::parse_egress_final(content) {
             stats.egress = egress;
+        } else {
+            // Fall back to last periodic egress stat
+            if let Some(egress) = Self::parse_egress_last(content) {
+                stats.egress = egress;
+            }
         }
 
         Ok(stats)
@@ -78,6 +83,24 @@ impl Stats {
                 filtered: caps[4].parse().unwrap(),
                 no_match: caps[5].parse().unwrap(),
                 buf_exhaust: caps[6].parse().unwrap(),
+            })
+    }
+
+    fn parse_egress_final(content: &str) -> Option<EgressStats> {
+        let re = Regex::new(
+            r"\[STATS:Egress FINAL\] total: sent=(\d+) submitted=(\d+) ch_recv=(\d+) errors=(\d+) bytes=(\d+)"
+        ).ok()?;
+
+        content
+            .lines()
+            .rev()
+            .find_map(|line| re.captures(line))
+            .map(|caps| EgressStats {
+                sent: caps[1].parse().unwrap(),
+                submitted: caps[2].parse().unwrap(),
+                ch_recv: caps[3].parse().unwrap(),
+                errors: caps[4].parse().unwrap(),
+                bytes: caps[5].parse().unwrap(),
             })
     }
 

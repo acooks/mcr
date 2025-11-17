@@ -191,7 +191,9 @@ pub struct FlowStats {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum RelayCommand {
     AddRule(ForwardingRule),
-    RemoveRule { rule_id: String },
+    RemoveRule {
+        rule_id: String,
+    },
     Shutdown,
     /// Ping command for readiness check - workers should respond when fully initialized
     Ping,

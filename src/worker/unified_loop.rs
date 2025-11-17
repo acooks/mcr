@@ -41,11 +41,11 @@
 
 use anyhow::{Context, Result};
 use io_uring::{opcode, types, IoUring};
-use std::sync::Arc;
 use socket2::{Domain, Protocol, Socket, Type};
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::os::fd::{AsRawFd, OwnedFd};
+use std::sync::Arc;
 
 use crate::logging::{Facility, Logger};
 use crate::worker::buffer_pool::{BufferPool, BufferSize, ManagedBuffer};
@@ -440,8 +440,7 @@ impl UnifiedDataPlane {
             // All targets have the same payload offset/len (from same received packet)
             let payload_start = targets[0].payload_offset;
             let payload_len = targets[0].payload_len;
-            let payload: Arc<[u8]> =
-                Arc::from(&buffer[payload_start..payload_start + payload_len]);
+            let payload: Arc<[u8]> = Arc::from(&buffer[payload_start..payload_start + payload_len]);
 
             // Increment rules_matched once per matched packet (not per output)
             if self.config.track_stats {
