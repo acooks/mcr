@@ -7,7 +7,7 @@ This project provides a high-performance, dynamically configurable multicast rel
 - **High-Performance Architecture:** Utilizes Linux's `io_uring` for asynchronous I/O and `AF_PACKET` for raw socket access, minimizing kernel-userspace overhead and enabling high throughput.
 - **Dynamic Reconfiguration:** Add, remove, and list forwarding rules at runtime without restarting the application via a UNIX socket-based control plane.
 - **Multi-Output (Fan-Out):** A single input stream can be efficiently replicated to multiple output multicast groups.
-- **Real-time Monitoring:** Built-in monitoring for packet rates, byte rates, and errors, available via console output and a Prometheus exporter (planned).
+- **Real-time Monitoring:** Built-in monitoring for packet rates, byte rates, and errors, available via console output.
 - **Standalone Tools:** Includes a high-performance traffic generator for load testing and a control client for interacting with the relay.
 
 ## Basic Concepts
@@ -16,7 +16,7 @@ MCR operates on a few core concepts:
 
 *   **Supervisor:** This is the main process that you launch when you run `multicast_relay`. It is responsible for managing the high-performance workers and handling runtime configuration commands. It does not process any multicast traffic itself.
 
-*   **Worker (or Data Plane):** These are the high-performance processes that do the actual work of receiving, processing, and re-transmitting multicast packets. The supervisor spawns one or more workers, typically pinning each to a specific CPU core to maximize performance. The data plane uses a single-threaded, unified event loop for optimal efficiency.
+*   **Worker:** These are the high-performance processes that do the actual work of receiving, processing, and re-transmitting multicast packets. The supervisor spawns one or more workers, typically pinning each to a specific CPU core to maximize performance.
 
 *   **Forwarding Rule:** A forwarding rule is a configuration object that tells a worker what to do. Each rule defines a specific input stream (based on multicast group and port) and a list of one or more outputs where that stream should be re-transmitted. You can manage these rules at runtime using the `control_client`.
 
@@ -76,7 +76,7 @@ The `control_client` is used to manage forwarding rules and log levels at runtim
 **Remove a Rule:**
 
 ```bash
-./target/release/control_client remove \
+./target/release/control_client remove-rule \
     --input-group 224.1.1.1 \
     --input-port 5000
 ```
@@ -161,26 +161,35 @@ The `traffic_generator` can be used to send multicast traffic for testing purpos
 
 ## Running Tests
 
-### Unit and Integration Tests
+To ensure correctness, tests should be run against production-like, optimized binaries. The testing workflow is separated into two main stages: building the release artifacts, and then running the test suites.
 
-To run the unit and integration tests:
+### 1. Build Release Binaries
 
-1.  Build all binaries in release mode:
-    ```bash
-    ./scripts/build_all.sh
-    ```
-2.  Execute the tests:
-    ```bash
-    cargo test --release -- --ignored --test-threads=1
-    ```
-
-### End-to-End Topology Tests
-
-These tests validate MCR in realistic network topologies using network namespace isolation. They require `sudo` privileges.
+First, build all application and test binaries in release mode using the recommended script. This ensures you are testing the same code you would deploy.
 
 ```bash
-# Run the default 3-hop pipeline test
-sudo tests/data_plane_pipeline_veth.sh
+# This is equivalent to './scripts/build_all.sh'
+just build-release
 ```
 
-For more advanced testing scenarios, refer to the scripts in the `tests/` directory.
+### 2. Execute Test Suites
+
+Once the release binaries are built, you can run the different test suites.
+
+**Unprivileged Tests (Unit & Fast Integration)**
+
+This command runs all tests that do not require root privileges.
+
+```bash
+cargo test --release
+```
+
+**Privileged Tests (Requires Sudo)**
+
+This command runs only the tests that require root for network namespace manipulation. They are ignored by default and must be run explicitly.
+
+```bash
+# The --test-threads=1 flag is required to prevent tests from interfering
+# with each other's network namespaces.
+sudo -E cargo test --release -- --ignored --test-threads=1
+```
