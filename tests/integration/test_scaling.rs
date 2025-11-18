@@ -12,38 +12,13 @@ mod common;
 use anyhow::Result;
 use common::{McrInstance, NetworkNamespace, VethPair};
 use mcr_test_macros::requires_root;
-use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
 /// Helper to send multicast packets using traffic_generator
+/// Uses count as rate for faster scaling tests
 fn send_packets(source_ip: &str, dest_group: &str, dest_port: u16, count: u32) -> Result<()> {
-    let traffic_bin = common::binary_path("traffic_generator");
-
-    let output = Command::new(traffic_bin)
-        .arg("--interface")
-        .arg(source_ip)
-        .arg("--group")
-        .arg(dest_group)
-        .arg("--port")
-        .arg(dest_port.to_string())
-        .arg("--count")
-        .arg(count.to_string())
-        .arg("--size")
-        .arg("1400")
-        .arg("--rate")
-        .arg(count.to_string()) // Use count as rate for faster tests
-        .output()?;
-
-    if !output.status.success() {
-        eprintln!(
-            "Traffic generator stderr: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        anyhow::bail!("Traffic generator failed");
-    }
-
-    Ok(())
+    common::traffic::send_packets_with_options(source_ip, dest_group, dest_port, count, 1400, count)
 }
 
 #[tokio::test]
@@ -215,29 +190,7 @@ async fn test_scale_1m_packets() -> Result<()> {
     mcr.add_rule("239.1.1.1:5001", vec!["239.2.2.2:5002:lo"])?;
 
     // Send at 50k pps for 1M packets = 20 seconds send + 5 seconds drain
-    let traffic_bin = common::binary_path("traffic_generator");
-    let output = Command::new(traffic_bin)
-        .arg("--interface")
-        .arg("10.0.0.1")
-        .arg("--group")
-        .arg("239.1.1.1")
-        .arg("--port")
-        .arg("5001")
-        .arg("--count")
-        .arg("1000000")
-        .arg("--size")
-        .arg("1400")
-        .arg("--rate")
-        .arg("50000")
-        .output()?;
-
-    if !output.status.success() {
-        eprintln!(
-            "Traffic generator stderr: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        anyhow::bail!("Traffic generator failed");
-    }
+    common::traffic::send_packets_with_options("10.0.0.1", "239.1.1.1", 5001, 1000000, 1400, 50000)?;
 
     println!("Waiting for pipeline to drain...");
     thread::sleep(Duration::from_secs(25));

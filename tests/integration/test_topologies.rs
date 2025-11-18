@@ -12,11 +12,10 @@ mod common;
 use anyhow::Result;
 use common::{McrInstance, NetworkNamespace, VethPair};
 use mcr_test_macros::requires_root;
-use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
-/// Helper to send multicast packets using traffic_generator
+/// Helper to send multicast packets using traffic_generator with explicit rate
 fn send_packets(
     source_ip: &str,
     dest_group: &str,
@@ -24,37 +23,7 @@ fn send_packets(
     count: u32,
     rate: u32,
 ) -> Result<()> {
-    let traffic_bin = common::binary_path("traffic_generator");
-
-    let output = Command::new(traffic_bin)
-        .arg("--interface")
-        .arg(source_ip)
-        .arg("--group")
-        .arg(dest_group)
-        .arg("--port")
-        .arg(dest_port.to_string())
-        .arg("--count")
-        .arg(count.to_string())
-        .arg("--size")
-        .arg("1400")
-        .arg("--rate")
-        .arg(rate.to_string())
-        .output()?;
-
-    if !output.status.success() {
-        eprintln!(
-            "Traffic generator stderr: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        anyhow::bail!("Traffic generator failed");
-    }
-
-    println!(
-        "[DEBUG] Traffic generator stdout: {}",
-        String::from_utf8_lossy(&output.stdout)
-    );
-
-    Ok(())
+    common::traffic::send_packets_with_options(source_ip, dest_group, dest_port, count, 1400, rate)
 }
 
 #[tokio::test]

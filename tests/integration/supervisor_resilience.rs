@@ -24,9 +24,21 @@ use std::env;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::process::{Child, Command};
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
 
 use crate::tests::{cleanup_socket, unique_socket_path_with_prefix};
+
+/// Default timeout for supervisor resilience tests (30 seconds)
+const TEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Helper macro to wrap test body with timeout
+macro_rules! with_timeout {
+    ($body:expr) => {
+        timeout(TEST_TIMEOUT, $body)
+            .await
+            .context("Test timed out after 30 seconds")?
+    };
+}
 
 /// Helper to start supervisor in background for testing
 async fn start_supervisor() -> Result<(Child, PathBuf)> {
@@ -95,50 +107,54 @@ fn is_process_running(pid: u32) -> bool {
 /// - **Tier:** 2 (Integration)
 #[tokio::test]
 async fn test_supervisor_restarts_control_plane_worker() -> Result<()> {
-    // Step 1: Start supervisor
-    let (mut supervisor, socket_path) = start_supervisor().await?;
-    let client = control_client::ControlClient::new(&socket_path);
+    timeout(TEST_TIMEOUT, async {
+        // Step 1: Start supervisor
+        let (mut supervisor, socket_path) = start_supervisor().await?;
+        let client = control_client::ControlClient::new(&socket_path);
 
-    // Step 2: Get control plane worker PID
-    let workers = client.list_workers().await?;
-    let cp_worker = workers
-        .iter()
-        .find(|w| w.worker_type == "ControlPlane")
-        .ok_or_else(|| anyhow::anyhow!("No control plane worker found"))?;
-    let original_pid = cp_worker.pid;
-    println!("[TEST] Original control plane worker PID: {}", original_pid);
+        // Step 2: Get control plane worker PID
+        let workers = client.list_workers().await?;
+        let cp_worker = workers
+            .iter()
+            .find(|w| w.worker_type == "ControlPlane")
+            .ok_or_else(|| anyhow::anyhow!("No control plane worker found"))?;
+        let original_pid = cp_worker.pid;
+        println!("[TEST] Original control plane worker PID: {}", original_pid);
 
-    // Step 3: Kill the worker
-    kill_worker(original_pid).await?;
-    sleep(Duration::from_millis(200)).await; // Give supervisor time to notice
-    assert!(!is_process_running(original_pid), "Worker should be dead");
-    println!("[TEST] Worker {} killed successfully", original_pid);
+        // Step 3: Kill the worker
+        kill_worker(original_pid).await?;
+        sleep(Duration::from_millis(200)).await; // Give supervisor time to notice
+        assert!(!is_process_running(original_pid), "Worker should be dead");
+        println!("[TEST] Worker {} killed successfully", original_pid);
 
-    // Step 4 & 5: Wait for supervisor to restart the worker
-    let mut new_pid = None;
-    for _ in 0..50 { // 5 second timeout
-        if let Ok(workers) = client.list_workers().await {
-            if let Some(cp) = workers.iter().find(|w| w.worker_type == "ControlPlane") {
-                if cp.pid != original_pid && is_process_running(cp.pid) {
-                    new_pid = Some(cp.pid);
-                    println!("[TEST] Worker restarted with new PID: {}", cp.pid);
-                    break;
+        // Step 4 & 5: Wait for supervisor to restart the worker
+        let mut new_pid = None;
+        for _ in 0..50 { // 5 second timeout
+            if let Ok(workers) = client.list_workers().await {
+                if let Some(cp) = workers.iter().find(|w| w.worker_type == "ControlPlane") {
+                    if cp.pid != original_pid && is_process_running(cp.pid) {
+                        new_pid = Some(cp.pid);
+                        println!("[TEST] Worker restarted with new PID: {}", cp.pid);
+                        break;
+                    }
                 }
             }
+            sleep(Duration::from_millis(100)).await;
         }
-        sleep(Duration::from_millis(100)).await;
-    }
 
-    // Step 6: Verify restart succeeded
-    assert!(new_pid.is_some(), "Supervisor should have restarted the worker");
-    let new_pid = new_pid.unwrap();
-    assert_ne!(new_pid, original_pid, "New worker should have a different PID");
-    assert!(is_process_running(new_pid), "New worker should be running");
+        // Step 6: Verify restart succeeded
+        assert!(new_pid.is_some(), "Supervisor should have restarted the worker");
+        let new_pid = new_pid.unwrap();
+        assert_ne!(new_pid, original_pid, "New worker should have a different PID");
+        assert!(is_process_running(new_pid), "New worker should be running");
 
-    // Cleanup
-    supervisor.kill().await?;
-    cleanup_socket(&socket_path);
-    Ok(())
+        // Cleanup
+        supervisor.kill().await?;
+        cleanup_socket(&socket_path);
+        Ok(())
+    })
+    .await
+    .context("Test timed out after 30 seconds")?
 }
 
 mod control_client {
@@ -190,6 +206,14 @@ mod control_client {
             }).await? {
                 Response::Success(_) => Ok(()),
                 Response::Error(e) => anyhow::bail!("Failed to add rule: {}", e),
+                _ => anyhow::bail!("Unexpected response from supervisor"),
+            }
+        }
+
+        pub async fn list_rules(&self) -> Result<Vec<ForwardingRule>> {
+            match self.send_command(SupervisorCommand::ListRules).await? {
+                Response::Rules(rules) => Ok(rules),
+                Response::Error(e) => anyhow::bail!("Failed to list rules: {}", e),
                 _ => anyhow::bail!("Unexpected response from supervisor"),
             }
         }

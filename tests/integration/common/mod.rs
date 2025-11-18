@@ -6,6 +6,7 @@
 pub mod mcr;
 pub mod network;
 pub mod stats;
+pub mod traffic;
 
 pub use mcr::McrInstance;
 pub use network::{NetworkNamespace, VethPair};

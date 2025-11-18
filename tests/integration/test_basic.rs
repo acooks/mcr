@@ -12,38 +12,12 @@ mod common;
 use anyhow::Result;
 use common::{McrInstance, NetworkNamespace, VethPair};
 use mcr_test_macros::requires_root;
-use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
-/// Helper to send multicast packets using traffic_generator
+/// Helper to send multicast packets using the common traffic module
 fn send_packets(source_ip: &str, dest_group: &str, dest_port: u16, count: u32) -> Result<()> {
-    let traffic_bin = common::binary_path("traffic_generator");
-
-    let output = Command::new(traffic_bin)
-        .arg("--interface")
-        .arg(source_ip)
-        .arg("--group")
-        .arg(dest_group)
-        .arg("--port")
-        .arg(dest_port.to_string())
-        .arg("--count")
-        .arg(count.to_string())
-        .arg("--size")
-        .arg("1400")
-        .arg("--rate")
-        .arg("1000") // 1000 pps for small tests
-        .output()?;
-
-    if !output.status.success() {
-        eprintln!(
-            "Traffic generator stderr: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        anyhow::bail!("Traffic generator failed");
-    }
-
-    Ok(())
+    common::traffic::send_packets(source_ip, dest_group, dest_port, count)
 }
 
 #[tokio::test]
