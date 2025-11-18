@@ -38,14 +38,9 @@ To build all components (the relay, the traffic generator, and the control clien
 
 The compiled binaries will be available in the `target/release/` directory. You may wish to copy them to a location in your system's `PATH` (e.g., `/usr/local/bin/`) for easier access.
 
-### Configure Kernel for High Performance
+## Configuration
 
-For optimal performance, tune the kernel's network buffer limits. This script increases the allowed send/receive buffer sizes.
-
-```bash
-# This is required once per boot
-sudo ./scripts/setup_kernel_tuning.sh
-```
+For detailed information on kernel tuning, environment variables for performance tuning, and the full command-line reference for all utilities, please see the **[MCR Configuration Guide](./CONFIGURATION.md)**.
 
 ## Running the Relay
 
@@ -55,68 +50,13 @@ To run the main relay application, which will start the supervisor and its worke
 sudo ./target/release/multicast_relay
 ```
 
-Workers are configured dynamically via the control client. Command-line options for initial rules are deprecated.
+All forwarding rules and runtime operations are managed via the `control_client`.
 
-## Using the Control Client
+## Basic `control_client` Examples
 
-The `control_client` is used to manage forwarding rules and log levels at runtime.
+Here are some common examples of how to use the `control_client` to manage the relay.
 
-**Add a Rule:**
-
-```bash
-./target/release/control_client add-rule \
-    --input-interface eth0 \
-    --input-group 239.0.0.1 \
-    --input-port 5001 \
-    --output-interface eth1 \
-    --output-group 239.0.0.2 \
-    --output-port 6001
-```
-
-**Remove a Rule:**
-
-```bash
-./target/release/control_client remove-rule \
-    --input-group 224.1.1.1 \
-    --input-port 5000
-```
-
-**List Rules:**
-
-```bash
-./target/release/control_client list
-```
-
-**Get Statistics:**
-
-```bash
-./target/release/control_client stats
-```
-
-**Control Log Levels:**
-
-```bash
-# Get current log levels
-./target/release/control_client log-level get
-
-# Set global log level (affects all facilities)
-./target/release/control_client log-level set --global info
-
-# Set facility-specific log level (overrides global)
-./target/release/control_client log-level set --facility Ingress --level debug
-```
-
-Available log levels: `emergency`, `alert`, `critical`, `error`, `warning`, `notice`, `info`, `debug`
-
-Available facilities: `Supervisor`, `RuleDispatch`, `ControlSocket`, `ControlPlane`, `DataPlane`, `Ingress`, `Egress`, `BufferPool`, `PacketParser`, `Stats`, `Security`, `Network`, `Test`
-
-## Examples / Cookbook
-
-Here are some practical examples of how to use the control client to configure the relay.
-
-### Example 1: Simple 1-to-1 Relay
-
-**Goal:** Relay traffic from multicast group `239.10.1.2:8001` to `239.20.3.4:9002` using the network interface `eth1`.
+**Add a 1-to-1 Forwarding Rule:**
 
 ```bash
 ./target/release/control_client add-rule \
@@ -128,10 +68,7 @@ Here are some practical examples of how to use the control client to configure t
     --output-port 9002
 ```
 
-### Example 2: 1-to-2 Head-End Replication
-
-**Goal:** Take a single input stream and replicate it to two different downstream groups.
-
+**Add a 1-to-2 Fan-Out Rule:**
 ```bash
 ./target/release/control_client add-rule \
     --input-interface eth0 \
@@ -144,9 +81,14 @@ Here are some practical examples of how to use the control client to configure t
     --output-group 239.30.1.2 \
     --output-port 7002
 ```
-Note that you provide multiple `--output-interface`, `--output-group`, and `--output-port` flags for the same input rule to define multiple outputs.
 
-## Using the Traffic Generator
+**List Active Rules:**
+
+```bash
+./target/release/control_client list
+```
+
+## Basic `traffic_generator` Example
 
 The `traffic_generator` can be used to send multicast traffic for testing purposes.
 
@@ -158,6 +100,7 @@ The `traffic_generator` can be used to send multicast traffic for testing purpos
     --rate 100000 \
     --size 1200
 ```
+
 
 ## Running Tests
 

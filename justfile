@@ -13,7 +13,7 @@ dev: fmt clippy build-release test-fast
     @echo "  sudo just test-performance       # Run performance tests"
 
 # Run code quality checks (fast, no coverage)
-check: fmt clippy build-release test-fast
+check: fmt clippy lint-docs build-release test-fast
     @echo "\n✅ Code quality checks passed!"
     @echo ""
     @echo "Additional test suites:"
@@ -24,7 +24,7 @@ check: fmt clippy build-release test-fast
     @echo "For full CI pipeline: just check-full"
 
 # Run ALL quality gates (slow, includes coverage)
-check-full: fmt clippy build test audit outdated coverage unsafe-check
+check-full: fmt clippy lint-docs build test audit outdated coverage unsafe-check
     @echo "\n✅ All checks passed (full CI pipeline)!"
 
 # Format check
@@ -36,6 +36,16 @@ fmt:
 clippy:
     @echo "--- Running Linter (cargo clippy) ---"
     cargo clippy --all-targets --features integration_test,testing -- -D warnings
+
+# Lint documentation files
+lint-docs:
+    @echo "--- Running Documentation Linter (markdownlint) ---"
+    @if ! command -v markdownlint &> /dev/null; then \
+        echo "Error: markdownlint-cli is not installed."; \
+        echo "Please install it with: npm install -g markdownlint-cli"; \
+        exit 1; \
+    fi
+    markdownlint --config .markdownlint.json "**/*.md"
 
 # Build the project
 build:

@@ -1,5 +1,10 @@
 # Multicast Relay - Architecture
 
+**Status:** ✅ CURRENT
+**Last Updated:** 2025-11-18
+
+---
+
 This document describes the architecture of the `multicast_relay` application. It is the definitive, up-to-date guide to the system's design, components, and core technical decisions. As the project evolves, this document is updated to reflect the current state of the implementation.
 
 ## 1. System Overview
@@ -30,11 +35,44 @@ Worker threads are designed as isolated, restartable processes. They prefer to p
 
 ## 3. High-Level Design
 
-The system is architected as a multi-process application to ensure robust privilege separation. It is composed of:
+The system is architected as a multi-process application to ensure robust privilege separation and scalability. It is composed of a single supervisor process that manages multiple data plane worker processes.
 
-1.  **A single, privileged Supervisor Process.**
-2.  **A single, unprivileged Control Plane Process.**
-3.  **Multiple, privileged Data Plane Worker Processes** (one per CPU core).
+```mermaid
+graph TD
+    subgraph User Space
+        A[User/Operator] --> B{control_client};
+    end
+
+    subgraph MCR Application
+        B -- JSON-RPC over Unix Socket --> C[Supervisor Process];
+
+        subgraph "Data Plane (Privileged)"
+            C -- Command Dispatch --> D1[Worker 1 (Core 0)];
+            C -- Command Dispatch --> D2[Worker 2 (Core 1)];
+            C -- Command Dispatch --> DN[Worker N (Core N-1)];
+        end
+    end
+
+    subgraph Kernel Space / Network
+        NetIn[Inbound Multicast Traffic] --> D1;
+        NetIn --> D2;
+        NetIn --> DN;
+
+        D1 --> NetOut[Outbound Multicast Traffic];
+        D2 --> NetOut;
+        DN --> NetOut;
+    end
+
+    style C fill:#f9f,stroke:#333,stroke-width:2px
+    style D1 fill:#bbf,stroke:#333,stroke-width:2px
+    style D2 fill:#bbf,stroke:#333,stroke-width:2px
+    style DN fill:#bbf,stroke:#333,stroke-width:2px
+```
+
+-   **User/Operator:** Interacts with the system via the `control_client`.
+-   **`control_client`:** A command-line tool that sends JSON-RPC commands to the supervisor.
+-   **Supervisor Process:** The main process that manages workers, handles configuration commands, and centralizes logging and statistics. It runs with privileges but does not handle high-speed packet forwarding.
+-   **Worker Processes:** High-performance data plane processes, each pinned to a specific CPU core. They receive, process, and re-transmit all multicast traffic.
 
 ## 4. The Data Plane: A Unified, Single-Threaded Architecture
 
@@ -49,6 +87,29 @@ The MCR data plane uses a single-threaded, unified event loop model to eliminate
     2.  **Egress (`AF_INET`):** When a received packet is processed and ready to be forwarded, the worker submits one or more `Send` operations to the *same* `io_uring` instance for the appropriate `AF_INET` egress sockets.
     3.  **Unified Completion:** The worker makes a single blocking call (`submit_and_wait()`) that waits for *any* type of event to complete—a packet being received, a packet having been sent, or a command arriving from the supervisor.
     4.  **Processing:** When the loop wakes, it processes all available completion events, frees buffers from sent packets, forwards newly received packets, and then submits new I/O operations to the ring.
+
+### Data Plane Packet Flow
+
+```mermaid
+flowchart LR
+    subgraph "Worker Thread (Unified `io_uring`)"
+        NIC[NIC Hardware Filter] --> AF[AF_PACKET Socket];
+        AF --> RECV[Recv Batch];
+        RECV --> PARSE[Parse Headers];
+        PARSE --> LOOKUP{Rule Lookup};
+        LOOKUP -- Match --> SEND[Send Batch];
+        LOOKUP -- No Match --> DROP([Drop]);
+        SEND --> INET[AF_INET Socket];
+        INET --> OUT[Output Interface];
+    end
+
+    subgraph "Buffer Pool"
+        BP[Core-Local Buffer Pool]
+    end
+
+    BP -- Allocate --> RECV;
+    SEND -- Free --> BP;
+```
 
 - **Benefits of this Model:**
     - **No Inter-Thread Communication:** This architecture completely eliminates the need for complex, performance-sapping cross-thread communication mechanisms.
@@ -110,13 +171,9 @@ The control plane provides the mechanism for runtime configuration and monitorin
 
 ## 7. Logging Architecture
 
-Worker processes do not log directly to the console or to files. Instead, a simple and robust pipe-based mechanism is used to centralize logging in the supervisor.
+Worker processes do not log directly to files. Instead, a simple and robust pipe-based mechanism decouples the high-performance workers from slower I/O by centralizing logging in the supervisor. Workers emit logs as a fast "fire-and-forget" operation into a pipe, and the supervisor asynchronously reads from these pipes, aggregates the messages, and prints them to its standard output.
 
-- **Pipe Redirection:** When the Supervisor process spawns a new worker, it creates a standard Unix pipe. The worker process's standard error (`stderr`) stream is redirected to the "write end" of this pipe.
-- **Log Aggregation:** The Supervisor holds the "read end" of the pipe for each worker. It uses its main event loop to asynchronously monitor all pipes for data.
-- **Log Flow:** When a worker writes a log message (e.g., via `eprintln!`), the operating system sends that data through the pipe. The Supervisor reads the data, prepends it with worker-specific context (e.g., `[Worker-1]`), and prints the final message to its own standard output.
-
-This design decouples the high-performance workers from the slower I/O of logging. Workers can emit logs as a fast "fire-and-forget" operation, while the supervisor handles the slower aggregation and output tasks.
+For a comprehensive guide to the logging system, including the high-performance cross-process design for the data plane, API usage, and monitoring techniques, see the detailed **[Logging Design Document](./design/LOGGING.md)**.
 
 ## 8. Memory Management
 
@@ -134,18 +191,105 @@ This design decouples the high-performance workers from the slower I/O of loggin
 
 
 
--   **Supervisor Pattern for Resilience:** The application will implement a supervisor pattern. The main application thread will act as the supervisor, responsible for the lifecycle of the data plane threads. The supervisor will maintain the canonical, master list of all forwarding rules. It will monitor its child threads for panics. Upon detecting a failure, it will automatically restart the failed thread and re-provision it with the correct set of forwarding rules from its master list.
 
 
 
--   **Idempotent Network State Reconciliation:** The supervisor will maintain the master rule list with states like "active" and "unresolved." It will use a Netlink socket to listen for all network state changes (`UP`, `DOWN`, `DELIF`, `NEWIF`). When an interface appears, the supervisor will automatically scan its "unresolved" rules and activate any that can now be satisfied. Rules will be gracefully paused and resumed as their underlying interfaces lose and regain carrier. Rules dependent on a deleted interface will be moved to the "unresolved" state, to be automatically re-activated if the interface reappears later.
+
+-   **Supervisor Pattern for Resilience:** The application implements a supervisor pattern. The main application thread acts as the supervisor, responsible for the lifecycle of the data plane threads. It monitors its child threads for panics and will automatically restart a failed thread.
+
+-   **Network State Reconciliation (Future Work):** A high-priority item on the roadmap is to implement idempotent network state reconciliation. The target design is for the supervisor to use a Netlink socket to listen for network state changes (e.g., interfaces going up or down). This would allow it to automatically pause, resume, or re-resolve forwarding rules as network conditions change. **This feature is not yet implemented.**
+
+
+
+
+
+
+
+### Supervisor Lifecycle Management
+
+
+
+
+
+
+
+```mermaid
+
+
+
+stateDiagram-v2
+
+
+
+    [*] --> Initializing
+
+
+
+    Initializing --> Running: All workers spawned
+
+
+
+
+
+
+
+    state Running {
+
+
+
+        [*] --> MonitoringWorkers
+
+
+
+        MonitoringWorkers --> WorkerCrashed: Worker panic/exit
+
+
+
+        WorkerCrashed --> BackoffDelay: failure_count++
+
+
+
+        BackoffDelay --> RespawningWorker: After delay
+
+
+
+        RespawningWorker --> ResyncingRules: Worker restarted
+
+
+
+        ResyncingRules --> MonitoringWorkers: Rules sent
+
+
+
+    }
+
+
+
+
+
+
+
+    Running --> ShuttingDown: SIGTERM/SIGINT
+
+
+
+    ShuttingDown --> [*]: All workers stopped
+
+
+
+```
+
+
+
+
 
 
 
 ## 10. Security and Privilege Model
 
-- **Privilege Separation (Target Architecture):** The application is designed to use a multi-process architecture to minimize attack surface and operate with least-privilege.
-  - The **Supervisor Process** is intended to be the only component that runs with elevated privileges (`CAP_NET_RAW`). Its sole responsibilities are managing the lifecycle of the unprivileged worker processes and performing privileged operations (e.g., creating `AF_PACKET` sockets).
-  - The **Control Plane Process** runs as an unprivileged user. It handles all parsing of potentially untrusted user input from the JSON-RPC interface.
-  -   **Future Work: Unprivileged Data Plane:** Currently, the Data Plane workers create their own `AF_PACKET` sockets and therefore must retain `CAP_NET_RAW`. A high-priority roadmap item is to migrate socket creation to the Supervisor and use file descriptor passing. This will allow the Data Plane workers to run as a completely unprivileged user, achieving the target architecture of full privilege separation.
+### Current Implementation vs. Target Architecture
+
+-   **Current State:** The Supervisor, Control Plane, and Data Plane all currently run within a single supervisor process. While architecturally distinct, they are not yet separated into different processes with distinct privilege levels. The entire application requires `CAP_NET_RAW`.
+-   **Target Architecture:** The goal is to separate these components into distinct processes. The Supervisor would retain `CAP_NET_RAW` to create sockets, while the Control Plane and Data Plane workers would run as completely unprivileged users. This would be achieved by the Supervisor passing the necessary socket file descriptors to the worker processes. This is a **high-priority future work item**.
+
 - **DDoS Amplification Risk (Trusted Network & QoS Mitigation):** The risk of DDoS amplification from external, malicious actors is considered mitigated by the operational requirement that the relay's ingress interfaces are connected only to physically secured, trusted network segments. The risk of accidental overload of a unicast destination due to misconfiguration is fully mitigated by the existing advanced QoS design, which allows for the classification and rate-limiting/prioritized dropping of high-bandwidth flows. No additional security-specific mechanisms are required for this threat vector.

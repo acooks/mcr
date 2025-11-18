@@ -51,8 +51,7 @@ for output in &rule.outputs {
 **File:** `src/worker/unified_loop.rs:547`
 
 ```rust
-// TODO: Support multiple outputs (fan-out)
-let output = &rule.outputs[0];  // ❌ ONLY FIRST OUTPUT!
+`let output = &rule.outputs[0];  // ❌ ONLY FIRST OUTPUT!
 ```
 
 **How it works:**

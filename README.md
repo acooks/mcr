@@ -80,8 +80,17 @@ A full usage guide is available in the [User Guide](./user_docs/USAGE.md).
 
 ## Documentation
 
--   **[User Guide](./user_docs/USAGE.md):** For users who want to install, configure, and operate MCR.
--   **[Developer Guide](./developer_docs/README.md):** For contributors who want to understand the architecture, development workflow, and testing strategy.
+This project provides separate documentation for users and developers.
+
+### For Users
+
+-   **[USAGE.md](./user_docs/USAGE.md):** A quick-start guide to get MCR up and running.
+-   **[CONFIGURATION.md](./user_docs/CONFIGURATION.md):** The complete guide to configuring MCR, including kernel tuning, environment variables, and control plane commands.
+-   **[WHY_USE_MCR.md](./user_docs/WHY_USE_MCR.md):** Explains the core problem MCR solves and compares it to other tools like `socat`.
+
+### For Developers
+
+-   **[DEVELOPER_DOCS](./developer_docs/README.md):** The main entry point for all developer-focused documentation, including architecture, testing, and contribution guidelines.
 
 ---
 

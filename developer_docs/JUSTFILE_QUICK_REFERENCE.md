@@ -375,7 +375,7 @@ just dev    # Does both correctly
 
 ## More Information
 
-- **Detailed workflow analysis:** [`JUSTFILE_WORKFLOW.md`](JUSTFILE_WORKFLOW.md)
+- **Workflow Analysis (Archived):** [`archive/JUSTFILE_WORKFLOW.md`](archive/JUSTFILE_WORKFLOW.md)
 - **Testing guide:** [`TESTING.md`](TESTING.md)
 - **Build consistency:** [`BUILD_CONSISTENCY.md`](BUILD_CONSISTENCY.md)
 - **Quick test guide:** [`QUICK_TEST.md`](../user_docs/QUICK_TEST.md)

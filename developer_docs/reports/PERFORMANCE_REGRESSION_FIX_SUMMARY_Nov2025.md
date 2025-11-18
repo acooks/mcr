@@ -1,47 +1,164 @@
-# Summary Report: Performance Regression & Fix (November 2025)
+# Report: Performance Regression & Fix (November 2025)
 
 **Status:** ✅ **RESOLVED**
 **Outcome:** Egress throughput improved from **97k pps to 439k pps**, exceeding the original performance target by 43%.
 
 ---
 
-## Overview
+## 1. Overview
 
-In mid-November 2025, a significant performance regression was identified after the implementation of the new "Option 4" unified `io_uring` data plane. Despite the superior architecture designed to eliminate cross-thread communication overhead, egress throughput had dropped to ~97k pps, well below the ~307k pps target established by the previous two-threaded model (PHASE4).
+In mid-November 2025, a significant performance regression was identified after the implementation of the new "Option 4" unified `io_uring` data plane. Despite a superior architecture, egress throughput had dropped to ~97k pps, well below the ~307k pps target.
 
-A focused investigation revealed that the regression was not due to an architectural flaw, but rather two critical configuration errors that created severe bottlenecks.
-
-## Root Causes
-
-1.  **Insufficient `io_uring` Queue Depth:** The queue depth was configured to 128 entries. Mathematical analysis showed this imposed a hard theoretical limit of ~39k pps, as the application could not keep enough operations in flight to saturate the CPU or network.
-2.  **Untuned UDP Socket Buffers:** The application used the default kernel UDP send buffer size (~208 KB). At the target throughput of ~430 MB/s, this buffer would fill in under 0.5 milliseconds, causing the kernel to block send operations and creating massive back-pressure, leading to 86% buffer exhaustion in the application.
-
-## Resolution
-
-The following fixes were implemented in the `unified_loop.rs` data plane:
-
-1.  **Increased `io_uring` Queue Depth:** The queue depth was increased from 128 to **1024**, raising the theoretical throughput limit well above the target rate.
-2.  **Tuned Socket Send Buffers:** Egress UDP sockets are now configured with a **4 MB send buffer** (`SO_SNDBUF`), providing sufficient capacity (~9ms of data at target rates) to handle bursts and prevent kernel blocking.
-3.  **Increased Send Batch Size:** The send batch size was increased from 32 to **64** to reduce syscall overhead.
-
-A kernel tuning script (`scripts/setup_kernel_tuning.sh`) was also created to ensure the host system's `net.core.wmem_max` limit could accommodate the larger socket buffers.
-
-## Outcome & Impact
-
-After applying the fixes, performance testing immediately confirmed the bottlenecks were resolved.
-
--   **Egress Throughput:** Increased from 97k pps to **439k pps** (+353%).
--   **Performance Target:** Exceeded the 307k pps target by **43%**.
--   **Buffer Exhaustion:** Dropped from 86% to **0%**, indicating the back-pressure was eliminated.
-
-The results validated that the unified single-threaded architecture is not only sound but is fundamentally more efficient than the previous two-threaded model, as it provides superior performance once correctly configured.
+A focused investigation revealed that the regression was not due to an architectural flaw, but rather two critical configuration errors that created severe bottlenecks. This report details the investigation, the fixes applied, and the successful outcome.
 
 ---
 
-## Historical Documents
+## 2. Root Cause Analysis
 
-For a detailed, step-by-step account of this investigation, the original documents have been archived and are available for review:
+### 2.1. Insufficient `io_uring` Queue Depth
 
--   **[Analysis of Bottlenecks](./../archive/performance_fix_nov2025/PERFORMANCE_FIXES_NEEDED.md)**
--   **[Documentation of Applied Changes](./../archive/performance_fix_nov2025/PERFORMANCE_FIXES_APPLIED.md)**
--   **[Final Success Report & Metrics](./../archive/performance_fix_nov2025/PERFORMANCE_SUCCESS_2025-11-18.md)**
+- **Problem:** The queue depth was configured to 128 entries. Mathematical analysis showed this imposed a hard theoretical limit of ~39k pps.
+- **Code:**
+  ```rust
+  // src/worker/unified_loop.rs
+  impl Default for UnifiedConfig {
+      fn default() -> Self {
+          Self {
+              queue_depth: 128,  // ← TOO SMALL!
+              // ...
+          }
+      }
+  }
+  ```
+
+### 2.2. Untuned UDP Socket Buffers
+
+- **Problem:** The application used the default kernel UDP send buffer size (~208 KB), which would fill in under 0.5 milliseconds at the target throughput, causing the kernel to block send operations and leading to 86% buffer exhaustion.
+- **Code:**
+  ```rust
+  // src/worker/unified_loop.rs
+  fn create_connected_udp_socket(...) -> Result<OwnedFd> {
+      // ...
+      // ← NO SO_SNDBUF SETTING!
+  }
+  ```
+
+---
+
+## 3. Resolution
+
+The following fixes were implemented in the `unified_loop.rs` data plane:
+
+### 3.1. Increased `io_uring` Queue Depth
+
+- **Change:** The queue depth was increased from 128 to **1024**.
+- **Code:**
+  ```rust
+  // src/worker/unified_loop.rs
+  impl Default for UnifiedConfig {
+      fn default() -> Self {
+          Self {
+              queue_depth: 1024,
+              send_batch_size: 64, // Also increased
+              // ...
+          }
+      }
+  }
+  ```
+
+### 3.2. Tuned Socket Send Buffers
+
+- **Change:** Egress UDP sockets are now configured with a **4 MB send buffer** (`SO_SNDBUF`).
+- **Code:**
+  ```rust
+  // src/worker/unified_loop.rs
+  fn create_connected_udp_socket(...) -> Result<OwnedFd> {
+      // ...
+      socket.set_send_buffer_size(4 * 1024 * 1024)?;
+      // ...
+  }
+  ```
+
+### 3.3. Kernel Tuning Script
+
+- **Change:** A kernel tuning script (`scripts/setup_kernel_tuning.sh`) was created to ensure the host system's `net.core.wmem_max` limit could accommodate the larger socket buffers.
+
+---
+
+## 4. Outcome & Impact
+
+### 4.1. Performance Metrics
+
+| Metric             | Before Fixes (Nov 16) | After Fixes (Nov 18) | Improvement |
+|--------------------|-----------------------|----------------------|-------------|
+| Egress Throughput  | 97,000 pps            | 439,418 pps          | +353%       |
+| Buffer Exhaustion  | 86%                   | 0%                   | -100%       |
+| vs. PHASE4 Target  | -68%                  | +43%                 |             |
+
+### 4.2. Analysis
+
+The results validated that the unified single-threaded architecture is not only sound but is fundamentally more efficient than the previous two-threaded model, as it provides superior performance once correctly configured. The elimination of cross-thread overhead and the tighter event loop of the unified design resulted in performance that exceeded the original target by 43%.
+
+---
+
+## 5. Conclusion
+
+
+
+The performance regression was successfully resolved by addressing two critical configuration errors. The unified loop architecture is now validated as the superior approach, delivering significantly higher performance and efficiency.
+
+
+
+---
+
+
+
+## 6. Performance Validation
+
+
+
+**Date:** 2025-11-18
+
+
+
+This section validates MCR's performance claims across multiple dimensions after the fixes were applied.
+
+
+
+### 6.1. Single-Hop Throughput Validation
+
+
+
+- **Objective:** Validate 439k pps egress throughput with 0% buffer exhaustion.
+
+- **Results:**
+
+  - Egress rate: 434,853 pps (within 1% of documented)
+
+  - Buffer exhaustion: 0%
+
+- **Verdict:** ✅ **VALIDATED**
+
+
+
+### 6.2. Multi-Stream Scalability
+
+
+
+- **Objective:** Validate MCR's ability to handle multiple concurrent multicast streams.
+
+- **Results:** 0% packet loss across 1-20 concurrent streams.
+
+- **Verdict:** ✅ **VALIDATED**
+
+
+
+### 6.3. Extreme Fanout Beyond Kernel VIF Limit
+
+
+
+- **Objective:** Demonstrate that MCR's userspace architecture bypasses the kernel's 32 VIF limit.
+
+- **Results:** Successfully handled a 1:50 fanout, 56% beyond the kernel limit, with 0% packet loss at moderate rates.
+
+- **Verdict:** ✅ **VALIDATED**

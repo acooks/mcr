@@ -68,14 +68,21 @@ When you use `rustup`, it will automatically detect this file and ensure you are
 
 ### Project-Specific Developer Tools
 
-This project uses the `just` command runner to simplify common development tasks. You need to install it once globally.
+This project uses `just` and `markdownlint-cli` to simplify and standardize development tasks.
 
-From your terminal, run:
+**`just` Command Runner**
+
+Install the `just` command runner once globally:
 ```bash
 cargo install just
 ```
 
-This command installs `just` into your Cargo binary directory (`~/.cargo/bin`), which should already be in your `PATH` if you followed the `rustup` setup correctly.
+**Documentation Linter**
+
+To ensure documentation is consistent and well-formatted, we use `markdownlint-cli`. Install it globally via `npm`:
+```bash
+npm install -g markdownlint-cli
+```
 
 Your environment is now fully bootstrapped.
 
@@ -98,7 +105,7 @@ Before committing your changes or submitting a pull request, run the full suite 
 
 1.  **Run Fast Checks:**
     ```bash
-    just check # Formats, lints, builds release binaries, and runs fast tests.
+    just check # Formats, lints code and docs, builds, and runs fast tests.
     ```
 2.  **Run Privileged Tests (Requires `sudo`):**
     ```bash
