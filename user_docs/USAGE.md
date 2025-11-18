@@ -161,35 +161,30 @@ The `traffic_generator` can be used to send multicast traffic for testing purpos
 
 ## Running Tests
 
-To ensure correctness, tests should be run against production-like, optimized binaries. The testing workflow is separated into two main stages: building the release artifacts, and then running the test suites.
+The project uses `cargo-nextest` for a more robust test execution experience and `just` to simplify the workflow.
 
-### 1. Build Release Binaries
+### 1. Build All Binaries
 
-First, build all application and test binaries in release mode using the recommended script. This ensures you are testing the same code you would deploy.
+Before running tests, build the release-optimized binaries.
 
 ```bash
-# This is equivalent to './scripts/build_all.sh'
 just build-release
 ```
 
-### 2. Execute Test Suites
+### 2. Run Test Suites
 
-Once the release binaries are built, you can run the different test suites.
+**Unprivileged Tests**
 
-**Unprivileged Tests (Unit & Fast Integration)**
-
-This command runs all tests that do not require root privileges.
+Run all unit tests and integration tests that do not require root privileges. This is the most common command needed during development.
 
 ```bash
-cargo test --release
+just test-fast
 ```
 
 **Privileged Tests (Requires Sudo)**
 
-This command runs only the tests that require root for network namespace manipulation. They are ignored by default and must be run explicitly.
+Run the integration tests that require root for network namespace manipulation.
 
 ```bash
-# The --test-threads=1 flag is required to prevent tests from interfering
-# with each other's network namespaces.
-sudo -E cargo test --release -- --ignored --test-threads=1
+sudo -E just test-integration-privileged
 ```

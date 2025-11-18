@@ -10,238 +10,248 @@
 mod common;
 
 use anyhow::Result;
-use common::{McrInstance, NetworkNamespace, VethPair};
-use mcr_test_macros::requires_root;
-use std::thread;
-use std::time::Duration;
 
-/// Helper to send multicast packets using traffic_generator
-/// Uses count as rate for faster scaling tests
-fn send_packets(source_ip: &str, dest_group: &str, dest_port: u16, count: u32) -> Result<()> {
-    common::traffic::send_packets_with_options(source_ip, dest_group, dest_port, count, 1400, count)
-}
+mod privileged {
+    use super::common::{self, McrInstance, NetworkNamespace, VethPair};
+    use super::*;
+    use std::thread;
+    use std::time::Duration;
 
-#[tokio::test]
-#[requires_root]
-async fn test_scale_1000_packets() -> Result<()> {
-    println!("\n=== Scaling Test: 1,000 packets ===\n");
+    /// All privileged tests must call this setup function.
+    fn setup() {
+        if !nix::unistd::geteuid().is_root() {
+            panic!("SKIPPED: This test must be run with root privileges.");
+        }
+    }
+    
+    /// Helper to send multicast packets using traffic_generator
+    /// Uses count as rate for faster scaling tests
+    fn send_packets(source_ip: &str, dest_group: &str, dest_port: u16, count: u32) -> Result<()> {
+        common::traffic::send_packets_with_options(source_ip, dest_group, dest_port, count, 1400, count)
+    }
 
-    let _ns = NetworkNamespace::enter()?;
-    _ns.enable_loopback().await?;
+    #[tokio::test]
+    async fn test_scale_1000_packets() -> Result<()> {
+        setup();
+        println!("\n=== Scaling Test: 1,000 packets ===\n");
 
-    let _veth = VethPair::create("veth0", "veth0p")
-        .await?
-        .set_addr("veth0", "10.0.0.1/24")
-        .await?
-        .set_addr("veth0p", "10.0.0.2/24")
-        .await?
-        .up()
-        .await?;
+        let _ns = NetworkNamespace::enter()?;
+        _ns.enable_loopback().await?;
 
-    let mut mcr = McrInstance::start("veth0p", Some(0))?;
-    mcr.add_rule("239.1.1.1:5001", vec!["239.2.2.2:5002:lo"])?;
+        let _veth = VethPair::create("veth0", "veth0p")
+            .await?
+            .set_addr("veth0", "10.0.0.1/24")
+            .await?
+            .set_addr("veth0p", "10.0.0.2/24")
+            .await?
+            .up()
+            .await?;
 
-    send_packets("10.0.0.1", "239.1.1.1", 5001, 1000)?;
-    thread::sleep(Duration::from_secs(3));
+        let mut mcr = McrInstance::start("veth0p", Some(0))?;
+        mcr.add_rule("239.1.1.1:5001", vec!["239.2.2.2:5002:lo"])?;
 
-    let stats = mcr.shutdown_and_get_stats()?;
+        send_packets("10.0.0.1", "239.1.1.1", 5001, 1000)?;
+        thread::sleep(Duration::from_secs(3));
 
-    println!("\n=== Results ===");
-    println!(
-        "Ingress: recv={} matched={} egr_sent={} filtered={} no_match={} buf_exhaust={}",
-        stats.ingress.recv,
-        stats.ingress.matched,
-        stats.ingress.egr_sent,
-        stats.ingress.filtered,
-        stats.ingress.no_match,
-        stats.ingress.buf_exhaust
-    );
-    println!(
-        "Egress: sent={} submitted={} ch_recv={} errors={} bytes={}",
-        stats.egress.sent,
-        stats.egress.submitted,
-        stats.egress.ch_recv,
-        stats.egress.errors,
-        stats.egress.bytes
-    );
+        let stats = mcr.shutdown_and_get_stats()?;
 
-    // Validate perfect 1:1 forwarding
-    assert!(stats.ingress.matched > 0, "Should forward some packets");
-    assert_eq!(
-        stats.ingress.matched, stats.ingress.egr_sent,
-        "Ingress matched should equal egr_sent"
-    );
-    assert_eq!(
-        stats.egress.ch_recv, stats.ingress.egr_sent,
-        "Egress ch_recv should equal ingress egr_sent"
-    );
-    assert_eq!(
-        stats.egress.sent, stats.egress.ch_recv,
-        "Egress sent should equal ch_recv"
-    );
-    assert_eq!(
-        stats.egress.sent, stats.egress.submitted,
-        "Egress sent should equal submitted"
-    );
+        println!("\n=== Results ===");
+        println!(
+            "Ingress: recv={} matched={} egr_sent={} filtered={} no_match={} buf_exhaust={}",
+            stats.ingress.recv,
+            stats.ingress.matched,
+            stats.ingress.egr_sent,
+            stats.ingress.filtered,
+            stats.ingress.no_match,
+            stats.ingress.buf_exhaust
+        );
+        println!(
+            "Egress: sent={} submitted={} ch_recv={} errors={} bytes={}",
+            stats.egress.sent,
+            stats.egress.submitted,
+            stats.egress.ch_recv,
+            stats.egress.errors,
+            stats.egress.bytes
+        );
 
-    // No errors
-    assert_eq!(
-        stats.ingress.buf_exhaust, 0,
-        "Should have no buffer exhaustion"
-    );
-    assert_eq!(stats.egress.errors, 0, "Should have no egress errors");
+        // Validate perfect 1:1 forwarding
+        assert!(stats.ingress.matched > 0, "Should forward some packets");
+        assert_eq!(
+            stats.ingress.matched, stats.ingress.egr_sent,
+            "Ingress matched should equal egr_sent"
+        );
+        assert_eq!(
+            stats.egress.ch_recv, stats.ingress.egr_sent,
+            "Egress ch_recv should equal ingress egr_sent"
+        );
+        assert_eq!(
+            stats.egress.sent, stats.egress.ch_recv,
+            "Egress sent should equal ch_recv"
+        );
+        assert_eq!(
+            stats.egress.sent, stats.egress.submitted,
+            "Egress sent should equal submitted"
+        );
 
-    println!("\n=== ✅ Test passed ===\n");
-    Ok(())
-}
+        // No errors
+        assert_eq!(
+            stats.ingress.buf_exhaust, 0,
+            "Should have no buffer exhaustion"
+        );
+        assert_eq!(stats.egress.errors, 0, "Should have no egress errors");
 
-#[tokio::test]
-#[requires_root]
-async fn test_scale_10000_packets() -> Result<()> {
-    println!("\n=== Scaling Test: 10,000 packets ===\n");
+        println!("\n=== ✅ Test passed ===\n");
+        Ok(())
+    }
 
-    let _ns = NetworkNamespace::enter()?;
-    _ns.enable_loopback().await?;
+    #[tokio::test]
+    async fn test_scale_10000_packets() -> Result<()> {
+        setup();
+        println!("\n=== Scaling Test: 10,000 packets ===\n");
 
-    let _veth = VethPair::create("veth0", "veth0p")
-        .await?
-        .set_addr("veth0", "10.0.0.1/24")
-        .await?
-        .set_addr("veth0p", "10.0.0.2/24")
-        .await?
-        .up()
-        .await?;
+        let _ns = NetworkNamespace::enter()?;
+        _ns.enable_loopback().await?;
 
-    let mut mcr = McrInstance::start("veth0p", Some(0))?;
-    mcr.add_rule("239.1.1.1:5001", vec!["239.2.2.2:5002:lo"])?;
+        let _veth = VethPair::create("veth0", "veth0p")
+            .await?
+            .set_addr("veth0", "10.0.0.1/24")
+            .await?
+            .set_addr("veth0p", "10.0.0.2/24")
+            .await?
+            .up()
+            .await?;
 
-    send_packets("10.0.0.1", "239.1.1.1", 5001, 10000)?;
-    thread::sleep(Duration::from_secs(4));
+        let mut mcr = McrInstance::start("veth0p", Some(0))?;
+        mcr.add_rule("239.1.1.1:5001", vec!["239.2.2.2:5002:lo"])?;
 
-    let stats = mcr.shutdown_and_get_stats()?;
+        send_packets("10.0.0.1", "239.1.1.1", 5001, 10000)?;
+        thread::sleep(Duration::from_secs(4));
 
-    println!("\n=== Results ===");
-    println!(
-        "Ingress: recv={} matched={} egr_sent={} filtered={} no_match={} buf_exhaust={}",
-        stats.ingress.recv,
-        stats.ingress.matched,
-        stats.ingress.egr_sent,
-        stats.ingress.filtered,
-        stats.ingress.no_match,
-        stats.ingress.buf_exhaust
-    );
-    println!(
-        "Egress: sent={} submitted={} ch_recv={} errors={} bytes={}",
-        stats.egress.sent,
-        stats.egress.submitted,
-        stats.egress.ch_recv,
-        stats.egress.errors,
-        stats.egress.bytes
-    );
+        let stats = mcr.shutdown_and_get_stats()?;
 
-    // Validate perfect 1:1 forwarding
-    assert!(stats.ingress.matched > 0, "Should forward some packets");
-    assert_eq!(
-        stats.ingress.matched, stats.ingress.egr_sent,
-        "Ingress matched should equal egr_sent"
-    );
-    assert_eq!(
-        stats.egress.ch_recv, stats.ingress.egr_sent,
-        "Egress ch_recv should equal ingress egr_sent"
-    );
-    assert_eq!(
-        stats.egress.sent, stats.egress.ch_recv,
-        "Egress sent should equal ch_recv"
-    );
-    assert_eq!(
-        stats.egress.sent, stats.egress.submitted,
-        "Egress sent should equal submitted"
-    );
+        println!("\n=== Results ===");
+        println!(
+            "Ingress: recv={} matched={} egr_sent={} filtered={} no_match={} buf_exhaust={}",
+            stats.ingress.recv,
+            stats.ingress.matched,
+            stats.ingress.egr_sent,
+            stats.ingress.filtered,
+            stats.ingress.no_match,
+            stats.ingress.buf_exhaust
+        );
+        println!(
+            "Egress: sent={} submitted={} ch_recv={} errors={} bytes={}",
+            stats.egress.sent,
+            stats.egress.submitted,
+            stats.egress.ch_recv,
+            stats.egress.errors,
+            stats.egress.bytes
+        );
 
-    // No errors
-    assert_eq!(
-        stats.ingress.buf_exhaust, 0,
-        "Should have no buffer exhaustion"
-    );
-    assert_eq!(stats.egress.errors, 0, "Should have no egress errors");
+        // Validate perfect 1:1 forwarding
+        assert!(stats.ingress.matched > 0, "Should forward some packets");
+        assert_eq!(
+            stats.ingress.matched, stats.ingress.egr_sent,
+            "Ingress matched should equal egr_sent"
+        );
+        assert_eq!(
+            stats.egress.ch_recv, stats.ingress.egr_sent,
+            "Egress ch_recv should equal ingress egr_sent"
+        );
+        assert_eq!(
+            stats.egress.sent, stats.egress.ch_recv,
+            "Egress sent should equal ch_recv"
+        );
+        assert_eq!(
+            stats.egress.sent, stats.egress.submitted,
+            "Egress sent should equal submitted"
+        );
 
-    println!("\n=== ✅ Test passed ===\n");
-    Ok(())
-}
+        // No errors
+        assert_eq!(
+            stats.ingress.buf_exhaust, 0,
+            "Should have no buffer exhaustion"
+        );
+        assert_eq!(stats.egress.errors, 0, "Should have no egress errors");
 
-#[tokio::test]
-#[requires_root]
-async fn test_scale_1m_packets() -> Result<()> {
-    println!("\n=== Scaling Test: 1,000,000 packets ===\n");
+        println!("\n=== ✅ Test passed ===\n");
+        Ok(())
+    }
 
-    let _ns = NetworkNamespace::enter()?;
-    _ns.enable_loopback().await?;
+    #[tokio::test]
+    async fn test_scale_1m_packets() -> Result<()> {
+        setup();
+        println!("\n=== Scaling Test: 1,000,000 packets ===\n");
 
-    let _veth = VethPair::create("veth0", "veth0p")
-        .await?
-        .set_addr("veth0", "10.0.0.1/24")
-        .await?
-        .set_addr("veth0p", "10.0.0.2/24")
-        .await?
-        .up()
-        .await?;
+        let _ns = NetworkNamespace::enter()?;
+        _ns.enable_loopback().await?;
 
-    let mut mcr = McrInstance::start("veth0p", Some(0))?;
-    mcr.add_rule("239.1.1.1:5001", vec!["239.2.2.2:5002:lo"])?;
+        let _veth = VethPair::create("veth0", "veth0p")
+            .await?
+            .set_addr("veth0", "10.0.0.1/24")
+            .await?
+            .set_addr("veth0p", "10.0.0.2/24")
+            .await?
+            .up()
+            .await?;
 
-    // Send at 50k pps for 1M packets = 20 seconds send + 5 seconds drain
-    common::traffic::send_packets_with_options("10.0.0.1", "239.1.1.1", 5001, 1000000, 1400, 50000)?;
+        let mut mcr = McrInstance::start("veth0p", Some(0))?;
+        mcr.add_rule("239.1.1.1:5001", vec!["239.2.2.2:5002:lo"])?;
 
-    println!("Waiting for pipeline to drain...");
-    thread::sleep(Duration::from_secs(25));
+        // Send at 50k pps for 1M packets = 20 seconds send + 5 seconds drain
+        common::traffic::send_packets_with_options("10.0.0.1", "239.1.1.1", 5001, 1000000, 1400, 50000)?;
 
-    let stats = mcr.shutdown_and_get_stats()?;
+        println!("Waiting for pipeline to drain...");
+        thread::sleep(Duration::from_secs(25));
 
-    println!("\n=== Results ===");
-    println!(
-        "Ingress: recv={} matched={} egr_sent={} filtered={} no_match={} buf_exhaust={}",
-        stats.ingress.recv,
-        stats.ingress.matched,
-        stats.ingress.egr_sent,
-        stats.ingress.filtered,
-        stats.ingress.no_match,
-        stats.ingress.buf_exhaust
-    );
-    println!(
-        "Egress: sent={} submitted={} ch_recv={} errors={} bytes={}",
-        stats.egress.sent,
-        stats.egress.submitted,
-        stats.egress.ch_recv,
-        stats.egress.errors,
-        stats.egress.bytes
-    );
+        let stats = mcr.shutdown_and_get_stats()?;
 
-    // Validate perfect 1:1 forwarding
-    assert!(stats.ingress.matched > 0, "Should forward some packets");
-    assert_eq!(
-        stats.ingress.matched, stats.ingress.egr_sent,
-        "Ingress matched should equal egr_sent"
-    );
-    assert_eq!(
-        stats.egress.ch_recv, stats.ingress.egr_sent,
-        "Egress ch_recv should equal ingress egr_sent"
-    );
-    assert_eq!(
-        stats.egress.sent, stats.egress.ch_recv,
-        "Egress sent should equal ch_recv"
-    );
-    assert_eq!(
-        stats.egress.sent, stats.egress.submitted,
-        "Egress sent should equal submitted"
-    );
+        println!("\n=== Results ===");
+        println!(
+            "Ingress: recv={} matched={} egr_sent={} filtered={} no_match={} buf_exhaust={}",
+            stats.ingress.recv,
+            stats.ingress.matched,
+            stats.ingress.egr_sent,
+            stats.ingress.filtered,
+            stats.ingress.no_match,
+            stats.ingress.buf_exhaust
+        );
+        println!(
+            "Egress: sent={} submitted={} ch_recv={} errors={} bytes={}",
+            stats.egress.sent,
+            stats.egress.submitted,
+            stats.egress.ch_recv,
+            stats.egress.errors,
+            stats.egress.bytes
+        );
 
-    // No errors
-    assert_eq!(
-        stats.ingress.buf_exhaust, 0,
-        "Should have no buffer exhaustion"
-    );
-    assert_eq!(stats.egress.errors, 0, "Should have no egress errors");
+        // Validate perfect 1:1 forwarding
+        assert!(stats.ingress.matched > 0, "Should forward some packets");
+        assert_eq!(
+            stats.ingress.matched, stats.ingress.egr_sent,
+            "Ingress matched should equal egr_sent"
+        );
+        assert_eq!(
+            stats.egress.ch_recv, stats.ingress.egr_sent,
+            "Egress ch_recv should equal ingress egr_sent"
+        );
+        assert_eq!(
+            stats.egress.sent, stats.egress.ch_recv,
+            "Egress sent should equal ch_recv"
+        );
+        assert_eq!(
+            stats.egress.sent, stats.egress.submitted,
+            "Egress sent should equal submitted"
+        );
 
-    println!("\n=== ✅ Test passed: 1M packets with perfect 1:1 forwarding ===\n");
-    Ok(())
+        // No errors
+        assert_eq!(
+            stats.ingress.buf_exhaust, 0,
+            "Should have no buffer exhaustion"
+        );
+        assert_eq!(stats.egress.errors, 0, "Should have no egress errors");
+
+        println!("\n=== ✅ Test passed: 1M packets with perfect 1:1 forwarding ===\n");
+        Ok(())
+    }
 }

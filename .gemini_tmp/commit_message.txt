@@ -1,13 +1,20 @@
-docs: Clarify AF_PACKET capability for unaddressed interfaces
+docs: Update STATUS.md with definitive egress regression root cause
 
-Enhances the "Ingress Path (`io_uring` + `AF_PACKET`)" section in
-`developer_docs/ARCHITECTURE.md` to explicitly state a key benefit of
-`AF_PACKET`.
+Updates the `STATUS.md` to reflect the definitive root cause of the
+~75% egress performance regression.
 
-This update clarifies that `AF_PACKET` enables MCR to receive raw frames
-even on network interfaces that **do not have an IP address assigned**.
-This is crucial for network isolation scenarios and further justifies
-MCR's low-level architectural choice.
+A `codebase_investigator` analysis, guided by the
+`EGRESS_REGRESSION_ANALYSIS` report, has confirmed that the primary cause
+was an architectural change to the `send_batch()` function in the egress
+worker. The function was refactored from a synchronous submit-and-reap
+model to a deferred-submission model, which broke the buffer pool
+feedback loop and caused massive ingress buffer exhaustion.
 
-This makes the documentation more precise and robust against potential
-misunderstandings of `AF_PACKET`'s role.
+The roadmap in `STATUS.md` has been updated to:
+- State this architectural regression as the primary problem.
+- Define the primary fix as reverting `send_batch()` to its synchronous model.
+- Frame the pre-existing lack of tuning (`SO_SNDBUF`, `io_uring` depth) as
+  a secondary optimization to be performed concurrently.
+
+This makes the `STATUS.md` a precise and actionable guide for fixing the
+critical performance issue.

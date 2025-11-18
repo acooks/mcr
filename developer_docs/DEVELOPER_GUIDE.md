@@ -81,26 +81,43 @@ Your environment is now fully bootstrapped.
 
 ## 2. Core Development Workflow
 
-This project uses a `justfile` as the single source of truth for common development tasks. It provides a convenient way to run the same checks that our Continuous Integration (CI) pipeline uses.
+This project uses a `justfile` as the single source of truth for common development tasks, enabling a "build once, test many" philosophy. This ensures consistent quality checks and a fast feedback loop.
 
-### Verifying Your Changes
+### Daily Development Workflow
 
-Before committing, the primary command you will use is:
+For most day-to-day coding, use the default `just` command:
+
 ```bash
-just check
+just # Runs format, lint, build (release), and fast tests
 ```
-This single command runs the complete suite of quality gates:
-1.  **`fmt`**: Checks for correct code formatting.
-2.  **`clippy`**: Lints the code for common mistakes and style issues.
-3.  **`build`**: Compiles the entire project.
-4.  **`test`**: Runs all unit and integration tests.
-5.  **`audit`**: Checks for known security vulnerabilities in the dependencies.
-6.  **`outdated`**: Checks for outdated dependencies.
+This command provides a fast development cycle (~2-3 minutes) by building binaries once and then running only the most common, unprivileged tests.
 
-### Running Individual Tasks
+### Before Committing (Quality Gates)
 
-You are not required to run the entire suite every time. You can run any of the individual steps as needed. For example, to just run the tests:
+Before committing your changes or submitting a pull request, run the full suite of quality gates:
+
+1.  **Run Fast Checks:**
+    ```bash
+    just check # Formats, lints, builds release binaries, and runs fast tests.
+    ```
+2.  **Run Privileged Tests (Requires `sudo`):**
+    ```bash
+    sudo -E just test-privileged # Runs Rust integration tests that require root privileges.
+    ```
+3.  **Run Performance Tests (Requires `sudo`):**
+    ```bash
+    sudo just test-performance # Runs the comprehensive performance validation test.
+    ```
+
+### Other Useful `just` Commands
+
+Refer to `JUSTFILE_QUICK_REFERENCE.md` for a complete list of `just` commands, including individual checks, specific test suites, and utility tasks.
+
+### Kernel Tuning (For Performance Testing)
+
+If you are working on the data plane or running performance-sensitive tests, you must tune the kernel's network buffer limits. This is a one-time step per boot.
+
 ```bash
-just test
+sudo just setup-kernel
 ```
-To see all available commands, you can view the `justfile` in the root of the repository.
+This command uses `scripts/setup_kernel_tuning.sh` to increase the allowed memory for socket buffers, which is critical for achieving high throughput without packet loss.

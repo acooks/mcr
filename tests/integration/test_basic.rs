@@ -1,181 +1,179 @@
-// Basic integration tests
-//
-// Run with: sudo -E cargo test --release --test integration -- --test-threads=1
-//
-// Tests require:
-// - Root privileges (for network namespaces) - enforced by #[requires_root]
-// - Release binaries built: cargo build --release --bins
-// - Single-threaded execution (network namespaces can conflict)
-
 mod common;
 
 use anyhow::Result;
-use common::{McrInstance, NetworkNamespace, VethPair};
-use mcr_test_macros::requires_root;
-use std::thread;
-use std::time::Duration;
 
-/// Helper to send multicast packets using the common traffic module
-fn send_packets(source_ip: &str, dest_group: &str, dest_port: u16, count: u32) -> Result<()> {
-    common::traffic::send_packets(source_ip, dest_group, dest_port, count)
-}
+// Non-privileged tests can go here at the top level.
 
-#[tokio::test]
-#[requires_root]
-async fn test_single_hop_1000_packets() -> Result<()> {
-    println!("\n=== Test: Single-hop forwarding with 1000 packets ===\n");
+mod privileged {
+    use super::common::{McrInstance, NetworkNamespace, VethPair};
+    use super::*;
+    use std::thread;
+    use std::time::Duration;
 
-    // Enter isolated network namespace
-    let _ns = NetworkNamespace::enter()?;
-    _ns.enable_loopback().await?;
+    /// All privileged tests must call this setup function.
+    fn setup() {
+        if !nix::unistd::geteuid().is_root() {
+            panic!("SKIPPED: This test must be run with root privileges.");
+        }
+    }
 
-    // Create veth pair
-    let _veth = VethPair::create("veth0", "veth0p")
-        .await?
-        .set_addr("veth0", "10.0.0.1/24")
-        .await?
-        .set_addr("veth0p", "10.0.0.2/24")
-        .await?
-        .up()
-        .await?;
+    #[tokio::test]
+    async fn test_single_hop_1000_packets() -> Result<()> {
+        setup();
+        println!("\n=== Test: Single-hop forwarding with 1000 packets ===\n");
 
-    println!("Network setup complete");
+        // Enter isolated network namespace
+        let _ns = NetworkNamespace::enter()?;
+        _ns.enable_loopback().await?;
 
-    // Start MCR instance
-    let mut mcr = McrInstance::start("veth0p", Some(0))?;
-    println!("MCR started, log: {:?}", mcr.log_path());
+        // Create veth pair
+        let _veth = VethPair::create("veth0", "veth0p")
+            .await?
+            .set_addr("veth0", "10.0.0.1/24")
+            .await?
+            .set_addr("veth0p", "10.0.0.2/24")
+            .await?
+            .up()
+            .await?;
 
-    // Add forwarding rule: 239.1.1.1:5001 -> 239.2.2.2:5002:lo
-    mcr.add_rule("239.1.1.1:5001", vec!["239.2.2.2:5002:lo"])?;
-    println!("Rule added");
+        println!("Network setup complete");
 
-    // Send 1000 packets
-    println!("Sending 1000 packets...");
-    send_packets("10.0.0.1", "239.1.1.1", 5001, 1000)?;
+        // Start MCR instance
+        let mut mcr = McrInstance::start("veth0p", Some(0))?;
+        println!("MCR started, log: {:?}", mcr.log_path());
 
-    // Wait for packets to be processed
-    println!("Waiting for pipeline to drain...");
-    thread::sleep(Duration::from_secs(3));
+        // Add forwarding rule: 239.1.1.1:5001 -> 239.2.2.2:5002:lo
+        mcr.add_rule("239.1.1.1:5001", vec!["239.2.2.2:5002:lo"])?;
+        println!("Rule added");
 
-    // Shutdown and get stats
-    println!("Shutting down MCR...");
-    let stats = mcr.shutdown_and_get_stats()?;
+        // Send 1000 packets
+        println!("Sending 1000 packets...");
+        common::traffic::send_packets("10.0.0.1", "239.1.1.1", 5001, 1000)?;
 
-    // Validate results
-    println!("\n=== Results ===");
-    println!(
-        "Ingress: recv={} matched={} egr_sent={} filtered={} no_match={} buf_exhaust={}",
-        stats.ingress.recv,
-        stats.ingress.matched,
-        stats.ingress.egr_sent,
-        stats.ingress.filtered,
-        stats.ingress.no_match,
-        stats.ingress.buf_exhaust
-    );
-    println!(
-        "Egress: sent={} submitted={} ch_recv={} errors={} bytes={}",
-        stats.egress.sent,
-        stats.egress.submitted,
-        stats.egress.ch_recv,
-        stats.egress.errors,
-        stats.egress.bytes
-    );
+        // Wait for packets to be processed
+        println!("Waiting for pipeline to drain...");
+        thread::sleep(Duration::from_secs(3));
 
-    // With veth interfaces, AF_PACKET sees both RX and TX packets
-    // So we expect roughly half the packets (this is a known limitation)
-    // For now, just validate we got SOME packets and forwarding is working
-    assert!(
-        stats.ingress.matched > 0,
-        "Should match at least some packets, got {}",
-        stats.ingress.matched
-    );
+        // Shutdown and get stats
+        println!("Shutting down MCR...");
+        let stats = mcr.shutdown_and_get_stats()?;
 
-    assert_eq!(
-        stats.ingress.matched, stats.ingress.egr_sent,
-        "Ingress matched should equal egress sent"
-    );
+        // Validate results
+        println!("\n=== Results ===");
+        println!(
+            "Ingress: recv={} matched={} egr_sent={} filtered={} no_match={} buf_exhaust={}",
+            stats.ingress.recv,
+            stats.ingress.matched,
+            stats.ingress.egr_sent,
+            stats.ingress.filtered,
+            stats.ingress.no_match,
+            stats.ingress.buf_exhaust
+        );
+        println!(
+            "Egress: sent={} submitted={} ch_recv={} errors={} bytes={}",
+            stats.egress.sent,
+            stats.egress.submitted,
+            stats.egress.ch_recv,
+            stats.egress.errors,
+            stats.egress.bytes
+        );
 
-    // Validate no packet errors
-    // Note: Parse errors are expected with AF_PACKET sockets (ARP, IPv6, etc.)
-    assert_eq!(
-        stats.ingress.buf_exhaust, 0,
-        "Should have no buffer exhaustion"
-    );
-    assert_eq!(stats.egress.errors, 0, "Should have no egress errors");
+        // With veth interfaces, AF_PACKET sees both RX and TX packets
+        // So we expect roughly half the packets (this is a known limitation)
+        // For now, just validate we got SOME packets and forwarding is working
+        assert!(
+            stats.ingress.matched > 0,
+            "Should match at least some packets, got {}",
+            stats.ingress.matched
+        );
 
-    // This is the critical assertion - egress should receive what ingress sent
-    // If this fails, we have the 2x packet bug
-    assert_eq!(
-        stats.egress.ch_recv, stats.ingress.egr_sent,
-        "Egress ch_recv ({}) should equal ingress egr_sent ({})",
-        stats.egress.ch_recv, stats.ingress.egr_sent
-    );
+        assert_eq!(
+            stats.ingress.matched, stats.ingress.egr_sent,
+            "Ingress matched should equal egress sent"
+        );
 
-    assert_eq!(
-        stats.egress.sent, stats.egress.ch_recv,
-        "Egress sent should equal ch_recv (no packet loss)"
-    );
+        // Validate no packet errors
+        // Note: Parse errors are expected with AF_PACKET sockets (ARP, IPv6, etc.)
+        assert_eq!(
+            stats.ingress.buf_exhaust, 0,
+            "Should have no buffer exhaustion"
+        );
+        assert_eq!(stats.egress.errors, 0, "Should have no egress errors");
 
-    assert_eq!(
-        stats.egress.sent, stats.egress.submitted,
-        "Egress sent should equal submitted (all submissions succeeded)"
-    );
+        // This is the critical assertion - egress should receive what ingress sent
+        // If this fails, we have the 2x packet bug
+        assert_eq!(
+            stats.egress.ch_recv, stats.ingress.egr_sent,
+            "Egress ch_recv ({}) should equal ingress egr_sent ({})",
+            stats.egress.ch_recv, stats.ingress.egr_sent
+        );
 
-    println!("\n=== ✅ Test passed ===\n");
+        assert_eq!(
+            stats.egress.sent, stats.egress.ch_recv,
+            "Egress sent should equal ch_recv (no packet loss)"
+        );
 
-    Ok(())
-}
+        assert_eq!(
+            stats.egress.sent, stats.egress.submitted,
+            "Egress sent should equal submitted (all submissions succeeded)"
+        );
 
-#[tokio::test]
-#[requires_root]
-async fn test_minimal_10_packets() -> Result<()> {
-    println!("\n=== Test: Minimal 10 packet test ===\n");
+        println!("\n=== ✅ Test passed ===\n");
 
-    let _ns = NetworkNamespace::enter()?;
-    _ns.enable_loopback().await?;
+        Ok(())
+    }
 
-    let _veth = VethPair::create("veth0", "veth0p")
-        .await?
-        .set_addr("veth0", "10.0.0.1/24")
-        .await?
-        .set_addr("veth0p", "10.0.0.2/24")
-        .await?
-        .up()
-        .await?;
+    #[tokio::test]
+    async fn test_minimal_10_packets() -> Result<()> {
+        setup();
+        println!("\n=== Test: Minimal 10 packet test ===\n");
 
-    let mut mcr = McrInstance::start("veth0p", None)?;
-    mcr.add_rule("239.1.1.1:5001", vec!["239.2.2.2:5002:lo"])?;
+        let _ns = NetworkNamespace::enter()?;
+        _ns.enable_loopback().await?;
 
-    send_packets("10.0.0.1", "239.1.1.1", 5001, 10)?;
-    thread::sleep(Duration::from_secs(2));
+        let _veth = VethPair::create("veth0", "veth0p")
+            .await?
+            .set_addr("veth0", "10.0.0.1/24")
+            .await?
+            .set_addr("veth0p", "10.0.0.2/24")
+            .await?
+            .up()
+            .await?;
 
-    let stats = mcr.shutdown_and_get_stats()?;
+        let mut mcr = McrInstance::start("veth0p", None)?;
+        mcr.add_rule("239.1.1.1:5001", vec!["239.2.2.2:5002:lo"])?;
 
-    println!("\n=== Results ===");
-    println!(
-        "Ingress: recv={} matched={} egr_sent={} filtered={} no_match={} buf_exhaust={}",
-        stats.ingress.recv,
-        stats.ingress.matched,
-        stats.ingress.egr_sent,
-        stats.ingress.filtered,
-        stats.ingress.no_match,
-        stats.ingress.buf_exhaust
-    );
-    println!(
-        "Egress: sent={} submitted={} ch_recv={} errors={} bytes={}",
-        stats.egress.sent,
-        stats.egress.submitted,
-        stats.egress.ch_recv,
-        stats.egress.errors,
-        stats.egress.bytes
-    );
+        common::traffic::send_packets("10.0.0.1", "239.1.1.1", 5001, 10)?;
+        thread::sleep(Duration::from_secs(2));
 
-    assert!(stats.ingress.matched > 0, "Should forward some packets");
-    // Note: Parse errors are expected with AF_PACKET sockets (ARP, IPv6, etc.)
-    // The important thing is that the UDP packets we sent were matched correctly
-    assert_eq!(stats.egress.errors, 0, "Should have no egress errors");
+        let stats = mcr.shutdown_and_get_stats()?;
 
-    println!("\n=== ✅ Test passed ===\n");
+        println!("\n=== Results ===");
+        println!(
+            "Ingress: recv={} matched={} egr_sent={} filtered={} no_match={} buf_exhaust={}",
+            stats.ingress.recv,
+            stats.ingress.matched,
+            stats.ingress.egr_sent,
+            stats.ingress.filtered,
+            stats.ingress.no_match,
+            stats.ingress.buf_exhaust
+        );
+        println!(
+            "Egress: sent={} submitted={} ch_recv={} errors={} bytes={}",
+            stats.egress.sent,
+            stats.egress.submitted,
+            stats.egress.ch_recv,
+            stats.egress.errors,
+            stats.egress.bytes
+        );
 
-    Ok(())
+        assert!(stats.ingress.matched > 0, "Should forward some packets");
+        // Note: Parse errors are expected with AF_PACKET sockets (ARP, IPv6, etc.)
+        // The important thing is that the UDP packets we sent were matched correctly
+        assert_eq!(stats.egress.errors, 0, "Should have no egress errors");
+
+        println!("\n=== ✅ Test passed ===\n");
+
+        Ok(())
+    }
 }

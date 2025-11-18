@@ -44,11 +44,15 @@ This combination of technologies allows MCR to operate at speeds approaching lin
 - Linux kernel 5.10+ (for `io_uring`)
 - Rust toolchain (latest stable)
 - `libpcap-dev` and `libelf-dev` (for building dependencies)
+- `cargo-nextest` (for running the test suite)
 
 ```bash
 # On Debian/Ubuntu
 sudo apt-get update
 sudo apt-get install -y build-essential libpcap-dev libelf-dev
+
+# Install the test runner
+cargo install cargo-nextest
 ```
 
 ### 2. Build

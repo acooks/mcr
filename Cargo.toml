@@ -38,7 +38,6 @@ regex = "1.10"
 rtnetlink = "0.14"
 futures-util = "0.3"
 mcr-test-macros = { path = "mcr-test-macros" }
-
 [features]
 integration_test = []
 testing = []

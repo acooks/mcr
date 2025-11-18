@@ -154,36 +154,39 @@ test-unit:
 # Tier 2 (Part A): Run unprivileged Rust integration tests (as regular user).
 test-integration-light:
     @echo "--- Running Integration Tests (non-privileged) ---"
-    cargo test --test integration --features integration_test
+    cargo nextest run --profile default --test integration
 
 # Tier 2 (Part B): Run privileged Rust integration tests (requires root).
-# Finds the pre-built test binary and runs only the tests marked `#[ignore]`.
+# Note: This builds as the current user first, then runs with elevated privileges.
 test-integration-privileged:
     #!/usr/bin/env bash
     set -euo pipefail
     echo "--- Running Privileged Integration Tests (requires root) ---"
+    echo "Building release binaries and test binaries as current user..."
+    cargo build --release --bins
+    cargo test --test integration --no-run
 
-    # Find integration test binary
+    # Find the integration test binary
     TEST_BINARY=$(find target/debug/deps -name 'integration-*' -type f -executable ! -name '*.d' | head -1)
-
     if [ -z "$TEST_BINARY" ]; then
-        echo "ERROR: Integration test binary not found. Run 'just build-test' first."
+        echo "ERROR: Integration test binary not found"
         exit 1
     fi
 
-    echo "Running ignored tests from: $(basename $TEST_BINARY)"
-    echo ""
-    sudo -E "$TEST_BINARY" --ignored --test-threads=1 --nocapture
+    echo "Running privileged tests with sudo..."
+    sudo -E "$TEST_BINARY" privileged:: --test-threads=1 --nocapture
 
 # Tier 3: Run a representative E2E Bash script test (requires root).
 test-e2e-bash:
     @echo "--- Running Bash E2E Tests (requires root) ---"
-    @if [ "$EUID" -ne 0 ]; then echo "ERROR: Requires root (sudo just test-e2e-bash)"; exit 1; fi
-    @bash tests/data_plane_e2e.sh
+    @if [ "$$EUID" -ne 0 ]; then echo "ERROR: Requires root (sudo just test-e2e-bash)"; exit 1; fi
+    bash tests/data_plane_e2e.sh
 
 # Meta-Target: Run the complete test suite.
 # This is the primary command for contributors to validate changes before a PR.
-test-all: build-test test-unit test-integration-light test-integration-privileged
+test-all: build-test test-unit test-integration-light
+    @echo "\n✅ Unprivileged test suite complete."
+    @echo "To run privileged tests, execute: sudo -E just test-integration-privileged"
 
 # Meta-Target: Run all fast, unprivileged tests.
 # This is useful for a quick feedback loop during development.
