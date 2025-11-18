@@ -111,7 +111,7 @@ Before committing your changes or submitting a pull request, run the full suite 
 
 ### Other Useful `just` Commands
 
-Refer to `JUSTFILE_QUICK_REFERENCE.md` for a complete list of `just` commands, including individual checks, specific test suites, and utility tasks.
+Refer to [`JUSTFILE_QUICK_REFERENCE.md`](JUSTFILE_QUICK_REFERENCE.md) for a complete list of `just` commands, including individual checks, specific test suites, and utility tasks.
 
 ### Kernel Tuning (For Performance Testing)
 

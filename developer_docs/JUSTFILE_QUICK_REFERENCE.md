@@ -375,10 +375,10 @@ just dev    # Does both correctly
 
 ## More Information
 
-- **Detailed workflow analysis:** `developer_docs/JUSTFILE_WORKFLOW.md`
-- **Testing guide:** `TESTING.md`
-- **Build consistency:** `developer_docs/BUILD_CONSISTENCY.md`
-- **Quick test guide:** `QUICK_TEST.md`
+- **Detailed workflow analysis:** [`JUSTFILE_WORKFLOW.md`](JUSTFILE_WORKFLOW.md)
+- **Testing guide:** [`TESTING.md`](TESTING.md)
+- **Build consistency:** [`BUILD_CONSISTENCY.md`](BUILD_CONSISTENCY.md)
+- **Quick test guide:** [`QUICK_TEST.md`](../user_docs/QUICK_TEST.md)
 
 ---
 

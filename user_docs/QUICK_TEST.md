@@ -142,6 +142,6 @@ MCR_SOCKET_SNDBUF=8388608 sudo tests/data_plane_pipeline_veth.sh
 
 ## More Details
 
-- **Analysis:** `developer_docs/PERFORMANCE_FIXES_NEEDED.md`
-- **Changes:** `developer_docs/PERFORMANCE_FIXES_APPLIED.md`
-- **Testing:** `TESTING.md`
+- **Analysis:** [`PERFORMANCE_FIXES_NEEDED.md`](../developer_docs/PERFORMANCE_FIXES_NEEDED.md)
+- **Changes:** [`PERFORMANCE_FIXES_APPLIED.md`](../developer_docs/PERFORMANCE_FIXES_APPLIED.md)
+- **Testing:** [`TESTING.md`](../developer_docs/TESTING.md)
