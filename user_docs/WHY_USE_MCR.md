@@ -1,8 +1,6 @@
-# Why Do I Need MCR?
+# MCR: The Multicast Routing Solution
 
-This guide explains the core problem that the Multicast Relay (MCR) is designed to solve.
-
-## The Problem: Unroutable Multicast Sources
+## The Challenge: Unroutable Multicast Traffic
 
 In many real-world networks, multicast traffic originates in a secure or isolated network segment, but it needs to be consumed in another. For security and network hygiene, the source of the traffic in the isolated segment is often "unroutable" from the consumer's network.
 
@@ -13,17 +11,15 @@ This is a common and frustrating problem in many industries, including:
 *   **Financial Services:** Forwarding market data feeds from a secure exchange network to an internal analysis or trading network.
 *   **Enterprise & Datacenters:** Distributing sensor data or application messages between different VLANs, security zones, or VPCs where direct routing is forbidden.
 
-### A Concrete Example: The Media Network
+### Example: The Media Network Scenario
 
 Imagine a television studio with a dedicated, high-performance **Media Network** (`10.10.1.0/24`). On this network, a camera sends a high-bitrate video stream to the multicast group `239.0.0.1`.
 
 You have a server with two interfaces: `eth0` is on the Media Network, and `eth1` is on the general **Corporate Network** (`10.90.1.0/24`). You want to view this video stream on the corporate network.
 
-<!-- DIAGRAM_NEEDED: A camera on a Media Network sends a multicast stream to 239.0.0.1. A server with two NICs, one on the Media Network and one on the Corporate Network, tries to forward this stream. The kernel on the server drops the packet due to an RPF check failure, because the camera's IP on the Media Network is not routable from the Corporate Network. -->
-
 When the server's `eth0` receives the multicast packet, the kernel's RPF check fails. The camera's source IP (`10.10.1.100`) is not routable from `eth1`. The packet is dropped.
 
-## The Solution: MCR
+## MCR's Solution: Bypassing RPF in Userspace
 
 MCR solves this problem by acting as a userspace relay. It operates at a low level, bypassing the kernel's routing and RPF checks.
 
@@ -32,9 +28,7 @@ MCR solves this problem by acting as a userspace relay. It operates at a low lev
 
 This allows MCR to create a clean, one-way bridge for multicast traffic between isolated networks without compromising their security posture. The entire process is optimized for efficiency through the use of Linux's `io_uring` asynchronous I/O interface, minimizing syscall overhead and maximizing throughput.
 
-<!-- DIAGRAM_NEEDED: The same network setup, but this time MCR is running on the server. MCR receives the packet on eth0 via AF_PACKET, bypassing the RPF check. It then takes the payload and re-transmits it as a new packet from eth1 to the Corporate Network, where viewers can now see the stream. -->
-
-## Why a Userspace Relay is the Practical Solution
+## Userspace Relay: The Practical Solution
 
 The "unroutable source" problem is fundamentally a **routing challenge**. While technically possible to address within the Linux kernel (e.g., via a custom kernel module), or through extensions to general-purpose tools like Netfilter, such approaches present significant practical barriers for most operational environments:
 

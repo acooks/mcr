@@ -23,15 +23,15 @@ In many modern network environments—such as broadcast media facilities, financ
 
 ---
 
-## Architecture: High-Performance by Design
+## Architecture: Performance by Design
 
-MCR is architected from the ground up for maximum throughput and minimal latency. Instead of making specific performance claims, we believe in transparently describing the design that makes high performance possible.
+MCR is architected from the ground up for maximum throughput and minimal latency. The design combines several modern Linux technologies to achieve near line-rate speeds.
 
--   **Userspace Operation:** Provides maximum flexibility and control, avoiding the limitations of kernel-level forwarding.
--   **`io_uring` for I/O:** Utilizes Linux's most advanced asynchronous I/O interface (`io_uring`) to dramatically reduce syscall overhead and minimize kernel-userspace context switching.
--   **`AF_PACKET` for Raw Sockets:** Reads and writes raw Ethernet frames, allowing for efficient, zero-copy processing and bypassing the kernel's IP stack.
+-   **Userspace Operation:** Provides maximum flexibility and control, avoiding the limitations and overhead of kernel-level forwarding.
+-   **`io_uring` for Asynchronous I/O:** Utilizes Linux's most advanced I/O interface to dramatically reduce syscall overhead and minimize kernel-userspace context switching.
+-   **`AF_PACKET` for Raw Sockets:** Reads and writes raw Ethernet frames, allowing for efficient processing and bypassing the kernel's IP stack.
 -   **Single-Threaded, Unified Event Loop:** A single thread handles ingress, processing, and egress within one `io_uring` instance, eliminating cross-thread communication overhead and maximizing cache efficiency.
--   **Multi-Output (Fan-Out):** A single ingress packet can be efficiently replicated to multiple egress destinations, leveraging a zero-copy architecture for high performance.
+-   **Zero-Copy Fan-Out:** A single ingress packet can be efficiently replicated to multiple egress destinations using a zero-copy `Arc<[u8]>` based architecture.
 
 This combination of technologies allows MCR to operate at speeds approaching line-rate, typically limited only by the underlying hardware.
 
