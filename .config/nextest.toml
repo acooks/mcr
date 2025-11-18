@@ -1,0 +1,10 @@
+# .config/nextest.toml
+
+# Default profile: runs all tests EXCEPT those in the 'privileged' modules
+# within the 'integration' test binary.
+[profile.default]
+default-filter = "not test(::privileged::)"
+
+# Privileged profile: runs ONLY the tests in the 'privileged' modules.
+[profile.privileged]
+default-filter = "test(::privileged::)"

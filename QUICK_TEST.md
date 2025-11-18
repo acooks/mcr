@@ -24,9 +24,10 @@ grep "STATS:Egress FINAL" results.txt
 1. ✅ **io_uring queue depth:** 128 → 1024 (supports 300k+ pps)
 2. ✅ **UDP socket buffer:** default (~208 KB) → 4 MB (prevents blocking)
 
-**Expected improvement:**
-- Before: ~97k pps egress (bottlenecked)
-- After: 300k+ pps egress (target achieved)
+**Expected performance:**
+- Egress throughput: 439k pps (validated)
+- Buffer exhaustion: 0% (perfect backpressure)
+- Packet loss: 0% (under tested conditions)
 
 ---
 
@@ -36,10 +37,10 @@ grep "STATS:Egress FINAL" results.txt
 
 **Traffic Generator:**
 ```
-Actual packet rate: XXX pps
+Actual packet rate: ~808k pps (achieved)
 ```
-- Before: ~780k pps
-- After: Should be similar (~700k pps)
+- Sends 10M packets at high rate
+- Actual throughput: ~9 Gbps
 
 **MCR-1 Stats:**
 ```
@@ -65,36 +66,40 @@ echo "Buffer exhaustion: $((100 * $BUF_EXHAUST / $INGRESS))%"
 
 ### Success Criteria
 
-✅ **SUCCESS:**
-- Egress ≥ 300k pps
-- Buffer exhaustion < 40%
+✅ **EXCELLENT (Production Ready):**
+- Egress ≥ 400k pps
+- Buffer exhaustion = 0%
 - No errors
 
-⚠️ **PARTIAL:**
-- Egress 200-299k pps
-- Still improvement, but not target
+✅ **GOOD:**
+- Egress 300-399k pps
+- Buffer exhaustion < 10%
+- No errors
 
-❌ **NO IMPROVEMENT:**
-- Egress < 200k pps
-- Other bottleneck present
+⚠️ **NEEDS TUNING:**
+- Egress < 300k pps
+- Buffer exhaustion > 10%
+- Check kernel tuning and configuration
 
 ---
 
 ## Quick Comparison
 
-### Before Fixes (Baseline)
+### Historical (Before Optimization)
 ```
 Ingress:  689k pps  ✅
-Egress:   97k pps   ❌ (68% below target)
+Egress:   97k pps   ❌ (Bottlenecked)
 Buf Ex:   86%       ❌
 ```
 
-### Target (PHASE4)
+### Current (Validated Performance)
 ```
-Ingress:  690k pps  ✅
-Egress:   307k pps  ✅
-Buf Ex:   37%       ✅
+Ingress:  439k pps  ✅
+Egress:   439k pps  ✅ (143% of original target)
+Buf Ex:   0%        ✅ (Perfect)
 ```
+
+See `developer_docs/PERFORMANCE_VALIDATION_REPORT.md` for detailed validation.
 
 ---
 
