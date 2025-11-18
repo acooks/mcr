@@ -1,9 +1,9 @@
 // Basic integration tests
 //
-// Run with: sudo cargo test --test test_basic -- --ignored --test-threads=1
+// Run with: sudo -E cargo test --release --test integration -- --test-threads=1
 //
 // Tests require:
-// - Root privileges (for network namespaces)
+// - Root privileges (for network namespaces) - enforced by #[requires_root]
 // - Release binaries built: cargo build --release --bins
 // - Single-threaded execution (network namespaces can conflict)
 
@@ -47,7 +47,6 @@ fn send_packets(source_ip: &str, dest_group: &str, dest_port: u16, count: u32) -
 }
 
 #[tokio::test]
-#[ignore] // Requires root
 #[requires_root]
 async fn test_single_hop_1000_packets() -> Result<()> {
     println!("\n=== Test: Single-hop forwarding with 1000 packets ===\n");
@@ -154,7 +153,6 @@ async fn test_single_hop_1000_packets() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore] // Requires root
 #[requires_root]
 async fn test_minimal_10_packets() -> Result<()> {
     println!("\n=== Test: Minimal 10 packet test ===\n");

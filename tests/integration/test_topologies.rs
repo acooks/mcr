@@ -1,9 +1,9 @@
 // Topology tests - multi-hop chains and fanout patterns
 //
-// Run with: sudo cargo test --test test_topologies -- --ignored --test-threads=1
+// Run with: sudo -E cargo test --release --test integration -- --test-threads=1
 //
 // Tests require:
-// - Root privileges (for network namespaces)
+// - Root privileges (for network namespaces) - enforced by #[requires_root]
 // - Release binaries built: cargo build --release --bins
 // - Single-threaded execution (network namespaces can conflict)
 
@@ -58,7 +58,6 @@ fn send_packets(
 }
 
 #[tokio::test]
-#[ignore]
 #[requires_root]
 async fn test_baseline_2hop_100k_packets() -> Result<()> {
     println!("\n=== Baseline: 2-hop forwarding with 100k packets ===\n");
@@ -184,18 +183,21 @@ async fn test_baseline_2hop_100k_packets() -> Result<()> {
         "MCR-2: egress sent should equal ch_recv"
     );
 
-    // No errors on either instance
-    assert_eq!(
-        stats1.ingress.filtered, 0,
-        "MCR-1 should have no parse errors"
+    // Allow small amount of filtered packets (stray multicast traffic like ARP, IPv6)
+    // Note: AF_PACKET sockets see all link-layer traffic
+    assert!(
+        stats1.ingress.filtered < 100,
+        "Too many filtered packets on MCR-1: {}",
+        stats1.ingress.filtered
     );
     assert_eq!(
         stats1.egress.errors, 0,
         "MCR-1 should have no egress errors"
     );
-    assert_eq!(
-        stats2.ingress.filtered, 0,
-        "MCR-2 should have no parse errors"
+    assert!(
+        stats2.ingress.filtered < 100,
+        "Too many filtered packets on MCR-2: {}",
+        stats2.ingress.filtered
     );
     assert_eq!(
         stats2.egress.errors, 0,
@@ -207,7 +209,6 @@ async fn test_baseline_2hop_100k_packets() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore]
 #[requires_root]
 async fn test_chain_3hop() -> Result<()> {
     println!("\n=== 3-Hop Chain Topology Test ===\n");
@@ -341,17 +342,29 @@ async fn test_chain_3hop() -> Result<()> {
         "MCR-3: channel delivery"
     );
 
-    // No errors
-    assert_eq!(stats1.ingress.filtered, 0);
-    assert_eq!(stats2.ingress.filtered, 0);
-    assert_eq!(stats3.ingress.filtered, 0);
+    // Allow small amount of filtered packets (stray multicast traffic like ARP, IPv6)
+    // Note: AF_PACKET sockets see all link-layer traffic
+    assert!(
+        stats1.ingress.filtered < 100,
+        "Too many filtered packets on MCR-1: {}",
+        stats1.ingress.filtered
+    );
+    assert!(
+        stats2.ingress.filtered < 100,
+        "Too many filtered packets on MCR-2: {}",
+        stats2.ingress.filtered
+    );
+    assert!(
+        stats3.ingress.filtered < 100,
+        "Too many filtered packets on MCR-3: {}",
+        stats3.ingress.filtered
+    );
 
     println!("\n=== ✅ Test passed: 3-hop chain with perfect forwarding ===\n");
     Ok(())
 }
 
 #[tokio::test]
-#[ignore]
 #[requires_root]
 async fn test_tree_fanout_1_to_3() -> Result<()> {
     println!("\n=== Tree Topology: 1:3 Fanout (Head-End Replication) ===\n");

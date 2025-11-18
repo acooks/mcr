@@ -1,9 +1,9 @@
 // Scaling tests - verify 1:1 forwarding at multiple packet counts
 //
-// Run with: sudo cargo test --test test_scaling -- --ignored --test-threads=1
+// Run with: sudo -E cargo test --release --test integration -- --test-threads=1
 //
 // Tests require:
-// - Root privileges (for network namespaces)
+// - Root privileges (for network namespaces) - enforced by #[requires_root]
 // - Release binaries built: cargo build --release --bins
 // - Single-threaded execution (network namespaces can conflict)
 
@@ -47,7 +47,6 @@ fn send_packets(source_ip: &str, dest_group: &str, dest_port: u16, count: u32) -
 }
 
 #[tokio::test]
-#[ignore]
 #[requires_root]
 async fn test_scale_1000_packets() -> Result<()> {
     println!("\n=== Scaling Test: 1,000 packets ===\n");
@@ -122,7 +121,6 @@ async fn test_scale_1000_packets() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore]
 #[requires_root]
 async fn test_scale_10000_packets() -> Result<()> {
     println!("\n=== Scaling Test: 10,000 packets ===\n");
@@ -197,7 +195,6 @@ async fn test_scale_10000_packets() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore]
 #[requires_root]
 async fn test_scale_1m_packets() -> Result<()> {
     println!("\n=== Scaling Test: 1,000,000 packets ===\n");
