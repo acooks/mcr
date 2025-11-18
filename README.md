@@ -1,19 +1,97 @@
-# Multicast Relay (MCR)
+# MCR: A High-Performance Userspace Multicast Relay
 
-**Note: MCR is currently under active development.**
+[![Build Status](https://github.com/your-repo/mcr/actions/workflows/rust.yml/badge.svg)](https://github.com/your-repo/mcr/actions/workflows/rust.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](./licenses.html)
 
-MCR is a high-performance, userspace multicast relay for Linux. It is a purpose-built tool for network architects, broadcast/media engineers, and financial services developers who need to reliably bridge multicast traffic between isolated or unroutable network segments.
+**MCR** is a specialized, high-performance multicast relay for Linux, designed to forward multicast traffic between network segments where conventional routing is impossible or inefficient.
 
-If you have ever been blocked by the kernel's Reverse Path Forwarding (RPF) check when trying to forward multicast traffic across network boundaries, MCR is the tool for you. It uses a low-level `AF_PACKET` and `io_uring` architecture to bypass these limitations and achieve millions of packets per second of throughput.
+It is built for engineers who face challenges with kernel-level multicast forwarding, such as the Reverse Path Forwarding (RPF) check, and require a flexible, scalable, and extremely fast userspace solution.
 
 ---
 
-## Getting Started
+## The Problem MCR Solves
 
-This project provides separate documentation for the two primary audiences:
+In many modern network environments—such as broadcast media facilities, financial data centers, or complex cloud VPCs—multicast traffic needs to traverse network boundaries that are not cleanly routable. Attempting to forward this traffic with standard routers often fails due to the kernel's strict RPF check, which drops packets that arrive on an interface other than the one the kernel would use to route back to the source.
 
-*   **For Users (`user_docs/`):** If you want to understand *why* you might need MCR, build it, or run it, start here.
-    *   [**Why Use MCR?**](./user_docs/WHY_USE_MCR.md) - Explains the core problem MCR solves.
-    *   [**Usage Guide**](./user_docs/USAGE.md) - A comprehensive guide to installing, configuring, and operating MCR.
+**MCR is the solution for this exact problem.** By operating at Layer 2 and using raw `AF_PACKET` sockets, it can receive multicast packets from one network interface and re-transmit them on another, completely bypassing the kernel's IP-layer routing and RPF enforcement.
 
-*   **For Developers (`developer_docs/`):** If you want to contribute to the project, understand its architecture, or learn about the testing strategy, start with the [**Developer Documentation**](./developer_docs/README.md).
+### Who is MCR for?
+
+*   **Network Architects & Cloud Engineers:** Bridge multicast traffic (e.g., discovery protocols, service announcements) between different VPCs, subnets, or physical network segments without complex routing changes.
+*   **Broadcast & Media Engineers:** Reliably transport high-bitrate media streams (e.g., SMPTE 2110) across network boundaries in production and lab environments.
+*   **Financial Services Developers:** Distribute real-time market data feeds across multiple isolated networks with minimal and predictable latency.
+
+---
+
+## Architecture: High-Performance by Design
+
+MCR is architected from the ground up for maximum throughput and minimal latency. Instead of making specific performance claims, we believe in transparently describing the design that makes high performance possible.
+
+-   **Userspace Operation:** Provides maximum flexibility and control, avoiding the limitations of kernel-level forwarding.
+-   **`io_uring` for I/O:** Utilizes Linux's most advanced asynchronous I/O interface (`io_uring`) to dramatically reduce syscall overhead and minimize kernel-userspace context switching.
+-   **`AF_PACKET` for Raw Sockets:** Reads and writes raw Ethernet frames, allowing for efficient, zero-copy processing and bypassing the kernel's IP stack.
+-   **Single-Threaded, Unified Event Loop:** A single thread handles ingress, processing, and egress within one `io_uring` instance, eliminating cross-thread communication overhead and maximizing cache efficiency.
+-   **Multi-Output (Fan-Out):** A single ingress packet can be efficiently replicated to multiple egress destinations, leveraging a zero-copy architecture for high performance.
+
+This combination of technologies allows MCR to operate at speeds approaching line-rate, typically limited only by the underlying hardware.
+
+---
+
+## Quick Start
+
+### 1. Prerequisites
+
+- Linux kernel 5.10+ (for `io_uring`)
+- Rust toolchain (latest stable)
+- `libpcap-dev` and `libelf-dev` (for building dependencies)
+
+```bash
+# On Debian/Ubuntu
+sudo apt-get update
+sudo apt-get install -y build-essential libpcap-dev libelf-dev
+```
+
+### 2. Build
+
+Build all necessary binaries in release mode.
+
+```bash
+./scripts/build_all.sh
+```
+
+### 3. Configure Kernel for High Performance
+
+For optimal performance, tune the kernel's network buffer limits. This script increases the allowed send/receive buffer sizes.
+
+```bash
+# This is required once per boot
+sudo ./scripts/setup_kernel_tuning.sh
+```
+
+### 4. Run & Configure the Relay
+
+A full usage guide is available in the [User Guide](./user_docs/USAGE.md).
+
+---
+
+## Documentation
+
+-   **[User Guide](./user_docs/USAGE.md):** For users who want to install, configure, and operate MCR.
+-   **[Developer Guide](./developer_docs/README.md):** For contributors who want to understand the architecture, development workflow, and testing strategy.
+
+---
+
+## License
+
+This project is dual-licensed under either of:
+
+-   Apache License, Version 2.0 ([LICENSE-APACHE](./LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
+-   MIT license ([LICENSE-MIT](./LICENSE-MIT) or http://opensource.org/licenses/MIT)
+
+at your option.
+
+---
+
+## Contributing
+
+We welcome contributions! Please see the [Contributing Guide](./developer_docs/CONTRIBUTING.md) for details on how to get started.

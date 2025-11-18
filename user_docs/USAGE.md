@@ -1,15 +1,13 @@
 # Multicast Relay
 
-This project provides a high-performance, dynamically configurable multicast relay application written in Rust. It is designed to receive UDP multicast streams and retransmit them to one or more destination multicast groups, with options for head-end replication.
-
-The application is built for performance, using an asynchronous, parallel architecture with `tokio` to handle many concurrent flows efficiently. It also includes a control plane for runtime configuration and a suite of tools for testing and monitoring.
+This project provides a high-performance, dynamically configurable multicast relay application written in Rust. It is designed to receive UDP multicast streams and retransmit them to one or more destination multicast groups, leveraging modern Linux kernel features for efficiency and control.
 
 ## Features
 
-- **High-Performance:** Asynchronous, multi-threaded design capable of handling millions of packets per second.
-- **Dynamic Reconfiguration:** Add, remove, and list forwarding rules at runtime without restarting the application.
-- **Head-End Replication:** A single input stream can be replicated to multiple output multicast groups.
-- **Real-time Monitoring:** Built-in monitoring for packet rates, byte rates, CPU usage, and memory usage, available via console output and a Prometheus exporter.
+- **High-Performance Architecture:** Utilizes Linux's `io_uring` for asynchronous I/O and `AF_PACKET` for raw socket access, minimizing kernel-userspace overhead and enabling high throughput.
+- **Dynamic Reconfiguration:** Add, remove, and list forwarding rules at runtime without restarting the application via a UNIX socket-based control plane.
+- **Multi-Output (Fan-Out):** A single input stream can be efficiently replicated to multiple output multicast groups.
+- **Real-time Monitoring:** Built-in monitoring for packet rates, byte rates, and errors, available via console output and a Prometheus exporter (planned).
 - **Standalone Tools:** Includes a high-performance traffic generator for load testing and a control client for interacting with the relay.
 
 ## Basic Concepts
@@ -18,7 +16,7 @@ MCR operates on a few core concepts:
 
 *   **Supervisor:** This is the main process that you launch when you run `multicast_relay`. It is responsible for managing the high-performance workers and handling runtime configuration commands. It does not process any multicast traffic itself.
 
-*   **Worker (or Data Plane):** These are the high-performance processes that do the actual work of receiving, processing, and re-transmitting multicast packets. The supervisor spawns one or more workers, typically pinning each to a specific CPU core to maximize performance.
+*   **Worker (or Data Plane):** These are the high-performance processes that do the actual work of receiving, processing, and re-transmitting multicast packets. The supervisor spawns one or more workers, typically pinning each to a specific CPU core to maximize performance. The data plane uses a single-threaded, unified event loop for optimal efficiency.
 
 *   **Forwarding Rule:** A forwarding rule is a configuration object that tells a worker what to do. Each rule defines a specific input stream (based on multicast group and port) and a list of one or more outputs where that stream should be re-transmitted. You can manage these rules at runtime using the `control_client`.
 
@@ -35,28 +33,29 @@ You will also need to have the official **Rust toolchain** installed. You can in
 To build all components (the relay, the traffic generator, and the control client), run the following command from the project root:
 
 ```bash
-cargo build --release
+./scripts/build_all.sh
 ```
 
 The compiled binaries will be available in the `target/release/` directory. You may wish to copy them to a location in your system's `PATH` (e.g., `/usr/local/bin/`) for easier access.
 
-## Running the Relay
+### Configure Kernel for High Performance
 
-To run the main relay application:
+For optimal performance, tune the kernel's network buffer limits. This script increases the allowed send/receive buffer sizes.
 
 ```bash
-./target/release/multicast_relay [OPTIONS]
+# This is required once per boot
+sudo ./scripts/setup_kernel_tuning.sh
 ```
 
-**Options:**
+## Running the Relay
 
-- `--input-group <IP>`: Set an initial input multicast group.
-- `--input-port <PORT>`: Set an initial input port.
-- `--output-group <IP>`: Set an initial output multicast group.
-- `--output-port <PORT>`: Set an initial output port.
-- `--output-interface <IP>`: Set the initial output interface.
-- `--reporting-interval <SECONDS>`: The interval for printing monitoring reports to the console.
-- `--prometheus-addr <IP:PORT>`: The address for the Prometheus metrics exporter.
+To run the main relay application, which will start the supervisor and its workers:
+
+```bash
+sudo ./target/release/multicast_relay
+```
+
+Workers are configured dynamically via the control client. Command-line options for initial rules are deprecated.
 
 ## Using the Control Client
 
@@ -65,11 +64,13 @@ The `control_client` is used to manage forwarding rules and log levels at runtim
 **Add a Rule:**
 
 ```bash
-./target/release/control_client add \
-    --input-group 239.1.1.1 \
-    --input-port 5000 \
-    --outputs 239.10.1.1:5001:10.1.5.25 \
-    --outputs 239.10.1.2:5002:10.1.5.25
+./target/release/control_client add-rule \
+    --input-interface eth0 \
+    --input-group 239.0.0.1 \
+    --input-port 5001 \
+    --output-interface eth1 \
+    --output-group 239.0.0.2 \
+    --output-port 6001
 ```
 
 **Remove a Rule:**
@@ -115,13 +116,16 @@ Here are some practical examples of how to use the control client to configure t
 
 ### Example 1: Simple 1-to-1 Relay
 
-**Goal:** Relay traffic from multicast group `239.10.1.2:8001` to `239.20.3.4:9002` using the network interface with the IP `10.1.5.25`.
+**Goal:** Relay traffic from multicast group `239.10.1.2:8001` to `239.20.3.4:9002` using the network interface `eth1`.
 
 ```bash
-./target/release/control_client add \
+./target/release/control_client add-rule \
+    --input-interface eth0 \
     --input-group 239.10.1.2 \
     --input-port 8001 \
-    --outputs 239.20.3.4:9002:10.1.5.25
+    --output-interface eth1 \
+    --output-group 239.20.3.4 \
+    --output-port 9002
 ```
 
 ### Example 2: 1-to-2 Head-End Replication
@@ -129,13 +133,18 @@ Here are some practical examples of how to use the control client to configure t
 **Goal:** Take a single input stream and replicate it to two different downstream groups.
 
 ```bash
-./target/release/control_client add \
+./target/release/control_client add-rule \
+    --input-interface eth0 \
     --input-group 239.10.1.2 \
     --input-port 8001 \
-    --outputs 239.30.1.1:7001:10.1.5.25 \
-    --outputs 239.30.1.2:7002:10.1.5.25
+    --output-interface eth1 \
+    --output-group 239.30.1.1 \
+    --output-port 7001 \
+    --output-interface eth1 \
+    --output-group 239.30.1.2 \
+    --output-port 7002
 ```
-Note that we just provide a second `--outputs` flag for the same input rule.
+Note that you provide multiple `--output-interface`, `--output-group`, and `--output-port` flags for the same input rule to define multiple outputs.
 
 ## Using the Traffic Generator
 
@@ -156,24 +165,22 @@ The `traffic_generator` can be used to send multicast traffic for testing purpos
 
 To run the unit and integration tests:
 
+1.  Build all binaries in release mode:
+    ```bash
+    ./scripts/build_all.sh
+    ```
+2.  Execute the tests:
+    ```bash
+    cargo test --release -- --ignored --test-threads=1
+    ```
+
+### End-to-End Topology Tests
+
+These tests validate MCR in realistic network topologies using network namespace isolation. They require `sudo` privileges.
+
 ```bash
-cargo test
+# Run the default 3-hop pipeline test
+sudo tests/data_plane_pipeline_veth.sh
 ```
 
-### Topology Tests (End-to-End)
-
-To run comprehensive end-to-end tests with network namespace isolation:
-
-```bash
-# Run all topology tests
-sudo just test-topologies
-
-# Run specific topology
-sudo tests/topologies/chain_3hop.sh
-```
-
-Available topologies:
-- `chain_3hop.sh` - 3-hop serial forwarding pipeline
-- `tree_fanout.sh` - Head-end replication (1:N amplification)
-
-See [tests/topologies/README.md](tests/topologies/README.md) for details.
+For more advanced testing scenarios, refer to the scripts in the `tests/` directory.

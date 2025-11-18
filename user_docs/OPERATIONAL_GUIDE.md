@@ -20,21 +20,21 @@ MCR outputs separate statistics lines for the Ingress (receiving) and Egress (se
 The Ingress stats line shows how many packets are being received from the network.
 
 **Example:**
-`[STATS:Ingress] recv=6129022 matched=3881980 parse_err=1 no_match=21 buf_exhaust=2247020 (490000 pps)`
+`[STATS:Ingress] recv=6129022 matched=3881980 parse_err=1 no_match=21 buf_exhaust=2247020 (high pps)`
 
 *   **`recv`**: The total number of raw frames (packets) received by the network card's `AF_PACKET` socket since the worker started. This is the highest-level view of incoming traffic.
 *   **`matched`**: The number of received packets that successfully matched a configured forwarding rule (i.e., correct multicast group and port). This is the count of "useful" packets.
 *   **`parse_err`**: The number of packets that were dropped because they were not valid Ethernet/IP/UDP frames. A high number may indicate non-IP traffic on the network.
 *   **`no_match`**: The number of valid UDP packets that did not match any active forwarding rule. This is expected if there is other multicast traffic on the network that you don't intend to relay.
 *   **`buf_exhaust` (Buffer Exhaustion):** This is a critical health metric. It counts how many incoming packets were dropped because the internal memory buffers were all in use. This is the primary indicator of **back-pressure**.
-*   **`pps` (Packets Per Second):** The current rate of *received* packets.
+*   **`pps` (Packets Per Second):** The current rate of *received* packets. Actual rates depend on system hardware and traffic load.
 
 ### Egress Statistics
 
 The Egress stats line shows how many packets are being sent out.
 
 **Example:**
-`[STATS:Egress] sent=4176384 submitted=4176384 errors=0 bytes=5846937600 (307000 pps)`
+`[STATS:Egress] sent=4176384 submitted=4176384 errors=0 bytes=5846937600 (high pps)`
 
 *   **`sent`**: The total number of packets that have been successfully sent by the operating system since the worker started.
 *   **`submitted`**: The total number of packets that the MCR application has submitted to the `io_uring` kernel interface for sending.
@@ -51,13 +51,13 @@ By comparing the Ingress and Egress stats, you can quickly diagnose the health o
 **Scenario:** You are intentionally sending more traffic than MCR can handle.
 
 ```
-[STATS:Ingress] recv=1000 matched=1000 ... buf_exhaust=200 ... (500k pps)
-[STATS:Egress]  sent=800  submitted=800  errors=0 ... (300k pps)
+[STATS:Ingress] recv=1000 matched=1000 ... buf_exhaust=200 ... (high pps)
+[STATS:Egress]  sent=800  submitted=800  errors=0 ... (high pps)
 ```
 
 **Interpretation:**
-*   The Ingress path is faster than the Egress path (500k pps vs. 300k pps).
-*   **`buf_exhaust > 0`**: This is **expected and healthy**. It shows that the system's back-pressure mechanism is working correctly. Packets that cannot be processed are being dropped at the earliest stage (Ingress) to protect the rest of the system.
+*   The Ingress path may show a higher packet rate than the Egress path, indicating that MCR is processing traffic as fast as possible given system limits.
+*   **`buf_exhaust > 0`**: This is **expected and healthy** when the system is operating at or beyond its capacity. It shows that MCR's internal back-pressure mechanism is working correctly, dropping excess packets at ingress to protect the system's stability.
 *   **`errors = 0`**: This is the key health indicator. It means the Egress path is running at its maximum capacity without failures.
 
 ### Egress Path Failure
@@ -65,8 +65,8 @@ By comparing the Ingress and Egress stats, you can quickly diagnose the health o
 **Scenario:** The network downstream of MCR is having problems (e.g., a saturated switch, a disconnected cable).
 
 ```
-[STATS:Ingress] recv=1000 matched=1000 ... buf_exhaust=0 ...
-[STATS:Egress]  sent=750  submitted=800  errors=50 ...
+[STATS:Ingress] recv=1000 matched=1000 ... buf_exhaust=0 ... (high pps)
+[STATS:Egress]  sent=750  submitted=800  errors=50 ... (lower pps)
 ```
 
 **Interpretation:**
@@ -78,8 +78,8 @@ By comparing the Ingress and Egress stats, you can quickly diagnose the health o
 **Scenario:** MCR is running, but no traffic is being forwarded.
 
 ```
-[STATS:Ingress] recv=1000 matched=0 no_match=1000 ...
-[STATS:Egress]  sent=0   submitted=0   errors=0 ...
+[STATS:Ingress] recv=1000 matched=0 no_match=1000 ... (high pps)
+[STATS:Egress]  sent=0   submitted=0   errors=0 ... (0 pps)
 ```
 
 **Interpretation:**

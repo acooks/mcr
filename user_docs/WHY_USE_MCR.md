@@ -19,20 +19,20 @@ Imagine a television studio with a dedicated, high-performance **Media Network**
 
 You have a server with two interfaces: `eth0` is on the Media Network, and `eth1` is on the general **Corporate Network** (`10.90.1.0/24`). You want to view this video stream on the corporate network.
 
-![](<DIAGRAM: A camera on a Media Network sends a multicast stream to 239.0.0.1. A server with two NICs, one on the Media Network and one on the Corporate Network, tries to forward this stream. The kernel on the server drops the packet due to an RPF check failure, because the camera's IP on the Media Network is not routable from the Corporate Network.>)
+<!-- DIAGRAM_NEEDED: A camera on a Media Network sends a multicast stream to 239.0.0.1. A server with two NICs, one on the Media Network and one on the Corporate Network, tries to forward this stream. The kernel on the server drops the packet due to an RPF check failure, because the camera's IP on the Media Network is not routable from the Corporate Network. -->
 
 When the server's `eth0` receives the multicast packet, the kernel's RPF check fails. The camera's source IP (`10.10.1.100`) is not routable from `eth1`. The packet is dropped.
 
 ## The Solution: MCR
 
-MCR solves this problem by acting as a high-performance, userspace relay. It operates at a low level, bypassing the kernel's routing and RPF checks.
+MCR solves this problem by acting as a userspace relay. It operates at a low level, bypassing the kernel's routing and RPF checks.
 
-1.  **Bypasses RPF:** MCR uses a low-level `AF_PACKET` socket to receive the raw Ethernet frames directly from the network card, *before* the kernel's IP stack and RPF check can see or drop them.
-2.  **Re-Transmits Cleanly:** MCR then takes the UDP payload from the packet and re-transmits it as a brand new multicast packet from a different interface. Because MCR is originating this new packet itself, the kernel sees it as legitimate local traffic, and the RPF check does not apply.
+1.  **Bypasses RPF:** MCR uses a low-level `AF_PACKET` socket to receive raw Ethernet frames directly from the network interface. This occurs *before* the kernel's IP stack can process them and apply the RPF check. By intervening at Layer 2, MCR ensures packets are not dropped due to routing limitations.
+2.  **Re-Transmits Cleanly:** MCR then takes the UDP payload from the packet and re-transmits it as a brand new multicast packet from a different interface. Because MCR originates this new packet, the kernel treats it as legitimate local traffic, and the RPF check does not apply to the re-transmitted packet.
 
-This allows MCR to create a clean, one-way bridge for multicast traffic between isolated networks without compromising their security posture.
+This allows MCR to create a clean, one-way bridge for multicast traffic between isolated networks without compromising their security posture. The entire process is optimized for efficiency through the use of Linux's `io_uring` asynchronous I/O interface, minimizing syscall overhead and maximizing throughput.
 
-![](<DIAGRAM: The same network setup, but this time MCR is running on the server. MCR receives the packet on eth0 via AF_PACKET, bypassing the RPF check. It then takes the payload and re-transmits it as a new packet from eth1 to the Corporate Network, where viewers can now see the stream.>)
+<!-- DIAGRAM_NEEDED: The same network setup, but this time MCR is running on the server. MCR receives the packet on eth0 via AF_PACKET, bypassing the RPF check. It then takes the payload and re-transmits it as a new packet from eth1 to the Corporate Network, where viewers can now see the stream. -->
 
 ## Why a Userspace Relay is the Practical Solution
 
@@ -45,12 +45,12 @@ MCR, as a high-performance **userspace relay**, offers an accessible, flexible, 
 
 ## What About `socat`?
 
-For simpler, lower-rate scenarios, the versatile `socat` tool can sometimes be used to achieve a similar outcome. However, `socat` is a general-purpose tool, whereas MCR is a purpose-built, high-performance application designed specifically for this problem.
+For simpler, lower-rate scenarios, the versatile `socat` tool can sometimes be used to achieve a similar outcome. However, `socat` is a general-purpose tool, whereas MCR is a purpose-built application designed specifically for this problem, leveraging modern Linux kernel features for efficiency.
 
 MCR is the superior solution when you need:
-*   **High Throughput:** To handle hundreds of thousands or millions of packets per second.
-*   **High Density:** To manage dozens or hundreds of concurrent multicast streams.
+*   **High Throughput:** Designed for scenarios demanding high packet rates.
+*   **High Density:** To manage dozens or hundreds of concurrent multicast streams efficiently.
 *   **Dynamic Reconfiguration:** To add, remove, and manage forwarding rules at runtime without service interruption.
-*   **Detailed Monitoring:** To get real-time, per-stream statistics on performance and potential issues.
+*   **Transparent Operation:** Operates at Layer 2, bypassing complex routing tables and RPF checks.
 
 For a detailed, technical comparison of the two tools, see the [**MCR vs. socat comparison document**](../developer_docs/comparisons/MCR_vs_socat.md).
