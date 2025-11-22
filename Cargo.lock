@@ -817,7 +817,7 @@ dependencies = [
  "socket2 0.6.1",
  "sysinfo",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror 2.0.17",
  "tokio",
  "tokio-uring",
  "tokio-util",
