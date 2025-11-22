@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 // Logger and LogRegistry for managing ring buffers
 
 use super::entry::LogEntry;

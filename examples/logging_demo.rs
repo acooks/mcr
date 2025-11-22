@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 // Example demonstrating the MCR logging system
 //
 // Run with: cargo run --example logging_demo

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 use clap::Parser;
 use std::net::Ipv4Addr;
 

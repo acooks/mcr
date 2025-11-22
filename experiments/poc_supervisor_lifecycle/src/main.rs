@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Proof-of-Concept: Robust Supervisor Process Lifecycle Management (Automated Test)
 //!
 //! This binary is a self-contained, automated test demonstrating the correct

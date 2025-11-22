@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 // Scaling tests - verify 1:1 forwarding at multiple packet counts
 //
 // Run with: sudo -E cargo test --release --test integration -- --test-threads=1
@@ -7,13 +8,11 @@
 // - Release binaries built: cargo build --release --bins
 // - Single-threaded execution (network namespaces can conflict)
 
-mod common;
-
 use anyhow::Result;
 
 mod privileged {
-    use super::common::{self, McrInstance, NetworkNamespace, VethPair};
     use super::*;
+    use crate::common::{McrInstance, NetworkNamespace, VethPair};
     use std::thread;
     use std::time::Duration;
 
@@ -23,11 +22,13 @@ mod privileged {
             panic!("SKIPPED: This test must be run with root privileges.");
         }
     }
-    
+
     /// Helper to send multicast packets using traffic_generator
     /// Uses count as rate for faster scaling tests
     fn send_packets(source_ip: &str, dest_group: &str, dest_port: u16, count: u32) -> Result<()> {
-        common::traffic::send_packets_with_options(source_ip, dest_group, dest_port, count, 1400, count)
+        crate::common::traffic::send_packets_with_options(
+            source_ip, dest_group, dest_port, count, 1400, count,
+        )
     }
 
     #[tokio::test]
@@ -199,7 +200,14 @@ mod privileged {
         mcr.add_rule("239.1.1.1:5001", vec!["239.2.2.2:5002:lo"])?;
 
         // Send at 50k pps for 1M packets = 20 seconds send + 5 seconds drain
-        common::traffic::send_packets_with_options("10.0.0.1", "239.1.1.1", 5001, 1000000, 1400, 50000)?;
+        crate::common::traffic::send_packets_with_options(
+            "10.0.0.1",
+            "239.1.1.1",
+            5001,
+            1000000,
+            1400,
+            50000,
+        )?;
 
         println!("Waiting for pipeline to drain...");
         thread::sleep(Duration::from_secs(25));

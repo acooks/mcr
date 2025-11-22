@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 fn main() {
     // This build script tells rustc to recognize the `tarpaulin` cfg flag.
     // `cargo tarpaulin` sets this flag during its test runs, but the compiler

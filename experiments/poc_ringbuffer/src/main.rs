@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 // Ring Buffer Proof of Concept
 // Demonstrates lockless SPSC and MPSC ring buffers for logging system
 

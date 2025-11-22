@@ -40,12 +40,12 @@ clippy:
 # Lint documentation files
 lint-docs:
     @echo "--- Running Documentation Linter (markdownlint) ---"
-    @if ! command -v markdownlint &> /dev/null; then \
-        echo "Error: markdownlint-cli is not installed."; \
-        echo "Please install it with: npm install -g markdownlint-cli"; \
+    @if ! command -v npm &> /dev/null; then \
+        echo "Error: npm is not installed."; \
+        echo "Please install Node.js and npm to run markdown linting."; \
         exit 1; \
     fi
-    markdownlint --config .markdownlint.json "**/*.md"
+    npx markdownlint --config .markdownlint.json "**/*.md"
 
 # Build the project
 build:

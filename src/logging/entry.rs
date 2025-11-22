@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 // Log entry structure with cache-line optimized layout
 
 use super::{Facility, Severity};

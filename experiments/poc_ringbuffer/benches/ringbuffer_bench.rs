@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 // Criterion benchmarks for ring buffer
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};

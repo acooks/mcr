@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Common Test Utilities and Helpers
 //!
 //! This module provides shared utilities for integration tests, including:

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 // Stats parsing utilities
 
 use anyhow::{Context, Result};

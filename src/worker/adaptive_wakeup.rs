@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Adaptive Wakeup Strategies for Egress Thread
 //!
 //! This module provides different strategies for waking up the egress thread
@@ -432,7 +433,9 @@ mod tests {
         let hybrid = HybridWakeup::new(Arc::new(owned_fd));
 
         // Manually switch to SPIN mode
-        hybrid.current_strategy.store(STRATEGY_SPIN, Ordering::Relaxed);
+        hybrid
+            .current_strategy
+            .store(STRATEGY_SPIN, Ordering::Relaxed);
 
         // Verify
         assert_eq!(

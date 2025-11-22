@@ -16,3 +16,6 @@ target/tarpaulin/
 # Test results
 test_results/
 .gemini_tmp/
+
+# Node.js dependencies
+node_modules/

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Proof of Concept: File Descriptor Passing with Privilege Drop
 //!
 //! This experiment validates a critical security architecture assumption (D24):

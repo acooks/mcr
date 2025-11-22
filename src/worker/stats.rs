@@ -1,9 +1,10 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 use anyhow::Result;
 use metrics::gauge;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use sysinfo::{Pid, System};
+use sysinfo::{Pid, ProcessesToUpdate, System};
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
 
@@ -28,7 +29,7 @@ pub async fn monitoring_task(shared_flows: SharedFlows, reporting_interval: u64)
     let reporting_duration = Duration::from_secs(reporting_interval);
 
     loop {
-        sys.refresh_process(pid);
+        sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), false);
         if let Some(process) = sys.process(pid) {
             let memory_usage = process.memory();
             gauge!("memory_usage_bytes").set(memory_usage as f64);

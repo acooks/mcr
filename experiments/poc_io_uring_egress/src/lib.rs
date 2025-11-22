@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Proof of Concept: io_uring Batched Egress
 //!
 //! This module implements io_uring-based batched UDP sendto() operations

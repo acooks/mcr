@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! # Metrics Module
 //!
 //! This module encapsulates the logic for exposing application metrics to external

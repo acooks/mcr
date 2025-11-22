@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Proof of Concept: Helper Socket Pattern for IGMP + NIC Filtering
 //!
 //! This experiment validates a critical architectural assumption (D6, D4):

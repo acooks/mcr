@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 // Allow await_holding_lock for std::sync::Mutex - these are intentional short-lived locks
 #![allow(clippy::await_holding_lock)]
 
