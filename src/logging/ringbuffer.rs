@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 // Lock-free ring buffers for logging
 //
 // Based on analysis of Linux printk_ringbuffer and FreeBSD msgbuf designs.

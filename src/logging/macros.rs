@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 // Logging macros for convenient logging
 
 /// Log a message with emergency severity

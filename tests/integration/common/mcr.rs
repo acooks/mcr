@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 // MCR instance management for testing
 
 use super::{binary_path, Stats};

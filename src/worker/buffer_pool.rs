@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Buffer Pool for Data Plane
 //!
 //! This module provides a high-performance, lock-free buffer pool designed for a
@@ -237,8 +238,12 @@ mod tests {
         let pool = BufferPool::new(2, 0, 0);
 
         // Acquire all buffers
-        let _buf1 = pool.acquire(BufferSize::Small).expect("Should get buffer 1");
-        let _buf2 = pool.acquire(BufferSize::Small).expect("Should get buffer 2");
+        let _buf1 = pool
+            .acquire(BufferSize::Small)
+            .expect("Should get buffer 1");
+        let _buf2 = pool
+            .acquire(BufferSize::Small)
+            .expect("Should get buffer 2");
         assert_eq!(pool.available(BufferSize::Small), 0);
 
         // Try to acquire when exhausted
@@ -287,8 +292,12 @@ mod tests {
     fn test_buffer_isolation() {
         let pool = BufferPool::new(2, 0, 0);
 
-        let mut buf1 = pool.acquire(BufferSize::Small).expect("Should acquire buf1");
-        let mut buf2 = pool.acquire(BufferSize::Small).expect("Should acquire buf2");
+        let mut buf1 = pool
+            .acquire(BufferSize::Small)
+            .expect("Should acquire buf1");
+        let mut buf2 = pool
+            .acquire(BufferSize::Small)
+            .expect("Should acquire buf2");
 
         // Write different data to each buffer
         buf1[0] = 1;
@@ -305,7 +314,9 @@ mod tests {
 
         // Acquire different sizes
         let _small = pool.acquire(BufferSize::Small).expect("Should get small");
-        let _std = pool.acquire(BufferSize::Standard).expect("Should get standard");
+        let _std = pool
+            .acquire(BufferSize::Standard)
+            .expect("Should get standard");
         let _jumbo = pool.acquire(BufferSize::Jumbo).expect("Should get jumbo");
 
         // Check counts
@@ -387,7 +398,7 @@ mod tests {
     fn test_buffer_size_copy_clone() {
         let size = BufferSize::Standard;
         let size_copy = size;
-        let size_clone = size.clone();
+        let size_clone = size; // Copy types don't need .clone()
 
         assert_eq!(size, size_copy);
         assert_eq!(size, size_clone);

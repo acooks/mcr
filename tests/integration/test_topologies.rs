@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 // Topology tests - multi-hop chains and fanout patterns
 //
 // Run with: sudo -E cargo test --release --test integration -- --test-threads=1
@@ -7,13 +8,11 @@
 // - Release binaries built: cargo build --release --bins
 // - Single-threaded execution (network namespaces can conflict)
 
-mod common;
-
 use anyhow::Result;
 
 mod privileged {
-    use super::common::{self, McrInstance, NetworkNamespace, VethPair};
     use super::*;
+    use crate::common::{McrInstance, NetworkNamespace, VethPair};
     use std::thread;
     use std::time::Duration;
 
@@ -32,7 +31,9 @@ mod privileged {
         count: u32,
         rate: u32,
     ) -> Result<()> {
-        common::traffic::send_packets_with_options(source_ip, dest_group, dest_port, count, 1400, rate)
+        crate::common::traffic::send_packets_with_options(
+            source_ip, dest_group, dest_port, count, 1400, rate,
+        )
     }
 
     #[tokio::test]

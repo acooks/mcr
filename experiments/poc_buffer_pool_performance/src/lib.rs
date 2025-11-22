@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Proof of Concept: Buffer Pool Performance
 //!
 //! This module implements a minimal, high-performance buffer pool for validating

@@ -1,12 +1,11 @@
-mod common;
-
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 use anyhow::Result;
 
 // Non-privileged tests can go here at the top level.
 
 mod privileged {
-    use super::common::{McrInstance, NetworkNamespace, VethPair};
     use super::*;
+    use crate::common::{McrInstance, NetworkNamespace, VethPair};
     use std::thread;
     use std::time::Duration;
 
@@ -48,7 +47,7 @@ mod privileged {
 
         // Send 1000 packets
         println!("Sending 1000 packets...");
-        common::traffic::send_packets("10.0.0.1", "239.1.1.1", 5001, 1000)?;
+        crate::common::traffic::send_packets("10.0.0.1", "239.1.1.1", 5001, 1000)?;
 
         // Wait for packets to be processed
         println!("Waiting for pipeline to drain...");
@@ -143,7 +142,7 @@ mod privileged {
         let mut mcr = McrInstance::start("veth0p", None)?;
         mcr.add_rule("239.1.1.1:5001", vec!["239.2.2.2:5002:lo"])?;
 
-        common::traffic::send_packets("10.0.0.1", "239.1.1.1", 5001, 10)?;
+        crate::common::traffic::send_packets("10.0.0.1", "239.1.1.1", 5001, 10)?;
         thread::sleep(Duration::from_secs(2));
 
         let stats = mcr.shutdown_and_get_stats()?;

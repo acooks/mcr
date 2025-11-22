@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Integration Tests: Runtime Log Level Control
 //!
 //! These tests verify that log levels can be changed at runtime via the control socket

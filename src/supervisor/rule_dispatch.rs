@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Rule Dispatch Module
 //!
 //! **Priority: CRITICAL - Sprint 1, Days 1-2**

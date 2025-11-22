@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Command reader for parsing length-delimited JSON commands from io_uring
 //!
 //! This module provides a stateful parser for the length-delimited codec used

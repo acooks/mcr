@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Exhaustion Behavior Test
 //!
 //! This test simulates burst traffic scenarios to validate how the buffer pool

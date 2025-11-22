@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! **Tier 3 Performance Benchmarks: Packet Forwarding Rate**
 //!
 //! This benchmark suite measures the performance characteristics of the multicast relay system.

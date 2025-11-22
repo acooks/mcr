@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Proof-of-Concept: Supervisor Resilience with Exponential Backoff (Automated Test)
 //!
 //! This binary demonstrates a supervisor's ability to handle failing child

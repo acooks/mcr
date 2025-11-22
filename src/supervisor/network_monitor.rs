@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Network State Monitoring and Reconciliation
 //!
 //! **Priority: HIGH - Sprint 1, Days 3-4**

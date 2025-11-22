@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 // Integration test utilities
 //
 // This module provides abstractions for integration testing of the multicast relay.

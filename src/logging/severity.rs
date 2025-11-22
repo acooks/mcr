@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 // Severity levels for logging (RFC 5424 syslog-style)
 
 use serde::{Deserialize, Serialize};

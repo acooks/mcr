@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Proof of Concept: Demonstrating Correct Ownership for `FnMut` Closures
 //!
 //! This PoC isolates and demonstrates the correct way to handle ownership

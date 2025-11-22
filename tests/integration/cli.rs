@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Integration Test for the application main function.
 
 use anyhow::Result;

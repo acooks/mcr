@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 use clap::Parser;
 pub mod ipc;
 pub mod logging;

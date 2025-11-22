@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! **Tier 2 Integration Tests: Supervisor Resilience**
 //!
 //! **Priority: CRITICAL - Sprint 1, Day 3**

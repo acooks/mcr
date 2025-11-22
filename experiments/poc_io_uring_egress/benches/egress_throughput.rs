@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use poc_io_uring_egress::{ConnectedEgressSender, EgressConfig};
 use std::net::UdpSocket;

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Proof-of-Concept: io_uring with AF_PACKET Sockets
 //!
 //! This binary is a minimal, self-contained example demonstrating how to use the

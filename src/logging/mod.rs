@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 // High-performance logging system for MCR
 //
 // Uses pipe-based JSON logging for data plane workers,

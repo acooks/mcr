@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 // Log consumer task - drains ring buffers and outputs log entries
 
 use super::entry::LogEntry;

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Integration Tests
 //!
 //! This file makes the integration test modules in `integration/` directory
@@ -19,6 +20,10 @@ mod tests {
         let _ = std::fs::remove_file(socket_path);
     }
 }
+
+// Include common utilities for integration tests
+#[path = "integration/common/mod.rs"]
+mod common;
 
 // Include integration test modules
 #[path = "integration/cli.rs"]
