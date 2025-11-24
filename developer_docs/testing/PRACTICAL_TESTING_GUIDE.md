@@ -27,20 +27,20 @@ We use a three-tiered strategy to test different aspects of the application. All
 
 -   **Purpose:** To test the interaction between MCR's Rust components. These are divided into unprivileged and privileged tests.
 -   **Scope:**
-    -   Control plane functionality (`control_client` -> `supervisor`).
-    -   Supervisor/worker process lifecycle.
-    -   Behavior in isolated network namespaces (privileged only).
+-   Control plane functionality (`control_client` -> `supervisor`).
+-   Supervisor/worker process lifecycle.
+-   Behavior in isolated network namespaces (privileged only).
 -   **Commands:**
-    -   `just test-integration-light` (for unprivileged tests)
-    -   `sudo -E just test-integration-privileged` (for privileged tests)
+-   `just test-integration-light` (for unprivileged tests)
+-   `sudo -E just test-integration-privileged` (for privileged tests)
 
 ### Tier 3: E2E (End-to-End) Bash Tests
 
 -   **Purpose:** To validate the final, compiled **release binaries** under realistic network conditions.
 -   **Scope:** Packet forwarding correctness, performance benchmarks, and complex multi-hop topologies.
 -   **Commands:**
-    -   `sudo just test-e2e-bash`
-    -   `sudo just test-performance`
+-   `sudo just test-e2e-bash`
+-   `sudo just test-performance`
 
 ## 3. The "Build Once, Test Many" Workflow
 

@@ -18,13 +18,13 @@ This test is specifically designed to highlight MCR's advantages in:
 This scenario simulates a common use case for an RPF-solving relay, such as an IPTV headend or financial market data distributor.
 
 *   **Workload:**
-    *   **Number of Streams:** 50 independent multicast streams.
-    *   **Per-Stream Rate:** 3,000 packets per second (pps).
-    *   **Aggregate Rate:** 50 streams * 3,000 pps = **150,000 pps**.
+*   **Number of Streams:** 50 independent multicast streams.
+*   **Per-Stream Rate:** 3,000 packets per second (pps).
+*   **Aggregate Rate:** 50 streams * 3,000 pps = **150,000 pps**.
 *   **Translation:** Each stream is forwarded one-to-one to a new destination group, simulating a source address translation to solve the RPF problem.
-    *   `239.1.1.1:5001` -> `239.10.1.1:6001`
-    *   `239.1.1.2:5002` -> `239.10.1.2:6002`
-    *   ...and so on for 50 unique streams.
+*   `239.1.1.1:5001` -> `239.10.1.1:6001`
+*   `239.1.1.2:5002` -> `239.10.1.2:6002`
+*   ...and so on for 50 unique streams.
 
 ### **3. Network Topology**
 

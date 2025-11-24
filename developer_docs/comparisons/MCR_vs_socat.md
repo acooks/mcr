@@ -82,12 +82,12 @@ br0 (Network Segment A)         br1 (Network Segment B)
 ### 3.4. Performance Analysis: Root Cause
 
 - **`socat`'s Limitations:**
-    - **Traditional I/O Model:** `recvfrom()`/`sendto()` syscalls for each packet create high overhead.
-    - **No Batching:** Processes packets one at a time, wasting CPU cycles on syscalls.
+  - **Traditional I/O Model:** `recvfrom()`/`sendto()` syscalls for each packet create high overhead.
+  - **No Batching:** Processes packets one at a time, wasting CPU cycles on syscalls.
 - **MCR's Advantages:**
-    - **`io_uring` Batched I/O:** Batches up to 32 receive and 64 send operations in single syscalls, dramatically reducing overhead.
-    - **Zero-Copy Architecture:** Shared memory ring buffers avoid copying between kernel and userspace.
-    - **AF_PACKET Efficiency:** Direct access to the network layer bypasses the kernel's UDP stack.
+  - **`io_uring` Batched I/O:** Batches up to 32 receive and 64 send operations in single syscalls, dramatically reducing overhead.
+  - **Zero-Copy Architecture:** Shared memory ring buffers avoid copying between kernel and userspace.
+  - **AF_PACKET Efficiency:** Direct access to the network layer bypasses the kernel's UDP stack.
 
 ---
 
