@@ -205,7 +205,7 @@ For a comprehensive guide to the logging system, including the high-performance 
 
 ## 9. Reliability and Resilience
 
-- **Supervisor Pattern for Resilience:** The application implements a supervisor pattern. The main application thread acts as the supervisor, responsible for the lifecycle of the data plane threads. It monitors its child threads for panics and will automatically restart a failed thread.
+- **Supervisor Pattern for Resilience:** The application implements a supervisor pattern. The main supervisor process is responsible for the lifecycle of the data plane worker processes. It monitors its child worker processes for crashes and will automatically restart a failed worker process using an exponential backoff strategy.
 
 - **Network State Reconciliation (Future Work):** A high-priority item on the roadmap is to implement idempotent network state reconciliation. The target design is for the supervisor to use a Netlink socket to listen for network state changes (e.g., interfaces going up or down). This would allow it to automatically pause, resume, or re-resolve forwarding rules as network conditions change. **This feature is not yet implemented.**
 
