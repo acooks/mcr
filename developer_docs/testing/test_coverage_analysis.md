@@ -143,6 +143,7 @@
 **Problem**: Integration tests were intentionally kept minimal, moving logic to unit tests. But for supervisor, unit tests were then removed as "redundant", leaving gaps.
 
 **From `tests/integration.rs` comments:**
+
 ```text
 // REMOVED: supervisor.rs - redundant with unit tests in src/supervisor.rs
 // DEFERRED: supervisor_resilience.rs - needs complete rewrite for current supervisor API

@@ -77,6 +77,7 @@ This test will demonstrate that while `socat` is excellent for simple tasks, MCR
 **Date**: 2025-11-15
 
 **Topology**: Simplified Chain (3-namespace) instead of dual-bridge
+
 ```text
 gen-ns (veth0) <-> (veth1) relay-ns (veth2) <-> (veth3) sink-ns
 ```
@@ -158,6 +159,7 @@ gen-ns (veth0) <-> (veth1) relay-ns (veth2) <-> (veth3) sink-ns
 Results generated using: `tests/performance/compare_socat_chain.sh`
 
 Commands used:
+
 ```bash
 # Test 1: Default (1 worker) - Valid comparison
 sudo PACKET_COUNT=9000000 SEND_RATE=150000 ./tests/performance/compare_socat_chain.sh

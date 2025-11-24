@@ -36,19 +36,23 @@ grep "STATS:Egress FINAL" results.txt
 ### Look for these metrics in the output
 
 **Traffic Generator:**
+
 ```text
 Actual packet rate: ~808k pps (achieved)
 ```
+
 - Sends 10M packets at high rate
 - Actual throughput: ~9 Gbps
 
 **MCR-1 Stats:**
+
 ```text
 [STATS:Ingress FINAL] total: recv=X matched=X egr_sent=X ... buf_exhaust=X
 [STATS:Egress FINAL] total: sent=X submitted=X ch_recv=X errors=X bytes=X
 ```
 
 **Calculate rates:**
+
 ```bash
 # Get test duration from output
 DURATION=$(grep "Elapsed time" results.txt | cut -d: -f2 | cut -d's' -f1)
@@ -130,6 +134,7 @@ sudo tests/data_plane_pipeline_veth.sh
 ### Test still shows low performance
 
 Try increasing socket buffer:
+
 ```bash
 # Try 8 MB
 MCR_SOCKET_SNDBUF=8388608 sudo tests/data_plane_pipeline_veth.sh

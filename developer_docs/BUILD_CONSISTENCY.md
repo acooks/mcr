@@ -28,6 +28,7 @@ Even though your integration tests use `binary_path()` to find release binaries,
 ### 2. Shell Scripts Triggering Rebuilds
 
 Found in `tests/*.sh`:
+
 ```bash
 # These all trigger rebuilds:
 tests/data_plane_debug.sh:            cargo build --release
@@ -44,6 +45,7 @@ tests/scaling_test.sh:                cargo build --release --quiet
 ### 3. Feature Flags
 
 Your `Cargo.toml` has:
+
 ```toml
 [features]
 integration_test = []
@@ -55,6 +57,7 @@ These features aren't currently being used inconsistently, but they could cause 
 ### 4. Dev-Dependencies
 
 Test compilation includes all `[dev-dependencies]`:
+
 ```toml
 [dev-dependencies]
 proptest = "1.9.0"
@@ -106,6 +109,7 @@ Result: Three compilations, confusion about which binary is tested.
 Create a single "build everything" script:
 
 **File:** `scripts/build_all.sh`
+
 ```bash
 #!/bin/bash
 set -e
@@ -124,6 +128,7 @@ echo "Run tests with: ./scripts/run_tests.sh"
 ```
 
 **File:** `scripts/run_tests.sh`
+
 ```bash
 #!/bin/bash
 set -e
@@ -145,6 +150,7 @@ sudo tests/data_plane_pipeline_veth.sh
 Then modify shell scripts to skip building:
 
 **In each `tests/*.sh` file:**
+
 ```bash
 # OLD:
 # cargo build --release
@@ -162,6 +168,7 @@ echo "Using binary: $RELAY_BINARY ($(stat -c%s $RELAY_BINARY) bytes, built $(sta
 ### Solution 2: Consistent Build Commands
 
 **Create `.cargo/config.toml`:**
+
 ```toml
 [alias]
 # Build all binaries in release mode
@@ -175,6 +182,7 @@ rebuild = "clean && build --release --bins"
 ```
 
 **Usage:**
+
 ```bash
 cargo build-all              # Build once
 cargo test-integration       # Run Rust tests
@@ -184,6 +192,7 @@ sudo tests/*.sh              # Run shell tests (no rebuild)
 ### Solution 3: Makefile (Traditional Approach)
 
 **File:** `Makefile`
+
 ```makefile
 .PHONY: all build test clean
 
@@ -219,6 +228,7 @@ rebuild: clean build
 ```
 
 **Usage:**
+
 ```bash
 make build           # Build once
 make test            # Rust integration tests
@@ -229,6 +239,7 @@ make test-all        # All tests
 ### Solution 4: Just File (Modern Approach)
 
 Create `justfile`:
+
 ```just
 # Build all binaries
 build:
@@ -264,6 +275,7 @@ info:
 ```
 
 **Usage:**
+
 ```bash
 just build           # Build once
 just test-rust       # Rust tests
@@ -309,6 +321,7 @@ sudo tests/data_plane_pipeline_veth.sh
 ### 1. Update Shell Scripts
 
 **Pattern to add at the top of each `tests/*.sh`:**
+
 ```bash
 # Check for required binaries
 check_binary() {
@@ -331,6 +344,7 @@ check_binary "$TRAFFIC_GENERATOR_BINARY"
 ### 2. Update Integration Test Helper
 
 **In `tests/integration/common/mod.rs`:**
+
 ```rust
 /// Get the path to a compiled binary
 pub fn binary_path(name: &str) -> PathBuf {
@@ -370,6 +384,7 @@ pub fn binary_path(name: &str) -> PathBuf {
 ### 3. Document in README
 
 Add to `README.md`:
+
 ```markdown
 ## Testing
 

@@ -40,17 +40,21 @@ just test-quick
 ### Framework Workflow
 
 **Phase 1: Build** (as regular user)
+
 ```bash
 just build-test
 ```
+
 - Compiles test binaries with `cargo test --no-run`
 - Compiles release binaries with `cargo build --release`
 - No privilege escalation during compilation
 
 **Phase 2: Execute** (with sudo)
+
 ```bash
 just test-integration-privileged
 ```
+
 - Finds pre-built test binary: `target/debug/deps/integration-*`
 - Runs with sudo: `sudo -E "$TEST_BINARY" --ignored --test-threads=1 --nocapture`
 - Tests create their own network namespaces via `NetworkNamespace::enter()`
@@ -69,6 +73,7 @@ just test-integration-privileged
 ### Test Results: ⚠️ All 8 Tests Failing
 
 **Failure Summary**:
+
 ```text
 test result: FAILED. 0 passed; 8 failed; 0 ignored; 0 measured; 12 filtered out
 ```
@@ -88,6 +93,7 @@ test result: FAILED. 0 passed; 8 failed; 0 ignored; 0 measured; 12 filtered out
 ### Common Pattern: Zero Packets Received/Forwarded
 
 **7 out of 8 tests** show the same pattern:
+
 ```text
 Ingress: recv=0 matched=0 egr_sent=0 filtered=0 no_match=0 buf_exhaust=0
 Egress: sent=0 submitted=0 ch_recv=0 errors=0 bytes=0
@@ -102,6 +108,7 @@ Egress: sent=0 submitted=0 ch_recv=0 errors=0 bytes=0
 ### test_scale_1m_packets: Partial Success
 
 This test shows interesting behavior:
+
 ```text
 Ingress: recv=1000018 matched=1000000 egr_sent=1000000 filtered=18 no_match=0 buf_exhaust=0
 Egress: sent=0 submitted=0 ch_recv=0 errors=0 bytes=0
@@ -165,17 +172,20 @@ for '--outputs <OUTPUTS>': Invalid format. Expected group:port:interface[:dtls]
 ### Testing Recommendations
 
 **Run with backtraces for better diagnostics**:
+
 ```bash
 RUST_BACKTRACE=1 just test-integration-privileged
 ```
 
 **Test individual failing tests**:
+
 ```bash
 just build-test
 sudo -E target/debug/deps/integration-* --ignored --test test_scale_1m_packets --nocapture
 ```
 
 **Check MCR logs from failed tests**:
+
 ```bash
 cat /tmp/test_mcr_*.log
 ```

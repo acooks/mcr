@@ -129,6 +129,7 @@ pub fn run(&mut self, packet_rx: &crossbeam_queue::SegQueue<EgressWorkItem>) -> 
 ### Buffer Pool Exhaustion Mechanism
 
 **PHASE4 behavior (synchronous):**
+
 ```text
 Iteration N:
   1. Ingress allocates 32 buffers from pool
@@ -141,6 +142,7 @@ Iteration N:
 ```
 
 **Current behavior (asynchronous):**
+
 ```text
 Iteration N:
   1. Ingress allocates 32 buffers from pool
@@ -233,6 +235,7 @@ Looking at the diff, the refactor happened between PHASE4 (2d5e8ef, 2025-11-10) 
 ### Option 1: Revert to Synchronous send_batch() ✅ RECOMMENDED
 
 **Change:**
+
 ```rust
 pub fn send_batch(&mut self) -> Result<usize> {
     if self.egress_queue.is_empty() {

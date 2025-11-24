@@ -725,6 +725,7 @@ Total Size = Header + (capacity * 256 bytes)
 ### Initialization Flow
 
 **Supervisor (creates shared memory):**
+
 ```rust
 // 1. Create shared memory segment
 let shm = Shmem::create()
@@ -746,6 +747,7 @@ worker.spawn_with_env("MCR_LOG_SHM=/mcr_log_dp0");
 ```
 
 **Worker (attaches to shared memory):**
+
 ```rust
 // 1. Get shared memory ID from environment
 let shm_id = env::var("MCR_LOG_SHM")?;

@@ -49,6 +49,7 @@ When socat sends to multicast address 239.9.9.9 with `bind=10.0.1.20`:
 ## The Solution: Explicit Multicast Route
 
 Adding this command before starting socat:
+
 ```bash
 ip route add 224.0.0.0/4 dev veth-mcr1
 ```

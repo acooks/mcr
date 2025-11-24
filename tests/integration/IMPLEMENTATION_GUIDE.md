@@ -30,6 +30,7 @@ Start by implementing the 3 helper functions at the top of `supervisor_resilienc
 **Purpose**: Spawn a supervisor process for testing
 
 **Implementation steps**:
+
 ```rust
 async fn start_supervisor() -> Result<(Child, PathBuf)> {
     // 1. Generate unique socket paths
@@ -64,6 +65,7 @@ async fn start_supervisor() -> Result<(Child, PathBuf)> {
 ```
 
 **Testing**: After implementing, test it in isolation:
+
 ```bash
 cargo test --test supervisor_resilience start_supervisor -- --exact --nocapture
 ```
@@ -73,6 +75,7 @@ cargo test --test supervisor_resilience start_supervisor -- --exact --nocapture
 **Purpose**: Forcibly kill a worker process to simulate crash
 
 **Implementation steps**:
+
 ```rust
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
@@ -96,6 +99,7 @@ async fn kill_worker(pid: u32) -> Result<()> {
 **Purpose**: Check if a process exists
 
 **Implementation**:
+
 ```rust
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
@@ -181,6 +185,7 @@ async fn test_supervisor_restarts_control_plane_worker() -> Result<()> {
 **Key difference**: This test adds rules before killing the worker, then verifies the new worker receives them.
 
 **Implementation outline**:
+
 ```rust
 #[tokio::test]
 async fn test_supervisor_resyncs_rules_on_restart() -> Result<()> {
@@ -237,6 +242,7 @@ async fn test_supervisor_resyncs_rules_on_restart() -> Result<()> {
 **Challenge**: This test is more complex because you need to measure timing.
 
 **Implementation outline**:
+
 ```rust
 #[tokio::test]
 async fn test_supervisor_applies_exponential_backoff() -> Result<()> {

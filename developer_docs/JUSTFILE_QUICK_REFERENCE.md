@@ -72,9 +72,11 @@ just check
 Same as `just dev` but emphasizes it's a quality gate.
 
 **Full CI Pipeline** (slow)
+
 ```bash
 just check-full
 ```
+
 Includes coverage report (adds ~5-10 minutes).
 
 ### Testing Levels
@@ -110,15 +112,19 @@ sudo just test-perf-quick    # Quick 10 packet test
 ### Building
 
 **Build Release Binaries** (Production)
+
 ```bash
 just build-release
 ```
+
 Uses `scripts/build_all.sh`, shows checksums.
 
 **Build Test Binaries** (For Rust integration tests)
+
 ```bash
 just build-test
 ```
+
 Builds debug test binaries.
 
 ---
@@ -128,11 +134,13 @@ Builds debug test binaries.
 ### What Changed
 
 **OLD:**
+
 ```bash
 just check    # Rebuilt 3+ times, took 10+ minutes
 ```
 
 **NEW:**
+
 ```bash
 just check    # Builds once, takes 2-3 minutes
 just check-full  # Full CI pipeline (if you really need it)
@@ -265,12 +273,15 @@ sudo -E just test-privileged
 ### One-Time Setup
 
 **For Performance Testing:**
+
 ```bash
 sudo just setup-kernel
 ```
+
 Sets kernel network buffer limits. Persists until reboot.
 
 **To Make Permanent:**
+
 ```bash
 sudo just setup-kernel
 # Then manually add to /etc/sysctl.conf (shown in output)
@@ -289,6 +300,7 @@ ERROR: Binary not found: target/release/multicast_relay
 ```
 
 **Solution:**
+
 ```bash
 just build-release
 ```
@@ -298,6 +310,7 @@ just build-release
 **Problem:** Tests keep rebuilding binaries.
 
 **Solution:** You're using old workflow. Use:
+
 ```bash
 just build-release   # Build once
 just test-fast       # Test many times
@@ -308,6 +321,7 @@ just test-fast       # Test many times
 **Problem:** Kernel limits too low.
 
 **Solution:**
+
 ```bash
 sudo just setup-kernel
 ```
@@ -317,6 +331,7 @@ sudo just setup-kernel
 **Problem:** Want coverage and all checks like old `just check`.
 
 **Solution:**
+
 ```bash
 just check-full      # Includes coverage, audit, etc.
 ```

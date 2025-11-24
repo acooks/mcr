@@ -101,12 +101,14 @@ Operations per second:
 ### ✅ APPROVED: Signature Change
 
 **Current:**
+
 ```rust
 fn process_received_packet(&mut self, packet_data: &[u8])
     -> Result<Option<ForwardingTarget>>
 ```
 
 **Proposed:**
+
 ```rust
 fn process_received_packet(&mut self, packet_data: &[u8])
     -> Result<Vec<ForwardingTarget>>
@@ -229,6 +231,7 @@ No changes needed if we extract payload in caller.
 #### 2. Modify `SendWorkItem`
 
 **Current:**
+
 ```rust
 struct SendWorkItem {
     buffer: ManagedBuffer,  // Owns entire buffer
@@ -238,6 +241,7 @@ struct SendWorkItem {
 ```
 
 **Proposed Option A (Minimal change):**
+
 ```rust
 struct SendWorkItem {
     payload: Arc<[u8]>,     // Shares payload via Arc
@@ -247,6 +251,7 @@ struct SendWorkItem {
 ```
 
 **Proposed Option B (Keep compatibility):**
+
 ```rust
 enum SendPayload {
     Owned(ManagedBuffer),   // For single-output (avoid Arc overhead)
@@ -265,6 +270,7 @@ struct SendWorkItem {
 #### 3. Update `handle_recv_completion`
 
 **Current:**
+
 ```rust
 if let Some(target) = self.process_received_packet(&buffer[..])? {
     let mut send_buffer = self.buffer_pool.acquire()?;
@@ -279,6 +285,7 @@ if let Some(target) = self.process_received_packet(&buffer[..])? {
 ```
 
 **Proposed:**
+
 ```rust
 let targets = self.process_received_packet(&buffer[..bytes_received])?;
 

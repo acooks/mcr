@@ -37,6 +37,7 @@ Position:    0,   1,   2,   3,   0,   1,   2,   3,   0,   1,   2, ... (capacity=
 **Decision**: Use 3-state atomic field per entry.
 
 **States**:
+
 ```rust
 const EMPTY: u8   = 0;  // Slot available for writing
 const WRITING: u8 = 1;  // Writer is filling the entry
@@ -88,6 +89,7 @@ if entry.state.load(Ordering::Acquire) == READY { // Acquire: see all writer's s
 - Both Linux and FreeBSD use this approach
 
 **Detection**:
+
 ```rust
 if write_seq >= read_seq + capacity {
     // Overwriting unread entry
@@ -338,6 +340,7 @@ Reader implementation identical to SPSC (single consumer in both cases).
 ### Power-of-2 Requirement
 
 All capacities must be powers of 2 for fast modulo:
+
 ```rust
 pos = seq & (capacity - 1)  // Fast: single AND instruction
 // vs

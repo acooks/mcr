@@ -11,6 +11,7 @@
 - 1400-byte packets
 
 **Results @ 500k pps target:**
+
 ```text
 Traffic sent: 1,000,000 packets @ 500k pps
 MCR-1 received: 301,950 packets (30%)
@@ -56,6 +57,7 @@ Buffer exhaustion: 62,316 packets (21% of received)
 ### 2. **Kernel Buffer Limits**
 
 In isolated namespace, default kernel parameters are conservative:
+
 ```bash
 # Check current values
 sysctl net.core.netdev_max_backlog    # Often 1000 (too small!)
@@ -76,6 +78,7 @@ Current test uses `--num-workers 1` due to architectural limitations:
 ### Short-Term (For Tests)
 
 **Adjust test to match actual capacity:**
+
 ```bash
 PACKET_COUNT=500000   # 500k packets
 SEND_RATE=250000      # 250k pps (realistic for single worker + veth)
@@ -86,6 +89,7 @@ SEND_RATE=250000      # 250k pps (realistic for single worker + veth)
 ### Medium-Term (Kernel Tuning)
 
 Add kernel tuning to test setup:
+
 ```bash
 # Increase network buffers before entering namespace
 sysctl -w net.core.netdev_max_backlog=5000
@@ -125,12 +129,14 @@ ip link set veth0 txqueuelen 10000
 ### Results
 
 **Before CPU isolation (all on core 0):**
+
 ```text
 MCR-1 matched: 87k (29% efficiency)
 All instances competing for 1 core (8 threads total)
 ```
 
 **After CPU isolation (cores 0-3):**
+
 ```text
 MCR-1 matched: 85k (17% efficiency)
 Each instance on dedicated core

@@ -140,6 +140,7 @@ mtx_unlock_spin(&mbp->msg_lock);
 ### Why Sequence Numbers Matter
 
 **Traditional Approach** (problematic):
+
 ```c
 // Writer updates write_pos
 write_pos = (write_pos + 1) % buffer_size;
@@ -151,6 +152,7 @@ available = (write_pos - read_pos) % buffer_size;
 **Problem**: Reader must access writer's pointer (cache line sharing, contention).
 
 **FreeBSD Approach** (elegant):
+
 ```c
 // Writer updates msg_wseq (independent variable)
 msg_wseq = MSGBUF_SEQNORM(mbp, msg_wseq + 1);
@@ -166,6 +168,7 @@ msg_rseq = MSGBUF_SEQNORM(mbp, msg_rseq + 1);
 ### Wraparound Handling
 
 **Detection**:
+
 ```c
 wseq = mbp->msg_wseq;
 rseq = mbp->msg_rseq;
@@ -229,6 +232,7 @@ struct msgbuf {
 **Lesson from FreeBSD**: Use **sequence numbers** instead of shared read/write pointers to avoid cache line contention.
 
 **MCR Application**:
+
 ```rust
 pub struct RingBuffer {
     entries: Box<[LogEntry]>,
@@ -257,6 +261,7 @@ self.read_seq.fetch_add(1, Ordering::Relaxed);
 **Lesson from Linux**: Use atomic state transitions to signal when entries are ready for reading.
 
 **MCR Application**:
+
 ```rust
 pub struct LogEntry {
     state: AtomicU8,  // 0=empty, 1=writing, 2=ready
@@ -292,6 +297,7 @@ if entry.state.load(Ordering::Acquire) == 2 {
 **Lesson from Linux**: Explicit memory barriers prevent reading stale data.
 
 **MCR Application**:
+
 ```rust
 // Writer:
 entry.timestamp = now;

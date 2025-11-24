@@ -19,6 +19,7 @@ A focused investigation revealed that the regression was not due to an architect
 
 - **Problem:** The queue depth was configured to 128 entries. Mathematical analysis showed this imposed a hard theoretical limit of ~39k pps.
 - **Code:**
+
   ```rust
   // src/worker/unified_loop.rs
   impl Default for UnifiedConfig {
@@ -35,6 +36,7 @@ A focused investigation revealed that the regression was not due to an architect
 
 - **Problem:** The application used the default kernel UDP send buffer size (~208 KB), which would fill in under 0.5 milliseconds at the target throughput, causing the kernel to block send operations and leading to 86% buffer exhaustion.
 - **Code:**
+
   ```rust
   // src/worker/unified_loop.rs
   fn create_connected_udp_socket(...) -> Result<OwnedFd> {
@@ -53,6 +55,7 @@ The following fixes were implemented in the `unified_loop.rs` data plane:
 
 - **Change:** The queue depth was increased from 128 to **1024**.
 - **Code:**
+
   ```rust
   // src/worker/unified_loop.rs
   impl Default for UnifiedConfig {
@@ -70,6 +73,7 @@ The following fixes were implemented in the `unified_loop.rs` data plane:
 
 - **Change:** Egress UDP sockets are now configured with a **4 MB send buffer** (`SO_SNDBUF`).
 - **Code:**
+
   ```rust
   // src/worker/unified_loop.rs
   fn create_connected_udp_socket(...) -> Result<OwnedFd> {

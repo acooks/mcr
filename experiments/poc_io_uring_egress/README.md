@@ -352,6 +352,7 @@ All benchmarks completed successfully. Key findings below.
 - Best throughput: **1.85M pps** (batch 64-128)
 
 **Comparison:**
+
 ```text
 vs 1:10 amplification (3.1M target): 1.85M / 3.1M = 59.7% ⚠️
 vs 1:5 amplification (1.56M target): 1.85M / 1.56M = 118.6% ✅
@@ -391,6 +392,7 @@ Syscall reduction = 1,850,000 / 57,812 = 32x fewer syscalls ✅
 This **32x reduction** matches the theoretical model exactly.
 
 **CPU savings:**
+
 ```text
 Without batching: 1,850,000 × 400ns = 740ms/sec = 74% CPU
 With batching:    57,812 × 400ns = 23ms/sec = 2.3% CPU

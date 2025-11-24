@@ -69,6 +69,7 @@ Here are some common examples of how to use the `control_client` to manage the r
 ```
 
 **Add a 1-to-2 Fan-Out Rule:**
+
 ```bash
 ./target/release/control_client add-rule \
     --input-interface eth0 \

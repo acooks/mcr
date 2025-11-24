@@ -42,12 +42,14 @@ Runs as part of `just check` and verifies:
 - 📊 Tracks changes from baseline
 
 **Usage**:
+
 ```bash
 just unsafe-check         # Quick check (fails if limits exceeded)
 just unsafe-report        # Detailed cargo-geiger report
 ```
 
 **Output Example**:
+
 ```text
 🔒 Checking unsafe code usage...
 
@@ -69,6 +71,7 @@ The `.clippy.toml` file configures Clippy to:
 - Catch common unsafe pitfalls during regular linting
 
 **Usage**:
+
 ```bash
 just clippy   # Runs as part of quality checks
 ```
@@ -78,11 +81,13 @@ just clippy   # Runs as part of quality checks
 Generates comprehensive reports on unsafe usage in dependencies.
 
 **Usage**:
+
 ```bash
 just unsafe-report   # Generates target/geiger-report.txt
 ```
 
 **Sample Output**:
+
 ```text
 Functions  Expressions  Impls  Traits  Methods  Dependency
 327/697    29568/43304  466/568 52/55  825/1120  multicast_relay

@@ -7,6 +7,7 @@
 ## Motivation
 
 During test framework validation, we identified that `test_scale_1m_packets` shows:
+
 ```text
 Ingress: recv=1000018 matched=1000000 egr_sent=1000000 ✅
 Egress: sent=0 ch_recv=0 ❌
@@ -23,6 +24,7 @@ A `/dev/null` egress sink would help:
 ### 1. Ingress-Only Performance Testing
 
 Measure pure packet reception and matching performance:
+
 ```rust
 #[tokio::test]
 async fn test_ingress_max_throughput() {
@@ -45,6 +47,7 @@ async fn test_ingress_max_throughput() {
 ### 2. Channel Communication Debugging
 
 Verify ingress→egress channel works before testing network egress:
+
 ```rust
 #[tokio::test]
 async fn test_ingress_egress_channel() {
@@ -64,6 +67,7 @@ This would have helped diagnose the current test failure where `ch_recv=0`.
 ### 3. Multi-Stream Scaling Tests
 
 Test scaling without network I/O becoming the bottleneck:
+
 ```bash
 # Test 100 concurrent streams without network overhead
 for stream in {1..100}; do
@@ -77,6 +81,7 @@ send_traffic_to_all_streams
 ### 4. CPU Profiling
 
 Profile CPU usage of packet processing without I/O noise:
+
 ```bash
 perf record -g ./multicast_relay --output devnull ...
 # Clean CPU profile of packet matching logic
@@ -152,6 +157,7 @@ This provides the clearest benefit for the use cases:
 ### Code Changes Required
 
 **1. Output Parsing** (`src/cli/mod.rs` or similar):
+
 ```rust
 pub enum OutputDestination {
     Multicast {
@@ -175,6 +181,7 @@ impl FromStr for OutputDestination {
 ```
 
 **2. Egress Worker** (`src/worker/egress.rs`):
+
 ```rust
 match output_dest {
     OutputDestination::Multicast { group, port, interface } => {
@@ -192,6 +199,7 @@ match output_dest {
 
 **3. Stats Reporting**:
 Add clarity to stats when using devnull:
+
 ```text
 Egress: sent=1000000 (to devnull) ch_recv=1000000 errors=0
 ```
@@ -219,6 +227,7 @@ async fn test_devnull_sink_basic() {
 ### Use in Existing Failing Test
 
 Apply to `test_scale_1m_packets` to isolate the issue:
+
 ```rust
 #[tokio::test]
 #[ignore]
@@ -255,6 +264,7 @@ This would help debug:
 ## Alternative: Drop Rules (Future)
 
 A more general solution could be "rule actions":
+
 ```bash
 --action forward  # Default, send to egress
 --action drop     # Count but discard

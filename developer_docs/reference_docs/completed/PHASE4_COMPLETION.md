@@ -140,6 +140,7 @@ Phase 4 has been completed with **actual measured performance data** from real-w
 **Problem:** `SupervisorCommand::GetStats` returned empty vector
 
 **Solution:**
+
 ```rust
 SupervisorCommand::GetStats => {
     // Return FlowStats for each configured rule
@@ -170,6 +171,7 @@ SupervisorCommand::GetStats => {
 **File:** `src/worker/egress.rs:507-516`
 
 **Fix:** Added missing `payload_len` field to test helper:
+
 ```rust
 fn create_dummy_packet(interface_name: &str, dest_addr: SocketAddr) -> EgressPacket {
     let mut buffer_pool = BufferPool::new(false);

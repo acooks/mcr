@@ -22,9 +22,11 @@ Based on comprehensive analysis (see `/tmp/test_coverage_analysis.md`), the MCR 
 **Goal**: Establish baseline and add highest-impact tests
 
 1. **Establish Coverage Baseline**
+
    ```bash
    cargo tarpaulin --out Html --output-dir coverage
    ```
+
    - Document current line/branch coverage percentages
    - Identify specific uncovered critical paths
    - Commit baseline report to git
@@ -67,6 +69,7 @@ Based on comprehensive analysis (see `/tmp/test_coverage_analysis.md`), the MCR 
 1. **Add Multi-Worker Integration Test**
 
    Create `tests/integration/multi_worker_basic.rs`:
+
    ```rust
    // Test: 1 CP + 2 DP workers processing rules simultaneously
    // Validates: fanout group IDs, concurrent rule processing, no packet duplication
@@ -94,12 +97,14 @@ Based on comprehensive analysis (see `/tmp/test_coverage_analysis.md`), the MCR 
 
 2. **Make Testing Easier**
    - Create test helper utilities:
+
      ```rust
      // tests/helpers/mod.rs
      fn create_test_supervisor() -> WorkerManager { ... }
      fn mock_unix_stream_pair() -> (UnixStream, UnixStream) { ... }
      fn create_test_namespace() -> Result<TestNetNs> { ... }
      ```
+
    - Document testing patterns in `docs/testing/patterns.md`
 
 3. **Protect Critical Paths**
@@ -127,6 +132,7 @@ Pick exactly one of these to start TODAY:
 cargo tarpaulin --out Html --output-dir coverage
 firefox coverage/index.html  # or your browser
 ```
+
 This shows actual coverage percentages and uncovered lines.
 
 ### Option B: Highest Impact Test (30 minutes)

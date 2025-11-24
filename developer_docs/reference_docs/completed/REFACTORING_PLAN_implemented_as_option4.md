@@ -901,6 +901,7 @@ Keep:
 **File**: `src/logging/mod.rs`
 
 Update exports:
+
 ```rust
 // DELETE:
 // pub use integration::{DataPlaneLogging, SupervisorLogging, ControlPlaneLogging, SharedMemoryLogManager};
@@ -920,6 +921,7 @@ pub use entry::LogEntry;  // May still be useful for JSON deserialization
 **File**: `Cargo.toml`
 
 **Add**:
+
 ```toml
 [dependencies]
 tracing = "0.1"
@@ -927,6 +929,7 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 ```
 
 **Consider removing** (if no longer used):
+
 ```toml
 # May no longer need these if only used for shared memory:
 # shared_memory = "..."  (already removed based on git history)

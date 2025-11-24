@@ -23,6 +23,7 @@ Successfully implemented and debugged the unified single-threaded data plane loo
 **Work Done:**
 - Added `parse_packet` import from `packet_parser` module
 - Created `ForwardingTarget` struct for clean separation of concerns:
+
   ```rust
   struct ForwardingTarget {
       payload_offset: usize,
@@ -31,6 +32,7 @@ Successfully implemented and debugged the unified single-threaded data plane loo
       interface_name: String,
   }
   ```
+
 - Implemented `process_received_packet()` method:
   - Parses Ethernet → IPv4 → UDP headers
   - Looks up forwarding rules by (multicast_group, port) key
@@ -66,13 +68,15 @@ Successfully implemented and debugged the unified single-threaded data plane loo
 
 - File: `/home/acooks/mcr/src/worker/mod.rs`
 - Changed import to use `run_unified_data_plane`:
+
   ```rust
   // Option 4: Unified single-threaded loop (default)
   use data_plane_integrated::run_unified_data_plane as data_plane_task;
-  
+
   // Option 3: Two-thread model (legacy)
   // use data_plane_integrated::run_data_plane as data_plane_task;
   ```
+
 - Legacy two-thread model remains available (commented out)
 - Easy to switch back if needed
 
@@ -87,9 +91,11 @@ Successfully implemented and debugged the unified single-threaded data plane loo
 #### Bug 1: Submission Queue Overflow (CRITICAL)
 
 **Symptoms:**
+
 ```text
 [Worker 1741402] Data Plane worker process failed: submission queue is full
 ```
+
 - Workers crashed after ~5 minutes of operation
 - Supervisor continuously restarted failed workers
 - Completely prevented sustained operation
@@ -98,6 +104,7 @@ Successfully implemented and debugged the unified single-threaded data plane loo
 The unified loop was submitting io_uring operations without checking if there was available space in the submission queue. When the queue filled up, the next `push()` call would fail with "queue full" error.
 
 **Analysis:**
+
 ```rust
 // BEFORE (buggy code):
 for _ in 0..num_recv_buffers {
@@ -169,9 +176,11 @@ fn submit_send_batch(&mut self) -> Result<()> {
 #### Bug 2: Buffer Pool Exhaustion at Startup
 
 **Symptoms:**
+
 ```text
 [Worker 1745431] Data Plane worker process failed: Buffer pool exhausted during recv buffer setup
 ```
+
 - Workers failed to initialize
 - Crashed immediately at startup
 - Prevented unified loop from ever running
@@ -218,6 +227,7 @@ impl Default for UnifiedConfig {
 ```
 
 **New Calculation:**
+
 ```text
 After Fix:
 - num_recv_buffers per worker: 32
@@ -304,6 +314,7 @@ sudo multicast_relay supervisor \
 ```
 
 **Result:**
+
 ```text
 [Worker 1747319] [run_unified_data_plane] Entry point reached
 [Worker 1747319] {"facility":"DataPlane","level":"Info","message":"Unified data plane starting",...}
@@ -313,6 +324,7 @@ sudo multicast_relay supervisor \
 [Worker 1747319] {"facility":"DataPlane","level":"Info","message":"Unified event loop starting",...}
 [Worker 1747319] {"facility":"DataPlane","level":"Info","message":"Starting unified event loop",...}
 ```
+
 ✅ **PASS:** Worker started successfully, event loop running
 
 #### Test 2: Multi-Worker Startup (20 workers)
@@ -420,6 +432,7 @@ MD5: 48b1fcf85d86ab452099e71f0d862621
 - Current two-thread model: ~97k pps egress (regressed)
 
 **Test:**
+
 ```bash
 sudo tests/data_plane_pipeline_veth.sh
 ```

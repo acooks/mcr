@@ -10,28 +10,34 @@ Determine if socat can relay multicast traffic and what requirements are needed.
 
 - Confirmed socat has the necessary socket options
 - Working socat command pattern:
+
   ```bash
   socat -u \
     UDP4-RECV:5001,ip-add-membership=239.255.0.1:veth-relay0,reuseaddr \
     UDP4-SEND:239.255.0.2:5001,ip-multicast-if=10.0.2.1,reuseaddr
   ```
+
 - Requires different input/output multicast addresses
 
 ### 2. Topology Matters
 
 **3-Namespace Topology (WORKS):**
+
 ```text
 src-ns ↔ relay-ns ↔ sink-ns
 [isolated]  [relay]  [isolated]
 ```
+
 - Result: 5/5 packets (100% success)
 - Requirements: Different mcast groups, relay egress route
 
 **MCR's Dual-Bridge Topology (FAILS):**
+
 ```text
 Single namespace with br0, br1
 Multi-homed relay: veth-mcr0, veth-mcr1
 ```
+
 - Result: 0 packets for BOTH socat and MCR
 - Suggests test infrastructure issue or fundamental limitation
 

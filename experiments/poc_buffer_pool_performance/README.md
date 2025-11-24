@@ -129,6 +129,7 @@ Buffer Sizes:
 **Proposed configuration rationale:**
 
 Weighted by typical traffic distribution (60% small, 30% standard, 10% jumbo):
+
 ```text
 Small (60%):    1,000 buffers × 1,500 B = 1,500 KB
 Standard (30%):   500 buffers × 4,096 B = 2,000 KB
@@ -144,6 +145,7 @@ Total per core:                           5,300 KB (~5.3 MB)
 ### 6. Allocation Latency Model
 
 **Pool allocation (lock-free pop from free list):**
+
 ```text
 Operations:
   - Check if empty:     ~1 instruction  (~0.3 ns)
@@ -154,6 +156,7 @@ Expected latency: 5-10 ns (in L1 cache)
 ```
 
 **Dynamic allocation (`Vec::with_capacity`):**
+
 ```text
 malloc/jemalloc path:
   - Lock acquisition:   ~20-50 ns (uncontended)
@@ -171,6 +174,7 @@ Slow path:  ~1,000-10,000 ns
 ### 7. Cache Behavior Model
 
 **Pool approach (buffer reuse):**
+
 ```text
 Reused buffers stay hot in cache:
   - L1 cache hit: ~1 ns     (32 KB typical)
@@ -181,6 +185,7 @@ Pool size (5.3 MB) < L3 size → most accesses are L3 or better
 ```
 
 **Dynamic allocation (cold memory):**
+
 ```text
 Every allocation returns cold memory:
   - First access:   ~100 ns (RAM) + ~10-50 ns (TLB miss)
@@ -190,6 +195,7 @@ Cold buffer penalty: ~100-150 ns per packet
 ```
 
 **CPU savings at 312.5k pps/core:**
+
 ```text
 If pool saves 100 ns per packet:
   Time saved = 312,500 × 100 ns = 31.25 ms/second
@@ -548,6 +554,7 @@ The performance advantages are clear and measurable. Proceed with buffer pool im
 ### ✅ Recommended Pool Configuration
 
 Per-core allocation:
+
 ```text
 Small (1500B):    1,000 buffers = 1.5 MB
 Standard (4096B):   500 buffers = 2.0 MB

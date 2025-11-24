@@ -74,6 +74,7 @@ This creates a truly event-driven loop that wakes on ANY event.
 **File:** `src/worker/egress.rs`
 
 Add to `EgressLoop` struct:
+
 ```rust
 pub struct EgressLoop<B, P> {
     // ... existing fields ...

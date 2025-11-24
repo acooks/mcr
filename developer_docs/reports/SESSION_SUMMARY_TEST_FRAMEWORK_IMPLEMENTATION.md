@@ -11,6 +11,7 @@
 - `justfile` (lines 122-167) - Added 7 new test framework targets
 
 **New Workflow**:
+
 ```bash
 # Build as regular user
 just build-test
@@ -54,6 +55,7 @@ just test-all                       # Complete suite
 ### 4. ✅ /dev/null Egress Sink Proposal
 
 **Motivation**: From test failure analysis:
+
 ```text
 Ingress: recv=1000018 matched=1000000 egr_sent=1000000 ✅
 Egress: sent=0 ch_recv=0 ❌
@@ -66,6 +68,7 @@ Egress: sent=0 ch_recv=0 ❌
 4. Benchmark without network bottlenecks
 
 **Proposed Syntax**:
+
 ```bash
 control_client add \
   --input-interface eth0 \
@@ -113,6 +116,7 @@ This is a **fundamental architecture bug** in worker lifecycle management, not j
 ### Immediate: Debug Test Failures
 
 1. **Run simplest failing test with more diagnostics**:
+
    ```bash
    RUST_BACKTRACE=full just build-test
    sudo -E target/debug/deps/integration-* \
@@ -120,6 +124,7 @@ This is a **fundamental architecture bug** in worker lifecycle management, not j
    ```
 
 2. **Check MCR logs**:
+
    ```bash
    cat /tmp/test_mcr_*.log
    ```
@@ -142,6 +147,7 @@ This is a **fundamental architecture bug** in worker lifecycle management, not j
 4. Egress worker not receiving from channel
 
 **Key assertion failing**:
+
 ```rust
 // Line 276 in tests/integration/test_scaling.rs
 assert_eq!(
@@ -209,6 +215,7 @@ This suggests egress worker is either:
 ### Pattern 1: Zero Packets (7 tests)
 
 **Symptom**:
+
 ```text
 Ingress: recv=0 matched=0 egr_sent=0
 Egress: sent=0 ch_recv=0
@@ -230,6 +237,7 @@ Egress: sent=0 ch_recv=0
 ### Pattern 2: Partial Success (1 test)
 
 **Symptom**:
+
 ```text
 Ingress: recv=1000018 matched=1000000 egr_sent=1000000 ✅
 Egress: sent=0 ch_recv=0 ❌
@@ -255,6 +263,7 @@ Egress: sent=0 ch_recv=0 ❌
 ### Pattern 3: CLI Parsing Error (1 test)
 
 **Symptom**:
+
 ```text
 Error: invalid value '239.2.2.2:5002:veth1a,239.3.3.3:5003:veth2a,239.4.4.4:5004:veth3a'
 for '--outputs': Invalid format
@@ -270,6 +279,7 @@ for '--outputs': Invalid format
 ## Commands for Next Session
 
 **Debug failing test**:
+
 ```bash
 # Build first
 just build-test
@@ -282,18 +292,21 @@ sudo -E RUST_BACKTRACE=full \
 ```
 
 **Check for running processes**:
+
 ```bash
 ps aux | grep multicast_relay
 sudo ip netns list
 ```
 
 **Clean up if needed**:
+
 ```bash
 sudo pkill -9 multicast_relay
 sudo ip netns del <namespace>
 ```
 
 **View MCR logs**:
+
 ```bash
 cat /tmp/test_mcr_*.log
 ```

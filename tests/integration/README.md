@@ -137,6 +137,7 @@ Features:
 2. **Mark test as `#[ignore]`** if it requires root
 3. **Use `#[tokio::test]`** for async operations (network setup)
 4. **Follow the pattern:**
+
    ```rust
    #[tokio::test]
    #[ignore]

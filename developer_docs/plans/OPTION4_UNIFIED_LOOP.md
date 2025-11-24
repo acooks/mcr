@@ -261,6 +261,7 @@ Allows 1M concurrent receives and 1M concurrent sends.
 - `src/worker/unified_loop.rs::process_received_packet()`
 
 **Integration points:**
+
 ```rust
 fn process_received_packet(&mut self, packet_data: &[u8]) -> Result<Option<SendWorkItem>> {
     // 1. Parse Ethernet header (14 bytes)
@@ -284,6 +285,7 @@ fn process_received_packet(&mut self, packet_data: &[u8]) -> Result<Option<SendW
 - `src/worker/data_plane_integrated.rs` or create new variant
 
 **Changes:**
+
 ```rust
 pub fn run_unified_data_plane(
     config: DataPlaneConfig,

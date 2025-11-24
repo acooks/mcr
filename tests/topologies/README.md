@@ -52,6 +52,7 @@ unshare --net --mount-proc --map-root-user bash -c '
 **Status:** ✅ Implemented
 
 **Topology:**
+
 ```text
 Traffic Gen → MCR-1 → MCR-2 → MCR-3
 ```
@@ -63,6 +64,7 @@ Traffic Gen → MCR-1 → MCR-2 → MCR-3
 - No packet corruption
 
 **Usage:**
+
 ```bash
 sudo tests/topologies/chain_3hop.sh
 ```
@@ -78,6 +80,7 @@ sudo tests/topologies/chain_3hop.sh
 **Status:** 🔜 Planned
 
 **Topology:**
+
 ```text
                     ┌→ MCR-2
 Traffic Gen → MCR-1 ┼→ MCR-3
@@ -91,6 +94,7 @@ Traffic Gen → MCR-1 ┼→ MCR-3
 - Egress queue fairness
 
 **Usage:**
+
 ```bash
 sudo tests/topologies/tree_fanout.sh
 ```
@@ -100,6 +104,7 @@ sudo tests/topologies/tree_fanout.sh
 **Status:** 🔜 Planned
 
 **Topology:**
+
 ```text
 Traffic Gen 1 → MCR-1 ┐
 Traffic Gen 2 → MCR-2 ┼→ MCR-4 (convergence)
@@ -117,6 +122,7 @@ Traffic Gen 3 → MCR-3 ┘
 **Status:** 🔜 Planned
 
 **Topology:**
+
 ```text
                ┌→ MCR-2 ┐
 Traffic Gen → MCR-1      → MCR-4
@@ -134,6 +140,7 @@ Traffic Gen → MCR-1      → MCR-4
 **Status:** 🔜 Planned
 
 **Topology:**
+
 ```text
 Every MCR instance forwards to every other MCR instance
 ```
@@ -208,6 +215,7 @@ sudo tests/topologies/run_with_coverage.sh
 ### View Logs
 
 Logs persist after test completion in `/tmp/`:
+
 ```bash
 tail -f /tmp/mcr1.log
 tail -50 /tmp/mcr1.log | grep STATS
@@ -216,6 +224,7 @@ tail -50 /tmp/mcr1.log | grep STATS
 ### Run Test Manually
 
 To debug interactively, extract the inner bash script and run it:
+
 ```bash
 # Enter isolated namespace
 sudo unshare --net --mount-proc --map-root-user bash

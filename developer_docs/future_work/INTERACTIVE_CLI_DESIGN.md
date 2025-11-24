@@ -26,6 +26,7 @@ This document defines the design for:
 - No additional IPC mechanism needed
 
 **Implementation**:
+
 ```rust
 pub enum SupervisorCommand {
     // ... existing commands ...
@@ -56,6 +57,7 @@ pub enum SupervisorCommand {
 - Thread-safe with RwLock or atomic operations
 
 **Implementation**:
+
 ```rust
 pub struct LogRegistry {
     loggers: HashMap<Facility, Logger>,
@@ -123,6 +125,7 @@ Client cancels by closing socket
 - Crossterm backend works everywhere
 
 **Dependencies**:
+
 ```toml
 [dependencies]
 ratatui = "0.26"
@@ -150,6 +153,7 @@ tokio = { version = "1", features = ["full"] }
 **Status**: Completed in commits d369379 and 5c04136
 
 **Commands**:
+
 ```bash
 # CLI interface
 control_client log-level get
@@ -192,6 +196,7 @@ control_client log-level get
 ### Phase 2: Log Streaming
 
 **Commands**:
+
 ```bash
 # Tail logs (like journalctl -f)
 control_client logs tail --facility Ingress --level debug
@@ -351,12 +356,14 @@ SupervisorCommand::StreamLogs { facilities, min_level } => {
 ### Log-Level Check Overhead
 
 **Current (no filtering)**:
+
 ```rust
 logger.log(Severity::Debug, Facility::Ingress, "Packet received");
 // → Direct ring buffer write (~50-100ns)
 ```
 
 **With filtering**:
+
 ```rust
 logger.log(Severity::Debug, Facility::Ingress, "Packet received");
 // → Check global level (atomic load: ~5ns)
