@@ -165,5 +165,3 @@ A utility for sending test multicast traffic.
 | `--port` | The destination multicast UDP port. |
 | `--rate` | The target send rate in packets per second. |
 | `--size` | The size of the UDP payload in bytes. |
-
-```
