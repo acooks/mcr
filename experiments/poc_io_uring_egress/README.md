@@ -7,6 +7,7 @@ This experiment validates the io_uring-based egress strategy for the multicast r
 ## The Problem
 
 The data plane egress path must:
+
 1. Send packets to multiple interfaces at line rate (5M pps total system)
 2. Use batched async I/O for efficiency (D8: io_uring for Egress)
 3. Bind sockets to specific source IPs (D5: Memory Copy Egress)
@@ -38,7 +39,7 @@ This is the **egress hot path**. Poor batching = system call overhead kills thro
 
 Each ingress packet may be forwarded to **multiple egress interfaces**:
 
-```
+```text
 Amplification scenarios:
   1:1 (single egress)      → 312,500 egress pps/core
   1:2 (two egress)         → 625,000 egress pps/core
@@ -50,7 +51,7 @@ Amplification scenarios:
 
 ### System Call Overhead Without Batching
 
-```
+```text
 Traditional approach (sendto() per packet):
 
 System calls/second = 3,125,000 sendto() calls
@@ -67,7 +68,7 @@ Result: IMPOSSIBLE - CPU saturated by syscalls alone
 
 ### System Call Savings with io_uring Batching
 
-```
+```text
 io_uring batched approach:
 
 Batch size: 64 packets/batch
@@ -89,7 +90,7 @@ Syscall reduction: 3,125,000 → 97,656 = 32x fewer syscalls
 
 ### Expected Latency
 
-```
+```text
 Egress path (per packet):
   1. Copy to buffer:           ~500-2000 ns (size-dependent)
   2. Prepare SQE:              ~50 ns
@@ -101,7 +102,7 @@ Total latency: ~6-103 µs per packet (kernel-limited, not CPU)
 
 ### Throughput Target
 
-```
+```text
 Per-core egress target: 3.1M pps (worst case 1:10 amplification)
 
 With 64-packet batches:
@@ -132,6 +133,7 @@ Target validated if:
 ### Implementation
 
 **Minimal io_uring Egress:**
+
 - Create UDP socket, bind to specific source IP
 - Set up io_uring with configurable queue depth
 - Submit batched `sendto()` operations via `IORING_OP_SENDTO`
@@ -139,6 +141,7 @@ Target validated if:
 - Handle errors from CQ entries
 
 **Test Scenarios:**
+
 - Localhost loopback (low latency, high throughput)
 - Network namespace (isolated testing)
 - Error injection (unreachable destinations)
@@ -146,9 +149,10 @@ Target validated if:
 ### Test Scenarios
 
 #### 1. Throughput Benchmark
+
 **Purpose:** Measure sustained egress throughput
 
-```
+```text
 Method: Send packets in batches via io_uring
 
 Variables:
@@ -168,9 +172,10 @@ Expected:
 ```
 
 #### 2. Latency Benchmark
+
 **Purpose:** Measure per-packet egress latency
 
-```
+```text
 Method: Submit → Wait → Reap loop
 
 Metrics:
@@ -183,9 +188,10 @@ Expected:
 ```
 
 #### 3. Source IP Binding Test
+
 **Purpose:** Verify bind() + sendto() pattern
 
-```
+```text
 Test:
   1. Create UDP socket
   2. Bind to specific source IP (e.g., 192.168.1.100)
@@ -198,9 +204,10 @@ Expected:
 ```
 
 #### 4. Error Handling Test
+
 **Purpose:** Characterize error reporting
 
-```
+```text
 Test scenarios:
   1. Send to unreachable destination (EHOSTUNREACH)
   2. Send to down interface (ENETDOWN)
@@ -218,9 +225,10 @@ Expected:
 ```
 
 #### 5. System Call Reduction (via perf)
+
 **Purpose:** Quantify syscall savings
 
-```
+```text
 Method: Use perf stat during benchmark
 
 Commands:
@@ -247,11 +255,13 @@ All tests and benchmarks executed successfully on 2025-11-07.
 ### Test Execution Summary
 
 **Unit Tests:** ✅ All 3 tests passed
+
 - Sender creation
 - Source IP binding
 - Send single packet
 
 **Functional Tests:** ✅ All 5 tests passed
+
 - Basic send/receive (1 packet)
 - Batched send (10 packets)
 - Source IP binding verification
@@ -267,7 +277,7 @@ All benchmarks completed successfully. Key findings below.
 **Test:** 1000-byte packets, queue depth 128, varying batch sizes
 
 | Batch Size | Time per Batch | Throughput (Melem/s) | Packets/Sec |
-|------------|----------------|----------------------|-------------|
+| ---------- | -------------- | -------------------- | ----------- |
 | 1          | 776 ns         | 1.29                 | 1.29M       |
 | 16         | 8.88 µs        | 1.80                 | 1.80M       |
 | 32         | 17.47 µs       | 1.83                 | 1.83M       |
@@ -275,12 +285,14 @@ All benchmarks completed successfully. Key findings below.
 | 128        | 68.97 µs       | 1.86                 | 1.86M       |
 
 **Analysis:**
+
 - Throughput **increases** from batch 1 to 16 (1.29M → 1.80M = 40% improvement)
 - Throughput **plateaus** at batch 32-64 (1.83M → 1.85M = minimal gain)
 - Batch 128 shows **no further improvement** (1.86M ≈ 1.85M)
 - **Optimal batch size: 32-64 packets** ✅
 
 **Per-packet cost:**
+
 - Batch 1: 776 ns/packet
 - Batch 64: 540 ns/packet (34.61 µs / 64)
 - **30% reduction** in per-packet overhead with batching
@@ -290,13 +302,14 @@ All benchmarks completed successfully. Key findings below.
 **Test:** 64-packet batches, 1000-byte packets, varying queue depths
 
 | Queue Depth | Time per Batch | Delta vs QD=32 |
-|-------------|----------------|----------------|
+| ----------- | -------------- | -------------- |
 | 32          | 34.68 µs       | baseline       |
 | 64          | 34.53 µs       | -0.4%          |
 | 128         | 34.59 µs       | -0.3%          |
 | 256         | 34.56 µs       | -0.3%          |
 
 **Analysis:**
+
 - Queue depth has **no measurable impact** in the 32-256 range
 - All measurements within 0.4% of each other (measurement noise)
 - Smaller queues save memory without performance cost
@@ -307,7 +320,7 @@ All benchmarks completed successfully. Key findings below.
 **Test:** 64-packet batches, queue depth 128, varying packet sizes
 
 | Packet Size | Time per Batch | Throughput (MiB/s) |
-|-------------|----------------|--------------------|
+| ----------- | -------------- | ------------------ |
 | 100 bytes   | 33.91 µs       | 2.81               |
 | 500 bytes   | 60.48 µs       | 7.88               |
 | 1000 bytes  | 43.25 µs       | 22.05              |
@@ -316,6 +329,7 @@ All benchmarks completed successfully. Key findings below.
 | 8000 bytes  | 46.63 µs       | 163.63             |
 
 **Analysis:**
+
 - Larger packets = higher MiB/s throughput (expected)
 - Time per batch varies (33-60 µs range)
 - Variance likely due to CPU cache effects and memory copy overhead
@@ -326,11 +340,12 @@ All benchmarks completed successfully. Key findings below.
 **Test:** 64-packet batches, 1000-byte packets, queue depth 128
 
 | Configuration | Time per Batch | Overhead |
-|---------------|----------------|----------|
+| ------------- | -------------- | -------- |
 | With stats    | 34.548 µs      | baseline |
 | Without stats | 34.506 µs      | -0.12%   |
 
 **Analysis:**
+
 - Stats overhead is **0.12%** (essentially zero, within measurement noise)
 - Similar to buffer pool results (Exp #3) - stats are free
 - ✅ **Enable stats in production** (full observability at zero cost)
@@ -340,14 +355,17 @@ All benchmarks completed successfully. Key findings below.
 #### Throughput vs Target
 
 **Target (from modeling):**
+
 - Worst-case: 3.1M pps/core (1:10 ingress:egress amplification)
 - Typical: 1.56M pps/core (1:5 amplification)
 
 **Achieved:**
+
 - Best throughput: **1.85M pps** (batch 64-128)
 
 **Comparison:**
-```
+
+```text
 vs 1:10 amplification (3.1M target): 1.85M / 3.1M = 59.7% ⚠️
 vs 1:5 amplification (1.56M target): 1.85M / 1.56M = 118.6% ✅
 ```
@@ -364,6 +382,7 @@ The 1.85M pps throughput is **40% below** the worst-case 3.1M target. However, t
 **For typical 1:5 amplification:** ✅ Target met with 18.6% headroom
 
 **For extreme 1:10 amplification:** ⚠️ Options:
+
 - Use 2 egress workers per core (1.85M × 2 = 3.7M > 3.1M)
 - Accept backpressure on extreme amplification scenarios
 - Re-test with real NICs (likely faster than loopback)
@@ -372,7 +391,7 @@ The 1.85M pps throughput is **40% below** the worst-case 3.1M target. However, t
 
 **Calculation (64-packet batches at 1.85M pps):**
 
-```
+```text
 Batches per second = 1,850,000 / 64 = 28,906 batches/sec
 Syscalls per batch = 2 (submit + reap)
 Total syscalls = 28,906 × 2 = 57,812 syscalls/sec
@@ -386,7 +405,8 @@ Syscall reduction = 1,850,000 / 57,812 = 32x fewer syscalls ✅
 This **32x reduction** matches the theoretical model exactly.
 
 **CPU savings:**
-```
+
+```text
 Without batching: 1,850,000 × 400ns = 740ms/sec = 74% CPU
 With batching:    57,812 × 400ns = 23ms/sec = 2.3% CPU
 
@@ -398,7 +418,7 @@ CPU saved: 71.7% per core
 **Per-packet overhead:**
 
 | Batch Size | Total Time | Per-Packet | Efficiency vs Batch 1 |
-|------------|------------|------------|-----------------------|
+| ---------- | ---------- | ---------- | --------------------- |
 | 1          | 776 ns     | 776 ns     | 1.0x (baseline)       |
 | 16         | 8.88 µs    | 555 ns     | 1.40x faster          |
 | 32         | 17.47 µs   | 546 ns     | 1.42x faster          |
@@ -417,7 +437,7 @@ From modeling and experiment design:
 - [✅] **Errors reported in CQ:** YES - Framework supports error handling (not tested with failures in this run)
 - [✅] **Syscall reduction > 10x:** YES - Achieved 32x reduction
 
-**Validation: 4/5 criteria met, 1 partially met (throughput adequate for typical case)**
+#### Validation: 4/5 criteria met, 1 partially met (throughput adequate for typical case)
 
 ---
 
@@ -432,6 +452,7 @@ CPU overhead for egress drops from 74% to 2.3% at 1.85M pps.
 ### 2. Optimal Batch Size is 32-64 Packets
 
 Beyond batch 64, there's **no performance gain**. Batch 32-64 hits the sweet spot:
+
 - Good throughput (1.83-1.85M pps)
 - Low latency (17-35 µs per batch)
 - Diminishing returns beyond this point
@@ -440,7 +461,7 @@ Beyond batch 64, there's **no performance gain**. Batch 32-64 hits the sweet spo
 
 Queue depth has **no measurable performance impact**. Use smaller queues to save memory.
 
-**Recommendation: Queue depth 64-128**
+#### Recommendation: Queue depth 64-128
 
 ### 4. Stats Are Free
 
@@ -453,6 +474,7 @@ Safe to enable full per-packet observability in production.
 **1.85M pps** is excellent for typical multicast relay scenarios (1:5 amplification).
 
 For extreme amplification (1:10), may need:
+
 - Multiple egress workers per core
 - Or accept that extreme scenarios will backpressure
 
@@ -482,7 +504,7 @@ Batching delivers **32x syscall reduction** and **2.3% CPU overhead** at 1.85M p
 
 ### ✅ Recommended Configuration
 
-```
+```text
 Queue depth: 64-128 (balance memory vs flexibility)
 Batch size: 32-64 packets (optimal performance)
 Stats: Enable (0.12% overhead - negligible)
@@ -499,6 +521,7 @@ Single egress worker per core is sufficient for typical multicast relay scenario
 **For 1:10 amplification:** 1.85M pps < 3.1M target
 
 **Options:**
+
 1. Use 2 egress workers per core (1.85M × 2 = 3.7M > 3.1M)
 2. Accept backpressure on extreme scenarios (graceful degradation)
 3. Re-test with real NICs (likely faster than loopback)
@@ -518,6 +541,7 @@ Egress batching strategy is **validated and ready for implementation**.
 ## Success Criteria
 
 ✅ **Pass** if:
+
 - Throughput > 3M packets/sec/core (worst-case 1:10 amplification)
 - Latency p99 < 200 µs (acceptable for multicast relay)
 - Source IP binding works correctly
@@ -525,6 +549,7 @@ Egress batching strategy is **validated and ready for implementation**.
 - System call reduction > 10x vs non-batched
 
 ❌ **Fail** if:
+
 - Throughput < 1M pps/core (insufficient for target workload)
 - Errors cause ring corruption or crashes
 - Source IP binding breaks sendto() functionality
@@ -542,6 +567,7 @@ Egress batching strategy is **validated and ready for implementation**.
 ✅ Demonstrates syscall reduction benefit
 
 **Production Recommendations:**
+
 - Use io_uring for all egress operations
 - Queue depth: 64-128 (to be determined by benchmarks)
 - Batch size: 32-64 packets
@@ -553,6 +579,7 @@ Egress batching strategy is **validated and ready for implementation**.
 ❌ Would require rethinking egress strategy
 
 **Options:**
+
 1. Fall back to blocking sendto() with thread pool
 2. Investigate tokio-uring or other async I/O frameworks
 3. Re-evaluate if 5M pps target is achievable
@@ -571,27 +598,32 @@ Egress batching strategy is **validated and ready for implementation**.
 ## Implementation Plan
 
 ### Phase 1: Basic Setup ✅
+
 1. Create UDP socket with source IP binding
 2. Set up io_uring with minimal queue depth
 3. Submit single sendto() operation
 4. Verify packet is sent correctly
 
 ### Phase 2: Batching 🔵 IN PROGRESS
+
 1. Submit multiple sendto() operations in batch
 2. Reap completions from CQ
 3. Verify all packets sent successfully
 
 ### Phase 3: Benchmarks ⏳
+
 1. Implement Criterion benchmarks for throughput
 2. Test various batch sizes and queue depths
 3. Measure latency distribution
 
 ### Phase 4: Error Handling ⏳
+
 1. Inject error scenarios (unreachable destinations)
 2. Verify error reporting in CQ
 3. Confirm ring recovery after errors
 
 ### Phase 5: Analysis ⏳
+
 1. Run perf stat for syscall analysis
 2. Document optimal configuration
 3. Update ARCHITECTURE.md if needed

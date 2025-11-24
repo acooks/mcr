@@ -24,6 +24,7 @@ Phase 4 has been completed with **actual measured performance data** from real-w
 **Created:** `tests/data_plane_pipeline_veth.sh`
 
 **Test Setup:**
+
 - 3-hop MCR pipeline using veth pairs (point-to-point virtual interfaces)
 - Traffic Generator → MCR-1 → MCR-2 → MCR-3
 - 10 million packets @ 1400 bytes (total: 14 GB)
@@ -31,21 +32,22 @@ Phase 4 has been completed with **actual measured performance data** from real-w
 
 **Measured Results:**
 
-| Component | Metric | Value |
-|-----------|--------|-------|
-| Traffic Generator | Actual send rate | 733k pps (target: 1M pps) |
-| Traffic Generator | Throughput | 8.22 Gbps |
-| MCR-1 Ingress | Peak receive rate | 490k pps |
-| MCR-1 Ingress | Matched packets | 3.88M (63%) |
-| MCR-1 Ingress | Buffer exhaustion | 2.25M packets (37%) |
-| MCR-1 Egress | Sustained send rate | 307k pps |
-| MCR-1 Egress | Bytes sent | 5.85 GB |
-| MCR-1 Egress | Errors | 0 |
-| MCR-2 Ingress | Receive rate | 300k pps |
-| MCR-2 Egress | Send rate | 300k pps |
-| MCR-2 Ingress | Buffer exhaustion | 0% |
+| Component         | Metric              | Value                     |
+| ----------------- | ------------------- | ------------------------- |
+| Traffic Generator | Actual send rate    | 733k pps (target: 1M pps) |
+| Traffic Generator | Throughput          | 8.22 Gbps                 |
+| MCR-1 Ingress     | Peak receive rate   | 490k pps                  |
+| MCR-1 Ingress     | Matched packets     | 3.88M (63%)               |
+| MCR-1 Ingress     | Buffer exhaustion   | 2.25M packets (37%)       |
+| MCR-1 Egress      | Sustained send rate | 307k pps                  |
+| MCR-1 Egress      | Bytes sent          | 5.85 GB                   |
+| MCR-1 Egress      | Errors              | 0                         |
+| MCR-2 Ingress     | Receive rate        | 300k pps                  |
+| MCR-2 Egress      | Send rate           | 300k pps                  |
+| MCR-2 Ingress     | Buffer exhaustion   | 0%                        |
 
-**Key Finding: Performance Asymmetry**
+### Key Finding: Performance Asymmetry
+
 - **Ingress (AF_PACKET + io_uring):** 490k pps capability
 - **Egress (UDP sockets + io_uring):** 307k pps maximum
 - **Throughput deficit:** 37% slower egress
@@ -54,33 +56,40 @@ Phase 4 has been completed with **actual measured performance data** from real-w
 ### 2. Debugging Journey
 
 #### Issue #1: Loopback Feedback Loop ✅ FIXED
+
 - **Problem:** All MCR instances saw all traffic (3x packet inflation)
 - **Fix:** Used veth pairs for point-to-point isolation
 
 #### Issue #2: Interface Binding ✅ FIXED
+
 - **Problem:** All MCR instances bound to "lo" instead of veth interfaces
 - **Fix:** Added `--interface` parameter to supervisor commands
 
 #### Issue #3: Socket Conflict ✅ FIXED
+
 - **Problem:** MCR-2 failed with "Address already in use"
 - **Fix:** Unique `--relay-command-socket-path` for each instance
 
 #### Issue #4: Packet Fragmentation ✅ FIXED
+
 - **Problem:** 99.9% parse errors - fragmented packets
 - **Root cause:** 1500-byte payload + 42-byte headers > 1500 MTU
 - **Fix:** Reduced payload to 1400 bytes
 
 #### Issue #5: Egress Buffer Size Bug ✅ FIXED
+
 - **Problem:** MCR-1 egress sending 1500-byte packets despite 1400-byte input
 - **Root cause:** Sending `buffer.len()` instead of actual `payload_len`
 - **Fix:** Added `payload_len` field to `EgressPacket` struct
 
 #### Issue #6: Truncation Panic ✅ FIXED
+
 - **Problem:** Panic on "range end index 1442 out of range for slice of length 177"
 - **Root cause:** AF_PACKET captures all traffic (ARP, ICMP) - small packets
 - **Fix:** Added bounds checking before payload copy
 
 #### Issue #7: Buffer Exhaustion ✅ DIAGNOSED
+
 - **Problem:** 52% packet loss due to buffer pool exhaustion
 - **Root cause:** Egress only reaped completions during `send_batch()` calls
 - **Fix:** Added eager completion reaping on every egress loop iteration
@@ -117,12 +126,14 @@ Phase 4 has been completed with **actual measured performance data** from real-w
 **Problem:** Using `println!` instead of proper logging system, no distinction between debug logging and telemetry.
 
 **Solution:**
+
 - Changed stats format: `[Ingress Stats]` → `[STATS:Ingress]`
 - Changed stats format: `[Egress Stats]` → `[STATS:Egress]`
 - Integrated with `Facility::Stats` logging
 - Updated test script grep patterns
 
 **Benefit:** Clear visual distinction between:
+
 - **Periodic telemetry:** `[STATS:Ingress]` (automatic, every 1 second)
 - **Debug logging:** `[Ingress]` (one-time events, rule changes)
 - **Errors:** `[Ingress] FATAL:` (exceptional conditions)
@@ -132,6 +143,7 @@ Phase 4 has been completed with **actual measured performance data** from real-w
 **Problem:** `SupervisorCommand::GetStats` returned empty vector
 
 **Solution:**
+
 ```rust
 SupervisorCommand::GetStats => {
     // Return FlowStats for each configured rule
@@ -153,6 +165,7 @@ SupervisorCommand::GetStats => {
 ```
 
 **Benefit:**
+
 - Shows which rules are configured
 - Returns valid structure (zero counters as placeholder)
 - Documents future enhancement path (query workers for actual stats)
@@ -162,6 +175,7 @@ SupervisorCommand::GetStats => {
 **File:** `src/worker/egress.rs:507-516`
 
 **Fix:** Added missing `payload_len` field to test helper:
+
 ```rust
 fn create_dummy_packet(interface_name: &str, dest_addr: SocketAddr) -> EgressPacket {
     let mut buffer_pool = BufferPool::new(false);
@@ -179,26 +193,28 @@ fn create_dummy_packet(interface_name: &str, dest_addr: SocketAddr) -> EgressPac
 
 ## Files Modified
 
-| File | Purpose | Changes |
-|------|---------|---------|
-| `tests/data_plane_pipeline_veth.sh` | Created | Full 3-hop pipeline test with veth pairs |
-| `src/worker/ingress.rs` | Stats logging | Changed to `[STATS:Ingress]` |
-| `src/worker/egress.rs` | Stats logging + test fix | Changed to `[STATS:Egress]`, fixed test helper |
-| `src/worker/data_plane_integrated.rs` | Stats logging | Changed to `[STATS:Egress]` |
-| `src/supervisor.rs` | GetStats impl | Return configured rules with zero counters |
+| File                                  | Purpose                  | Changes                                        |
+| ------------------------------------- | ------------------------ | ---------------------------------------------- |
+| `tests/data_plane_pipeline_veth.sh`   | Created                  | Full 3-hop pipeline test with veth pairs       |
+| `src/worker/ingress.rs`               | Stats logging            | Changed to `[STATS:Ingress]`                   |
+| `src/worker/egress.rs`                | Stats logging + test fix | Changed to `[STATS:Egress]`, fixed test helper |
+| `src/worker/data_plane_integrated.rs` | Stats logging            | Changed to `[STATS:Egress]`                    |
+| `src/supervisor.rs`                   | GetStats impl            | Return configured rules with zero counters     |
 
 ---
 
 ## Test Results
 
 ### Library Tests
-```
+
+```text
 running 122 tests
 test result: ok. 122 passed; 0 failed; 0 ignored; 0 measured
 ```
 
 ### Latest Pipeline Test Results
-```
+
+```text
 Traffic Generator:
   Packets sent: 10,000,000
   Actual rate: 733k pps (target: 1M pps)
@@ -230,27 +246,32 @@ MCR-3 (veth2b):
 ### 1. Logging System Integration 🔴 HIGH PRIORITY
 
 **Current State:**
+
 - Data plane workers use `println!` for stats/debug
 - No proper `Logger` integration
 - Stats labeled with `[STATS:...]` prefix as temporary solution
 
 **Requirements:**
+
 - Integrate `Logger` with `Facility::Stats` / `Facility::Ingress` / `Facility::Egress`
 - Proper `Severity` levels (Info for stats, Debug for verbose traces)
 - Design calls for workers to report stats periodically (not queried by supervisor)
 
 **Scope:**
+
 - Plumb `Logger` instances through to data plane workers
 - Replace `println!` with proper log macros
 - Maintain periodic stats reporting (every 1 second)
 - Ensure zero-allocation logging in hot path
 
 **Files to modify:**
+
 - `src/worker/ingress.rs` (lines 297, 305, 166, 187, 371, 524-570)
 - `src/worker/data_plane_integrated.rs` (lines 232, 241, 226)
 - `src/worker/egress.rs` (debug prints)
 
 **Files to modify:**
+
 - `src/worker/ingress.rs` (lines 297, 305, 166, 187, 371, 524-570)
 - `src/worker/data_plane_integrated.rs` (lines 232, 241, 226)
 - `src/worker/egress.rs` (debug prints)
@@ -260,21 +281,25 @@ MCR-3 (veth2b):
 ### 2. Actual Stats Aggregation from Workers 🟡 MEDIUM PRIORITY
 
 **Current State:**
+
 - `GetStats` returns configured rules with zero counters
 - No IPC mechanism to query data plane workers for actual stats
 
 **Requirements:**
+
 - Query data plane workers for live IngressStats/EgressStats
 - Aggregate stats from multiple workers
 - Return actual per-rule packet/byte counters
 
 **Scope:**
+
 - Add `GetStats` to `RelayCommand` enum
 - Implement stats query handler in data plane worker
 - Aggregate stats in supervisor
 - Map worker-level stats to per-rule FlowStats
 
 **Design considerations:**
+
 - Stats are currently aggregate (not per-rule) in workers
 - Would need per-rule tracking in ingress/egress loops
 - Or accept worker-level aggregates and document limitation
@@ -286,11 +311,13 @@ MCR-3 (veth2b):
 ### 3. Performance Asymmetry Mitigation 🟢 LOW PRIORITY (Production Tuning)
 
 **Current State:**
+
 - AF_PACKET ingress: 490k pps
 - UDP egress: 307k pps
 - 37% throughput gap
 
 **Potential optimizations:**
+
 - Investigate UDP socket tuning (SO_SNDBUF, etc.)
 - Consider io_uring SEND_ZC (zero-copy send) for UDP
 - Profile egress path to identify bottleneck
@@ -303,16 +330,19 @@ MCR-3 (veth2b):
 ### 4. Integration Tests 🟡 MEDIUM PRIORITY
 
 **Current State:**
+
 - Unit tests: 122 passing
 - Manual end-to-end test: `data_plane_pipeline_veth.sh`
 - No automated integration test suite
 
 **Requirements:**
+
 - Automated CI/CD integration tests
 - Network namespace isolation
 - Multiple test scenarios (fragmentation, buffer exhaustion, multi-output, etc.)
 
 **Scope:**
+
 - Create `tests/integration/` directory
 - Port veth test to Rust integration test
 - Add test scenarios for edge cases
@@ -325,6 +355,7 @@ MCR-3 (veth2b):
 ### 5. Documentation Updates 📝 IN PROGRESS (This Document)
 
 **Completed:**
+
 - ✅ This completion document (`PHASE4_COMPLETION.md`)
 
 ---
@@ -347,16 +378,16 @@ MCR-3 (veth2b):
 
 ## Success Metrics - Final Assessment
 
-| Metric | Target | Actual | Status |
-|--------|--------|--------|--------|
-| Pipeline throughput | 312.5k pps/core | **490k pps** ingress | ✅ **157% of target** |
-| Egress throughput | N/A | **307k pps** sustained | ✅ **Stable at capacity** |
-| Buffer pool allocation | <200ns | 113ns (range: 105-120ns) | ✅ **43% better** |
-| Packet parsing | <100ns | 11ns (range: 8-30ns) | ✅ **89% better** |
-| Rule lookup | <100ns | 15ns (range: 7-27ns) | ✅ **85% better** |
-| Functional correctness | Pass | ✅ Pass | ✅ **3-hop pipeline validated** |
-| Telemetry sufficiency | Observable at capacity | ✅ Yes | ✅ **Diagnosed correctly** |
-| Error handling | Graceful degradation | ✅ Buffer exhaustion | ✅ **Predictable behavior** |
+| Metric                 | Target                 | Actual                   | Status                          |
+| ---------------------- | ---------------------- | ------------------------ | ------------------------------- |
+| Pipeline throughput    | 312.5k pps/core        | **490k pps** ingress     | ✅ **157% of target**           |
+| Egress throughput      | N/A                    | **307k pps** sustained   | ✅ **Stable at capacity**       |
+| Buffer pool allocation | <200ns                 | 113ns (range: 105-120ns) | ✅ **43% better**               |
+| Packet parsing         | <100ns                 | 11ns (range: 8-30ns)     | ✅ **89% better**               |
+| Rule lookup            | <100ns                 | 15ns (range: 7-27ns)     | ✅ **85% better**               |
+| Functional correctness | Pass                   | ✅ Pass                  | ✅ **3-hop pipeline validated** |
+| Telemetry sufficiency  | Observable at capacity | ✅ Yes                   | ✅ **Diagnosed correctly**      |
+| Error handling         | Graceful degradation   | ✅ Buffer exhaustion     | ✅ **Predictable behavior**     |
 
 ---
 
@@ -404,6 +435,7 @@ Phase 4 is **COMPLETE** with real-world validation. The system:
 - ✅ Has identified clear performance asymmetry (AF_PACKET vs UDP)
 
 **Outstanding work:**
+
 - 🔴 Logging system integration (high priority)
 - 🟡 Actual stats aggregation from workers (medium priority)
 - 🟢 Performance profiling and optimization (low priority - defer to production)

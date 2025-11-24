@@ -11,13 +11,15 @@ This document specifies the ring buffer implementation for MCR's logging system,
 **Decision**: Use monotonic sequence numbers (u64) instead of wrap-around pointers.
 
 **Rationale**:
+
 - Avoids reader-writer cache line sharing (FreeBSD msgbuf insight)
 - u64 never wraps in practice (584 years at 1B ops/sec)
 - Simpler than Linux's ID+wrap count approach
 - Fast position calculation: `pos = seq & (capacity - 1)` (for power-of-2 capacity)
 
 **Example**:
-```
+
+```text
 Sequence:    0,   1,   2,   3,   4,   5,   6,   7,   8,   9,  10, ...
 Position:    0,   1,   2,   3,   0,   1,   2,   3,   0,   1,   2, ... (capacity=4)
 ```
@@ -26,16 +28,17 @@ Position:    0,   1,   2,   3,   0,   1,   2,   3,   0,   1,   2, ... (capacity=
 
 **Decision**: Two ring buffer implementations for different concurrency patterns.
 
-| Buffer Type | Use Case | Writers | Readers | Synchronization |
-|-------------|----------|---------|---------|-----------------|
-| **SPSC** | Data plane (io_uring) | 1 per core | 1 (consumer) | Lock-free, Relaxed atomics |
-| **MPSC** | Control plane (async) | N (tokio tasks) | 1 (consumer) | CAS-based reservation |
+| Buffer Type | Use Case              | Writers         | Readers      | Synchronization            |
+| ----------- | --------------------- | --------------- | ------------ | -------------------------- |
+| **SPSC**    | Data plane (io_uring) | 1 per core      | 1 (consumer) | Lock-free, Relaxed atomics |
+| **MPSC**    | Control plane (async) | N (tokio tasks) | 1 (consumer) | CAS-based reservation      |
 
 ### 3. Entry State Machine
 
 **Decision**: Use 3-state atomic field per entry.
 
 **States**:
+
 ```rust
 const EMPTY: u8   = 0;  // Slot available for writing
 const WRITING: u8 = 1;  // Writer is filling the entry
@@ -43,7 +46,8 @@ const READY: u8   = 2;  // Entry ready for reading
 ```
 
 **State Transitions**:
-```
+
+```text
 Writer: EMPTY → WRITING → READY
 Reader: READY → EMPTY (after consuming)
 ```
@@ -54,13 +58,13 @@ Reader: READY → EMPTY (after consuming)
 
 **Critical for Correctness**:
 
-| Operation | Ordering | Rationale |
-|-----------|----------|-----------|
-| Write seq increment | `Relaxed` (SPSC) / `AcqRel` (MPSC) | SPSC has no contention, MPSC needs synchronization |
-| Read seq load | `Acquire` | Synchronize with writer |
-| Entry state → WRITING | `Release` | Signal start of write |
-| Entry state → READY | `Release` | Ensure data visible before ready |
-| Entry state load | `Acquire` | Ensure reading latest data |
+| Operation             | Ordering                           | Rationale                                          |
+| --------------------- | ---------------------------------- | -------------------------------------------------- |
+| Write seq increment   | `Relaxed` (SPSC) / `AcqRel` (MPSC) | SPSC has no contention, MPSC needs synchronization |
+| Read seq load         | `Acquire`                          | Synchronize with writer                            |
+| Entry state → WRITING | `Release`                          | Signal start of write                              |
+| Entry state → READY   | `Release`                          | Ensure data visible before ready                   |
+| Entry state load      | `Acquire`                          | Ensure reading latest data                         |
 
 **Key Insight**: Paired `Release`/`Acquire` creates happens-before relationship.
 
@@ -80,12 +84,14 @@ if entry.state.load(Ordering::Acquire) == READY { // Acquire: see all writer's s
 **Decision**: Drop oldest entries (overwrite), track overrun count.
 
 **Rationale**:
+
 - Preserves low latency (no blocking)
 - Recent logs are more valuable than old logs
 - Overrun counter signals buffer sizing issues
 - Both Linux and FreeBSD use this approach
 
 **Detection**:
+
 ```rust
 if write_seq >= read_seq + capacity {
     // Overwriting unread entry
@@ -139,6 +145,7 @@ pub struct KeyValue {
 ```
 
 **Design Choices**:
+
 - **Cache line aligned**: Prevents false sharing between adjacent entries
 - **Fixed size**: Zero-allocation, predictable memory layout
 - **Power-of-2 size**: Fast modulo via bitwise AND
@@ -322,20 +329,21 @@ Reader implementation identical to SPSC (single consumer in both cases).
 
 ### Memory Budget
 
-| Component | Buffer Size | Entry Size | Total Memory | Rationale |
-|-----------|-------------|------------|--------------|-----------|
-| Ingress (per-core) | 65,536 | 512 B | 32 MB | Fits in L3 cache, handles bursts |
-| Egress (per-core) | 16,384 | 512 B | 8 MB | Lower volume than ingress |
-| DataPlane | 8,192 | 512 B | 4 MB | Coordinator, moderate volume |
-| Supervisor | 4,096 | 512 B | 2 MB | Low frequency |
-| ControlPlane | 4,096 | 512 B | 2 MB | Low frequency |
-| Other facilities | 2,048 | 512 B | 1 MB | Default for misc facilities |
+| Component          | Buffer Size | Entry Size | Total Memory | Rationale                        |
+| ------------------ | ----------- | ---------- | ------------ | -------------------------------- |
+| Ingress (per-core) | 65,536      | 512 B      | 32 MB        | Fits in L3 cache, handles bursts |
+| Egress (per-core)  | 16,384      | 512 B      | 8 MB         | Lower volume than ingress        |
+| DataPlane          | 8,192       | 512 B      | 4 MB         | Coordinator, moderate volume     |
+| Supervisor         | 4,096       | 512 B      | 2 MB         | Low frequency                    |
+| ControlPlane       | 4,096       | 512 B      | 2 MB         | Low frequency                    |
+| Other facilities   | 2,048       | 512 B      | 1 MB         | Default for misc facilities      |
 
 **4-Core System Total**: (32 + 8) × 4 cores + 4 + 2 + 2 + 5 × 1 = **173 MB**
 
 ### Power-of-2 Requirement
 
 All capacities must be powers of 2 for fast modulo:
+
 ```rust
 pos = seq & (capacity - 1)  // Fast: single AND instruction
 // vs
@@ -363,7 +371,7 @@ pos = seq % capacity        // Slow: division instruction
 
 **Happens-Before Relationships**:
 
-```
+```text
 Writer: entry.data = X (1)
 Writer: fence(Release) (2)
 Writer: state.store(READY, Release) (3)
@@ -378,16 +386,17 @@ Therefore: Writer's data store (1) happens-before Reader's data load (6) ✓
 
 ## Performance Targets
 
-| Metric | SPSC (Data Plane) | MPSC (Control Plane) |
-|--------|-------------------|----------------------|
-| Write latency (p50) | < 100 ns | < 200 ns |
-| Write latency (p99) | < 500 ns | < 2 µs |
-| Read latency | < 100 ns | < 200 ns |
-| Throughput (single thread) | > 10M ops/sec | > 5M ops/sec |
-| Throughput (4 writers) | N/A | > 15M ops/sec |
-| Overrun rate | < 0.01% | < 0.1% |
+| Metric                     | SPSC (Data Plane) | MPSC (Control Plane) |
+| -------------------------- | ----------------- | -------------------- |
+| Write latency (p50)        | < 100 ns          | < 200 ns             |
+| Write latency (p99)        | < 500 ns          | < 2 µs               |
+| Read latency               | < 100 ns          | < 200 ns             |
+| Throughput (single thread) | > 10M ops/sec     | > 5M ops/sec         |
+| Throughput (4 writers)     | N/A               | > 15M ops/sec        |
+| Overrun rate               | < 0.01%           | < 0.1%               |
 
 **Baseline Comparison**:
+
 - Linux `printk`: ~100-500 ns
 - FreeBSD `msgbuf`: ~200-800 ns (spinlock overhead)
 - Rust `crossbeam::queue`: ~50-150 ns (similar SPSC design)
@@ -418,6 +427,7 @@ Therefore: Writer's data store (1) happens-before Reader's data load (6) ✓
 ### Property-Based Tests
 
 Using `proptest`:
+
 1. **Sequential Consistency**: All reads occur in write order
 2. **No Lost Messages**: Read count + overrun count = write count
 3. **No Duplicates**: Every sequence number appears at most once
@@ -425,23 +435,27 @@ Using `proptest`:
 ## Implementation Phases
 
 ### Phase 1: Core SPSC Implementation ✓ (PoC)
+
 - [ ] `LogEntry` struct with state field
 - [ ] `SPSCRingBuffer` with sequence numbers
 - [ ] Basic write/read operations
 - [ ] Unit tests
 
 ### Phase 2: Core MPSC Implementation ✓ (PoC)
+
 - [ ] `MPSCRingBuffer` with CAS-based write
 - [ ] Concurrent write tests
 - [ ] Benchmarks vs SPSC
 
 ### Phase 3: Performance Validation
+
 - [ ] Latency benchmarks (compare vs targets)
 - [ ] Throughput benchmarks
 - [ ] Memory ordering verification (miri)
 - [ ] Optimize hot paths if needed
 
 ### Phase 4: Integration
+
 - [ ] Integrate into logging infrastructure
 - [ ] Add facility-specific buffers
 - [ ] Consumer task implementation
@@ -470,6 +484,6 @@ Using `proptest`:
 
 - Linux `printk_ringbuffer`: kernel/printk/printk_ringbuffer.c
 - FreeBSD `msgbuf`: sys/kern/subr_msgbuf.c
-- Rust Atomics and Locks (Mara Bos): https://marabos.nl/atomics/
+- Rust Atomics and Locks (Mara Bos): <https://marabos.nl/atomics/>
 - crossbeam-rs: Lock-free data structures
 - Linux kernel memory barriers: Documentation/memory-barriers.txt

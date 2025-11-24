@@ -17,13 +17,14 @@ Option 4 eliminates the cross-thread communication bottleneck by merging ingress
 
 ### Current Two-Thread Architecture Issues
 
-```
+```text
 Ingress Thread          SegQueue/mpsc          Egress Thread
 io_uring (RX) --------> [bottleneck] --------> io_uring (TX)
    Fast                    Slow?                   Fast
 ```
 
 **Bottlenecks identified:**
+
 1. **Cross-thread queue** - SegQueue or mpsc::channel between threads
 2. **Eventfd overhead** - Cross-thread wakeup mechanism
 3. **Context switches** - CPU switching between threads
@@ -48,7 +49,7 @@ Result: 99.8% buffer exhaustion, egress froze with zero stats output.
 
 ### Design
 
-```
+```text
 Single Thread, One io_uring Instance
 ┌─────────────────────────────────────────────────┐
 │  io_uring Submission Queue (SQ):                │
@@ -196,7 +197,7 @@ loop {
 
 ## Code Structure
 
-```
+```text
 src/worker/unified_loop.rs
 ├── UnifiedDataPlane struct
 │   ├── ring: IoUring (single instance!)
@@ -258,9 +259,11 @@ Allows 1M concurrent receives and 1M concurrent sends.
 **Task:** Integrate packet parsing from `ingress.rs`
 
 **Files to modify:**
+
 - `src/worker/unified_loop.rs::process_received_packet()`
 
 **Integration points:**
+
 ```rust
 fn process_received_packet(&mut self, packet_data: &[u8]) -> Result<Option<SendWorkItem>> {
     // 1. Parse Ethernet header (14 bytes)
@@ -281,9 +284,11 @@ fn process_received_packet(&mut self, packet_data: &[u8]) -> Result<Option<SendW
 **Task:** Replace two-thread model with unified loop
 
 **Files to modify:**
+
 - `src/worker/data_plane_integrated.rs` or create new variant
 
 **Changes:**
+
 ```rust
 pub fn run_unified_data_plane(
     config: DataPlaneConfig,
@@ -317,6 +322,7 @@ pub fn run_unified_data_plane(
 **Test:** Run `tests/data_plane_pipeline_veth.sh`
 
 **Success criteria:**
+
 - Ingress ≥ 690k pps (current baseline)
 - Egress ≥ 307k pps (PHASE4 target)
 - Buffer exhaustion < 40%
@@ -359,6 +365,7 @@ pub fn run_unified_data_plane(
 ## Decision Log
 
 **2025-11-17:** Option 4 skeleton implemented
+
 - Recognized Option 2's fundamental deadlock issue
 - User questioned cross-thread queue necessity
 - Designed unified single-threaded architecture

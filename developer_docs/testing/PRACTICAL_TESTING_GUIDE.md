@@ -19,28 +19,28 @@ We use a three-tiered strategy to test different aspects of the application. All
 
 ### Tier 1: Unit Tests
 
--   **Purpose:** To test pure, internal business logic in isolation, without requiring privileges or a specific kernel environment.
--   **Scope:** Protocol serialization, state management, statistics logic, buffer pool management, and packet header parsing.
--   **Command:** `just test-unit`
+- **Purpose:** To test pure, internal business logic in isolation, without requiring privileges or a specific kernel environment.
+- **Scope:** Protocol serialization, state management, statistics logic, buffer pool management, and packet header parsing.
+- **Command:** `just test-unit`
 
 ### Tier 2: Rust Integration Tests
 
--   **Purpose:** To test the interaction between MCR's Rust components. These are divided into unprivileged and privileged tests.
--   **Scope:**
-    -   Control plane functionality (`control_client` -> `supervisor`).
-    -   Supervisor/worker process lifecycle.
-    -   Behavior in isolated network namespaces (privileged only).
--   **Commands:**
-    -   `just test-integration-light` (for unprivileged tests)
-    -   `sudo -E just test-integration-privileged` (for privileged tests)
+- **Purpose:** To test the interaction between MCR's Rust components. These are divided into unprivileged and privileged tests.
+- **Scope:**
+- Control plane functionality (`control_client` -> `supervisor`).
+- Supervisor/worker process lifecycle.
+- Behavior in isolated network namespaces (privileged only).
+- **Commands:**
+- `just test-integration-light` (for unprivileged tests)
+- `sudo -E just test-integration-privileged` (for privileged tests)
 
 ### Tier 3: E2E (End-to-End) Bash Tests
 
--   **Purpose:** To validate the final, compiled **release binaries** under realistic network conditions.
--   **Scope:** Packet forwarding correctness, performance benchmarks, and complex multi-hop topologies.
--   **Commands:**
-    -   `sudo just test-e2e-bash`
-    -   `sudo just test-performance`
+- **Purpose:** To validate the final, compiled **release binaries** under realistic network conditions.
+- **Scope:** Packet forwarding correctness, performance benchmarks, and complex multi-hop topologies.
+- **Commands:**
+- `sudo just test-e2e-bash`
+- `sudo just test-performance`
 
 ## 3. The "Build Once, Test Many" Workflow
 
@@ -50,10 +50,10 @@ The `justfile` orchestrates this workflow.
 
 ### Core Commands
 
--   **`just build-release` / `just build-test`**: Builds the release or test binaries as your current user.
--   **`just test-fast`**: The most common command for daily development. It runs all fast, unprivileged tests (unit and integration-light).
--   **`just check`**: The primary quality gate. It formats, lints, builds, and runs `test-fast`.
--   **`sudo -E just test-privileged`**: Runs the full suite of privileged tests, including Rust integration tests and E2E bash scripts. The `-E` flag is critical to preserve the user's environment variables.
+- **`just build-release` / `just build-test`**: Builds the release or test binaries as your current user.
+- **`just test-fast`**: The most common command for daily development. It runs all fast, unprivileged tests (unit and integration-light).
+- **`just check`**: The primary quality gate. It formats, lints, builds, and runs `test-fast`.
+- **`sudo -E just test-privileged`**: Runs the full suite of privileged tests, including Rust integration tests and E2E bash scripts. The `-E` flag is critical to preserve the user's environment variables.
 
 For a complete list of commands, see the **[Justfile Quick Reference](../JUSTFILE_QUICK_REFERENCE.md)**.
 
@@ -65,19 +65,20 @@ To run tests that require root privileges without interfering with the host syst
 
 A key component of our framework is the `scripts/run-tests-in-netns.sh` script. This script automates the process:
 
-1.  **Creates a unique network namespace.**
-2.  Sets up the loopback interface within the namespace.
-3.  Executes the pre-compiled Rust test binary inside the namespace with `sudo -E ip netns exec ...`.
-4.  **Automatically cleans up** the namespace when the test completes, even if it fails.
+1. **Creates a unique network namespace.**
+2. Sets up the loopback interface within the namespace.
+3. Executes the pre-compiled Rust test binary inside the namespace with `sudo -E ip netns exec ...`.
+4. **Automatically cleans up** the namespace when the test completes, even if it fails.
 
 ### Running Privileged Tests
 
 The `just test-integration-privileged` command handles this for you. It finds the compiled test binary and executes it using the network namespace wrapper script.
 
 This ensures that privileged tests are:
--   **Isolated:** They cannot interfere with your local network.
--   **Repeatable:** They run in a clean, consistent environment every time.
--   **CI-Friendly:** This approach works reliably in automated CI/CD pipelines.
+
+- **Isolated:** They cannot interfere with your local network.
+- **Repeatable:** They run in a clean, consistent environment every time.
+- **CI-Friendly:** This approach works reliably in automated CI/CD pipelines.
 
 ### Debugging E2E Tests
 
@@ -96,6 +97,6 @@ When writing or debugging these scripts, pay close attention to the patterns for
 
 Our test suite is continuously evolving. Based on `TODO` comments in the source code, here are some known areas where coverage could be improved:
 
--   **Performance Benchmarks:** The benchmark tests in `tests/benchmarks/` are currently stubs and need to be fully implemented to provide meaningful performance metrics for forwarding rate, latency, and control plane operations.
--   **Rule Removal E2E Test:** The E2E test suite is missing a test case to validate the removal of forwarding rules via the `control_client`.
--   **Supervisor Resilience:** While some resilience is tested, more complex failure scenarios (e.g., worker crash loops) could be added to the integration test suite.
+- **Performance Benchmarks:** The benchmark tests in `tests/benchmarks/` are currently stubs and need to be fully implemented to provide meaningful performance metrics for forwarding rate, latency, and control plane operations.
+- **Rule Removal E2E Test:** The E2E test suite is missing a test case to validate the removal of forwarding rules via the `control_client`.
+- **Supervisor Resilience:** While some resilience is tested, more complex failure scenarios (e.g., worker crash loops) could be added to the integration test suite.

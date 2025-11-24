@@ -12,6 +12,7 @@
 Phase 4 implements the high-performance data plane for the multicast relay. This is the core packet processing path that handles ingress, forwarding, and egress at line rate (target: 5M packets/second total system).
 
 **Prerequisites:** ✅ All critical experiments validated!
+
 - ✅ Exp #1: Helper Socket Pattern (ingress)
 - ✅ Exp #2: Privilege Drop + FD Passing (security)
 - ✅ Exp #3: Buffer Pool Performance (memory)
@@ -23,7 +24,7 @@ Phase 4 implements the high-performance data plane for the multicast relay. This
 
 ### Core Data Path
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────┐
 │                     Data Plane Worker                        │
 │                  (One per CPU core, pinned)                  │
@@ -114,18 +115,21 @@ pub struct BufferPool {
 ```
 
 **Key Decisions from Exp #3:**
+
 - Use VecDeque for O(1) pop_front/push_back
 - Pre-allocate all buffers at startup (no dynamic fallback)
 - Enable metrics tracking (0.12% overhead - negligible)
 - Pool capacity: 1000/500/200 per core
 
 **Tasks:**
+
 - [x] Copy validated implementation from Exp #3
 - [x] Add to `src/worker/buffer_pool.rs`
 - [x] Write comprehensive unit tests (9 tests)
 - [x] Document public API
 
 **Acceptance Criteria:**
+
 - ✅ All buffer pool unit tests pass
 - ✅ Benchmarks show <50ns allocation latency (validated in Exp #3)
 - ✅ Memory footprint = 5.3 MB per worker (1000/500/200 buffers)
@@ -175,6 +179,7 @@ pub fn is_fragmented(ip_header: &Ipv4Header) -> bool {
 ```
 
 **Tasks:**
+
 - [x] Implement safe Rust parsing with slice indexing
 - [x] Add checksum validation
 - [x] Add fragment detection
@@ -182,6 +187,7 @@ pub fn is_fragmented(ip_header: &Ipv4Header) -> bool {
 - [x] Document public API
 
 **Acceptance Criteria:**
+
 - ✅ Parse packets with <100ns overhead (safe Rust implementation)
 - ✅ Handle all common packet formats (Ethernet/IPv4/UDP)
 - ✅ Detect and reject fragments (D30 implemented)
@@ -232,11 +238,13 @@ impl IngressLoop {
 ```
 
 **Key Design Points from Exp #1:**
+
 - Helper socket stays open (don't read from it)
 - AF_PACKET with `ETH_P_IP` (filter for IPv4 only)
 - Userspace demux by (dest_ip, dest_port) - trust NIC filtering for multicast MAC
 
 **Tasks:**
+
 - [x] Implement AF_PACKET socket setup
 - [x] Implement helper socket pattern (validated from Exp #1)
 - [x] Implement io_uring recv loop (batched 32-64 packets)
@@ -246,6 +254,7 @@ impl IngressLoop {
 - [x] Add channel-based forwarding to egress
 
 **Acceptance Criteria:**
+
 - ✅ Can receive multicast packets on specified groups
 - ✅ Correctly demultiplexes by (dest_ip, dest_port)
 - ✅ Gracefully handles buffer pool exhaustion (drop packets)
@@ -298,12 +307,14 @@ impl EgressLoop {
 ```
 
 **Key Design Points from Exp #5:**
+
 - Queue depth: 64-128
 - Batch size: 32-64 packets (optimal throughput plateau)
 - Source IP binding: Create socket per interface, bind to specific IP
 - Error handling: Check CQE result, log errors, continue processing
 
 **Tasks:**
+
 - [x] Implement io_uring send loop (validated from Exp #5)
 - [x] Implement connected sockets per (interface, destination)
 - [x] Implement batching logic (32-64 packets)
@@ -311,6 +322,7 @@ impl EgressLoop {
 - [x] Add error handling and logging
 
 **Acceptance Criteria:**
+
 - ✅ Achieves 1.85M pps throughput (validated in Exp #5)
 - ✅ Batching reduces syscalls by 32x (1.85M → 57k syscalls/sec)
 - ✅ Errors don't crash the loop
@@ -351,6 +363,7 @@ impl DataPlane {
 ```
 
 **Tasks:**
+
 - [x] Implement main data plane structure
 - [x] Integrate ingress and egress loops (thread-based)
 - [x] Add mpsc channel for ingress→egress communication
@@ -359,6 +372,7 @@ impl DataPlane {
 - [ ] Add statistics reporting - deferred to Phase 3 integration
 
 **Acceptance Criteria:**
+
 - ✅ Ingress and egress loops run concurrently in threads
 - ✅ Zero-copy forwarding via mpsc channel
 - ✅ Graceful shutdown when channel closes
@@ -398,6 +412,7 @@ impl DataPlane {
 ```
 
 **Tasks:**
+
 - [x] Implement rule add/remove in ingress loop
 - [x] Handle IGMP join/leave via helper sockets
 - [x] Add multi-output support (1:N amplification)
@@ -405,6 +420,7 @@ impl DataPlane {
 - [ ] Add statistics collection - deferred to Phase 2/3 completion
 
 **Acceptance Criteria:**
+
 - ✅ Rules can be added/removed dynamically (add_rule/remove_rule methods)
 - ✅ IGMP joins happen correctly (helper socket pattern)
 - ✅ Multi-output forwarding works (buffer cloning)
@@ -418,6 +434,7 @@ impl DataPlane {
 ### Step 7: Testing
 
 **Unit Tests:**
+
 - [x] Buffer pool allocation/deallocation (9 tests)
 - [x] Packet parser correctness (10 tests)
 - [x] Rule matching logic (integrated tests)
@@ -425,6 +442,7 @@ impl DataPlane {
 - **Total: 31 unit tests implemented**
 
 **Integration Tests:**
+
 - [ ] End-to-end packet flow (ingress → parse → match → egress)
 - [ ] Buffer pool exhaustion behavior under load
 - [ ] Rule add/remove during traffic
@@ -432,6 +450,7 @@ impl DataPlane {
 - **Status: Deferred to integration test suite**
 
 **Performance Tests:**
+
 - [x] Egress throughput: 1.85M pps (validated in Exp #5) ✅
 - [x] Buffer pool: ~113ns allocation+deallocation (range: 105-120ns, target: <200ns, validated 2025-11-10) ✅
 - [x] Packet parsing: ~11ns per packet (range: 8-30ns, target: <100ns, validated 2025-11-10) ✅
@@ -440,6 +459,7 @@ impl DataPlane {
 - **Status: COMPLETE - All metrics validated across 7 runs, all targets exceeded**
 
 **Acceptance Criteria:**
+
 - ✅ 31 unit tests implemented and passing
 - 🔄 80%+ code coverage goal (56.22% measured with tarpaulin, 2025-11-10)
 - 🔄 Integration tests deferred to separate testing phase
@@ -494,6 +514,7 @@ Phase 4 is substantially complete when:
 ### Risk: Performance doesn't meet targets
 
 **Mitigation:**
+
 - Run Exp #4 (Packet Parsing Performance) if parsing is slow
 - Profile with `perf` to identify bottlenecks
 - Consider SIMD optimizations for hot paths
@@ -501,6 +522,7 @@ Phase 4 is substantially complete when:
 ### Risk: Integration complexity
 
 **Mitigation:**
+
 - Implement and test each component independently first
 - Use mocks for integration testing
 - Incremental integration (ingress first, then egress)
@@ -508,6 +530,7 @@ Phase 4 is substantially complete when:
 ### Risk: io_uring complexity
 
 **Mitigation:**
+
 - Reference Exp #5 implementation extensively
 - Start with simple blocking I/O, migrate to io_uring incrementally
 - Use `tokio-uring` crate for higher-level abstractions
@@ -517,12 +540,14 @@ Phase 4 is substantially complete when:
 ## Dependencies
 
 **Crates to add:**
+
 - `io-uring` = "0.7" (already in experiments)
 - `socket2` = "0.5" (already in experiments)
 - `libc` = "0.2" (for raw socket operations)
 - `nix` = "0.30" (for AF_PACKET, privilege drop)
 
 **Validated patterns from experiments:**
+
 - Buffer pool design (Exp #3)
 - Helper socket pattern (Exp #1)
 - io_uring egress batching (Exp #5)
@@ -537,6 +562,7 @@ Phase 4 is substantially complete when:
 **Pessimistic:** 4 weeks (if performance tuning is needed)
 
 **Critical Path:**
+
 1. Buffer pool (2 days)
 2. Packet parser (2 days)
 3. Ingress loop (3-4 days)

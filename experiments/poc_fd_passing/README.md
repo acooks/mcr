@@ -20,7 +20,7 @@ In multicast_relay, we need to:
 
 `SCM_RIGHTS` (Socket Control Message - Rights) is a kernel mechanism for transferring file descriptors between processes through Unix domain sockets.
 
-```
+```text
 ┌──────────────────────────────────────────────────────────────┐
 │  Process A (Supervisor)         Process B (Worker)           │
 │                                                               │
@@ -76,6 +76,7 @@ fn send_fd(socket_fd: RawFd, fd_to_send: RawFd) -> Result<(), Error> {
 ```
 
 **Key components**:
+
 - `iov`: I/O vector with at least one byte of data
 - `cmsg`: Control message array containing `SCM_RIGHTS` with the FD(s)
 - The kernel handles the FD translation and security checks
@@ -106,6 +107,7 @@ fn recv_fd(socket_fd: RawFd) -> Result<RawFd, Error> {
 ```
 
 **Key components**:
+
 - `cmsg_buffer`: Pre-allocated buffer sized by `cmsg_space!` macro
 - `msg.cmsgs()`: Iterator over received control messages
 - `ScmRights`: Extracted file descriptors
@@ -155,7 +157,7 @@ cargo run
 
 ### Expected Output
 
-```
+```text
 ╔════════════════════════════════════════════════════════╗
 ║   File Descriptor Passing - Educational Demonstration  ║
 ║   Showing SCM_RIGHTS mechanism used in multicast_relay ║
@@ -285,16 +287,19 @@ fn worker_main(command_sock: RawFd) {
 ## References
 
 ### Man Pages
+
 - `unix(7)` - Unix domain sockets
 - `cmsg(3)` - Control message ancillary data
 - `sendmsg(2)` - Send message with ancillary data
 - `recvmsg(2)` - Receive message with ancillary data
 
 ### Kernel Documentation
+
 - [SCM_RIGHTS implementation](https://elixir.bootlin.com/linux/latest/source/net/unix/af_unix.c)
 - [File descriptor passing in Unix sockets](https://man7.org/linux/man-pages/man7/unix.7.html)
 
 ### Rust Crates
+
 - [`nix`](https://docs.rs/nix/) - Safe Rust bindings to Unix APIs
 - Provides `sendmsg`, `recvmsg`, `ControlMessage`, etc.
 

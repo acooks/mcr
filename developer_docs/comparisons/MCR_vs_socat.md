@@ -38,7 +38,7 @@ The fundamental difference between MCR and `socat` lies in how they interact wit
 
 This topology represents a typical Layer 3 multicast routing scenario.
 
-```
+```text
 gen-ns (veth0) <-> (veth1) relay-ns (veth2) <-> (veth3) sink-ns
 10.0.0.1              10.0.0.2  10.0.1.1         10.0.1.2
 ```
@@ -46,7 +46,7 @@ gen-ns (veth0) <-> (veth1) relay-ns (veth2) <-> (veth3) sink-ns
 #### Results
 
 | Packet Rate | MCR Loss | socat Loss | Performance Gap |
-|-------------|----------|------------|-----------------|
+| ----------- | -------- | ---------- | --------------- |
 | 50k pps     | 0.00%    | 0.00%      | None            |
 | 200k pps    | 0.00%    | 0.00%      | None            |
 | 400k pps    | 0.20%    | 15.33%     | **15.13%**      |
@@ -60,7 +60,7 @@ gen-ns (veth0) <-> (veth1) relay-ns (veth2) <-> (veth3) sink-ns
 
 This topology represents a Layer 2 bridging scenario between two separate network segments.
 
-```
+```text
 br0 (Network Segment A)         br1 (Network Segment B)
   ├─ veth-gen (10.0.0.10)         ├─ veth-sink (10.0.1.30)
   └─ veth-mcr0 (10.0.0.20) <─ Relay ─> veth-mcr1 (10.0.1.20)
@@ -68,11 +68,11 @@ br0 (Network Segment A)         br1 (Network Segment B)
 
 #### Results
 
-| Metric             | MCR         | socat       | Comparison      |
-|--------------------|-------------|-------------|-----------------|
-| Packets Delivered  | 1,000,000   | 0           | MCR: ∞ advantage|
-| Packet Loss        | 0.00%       | 100.00%     | MCR: Perfect    |
-| Result             | ✅ EXCELLENT | ❌ FAILED   | **MCR succeeds**|
+| Metric            | MCR          | socat     | Comparison       |
+| ----------------- | ------------ | --------- | ---------------- |
+| Packets Delivered | 1,000,000    | 0         | MCR: ∞ advantage |
+| Packet Loss       | 0.00%        | 100.00%   | MCR: Perfect     |
+| Result            | ✅ EXCELLENT | ❌ FAILED | **MCR succeeds** |
 
 **Analysis:**
 
@@ -82,12 +82,12 @@ br0 (Network Segment A)         br1 (Network Segment B)
 ### 3.4. Performance Analysis: Root Cause
 
 - **`socat`'s Limitations:**
-    - **Traditional I/O Model:** `recvfrom()`/`sendto()` syscalls for each packet create high overhead.
-    - **No Batching:** Processes packets one at a time, wasting CPU cycles on syscalls.
+  - **Traditional I/O Model:** `recvfrom()`/`sendto()` syscalls for each packet create high overhead.
+  - **No Batching:** Processes packets one at a time, wasting CPU cycles on syscalls.
 - **MCR's Advantages:**
-    - **`io_uring` Batched I/O:** Batches up to 32 receive and 64 send operations in single syscalls, dramatically reducing overhead.
-    - **Zero-Copy Architecture:** Shared memory ring buffers avoid copying between kernel and userspace.
-    - **AF_PACKET Efficiency:** Direct access to the network layer bypasses the kernel's UDP stack.
+  - **`io_uring` Batched I/O:** Batches up to 32 receive and 64 send operations in single syscalls, dramatically reducing overhead.
+  - **Zero-Copy Architecture:** Shared memory ring buffers avoid copying between kernel and userspace.
+  - **AF_PACKET Efficiency:** Direct access to the network layer bypasses the kernel's UDP stack.
 
 ---
 
@@ -96,11 +96,11 @@ br0 (Network Segment A)         br1 (Network Segment B)
 ### Multi-Stream Scalability
 
 | Streams | MCR Process Count | socat Process Count | MCR Advantage |
-|---------|------------------|---------------------|---------------|
-| 1       | 1 supervisor     | 2 processes         | 50% fewer     |
-| 5       | 1 supervisor     | 10 processes        | 90% fewer     |
-| 10      | 1 supervisor     | 20 processes        | 95% fewer     |
-| 20      | 1 supervisor     | 40 processes        | 97.5% fewer   |
+| ------- | ----------------- | ------------------- | ------------- |
+| 1       | 1 supervisor      | 2 processes         | 50% fewer     |
+| 5       | 1 supervisor      | 10 processes        | 90% fewer     |
+| 10      | 1 supervisor      | 20 processes        | 95% fewer     |
+| 20      | 1 supervisor      | 40 processes        | 97.5% fewer   |
 
 **Analysis:** MCR's supervisor-worker model is significantly more efficient for managing multiple streams, requiring far fewer processes than `socat`.
 

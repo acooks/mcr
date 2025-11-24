@@ -19,6 +19,7 @@ A focused investigation revealed that the regression was not due to an architect
 
 - **Problem:** The queue depth was configured to 128 entries. Mathematical analysis showed this imposed a hard theoretical limit of ~39k pps.
 - **Code:**
+
   ```rust
   // src/worker/unified_loop.rs
   impl Default for UnifiedConfig {
@@ -35,6 +36,7 @@ A focused investigation revealed that the regression was not due to an architect
 
 - **Problem:** The application used the default kernel UDP send buffer size (~208 KB), which would fill in under 0.5 milliseconds at the target throughput, causing the kernel to block send operations and leading to 86% buffer exhaustion.
 - **Code:**
+
   ```rust
   // src/worker/unified_loop.rs
   fn create_connected_udp_socket(...) -> Result<OwnedFd> {
@@ -53,6 +55,7 @@ The following fixes were implemented in the `unified_loop.rs` data plane:
 
 - **Change:** The queue depth was increased from 128 to **1024**.
 - **Code:**
+
   ```rust
   // src/worker/unified_loop.rs
   impl Default for UnifiedConfig {
@@ -70,6 +73,7 @@ The following fixes were implemented in the `unified_loop.rs` data plane:
 
 - **Change:** Egress UDP sockets are now configured with a **4 MB send buffer** (`SO_SNDBUF`).
 - **Code:**
+
   ```rust
   // src/worker/unified_loop.rs
   fn create_connected_udp_socket(...) -> Result<OwnedFd> {
@@ -89,11 +93,11 @@ The following fixes were implemented in the `unified_loop.rs` data plane:
 
 ### 4.1. Performance Metrics
 
-| Metric             | Before Fixes (Nov 16) | After Fixes (Nov 18) | Improvement |
-|--------------------|-----------------------|----------------------|-------------|
-| Egress Throughput  | 97,000 pps            | 439,418 pps          | +353%       |
-| Buffer Exhaustion  | 86%                   | 0%                   | -100%       |
-| vs. PHASE4 Target  | -68%                  | +43%                 |             |
+| Metric            | Before Fixes (Nov 16) | After Fixes (Nov 18) | Improvement |
+| ----------------- | --------------------- | -------------------- | ----------- |
+| Egress Throughput | 97,000 pps            | 439,418 pps          | +353%       |
+| Buffer Exhaustion | 86%                   | 0%                   | -100%       |
+| vs. PHASE4 Target | -68%                  | +43%                 |             |
 
 ### 4.2. Analysis
 
@@ -103,47 +107,28 @@ The results validated that the unified single-threaded architecture is not only 
 
 ## 5. Conclusion
 
-
-
 The performance regression was successfully resolved by addressing two critical configuration errors. The unified loop architecture is now validated as the superior approach, delivering significantly higher performance and efficiency.
-
-
 
 ---
 
-
-
 ## 6. Performance Validation
-
-
 
 **Date:** 2025-11-18
 
-
-
 This section validates MCR's performance claims across multiple dimensions after the fixes were applied.
 
-
-
 ### 6.1. Single-Hop Throughput Validation
-
-
 
 - **Objective:** Validate 439k pps egress throughput with 0% buffer exhaustion.
 
 - **Results:**
-
   - Egress rate: 434,853 pps (within 1% of documented)
 
   - Buffer exhaustion: 0%
 
 - **Verdict:** ✅ **VALIDATED**
 
-
-
 ### 6.2. Multi-Stream Scalability
-
-
 
 - **Objective:** Validate MCR's ability to handle multiple concurrent multicast streams.
 
@@ -151,11 +136,7 @@ This section validates MCR's performance claims across multiple dimensions after
 
 - **Verdict:** ✅ **VALIDATED**
 
-
-
 ### 6.3. Extreme Fanout Beyond Kernel VIF Limit
-
-
 
 - **Objective:** Demonstrate that MCR's userspace architecture bypasses the kernel's 32 VIF limit.
 

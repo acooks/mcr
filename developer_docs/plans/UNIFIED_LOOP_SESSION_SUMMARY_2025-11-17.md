@@ -21,8 +21,10 @@ Successfully implemented and debugged the unified single-threaded data plane loo
 **Objective:** Integrate packet parsing logic from the existing ingress module
 
 **Work Done:**
+
 - Added `parse_packet` import from `packet_parser` module
 - Created `ForwardingTarget` struct for clean separation of concerns:
+
   ```rust
   struct ForwardingTarget {
       payload_offset: usize,
@@ -31,6 +33,7 @@ Successfully implemented and debugged the unified single-threaded data plane loo
       interface_name: String,
   }
   ```
+
 - Implemented `process_received_packet()` method:
   - Parses Ethernet → IPv4 → UDP headers
   - Looks up forwarding rules by (multicast_group, port) key
@@ -52,6 +55,7 @@ Successfully implemented and debugged the unified single-threaded data plane loo
 **Work Done:**
 
 **A. Created `run_unified_data_plane()` function**
+
 - Location: `/home/acooks/mcr/src/worker/data_plane_integrated.rs:176-238`
 - Extracts command stream FD from ingress channels
 - Reads buffer pool configuration from environment variables:
@@ -62,20 +66,24 @@ Successfully implemented and debugged the unified single-threaded data plane loo
 - Initializes `UnifiedDataPlane` with supervisor-provided FD
 - Calls `unified.run()` to start event loop
 
-**B. Made unified loop the DEFAULT**
+#### B. Made unified loop the DEFAULT
+
 - File: `/home/acooks/mcr/src/worker/mod.rs`
 - Changed import to use `run_unified_data_plane`:
+
   ```rust
   // Option 4: Unified single-threaded loop (default)
   use data_plane_integrated::run_unified_data_plane as data_plane_task;
-  
+
   // Option 3: Two-thread model (legacy)
   // use data_plane_integrated::run_data_plane as data_plane_task;
   ```
+
 - Legacy two-thread model remains available (commented out)
 - Easy to switch back if needed
 
 **Verification:**
+
 - Compiles cleanly with no warnings
 - Supervisor spawns workers using unified loop
 
@@ -86,9 +94,11 @@ Successfully implemented and debugged the unified single-threaded data plane loo
 #### Bug 1: Submission Queue Overflow (CRITICAL)
 
 **Symptoms:**
-```
+
+```text
 [Worker 1741402] Data Plane worker process failed: submission queue is full
 ```
+
 - Workers crashed after ~5 minutes of operation
 - Supervisor continuously restarted failed workers
 - Completely prevented sustained operation
@@ -97,6 +107,7 @@ Successfully implemented and debugged the unified single-threaded data plane loo
 The unified loop was submitting io_uring operations without checking if there was available space in the submission queue. When the queue filled up, the next `push()` call would fail with "queue full" error.
 
 **Analysis:**
+
 ```rust
 // BEFORE (buggy code):
 for _ in 0..num_recv_buffers {
@@ -106,6 +117,7 @@ for _ in 0..num_recv_buffers {
 ```
 
 Under high load:
+
 1. Event loop processes completions slowly
 2. More receives/sends submitted than completions processed
 3. Submission queue fills to capacity (default: 128)
@@ -120,15 +132,15 @@ Added capacity checks before submitting operations:
 
 fn submit_recv_buffers(&mut self) -> Result<()> {
     // ... allocate buffers ...
-    
+
     // Check available space in submission queue
     let sq = self.ring.submission();
     let sq_available = sq.capacity() - sq.len();
     drop(sq); // Release borrow before loop
-    
+
     // Only submit as many as we have space for
     let to_submit = self.recv_buffers.len().min(sq_available);
-    
+
     for _ in 0..to_submit {
         // ... create and push operation ...
     }
@@ -140,12 +152,12 @@ fn submit_send_batch(&mut self) -> Result<()> {
     let sq = self.ring.submission();
     let sq_available = sq.capacity() - sq.len();
     drop(sq); // Release borrow before loop
-    
+
     // Limit batch size to available space
     let batch_size = self.send_queue.len()
         .min(self.config.send_batch_size)
         .min(sq_available);  // ✅ Never overflow!
-    
+
     for _ in 0..batch_size {
         // ... create and push operation ...
     }
@@ -154,12 +166,14 @@ fn submit_send_batch(&mut self) -> Result<()> {
 ```
 
 **Verification:**
+
 - Test: `cargo test --release test_add_and_remove_rule_e2e`
 - Result: Workers ran for 10+ minutes without crashes
 - Previous behavior: Crashed at ~5 minutes
 - ✅ Bug FIXED
 
 **Files Modified:**
+
 - `/home/acooks/mcr/src/worker/unified_loop.rs:499-542` (`submit_recv_buffers`)
 - `/home/acooks/mcr/src/worker/unified_loop.rs:545-599` (`submit_send_batch`)
 
@@ -168,9 +182,11 @@ fn submit_send_batch(&mut self) -> Result<()> {
 #### Bug 2: Buffer Pool Exhaustion at Startup
 
 **Symptoms:**
-```
+
+```text
 [Worker 1745431] Data Plane worker process failed: Buffer pool exhausted during recv buffer setup
 ```
+
 - Workers failed to initialize
 - Crashed immediately at startup
 - Prevented unified loop from ever running
@@ -178,7 +194,7 @@ fn submit_send_batch(&mut self) -> Result<()> {
 **Root Cause:**
 Configuration mismatch between per-worker buffer allocation and total pool size:
 
-```
+```text
 Default Configuration (BEFORE):
 - num_recv_buffers per worker: 64
 - Number of workers: 20 (on 20-core system)
@@ -217,7 +233,8 @@ impl Default for UnifiedConfig {
 ```
 
 **New Calculation:**
-```
+
+```text
 After Fix:
 - num_recv_buffers per worker: 32
 - Number of workers: 20
@@ -228,12 +245,14 @@ Operating margin: 62% of total pool available
 ```
 
 **Verification:**
+
 - Test: Manual startup with 1 worker and 20 workers
 - Result: No buffer pool exhaustion errors
 - Workers initialize successfully
 - ✅ Bug FIXED
 
 **File Modified:**
+
 - `/home/acooks/mcr/src/worker/unified_loop.rs:95`
 
 ---
@@ -242,7 +261,7 @@ Operating margin: 62% of total pool available
 
 ### Single-Threaded Unified Event Loop
 
-```
+```text
 ┌───────────────────────────────────────────────────────────┐
 │                    Single Thread                          │
 │                                                            │
@@ -274,6 +293,7 @@ Operating margin: 62% of total pool available
 ### Benefits Over Two-Thread Model
 
 **Eliminated:**
+
 - ❌ Cross-thread queue (SegQueue/mpsc)
 - ❌ Eventfd wakeup mechanism
 - ❌ Context switches between threads
@@ -281,6 +301,7 @@ Operating margin: 62% of total pool available
 - ❌ Arc<Mutex<>> for buffer pool synchronization
 
 **Gained:**
+
 - ✅ Single-threaded simplicity
 - ✅ Better cache locality
 - ✅ Natural batching (receive N, process N, send N)
@@ -293,7 +314,8 @@ Operating margin: 62% of total pool available
 
 ### Startup Tests ✅
 
-**Test 1: Single Worker Startup**
+#### Test 1: Single Worker Startup
+
 ```bash
 sudo multicast_relay supervisor \
     --control-socket-path /tmp/test.sock \
@@ -302,7 +324,8 @@ sudo multicast_relay supervisor \
 ```
 
 **Result:**
-```
+
+```text
 [Worker 1747319] [run_unified_data_plane] Entry point reached
 [Worker 1747319] {"facility":"DataPlane","level":"Info","message":"Unified data plane starting",...}
 [Worker 1747319] [run_unified_data_plane] Creating UnifiedDataPlane
@@ -311,14 +334,17 @@ sudo multicast_relay supervisor \
 [Worker 1747319] {"facility":"DataPlane","level":"Info","message":"Unified event loop starting",...}
 [Worker 1747319] {"facility":"DataPlane","level":"Info","message":"Starting unified event loop",...}
 ```
+
 ✅ **PASS:** Worker started successfully, event loop running
 
-**Test 2: Multi-Worker Startup (20 workers)**
+#### Test 2: Multi-Worker Startup (20 workers)
+
 ```bash
 cargo test --release test_add_and_remove_rule_e2e
 ```
 
 **Result:**
+
 - All 20 workers started successfully
 - No buffer pool exhaustion errors
 - No submission queue overflow errors
@@ -328,16 +354,19 @@ cargo test --release test_add_and_remove_rule_e2e
 
 ### Stability Tests ✅
 
-**Test: Extended Run**
+#### Test: Extended Run
+
 - Duration: 10+ minutes
 - Workers: 20 (default for 20-core system)
 - Load: Rule add/remove operations
 
 **Previous Behavior (before fixes):**
+
 - Crashed at ~5 minutes with "submission queue is full"
 - OR crashed immediately with "Buffer pool exhausted"
 
 **Current Behavior:**
+
 - ✅ No crashes
 - ✅ No submission queue errors
 - ✅ No buffer pool errors
@@ -348,15 +377,18 @@ cargo test --release test_add_and_remove_rule_e2e
 ## Code Quality
 
 ### Compilation
+
 ```bash
 $ cargo build --release
    Compiling multicast_relay v0.1.0 (/home/acooks/mcr)
     Finished `release` profile [optimized] target(s) in 2.95s
 ```
+
 ✅ **Clean build with ZERO warnings**
 
 ### Binary Info
-```
+
+```text
 File: /home/acooks/mcr/target/release/multicast_relay
 Built: 2025-11-17 20:13
 Size: 3,364,664 bytes
@@ -368,20 +400,23 @@ MD5: 48b1fcf85d86ab452099e71f0d862621
 ## Files Modified
 
 ### Core Implementation
+
 1. **`src/worker/unified_loop.rs`** (600+ lines)
    - Packet parsing integration (Phase 1)
    - Submission queue overflow fix (Phase 3)
    - Buffer pool exhaustion fix (Phase 3)
 
 ### Integration
-2. **`src/worker/data_plane_integrated.rs`**
+
+1. **`src/worker/data_plane_integrated.rs`**
    - Added `run_unified_data_plane()` function (Phase 2)
 
-3. **`src/worker/mod.rs`**
+2. **`src/worker/mod.rs`**
    - Made unified loop the default (Phase 2)
 
 ### Documentation
-4. **`developer_docs/plans/OPTION4_UNIFIED_LOOP.md`**
+
+1. **`developer_docs/plans/OPTION4_UNIFIED_LOOP.md`**
    - Updated status to reflect Phase 3 completion
 
 ---
@@ -393,6 +428,7 @@ MD5: 48b1fcf85d86ab452099e71f0d862621
 **Objective:** Verify packet forwarding actually works
 
 **Test Plan:**
+
 - Start supervisor with unified loop
 - Add forwarding rule via control_client
 - Send multicast traffic
@@ -406,15 +442,18 @@ MD5: 48b1fcf85d86ab452099e71f0d862621
 **Objective:** Compare against baselines
 
 **Baselines:**
+
 - PHASE4 (historical best): 307k pps egress
 - Current two-thread model: ~97k pps egress (regressed)
 
 **Test:**
+
 ```bash
 sudo tests/data_plane_pipeline_veth.sh
 ```
 
 **Success Criteria:**
+
 - Ingress ≥ 690k pps (current baseline)
 - Egress ≥ 307k pps (PHASE4 target)
 - Buffer exhaustion < 40%
@@ -424,6 +463,7 @@ sudo tests/data_plane_pipeline_veth.sh
 ### 3. Optimization (if needed)
 
 Potential areas:
+
 - io_uring queue depth tuning
 - Batch size optimization
 - Buffer pool sizing
@@ -434,6 +474,7 @@ Potential areas:
 ## Risk Assessment
 
 ### Low Risk ✅
+
 - Clean compilation
 - Stable startup
 - No crashes in extended testing
@@ -441,6 +482,7 @@ Potential areas:
 - Easy to revert (legacy two-thread model still available)
 
 ### Questions to Answer
+
 1. **Does it forward packets correctly?**
    - Status: Not yet tested with actual traffic
    - Next: Functional testing
@@ -460,20 +502,24 @@ Potential areas:
 The unified single-threaded loop (Option 4) is now in a stable, testable state:
 
 ✅ **Implementation Complete**
+
 - Packet parsing integrated
 - Data plane wired up
 - Default in supervisor
 
 ✅ **Critical Bugs Fixed**
+
 - Submission queue overflow resolved
 - Buffer pool exhaustion resolved
 
 ✅ **Stable Operation**
+
 - Workers start successfully
 - Run for 10+ minutes without crashes
 - No resource errors
 
 🔄 **Ready for Testing**
+
 - Functional testing: Verify packet forwarding
 - Performance testing: Compare vs baselines
 
@@ -481,4 +527,4 @@ The architecture eliminates the cross-thread communication bottleneck that was h
 
 ---
 
-**End of Session Summary**
+## End of Session Summary

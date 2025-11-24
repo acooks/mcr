@@ -1,0 +1,11 @@
+# Files to ignore during link checking
+# One pattern per line (supports wildcards)
+
+# Ignore all target directories (cargo build artifacts)
+*/target/**
+
+# Ignore node_modules
+*/node_modules/**
+
+# Ignore git directory
+.git/**

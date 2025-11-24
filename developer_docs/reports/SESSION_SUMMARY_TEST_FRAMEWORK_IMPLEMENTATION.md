@@ -5,12 +5,14 @@
 
 ## What Was Accomplished
 
-###  1. ✅ Test Framework Implementation Complete
+### 1. ✅ Test Framework Implementation Complete
 
 **Files Modified**:
+
 - `justfile` (lines 122-167) - Added 7 new test framework targets
 
 **New Workflow**:
+
 ```bash
 # Build as regular user
 just build-test
@@ -27,6 +29,7 @@ just test-all                       # Complete suite
 ### 2. ✅ Framework Validation and Test Results
 
 **Framework Status**: Working correctly
+
 - Test discovery: ✅
 - Sudo execution: ✅
 - Namespace isolation: ✅
@@ -35,6 +38,7 @@ just test-all                       # Complete suite
 **Test Results**: 0/8 passing (bit-rot confirmed)
 
 **Failure Patterns**:
+
 1. **7 tests**: Zero packets received (`recv=0, matched=0`)
 2. **1 test** (`test_scale_1m_packets`): Partial success
    - Ingress: 1M packets matched ✅
@@ -44,28 +48,33 @@ just test-all                       # Complete suite
 ### 3. ✅ Documentation Created
 
 **Testing Documentation**:
-- `docs/testing/TESTING.md` (6.6KB) - Developer guide
-- `docs/testing/test_framework_validation_results.md` (7.2KB) - Validation report
+
+- `testing/PRACTICAL_TESTING_GUIDE.md` (6.6KB) - Developer guide
+- `testing/test_framework_validation_results.md` (7.2KB) - Validation report
 
 **Planning Documents**:
+
 - `docs/plans/devnull_egress_sink.md` - `/dev/null` sink proposal
 - `scripts/run-tests-in-netns.sh` - Network namespace wrapper
 
 ### 4. ✅ /dev/null Egress Sink Proposal
 
 **Motivation**: From test failure analysis:
-```
+
+```text
 Ingress: recv=1000018 matched=1000000 egr_sent=1000000 ✅
 Egress: sent=0 ch_recv=0 ❌
 ```
 
 **Use Cases**:
+
 1. Isolate ingress performance (no network I/O)
 2. Debug egress channel issues
 3. Simplify performance tests
 4. Benchmark without network bottlenecks
 
 **Proposed Syntax**:
+
 ```bash
 control_client add \
   --input-interface eth0 \
@@ -80,27 +89,31 @@ control_client add \
 
 After running `test_scale_1m_packets` with full diagnostics, confirmed the exact failure:
 
-```
+```text
 Ingress: recv=1000018 matched=1000000 egr_sent=1000000 ✅
 Egress: sent=0 submitted=0 ch_recv=0 ❌
 ```
 
 **Analysis**:
+
 - Ingress worker: WORKING - receives packets, matches rules, sends to egress channel
 - Egress worker: NOT WORKING - never receives from channel (ch_recv=0)
 
 **Root Cause**:
 The `crossbeam_queue::SegQueue` channel between ingress and egress is either:
+
 1. Egress worker process not starting
 2. Egress worker not reading from the correct queue instance
 3. Channel not properly shared between processes
 
 **Code Locations**:
+
 - Egress event loop: `src/worker/egress.rs:437-502` - `run()` method
 - Channel drain logic: Line 440 `while let Some(packet) = packet_rx.pop()`
 - Stats increment: Should happen at egress.rs but ch_recv=0 indicates never reached
 
 **Next Investigation**:
+
 1. Check if egress worker process is actually spawned
 2. Verify `SegQueue` is properly shared via shared memory between supervisor and workers
 3. Add logging to egress worker startup to confirm it's running
@@ -113,6 +126,7 @@ This is a **fundamental architecture bug** in worker lifecycle management, not j
 ### Immediate: Debug Test Failures
 
 1. **Run simplest failing test with more diagnostics**:
+
    ```bash
    RUST_BACKTRACE=full just build-test
    sudo -E target/debug/deps/integration-* \
@@ -120,6 +134,7 @@ This is a **fundamental architecture bug** in worker lifecycle management, not j
    ```
 
 2. **Check MCR logs**:
+
    ```bash
    cat /tmp/test_mcr_*.log
    ```
@@ -136,12 +151,14 @@ This is a **fundamental architecture bug** in worker lifecycle management, not j
 **Problem**: `egress.ch_recv=0` despite `ingress.egr_sent=1000000`
 
 **Investigation areas**:
+
 1. Channel creation and lifecycle
 2. Worker process initialization
 3. IPC communication between ingress and egress
 4. Egress worker not receiving from channel
 
 **Key assertion failing**:
+
 ```rust
 // Line 276 in tests/integration/test_scaling.rs
 assert_eq!(
@@ -153,12 +170,14 @@ assert_eq!(
 ```
 
 This suggests egress worker is either:
+
 - Not started
 - Not reading from channel
 - Reading but not incrementing `ch_recv` stat
 - Channel not connected properly
 
 **Debugging strategy**:
+
 1. Add logging to egress worker channel read loop
 2. Verify worker process is running
 3. Check channel capacity and blocking
@@ -167,11 +186,13 @@ This suggests egress worker is either:
 ### Medium-term: Implement /dev/null Sink (Optional)
 
 **Benefits**:
+
 - Would help isolate channel vs network issues
 - Simplifies performance testing
 - Useful debugging tool
 
 **Implementation locations** (from proposal):
+
 1. CLI parsing - recognize "devnull" keyword
 2. Egress worker - skip network send, just count
 3. Stats reporting - indicate devnull destination
@@ -188,17 +209,20 @@ This suggests egress worker is either:
 ## Key Files Reference
 
 **Test Framework**:
+
 - `justfile:122-167` - Test targets
 - `scripts/run-tests-in-netns.sh` - Namespace wrapper
-- `docs/testing/TESTING.md` - Usage guide
+- `testing/PRACTICAL_TESTING_GUIDE.md` - Usage guide
 
 **Failing Tests**:
+
 - `tests/integration/test_basic.rs:114` - test_single_hop_1000_packets
 - `tests/integration/test_basic.rs:201` - test_minimal_10_packets
 - `tests/integration/test_scaling.rs:275` - test_scale_1m_packets ⭐ Start here
 - `tests/integration/test_topologies.rs:153` - test_baseline_2hop_100k_packets
 
 **Source Code Areas to Investigate**:
+
 - `src/worker/egress.rs` - Egress worker and channel handling
 - `src/worker/ingress.rs` - Packet reception and IGMP
 - `src/supervisor.rs` - Worker lifecycle management
@@ -209,12 +233,14 @@ This suggests egress worker is either:
 ### Pattern 1: Zero Packets (7 tests)
 
 **Symptom**:
-```
+
+```text
 Ingress: recv=0 matched=0 egr_sent=0
 Egress: sent=0 ch_recv=0
 ```
 
 **Likely causes**:
+
 1. Multicast socket not binding correctly
 2. IGMP membership not established
 3. Network namespace routing issues
@@ -222,6 +248,7 @@ Egress: sent=0 ch_recv=0
 5. Packets sent before MCR ready to receive
 
 **Investigation**:
+
 - Check IGMP membership: `ip maddr show`
 - Verify socket binding with `ss -anu`
 - Check routing: `ip route show table all`
@@ -230,23 +257,27 @@ Egress: sent=0 ch_recv=0
 ### Pattern 2: Partial Success (1 test)
 
 **Symptom**:
-```
+
+```text
 Ingress: recv=1000018 matched=1000000 egr_sent=1000000 ✅
 Egress: sent=0 ch_recv=0 ❌
 ```
 
 **What works**:
+
 - Packet reception ✅
 - Packet matching ✅
 - Ingress→Egress channel send ✅ (egr_sent counter)
 
 **What's broken**:
+
 - Egress channel receive ❌ (ch_recv=0)
 - Network transmission ❌ (sent=0)
 
 **Most likely cause**: Egress worker not reading from channel
 
 **Investigation priority** (in order):
+
 1. Is egress worker process running?
 2. Is egress worker blocked or crashed?
 3. Is channel connected correctly?
@@ -255,7 +286,8 @@ Egress: sent=0 ch_recv=0 ❌
 ### Pattern 3: CLI Parsing Error (1 test)
 
 **Symptom**:
-```
+
+```text
 Error: invalid value '239.2.2.2:5002:veth1a,239.3.3.3:5003:veth2a,239.4.4.4:5004:veth3a'
 for '--outputs': Invalid format
 ```
@@ -263,6 +295,7 @@ for '--outputs': Invalid format
 **Cause**: Test using comma-separated multiple outputs
 
 **Investigation**:
+
 - Check if syntax changed in recent commits
 - Verify correct multi-output format
 - Update test or fix parser
@@ -270,6 +303,7 @@ for '--outputs': Invalid format
 ## Commands for Next Session
 
 **Debug failing test**:
+
 ```bash
 # Build first
 just build-test
@@ -282,18 +316,21 @@ sudo -E RUST_BACKTRACE=full \
 ```
 
 **Check for running processes**:
+
 ```bash
 ps aux | grep multicast_relay
 sudo ip netns list
 ```
 
 **Clean up if needed**:
+
 ```bash
 sudo pkill -9 multicast_relay
 sudo ip netns del <namespace>
 ```
 
 **View MCR logs**:
+
 ```bash
 cat /tmp/test_mcr_*.log
 ```
@@ -313,6 +350,7 @@ The test framework is **complete and working**. The original problem statement h
 > "tests have bit-rotted, because they never run, because they require root and because we don't have a good, repeatable test-running framework"
 
 You now have:
+
 1. A repeatable framework ✅
 2. Tests that run with proper privileges ✅
 3. Clear documentation ✅

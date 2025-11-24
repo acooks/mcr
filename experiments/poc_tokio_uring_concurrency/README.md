@@ -12,10 +12,10 @@ The correct solution is to use `tokio::task::spawn_local`. This function spawns 
 
 This PoC demonstrates the correct pattern for:
 
-1.  Starting a `tokio-uring` runtime.
-2.  Using `tokio::task::spawn_local` to run multiple, long-lived, concurrent background tasks.
-3.  Using a `tokio::select!` loop to manage the application state.
-4.  Dynamically starting and stopping one of the local tasks by storing and aborting its `JoinHandle`.
+1. Starting a `tokio-uring` runtime.
+2. Using `tokio::task::spawn_local` to run multiple, long-lived, concurrent background tasks.
+3. Using a `tokio::select!` loop to manage the application state.
+4. Dynamically starting and stopping one of the local tasks by storing and aborting its `JoinHandle`.
 
 This provides a clear, working blueprint for the main application's `worker/mod.rs` file.
 

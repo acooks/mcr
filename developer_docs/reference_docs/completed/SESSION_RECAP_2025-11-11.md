@@ -24,12 +24,13 @@
 
 The system provides **sufficient telemetry** to diagnose "at capacity but operating correctly":
 
-```
+```text
 [STATS:Ingress] recv=6129022 matched=3881980 parse_err=1 no_match=21 buf_exhaust=2247020 (490000 pps)
 [STATS:Egress] sent=4176384 submitted=4176384 errors=0 bytes=5846937600 (307000 pps)
 ```
 
 **Diagnosis from stats alone:**
+
 - Ingress receiving at 490k pps ✅
 - Egress sending at 307k pps ✅
 - Zero errors (`errors=0`) ✅
@@ -44,13 +45,13 @@ The system provides **sufficient telemetry** to diagnose "at capacity but operat
 
 ### Code Changes
 
-| File | Change | Purpose |
-|------|--------|---------|
-| `tests/data_plane_pipeline_veth.sh` | Created | 3-hop performance test with veth pairs |
-| `src/worker/ingress.rs:306` | `[Ingress Stats]` → `[STATS:Ingress]` | Distinguish stats from debug |
-| `src/worker/data_plane_integrated.rs:242` | `[Egress Stats]` → `[STATS:Egress]` | Distinguish stats from debug |
-| `src/supervisor.rs:118-136` | Implement GetStats | Return configured rules |
-| `src/worker/egress.rs:512` | Add payload_len to test | Fix compilation |
+| File                                      | Change                                | Purpose                                |
+| ----------------------------------------- | ------------------------------------- | -------------------------------------- |
+| `tests/data_plane_pipeline_veth.sh`       | Created                               | 3-hop performance test with veth pairs |
+| `src/worker/ingress.rs:306`               | `[Ingress Stats]` → `[STATS:Ingress]` | Distinguish stats from debug           |
+| `src/worker/data_plane_integrated.rs:242` | `[Egress Stats]` → `[STATS:Egress]`   | Distinguish stats from debug           |
+| `src/supervisor.rs:118-136`               | Implement GetStats                    | Return configured rules                |
+| `src/worker/egress.rs:512`                | Add payload_len to test               | Fix compilation                        |
 
 ### Documentation Created
 
@@ -73,6 +74,7 @@ The system provides **sufficient telemetry** to diagnose "at capacity but operat
 **Estimated time:** 3.5 hours
 
 **Files to modify:**
+
 - Create `src/worker/logger.rs` (new)
 - Update `src/worker/ingress.rs`
 - Update `src/worker/data_plane_integrated.rs`
@@ -85,6 +87,7 @@ The system provides **sufficient telemetry** to diagnose "at capacity but operat
 **Problem:** GetStats returns configured rules with zero counters (no actual packet counts)
 
 **Options:**
+
 1. Query data plane workers via IPC for live stats
 2. Add per-rule tracking in workers
 3. Accept worker-level aggregates (current)
@@ -98,6 +101,7 @@ The system provides **sufficient telemetry** to diagnose "at capacity but operat
 **Finding:** 37% throughput gap between ingress (490k pps) and egress (307k pps)
 
 **Potential fixes:**
+
 - UDP socket tuning (SO_SNDBUF, etc.)
 - io_uring SEND_ZC (zero-copy send)
 - Profile egress path
@@ -109,14 +113,16 @@ The system provides **sufficient telemetry** to diagnose "at capacity but operat
 ## Test Results Summary
 
 ### Library Tests
-```
+
+```text
 cargo test --lib
 running 122 tests
 test result: ok. 122 passed; 0 failed; 0 ignored
 ```
 
 ### Pipeline Test (Latest Run)
-```
+
+```text
 Traffic Generator: 733k pps, 8.22 Gbps, 10M packets in 13.63s
 
 MCR-1 (veth0p → veth1a):
@@ -159,16 +165,19 @@ MCR-3 (veth2b):
 ## What's Next?
 
 ### This Session (if continuing)
+
 1. ✅ Recap completed (this document)
 2. 🔲 Update PHASE4_PLAN.md with measured results
 3. 🔲 Update DEVLOG.md with session summary
 
 ### Next Session
+
 1. **Implement logging integration** (see LOGGING_INTEGRATION_PLAN.md)
 2. **Decide on stats aggregation approach** (per-rule vs per-worker)
 3. **Create automated integration test suite**
 
 ### Future Sessions
+
 1. **Performance profiling** - Identify egress bottleneck
 2. **Load testing** - Multi-hour sustained tests
 3. **Failure scenarios** - Worker crashes, network failures
@@ -178,6 +187,7 @@ MCR-3 (veth2b):
 ## Quick Reference
 
 ### Run Tests
+
 ```bash
 # Unit tests
 cargo test --lib
@@ -190,6 +200,7 @@ cargo check
 ```
 
 ### View Stats
+
 ```bash
 # During test run
 tail -f /tmp/mcr1_veth.log | grep STATS
@@ -199,6 +210,7 @@ tail -30 /tmp/mcr1_veth.log | grep -E "\[STATS:Ingress\]|\[STATS:Egress\]" | tai
 ```
 
 ### Key Metrics to Watch
+
 - **recv** - Total packets received by ingress
 - **matched** - Packets matching forwarding rules
 - **buf_exhaust** - Packets dropped due to buffer pool exhaustion
@@ -212,6 +224,7 @@ tail -30 /tmp/mcr1_veth.log | grep -E "\[STATS:Ingress\]|\[STATS:Egress\]" | tai
 ## Status: Phase 4 COMPLETE ✅
 
 The data plane is **functionally complete** with **real-world validation**. Outstanding work is:
+
 - 🔴 Logging integration (high priority)
 - 🟡 Stats aggregation design (medium priority)
 - 🟢 Performance optimization (low priority - defer to production)

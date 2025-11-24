@@ -37,18 +37,20 @@ Runs as part of `just check` and verifies:
 
 - ✅ Unsafe block count is within limits
 - ✅ Unsafe code percentage is acceptable
-- ⚠️  Safety documentation exists for unsafe functions
-- ⚠️  No dangerous patterns (excessive transmute, raw pointers)
+- ⚠️ Safety documentation exists for unsafe functions
+- ⚠️ No dangerous patterns (excessive transmute, raw pointers)
 - 📊 Tracks changes from baseline
 
 **Usage**:
+
 ```bash
 just unsafe-check         # Quick check (fails if limits exceeded)
 just unsafe-report        # Detailed cargo-geiger report
 ```
 
 **Output Example**:
-```
+
+```text
 🔒 Checking unsafe code usage...
 
 Current Unsafe Usage:
@@ -69,6 +71,7 @@ The `.clippy.toml` file configures Clippy to:
 - Catch common unsafe pitfalls during regular linting
 
 **Usage**:
+
 ```bash
 just clippy   # Runs as part of quality checks
 ```
@@ -78,12 +81,14 @@ just clippy   # Runs as part of quality checks
 Generates comprehensive reports on unsafe usage in dependencies.
 
 **Usage**:
+
 ```bash
 just unsafe-report   # Generates target/geiger-report.txt
 ```
 
 **Sample Output**:
-```
+
+```text
 Functions  Expressions  Impls  Traits  Methods  Dependency
 327/697    29568/43304  466/568 52/55  825/1120  multicast_relay
 0/90       34/687       0/2    0/0     8/92     ├── libc 0.2.177
@@ -97,14 +102,14 @@ Functions  Expressions  Impls  Traits  Methods  Dependency
 
 **Total**: 17 unsafe blocks (0.35% of codebase)
 
-| File | Count | Purpose | Status |
-|------|-------|---------|--------|
-| `worker/ingress.rs` | 6 | io_uring, AF_PACKET sockets, FFI | ✅ Justified |
-| `worker/egress.rs` | 4 | io_uring send operations, FD conversion | ✅ Justified |
-| `worker/mod.rs` | 4 | Privilege checks, Unix stream conversion | ✅ Justified |
-| `worker/data_plane.rs` | 2 | Socket ownership transfer | ✅ Justified |
-| `worker/buffer_pool.rs` | 1 | Zero-copy buffer management | ⚠️ Needs doc |
-| `packet_parser.rs` | 0 | (Future optimization candidate) | N/A |
+| File                    | Count | Purpose                                  | Status       |
+| ----------------------- | ----- | ---------------------------------------- | ------------ |
+| `worker/ingress.rs`     | 6     | io_uring, AF_PACKET sockets, FFI         | ✅ Justified |
+| `worker/egress.rs`      | 4     | io_uring send operations, FD conversion  | ✅ Justified |
+| `worker/mod.rs`         | 4     | Privilege checks, Unix stream conversion | ✅ Justified |
+| `worker/data_plane.rs`  | 2     | Socket ownership transfer                | ✅ Justified |
+| `worker/buffer_pool.rs` | 1     | Zero-copy buffer management              | ⚠️ Needs doc |
+| `packet_parser.rs`      | 0     | (Future optimization candidate)          | N/A          |
 
 ### Dependencies with Heavy Unsafe
 
@@ -116,6 +121,7 @@ Expected for systems programming:
 - **libc** (5% unsafe): FFI bindings by definition
 
 Zero unsafe (safe abstractions):
+
 - anyhow, clap, thiserror, serde, serde_json, uuid
 
 ## Recommendations for Developers
@@ -130,7 +136,7 @@ Zero unsafe (safe abstractions):
 
 ### Safety Documentation Template
 
-```rust
+````rust
 /// Brief description of what this does
 ///
 /// # Safety
@@ -148,7 +154,7 @@ Zero unsafe (safe abstractions):
 pub unsafe fn dangerous_operation() {
     // ...
 }
-```
+````
 
 ### Code Review Checklist
 
@@ -168,7 +174,7 @@ The unsafe check is integrated into CI as part of `just check`:
 ```yaml
 # .github/workflows/ci.yml (example)
 - name: Run Quality Checks
-  run: just check  # Includes unsafe-check
+  run: just check # Includes unsafe-check
 ```
 
 ## Monitoring and Trends

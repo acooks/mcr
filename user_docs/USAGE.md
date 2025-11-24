@@ -14,11 +14,11 @@ This project provides a high-performance, dynamically configurable multicast rel
 
 MCR operates on a few core concepts:
 
-*   **Supervisor:** This is the main process that you launch when you run `multicast_relay`. It is responsible for managing the high-performance workers and handling runtime configuration commands. It does not process any multicast traffic itself.
+- **Supervisor:** This is the main process that you launch when you run `multicast_relay`. It is responsible for managing the high-performance workers and handling runtime configuration commands. It does not process any multicast traffic itself.
 
-*   **Worker:** These are the high-performance processes that do the actual work of receiving, processing, and re-transmitting multicast packets. The supervisor spawns one or more workers, typically pinning each to a specific CPU core to maximize performance.
+- **Worker:** These are the high-performance processes that do the actual work of receiving, processing, and re-transmitting multicast packets. The supervisor spawns one or more workers, typically pinning each to a specific CPU core to maximize performance.
 
-*   **Forwarding Rule:** A forwarding rule is a configuration object that tells a worker what to do. Each rule defines a specific input stream (based on multicast group and port) and a list of one or more outputs where that stream should be re-transmitted. You can manage these rules at runtime using the `control_client`.
+- **Forwarding Rule:** A forwarding rule is a configuration object that tells a worker what to do. Each rule defines a specific input stream (based on multicast group and port) and a list of one or more outputs where that stream should be re-transmitted. You can manage these rules at runtime using the `control_client`.
 
 ## Installation
 
@@ -69,6 +69,7 @@ Here are some common examples of how to use the `control_client` to manage the r
 ```
 
 **Add a 1-to-2 Fan-Out Rule:**
+
 ```bash
 ./target/release/control_client add-rule \
     --input-interface eth0 \
@@ -101,7 +102,6 @@ The `traffic_generator` can be used to send multicast traffic for testing purpos
     --size 1200
 ```
 
-
 ## Running Tests
 
 The project uses `cargo-nextest` for a more robust test execution experience and `just` to simplify the workflow.
@@ -116,7 +116,7 @@ just build-release
 
 ### 2. Run Test Suites
 
-**Unprivileged Tests**
+#### Unprivileged Tests
 
 Run all unit tests and integration tests that do not require root privileges. This is the most common command needed during development.
 
@@ -124,7 +124,7 @@ Run all unit tests and integration tests that do not require root privileges. Th
 just test-fast
 ```
 
-**Privileged Tests (Requires Sudo)**
+#### Privileged Tests (Requires Sudo)
 
 Run the integration tests that require root for network namespace manipulation.
 

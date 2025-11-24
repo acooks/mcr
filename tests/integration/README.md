@@ -4,7 +4,7 @@ This directory contains integration tests for the multicast relay that test the 
 
 ## Structure
 
-```
+```text
 integration/
 ├── common/              # Shared test utilities
 │   ├── mod.rs          # Module exports
@@ -23,18 +23,21 @@ integration/
 
 ## Running Tests
 
-**Step 1: Build as regular user (important!)**
+### Step 1: Build as regular user (important!)
+
 ```bash
 cargo build --release --bins
 cargo test --test integration --no-run
 ```
 
 This ensures:
+
 - All binaries are owned by your user, not root
 - No permission issues with cargo cache/target directory
 - Tests are compiled but not run yet
 
-**Step 2: Run tests with sudo**
+### Step 2: Run tests with sudo
+
 ```bash
 # Run all network integration tests
 sudo -E cargo test --test integration test_basic -- --ignored --test-threads=1
@@ -56,6 +59,7 @@ Tests will gracefully skip with a message explaining they need root privileges.
 ### Why `--test-threads=1`?
 
 Network namespace tests must run serially because:
+
 - They modify global network state
 - Parallel namespace creation can cause resource conflicts
 - Test isolation is critical
@@ -63,6 +67,7 @@ Network namespace tests must run serially because:
 ### Why `--ignored`?
 
 Network tests are marked `#[ignore]` because:
+
 - They require root privileges
 - They're slower than unit tests
 - They shouldn't run in normal `cargo test`
@@ -80,6 +85,7 @@ let stats = mcr.shutdown_and_get_stats()?;
 ```
 
 Features:
+
 - Automatic process cleanup on drop
 - Captures stdout/stderr to log file
 - Waits for control socket to be ready
@@ -109,6 +115,7 @@ let _veth = VethPair::create("veth0", "veth0p")
 ```
 
 Features:
+
 - Fluent builder API
 - Automatic cleanup on drop
 - IP address configuration
@@ -125,6 +132,7 @@ println!("Sent: {}", stats.egress.sent);
 ```
 
 Features:
+
 - Prefers `STATS:Ingress FINAL` for accuracy
 - Falls back to last periodic stat if needed
 - Structured data (no string parsing in tests)
@@ -135,6 +143,7 @@ Features:
 2. **Mark test as `#[ignore]`** if it requires root
 3. **Use `#[tokio::test]`** for async operations (network setup)
 4. **Follow the pattern:**
+
    ```rust
    #[tokio::test]
    #[ignore]
@@ -168,6 +177,7 @@ Features:
 ### AF_PACKET on veth interfaces
 
 AF_PACKET sockets see both RX and TX packets on veth interfaces. This means:
+
 - Traffic generator sends 1000 packets
 - MCR ingress receives ~500 (kernel filters out TX)
 - This is expected behavior, not a bug
@@ -177,6 +187,7 @@ Tests should validate proportional forwarding, not absolute packet counts.
 ### Graceful Shutdown Timing
 
 The `McrInstance::shutdown_and_get_stats()` method:
+
 1. Sends SIGTERM
 2. Waits 5 seconds for clean exit
 3. Force kills if still running

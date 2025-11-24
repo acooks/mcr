@@ -52,22 +52,26 @@ unshare --net --mount-proc --map-root-user bash -c '
 **Status:** ✅ Implemented
 
 **Topology:**
-```
+
+```text
 Traffic Gen → MCR-1 → MCR-2 → MCR-3
 ```
 
 **Tests:**
+
 - Serial forwarding through multiple hops
 - Buffer management across hops
 - Stats accuracy at each hop
 - No packet corruption
 
 **Usage:**
+
 ```bash
 sudo tests/topologies/chain_3hop.sh
 ```
 
 **Expected Outcome:**
+
 - MCR-1: Receives ~1M packets, forwards most
 - MCR-2: Receives packets from MCR-1, forwards most
 - MCR-3: Receives packets from MCR-2 (terminus)
@@ -78,19 +82,22 @@ sudo tests/topologies/chain_3hop.sh
 **Status:** 🔜 Planned
 
 **Topology:**
-```
+
+```text
                     ┌→ MCR-2
 Traffic Gen → MCR-1 ┼→ MCR-3
                     └→ MCR-4
 ```
 
 **Tests:**
+
 - Head-end replication (1 input → N outputs)
 - Buffer pool under amplification (3x traffic)
 - Per-output stats tracking
 - Egress queue fairness
 
 **Usage:**
+
 ```bash
 sudo tests/topologies/tree_fanout.sh
 ```
@@ -100,13 +107,15 @@ sudo tests/topologies/tree_fanout.sh
 **Status:** 🔜 Planned
 
 **Topology:**
-```
+
+```text
 Traffic Gen 1 → MCR-1 ┐
 Traffic Gen 2 → MCR-2 ┼→ MCR-4 (convergence)
 Traffic Gen 3 → MCR-3 ┘
 ```
 
 **Tests:**
+
 - Multiple sources to single destination
 - Ingress demultiplexing
 - Per-rule isolation
@@ -117,13 +126,15 @@ Traffic Gen 3 → MCR-3 ┘
 **Status:** 🔜 Planned
 
 **Topology:**
-```
+
+```text
                ┌→ MCR-2 ┐
 Traffic Gen → MCR-1      → MCR-4
                └→ MCR-3 ┘
 ```
 
 **Tests:**
+
 - Multiple paths converge at destination
 - No duplicate packets
 - Timing/ordering consistency
@@ -134,11 +145,13 @@ Traffic Gen → MCR-1      → MCR-4
 **Status:** 🔜 Planned
 
 **Topology:**
-```
+
+```text
 Every MCR instance forwards to every other MCR instance
 ```
 
 **Tests:**
+
 - Scalability (N² connections)
 - Cross-talk isolation
 - Rule management complexity
@@ -149,32 +162,38 @@ Every MCR instance forwards to every other MCR instance
 The `common.sh` library provides reusable functions for all topology tests:
 
 ### Network Setup
+
 - `enable_loopback()` - Enable lo interface in namespace
 - `setup_veth_pair <n1> <n2> <ip1> <ip2>` - Create and configure veth pair
 
 ### MCR Management
+
 - `start_mcr <name> <iface> <socket> [logfile]` - Start MCR instance
 - `wait_for_sockets <sock1> [sock2] ...` - Wait for control sockets
 - `add_rule <socket> <in_if> <in_grp> <in_port> <out_spec>` - Configure rule
 
 ### Traffic & Validation
+
 - `run_traffic <ip> <group> <port> <count> <size> <rate>` - Generate traffic
 - `get_stats <logfile>` - Extract final stats
 - `validate_stat <log> <type> <field> <min> <desc>` - Assert stat value
 
 ### Monitoring & Cleanup
+
 - `start_log_monitor <name> <logfile>` - Monitor logs in background
 - `cleanup_all()` - Clean up processes and sockets
 
 ## Running Tests
 
 ### Single Test
+
 ```bash
 # Run specific topology test
 sudo tests/topologies/chain_3hop.sh
 ```
 
 ### All Tests
+
 ```bash
 # Run all topology tests sequentially
 for test in tests/topologies/*.sh; do
@@ -185,6 +204,7 @@ done
 ```
 
 ### With Coverage
+
 ```bash
 # Run tests with coverage measurement (future)
 sudo tests/topologies/run_with_coverage.sh
@@ -199,14 +219,18 @@ sudo tests/topologies/run_with_coverage.sh
 ## Debugging
 
 ### View Logs
+
 Logs persist after test completion in `/tmp/`:
+
 ```bash
 tail -f /tmp/mcr1.log
 tail -50 /tmp/mcr1.log | grep STATS
 ```
 
 ### Run Test Manually
+
 To debug interactively, extract the inner bash script and run it:
+
 ```bash
 # Enter isolated namespace
 sudo unshare --net --mount-proc --map-root-user bash
@@ -219,16 +243,19 @@ ip link add veth0 type veth peer name veth1
 
 ### Common Issues
 
-**"Operation not permitted" creating veth**
+#### "Operation not permitted" creating veth
+
 - Ensure running with `sudo`
 - Check that `unshare` supports `--map-root-user`
 
-**"Timeout waiting for socket"**
+#### "Timeout waiting for socket"
+
 - Check `/tmp/mcrN.log` for startup errors
 - Verify binaries are built: `ls -la target/release/multicast_relay`
 - Ensure loopback is enabled: `ip link set lo up`
 
-**"No stats found"**
+#### "No stats found"
+
 - Check MCR instance is running: `ps aux | grep multicast_relay`
 - Verify traffic generator completed: check its exit code
 - Look for errors in logs: `grep ERROR /tmp/mcr1.log`
@@ -245,6 +272,7 @@ These topology tests provide end-to-end coverage for:
 - ✅ **Head-end replication** - 1:N amplification
 
 **Not covered** (blocked by architectural debt):
+
 - ⚠️ Privilege separation (workers run as root - D24)
 - ⚠️ Lazy socket creation (eager creation - D23)
 - ⚠️ Multi-interface per worker (--interface parameter - D21)

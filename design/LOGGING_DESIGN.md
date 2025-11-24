@@ -1,8 +1,6 @@
 # Multicast Relay Logging System Design
 
-> **NOTE**: For user-facing documentation, see **[docs/LOGGING.md](../docs/LOGGING.md)**
->
-> This document contains technical implementation details. Most users should start with the consolidated guide above.
+> **NOTE**: This document contains technical implementation details for the logging system design.
 
 ## The Cross-Process Logging Challenge
 
@@ -10,7 +8,7 @@
 
 MCR uses a **multi-process architecture** where data plane workers run as separate processes:
 
-```
+```text
 Supervisor Process (async tokio)
 ├─ Control Plane Worker (process) - async, handles management
 └─ Data Plane Workers (processes) - sync io_uring, packet forwarding
@@ -64,7 +62,7 @@ while let Some(entry) = shm.read() {
 
 **Architecture:**
 
-```
+```text
 Data Plane Worker Process                 Supervisor Process
 ┌─────────────────────┐                   ┌──────────────────┐
 │ packet_processing() │                   │                  │
@@ -77,12 +75,14 @@ Data Plane Worker Process                 Supervisor Process
 ## Implementation Status
 
 **Phase 1: COMPLETE** ✅ (commits d72eb93, 99423bd)
+
 - Lock-free SPSC and MPSC ring buffers
 - LogEntry (256 bytes, cache-line optimized)
 - Severity levels (RFC 5424) and Facilities
 - Comprehensive test suite (35 tests)
 
 **Phase 2: COMPLETE** ✅ (commit 99423bd)
+
 - Logger API with severity helpers
 - LogRegistry for managing per-facility ring buffers
 - Logging macros (`log_info!`, `log_error!`, `log_kv!`, etc.)
@@ -90,18 +90,21 @@ Data Plane Worker Process                 Supervisor Process
 - Pluggable output sinks (stdout, stderr, custom)
 
 **Phase 3: COMPLETE** ✅ (commits 2833697, eb97bce, f05a370)
+
 - Supervisor integrated with structured logging (15+ log sites)
 - RuleDispatcher using logging for warnings
 - Workers migrated from old `log` crate to eprintln!
 - All 89 tests passing with new logging system
 
 **Phase 4: COMPLETE** ✅ (commits d369379, 5c04136)
+
 - Runtime log level filtering (global and per-facility)
 - Control client CLI commands for log-level management
 - Comprehensive unit and integration tests (101 tests passing)
 - Performance: <100ns overhead for log-level checks
 
 **Phase 5: COMPLETE** ✅ (commits 06f5273, cc4bf9d)
+
 - Shared memory ring buffers for data plane workers (lock-free cross-process)
 - Control plane workers use MPSC ring buffers (async-safe)
 - All workers integrated with structured logging
@@ -109,6 +112,7 @@ Data Plane Worker Process                 Supervisor Process
 - 106/107 tests passing
 
 **Phase 6: AVAILABLE FOR FUTURE ENHANCEMENT** ⏳
+
 - Additional output sinks (file, syslog) - infrastructure exists, not yet configured
 - Metrics extraction from logs
 - Log streaming to control_client (see INTERACTIVE_CLI_DESIGN.md)
@@ -207,16 +211,16 @@ pub enum Severity {
 
 ### Severity Guidelines
 
-| Severity | Use Case | Examples |
-|----------|----------|----------|
-| Emergency | Process cannot continue | Supervisor panic, all workers dead |
-| Alert | Requires immediate admin action | Lost CAP_NET_RAW, AF_PACKET socket failure |
-| Critical | Component degraded/restarting | Worker crash, control plane reconnect |
-| Error | Operation failed | Packet parsing error, failed rule dispatch |
-| Warning | Potential problem | Buffer pool 90% full, worker backoff |
-| Notice | Normal significant event | Worker started, interface configured |
-| Info | Routine information | Rule added, stats snapshot |
-| Debug | Detailed diagnostic | Packet hexdump, io_uring CQE details |
+| Severity  | Use Case                        | Examples                                   |
+| --------- | ------------------------------- | ------------------------------------------ |
+| Emergency | Process cannot continue         | Supervisor panic, all workers dead         |
+| Alert     | Requires immediate admin action | Lost CAP_NET_RAW, AF_PACKET socket failure |
+| Critical  | Component degraded/restarting   | Worker crash, control plane reconnect      |
+| Error     | Operation failed                | Packet parsing error, failed rule dispatch |
+| Warning   | Potential problem               | Buffer pool 90% full, worker backoff       |
+| Notice    | Normal significant event        | Worker started, interface configured       |
+| Info      | Routine information             | Rule added, stats snapshot                 |
+| Debug     | Detailed diagnostic             | Packet hexdump, io_uring CQE details       |
 
 ## Facilities
 
@@ -254,18 +258,18 @@ pub enum Facility {
 
 ### Facility Characteristics
 
-| Facility | Threading Model | Volume | Buffering Strategy |
-|----------|----------------|--------|-------------------|
-| Supervisor | Tokio async | Low | Shared buffer with mutex |
-| RuleDispatch | Tokio async | Low-Medium | Shared buffer |
-| ControlPlane | Tokio async | Low-Medium | Per-worker buffer |
-| DataPlane | Dedicated thread | Medium | Per-core ring buffer |
-| Ingress | io_uring (blocking) | **Very High** | Per-core ring buffer (lock-free) |
-| Egress | io_uring (blocking) | High | Per-core ring buffer (lock-free) |
-| BufferPool | Shared (mutex) | Medium | Shared buffer |
-| PacketParser | Called from Ingress | **Very High** | Same as Ingress |
-| Stats | Tokio async | Low | Shared buffer |
-| Security | Various | Low | Shared buffer |
+| Facility     | Threading Model     | Volume        | Buffering Strategy               |
+| ------------ | ------------------- | ------------- | -------------------------------- |
+| Supervisor   | Tokio async         | Low           | Shared buffer with mutex         |
+| RuleDispatch | Tokio async         | Low-Medium    | Shared buffer                    |
+| ControlPlane | Tokio async         | Low-Medium    | Per-worker buffer                |
+| DataPlane    | Dedicated thread    | Medium        | Per-core ring buffer             |
+| Ingress      | io_uring (blocking) | **Very High** | Per-core ring buffer (lock-free) |
+| Egress       | io_uring (blocking) | High          | Per-core ring buffer (lock-free) |
+| BufferPool   | Shared (mutex)      | Medium        | Shared buffer                    |
+| PacketParser | Called from Ingress | **Very High** | Same as Ingress                  |
+| Stats        | Tokio async         | Low           | Shared buffer                    |
+| Security     | Various             | Low           | Shared buffer                    |
 
 ## Ring Buffer Architecture
 
@@ -332,6 +336,7 @@ pub struct KeyValue {
 ```
 
 **Cache Line Optimization:** The 256-byte structure is designed for optimal cache performance:
+
 - **Line 0** contains all fields accessed during write/read operations
 - **Lines 1-2** contain the bulk of the message data
 - **Line 3** contains structured logging data (accessed less frequently)
@@ -341,17 +346,18 @@ pub struct KeyValue {
 
 Optimized for small systems (1-2 CPUs) with 256-byte entries:
 
-| Facility | Buffer Size | Memory per Buffer | Rationale |
-|----------|-------------|-------------------|-----------|
-| Ingress (per-core) | 16,384 entries | 4 MB | Highest frequency facility |
-| Egress (per-core) | 4,096 entries | 1 MB | High frequency transmit |
-| PacketParser (per-core) | 4,096 entries | 1 MB | Called from ingress path |
-| DataPlane | 2,048 entries | 512 KB | Coordinator messages |
-| Supervisor | 1,024 entries | 256 KB | Low-frequency control |
-| ControlPlane | 1,024 entries | 256 KB | Low-frequency async |
-| Other facilities | 512 entries | 128 KB | Default for utilities |
+| Facility                | Buffer Size    | Memory per Buffer | Rationale                  |
+| ----------------------- | -------------- | ----------------- | -------------------------- |
+| Ingress (per-core)      | 16,384 entries | 4 MB              | Highest frequency facility |
+| Egress (per-core)       | 4,096 entries  | 1 MB              | High frequency transmit    |
+| PacketParser (per-core) | 4,096 entries  | 1 MB              | Called from ingress path   |
+| DataPlane               | 2,048 entries  | 512 KB            | Coordinator messages       |
+| Supervisor              | 1,024 entries  | 256 KB            | Low-frequency control      |
+| ControlPlane            | 1,024 entries  | 256 KB            | Low-frequency async        |
+| Other facilities        | 512 entries    | 128 KB            | Default for utilities      |
 
 **Memory Footprint Examples:**
+
 - **2-core system**: ~12.5 MB total
   - Ingress: 2 × 4 MB = 8 MB
   - Egress: 2 × 1 MB = 2 MB
@@ -362,6 +368,7 @@ Optimized for small systems (1-2 CPUs) with 256-byte entries:
 ### Lock-Free Single-Producer Single-Consumer (SPSC)
 
 For data plane workers (io_uring threads):
+
 - **Single Writer**: Each io_uring thread writes only to its own per-core buffer
 - **Single Reader**: Background consumer thread reads from all buffers
 - **Atomic Operations**: `write_pos` and `read_pos` use `Ordering::Relaxed` for writer, `Ordering::Acquire`/`Release` for coordination
@@ -370,6 +377,7 @@ For data plane workers (io_uring threads):
 ### Multi-Producer Single-Consumer (MPSC)
 
 For supervisor and async workers:
+
 - **Multiple Writers**: Tokio tasks may log concurrently
 - **Atomic CAS**: Use `compare_and_swap` on `write_pos`
 - **Fallback**: On contention, can fall back to immediate console output
@@ -577,7 +585,7 @@ mcr-control log reset-stats
 
 ### Text Format (Human-Readable)
 
-```
+```text
 2025-11-09T13:45:23.123456789Z [Supervisor] INFO [pid:1234 tid:5678] Starting 4 workers
 2025-11-09T13:45:23.145678901Z [DataPlane] NOTICE [pid:1235 tid:5679 core:0] Worker started worker_id=dp-0 interface=eth0
 2025-11-09T13:45:24.234567890Z [Ingress] ERROR [pid:1235 tid:5679 core:0] Failed to parse packet src_ip=192.168.1.1 error="invalid checksum"
@@ -602,7 +610,7 @@ mcr-control log reset-stats
 
 ### Syslog Format (RFC 5424)
 
-```
+```text
 <14>1 2025-11-09T13:45:23.123456Z hostname mcr 1234 Supervisor - Starting 4 workers
 <13>1 2025-11-09T13:45:24.234567Z hostname mcr 1235 Ingress - Failed to parse packet [src_ip="192.168.1.1" error="invalid checksum"]
 ```
@@ -610,12 +618,14 @@ mcr-control log reset-stats
 ## Migration Strategy
 
 ### Phase 1: Core Infrastructure ✅ COMPLETE
+
 1. ✅ Implement `SPSCRingBuffer`, `MPSCRingBuffer` (lock-free, cache-optimized)
 2. ✅ Implement `LogEntry` (256 bytes, 4 cache lines)
 3. ✅ Implement `Severity` (RFC 5424) and `Facility` (MCR-specific)
 4. ✅ Comprehensive test suite (35 tests, all passing)
 
 ### Phase 2: Logger and Consumer ✅ COMPLETE
+
 1. ✅ Implement `Logger` with severity helper methods
 2. ✅ Implement `LogRegistry` (per-facility ring buffers)
 3. ✅ Implement logging macros: `log_info!`, `log_error!`, `log_kv!`, etc.
@@ -623,6 +633,7 @@ mcr-control log reset-stats
 5. ✅ Implement output sinks (stdout, stderr, custom)
 
 ### Phase 3: Integration ✅ COMPLETE
+
 1. ✅ Created `SupervisorLogging` with MPSC buffers and AsyncConsumer
 2. ✅ Created `ControlPlaneLogging` with MPSC buffers and AsyncConsumer
 3. ✅ Created `SharedMemoryLogManager` for data plane cross-process logging
@@ -632,6 +643,7 @@ mcr-control log reset-stats
 7. ✅ Documented intentional remaining prints (pre-logging initialization, CLI tools)
 
 ### Phase 4: Advanced Features ⏳ AVAILABLE FOR FUTURE ENHANCEMENT
+
 1. ⏳ Implement `FileConsumer` with rotation support (infrastructure exists)
 2. ⏳ Implement `SyslogConsumer` (local/remote) (infrastructure exists)
 3. ⏳ Wire up runtime log level filtering via control socket (commands exist)
@@ -648,13 +660,13 @@ mcr-control log reset-stats
 
 ## Performance Targets
 
-| Metric | Target | Rationale |
-|--------|--------|-----------|
-| Logging latency (data plane) | < 100ns | Minimal impact on packet processing |
-| Logging latency (control plane) | < 1µs | Acceptable for async operations |
-| Memory overhead | < 100 MB | Bounded ring buffers |
-| Log throughput | > 1M msgs/sec | High-frequency ingress events |
-| Overrun rate | < 0.01% | Rarely drop messages |
+| Metric                          | Target        | Rationale                           |
+| ------------------------------- | ------------- | ----------------------------------- |
+| Logging latency (data plane)    | < 100ns       | Minimal impact on packet processing |
+| Logging latency (control plane) | < 1µs         | Acceptable for async operations     |
+| Memory overhead                 | < 100 MB      | Bounded ring buffers                |
+| Log throughput                  | > 1M msgs/sec | High-frequency ingress events       |
+| Overrun rate                    | < 0.01%       | Rarely drop messages                |
 
 ## Open Questions
 
@@ -688,7 +700,7 @@ mcr-control log reset-stats
 
 - RFC 5424: The Syslog Protocol
 - RFC 3164: BSD Syslog Protocol (obsolete)
-- FRR Logging Documentation: https://docs.frrouting.org/projects/dev-guide/en/latest/logging.html
+- FRR Logging Documentation: <https://docs.frrouting.org/projects/dev-guide/en/latest/logging.html>
 - Linux `io_uring` performance considerations
 - Rust `std::sync::atomic` documentation
 
@@ -698,7 +710,7 @@ mcr-control log reset-stats
 
 The shared memory region contains the complete ring buffer structure:
 
-```
+```text
 Shared Memory Region: /dev/shm/mcr_log_dp{worker_id}
 ┌──────────────────────────────────────────────────────────┐
 │ Header (metadata)                                        │
@@ -721,6 +733,7 @@ Total Size = Header + (capacity * 256 bytes)
 ### Initialization Flow
 
 **Supervisor (creates shared memory):**
+
 ```rust
 // 1. Create shared memory segment
 let shm = Shmem::create()
@@ -742,6 +755,7 @@ worker.spawn_with_env("MCR_LOG_SHM=/mcr_log_dp0");
 ```
 
 **Worker (attaches to shared memory):**
+
 ```rust
 // 1. Get shared memory ID from environment
 let shm_id = env::var("MCR_LOG_SHM")?;
@@ -784,14 +798,15 @@ impl Drop for SharedSPSCRingBuffer {
 ### Performance Characteristics
 
 **Writer (Data Plane) - Hot Path:**
+
 - Atomic load: ~5ns
-- Atomic CAS: ~10ns  
+- Atomic CAS: ~10ns
 - Memory copy: ~50ns (256 bytes)
 - **Total: ~65ns per log entry**
 - **Zero syscalls**
 
 **Reader (Supervisor Consumer Thread):**
+
 - Atomic load: ~5ns
 - Memory read: ~50ns
 - Format + write to stdout: ~1-10μs (syscalls OK)
-

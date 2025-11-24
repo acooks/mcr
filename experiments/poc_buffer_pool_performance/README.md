@@ -32,7 +32,7 @@ This is **the** memory management bottleneck. Poor design = unacceptable latency
 
 ### 1. Per-Core Packet Rate
 
-```
+```text
 Cores    | Per-Core Rate | Inter-Packet Time
 ---------|---------------|------------------
 8 cores  | 625k pps      | 1.6 µs
@@ -40,13 +40,13 @@ Cores    | Per-Core Rate | Inter-Packet Time
 32 cores | 156.25k pps   | 6.4 µs
 ```
 
-**Reference configuration for modeling: 16 cores @ 312.5k pps/core**
+#### Reference configuration for modeling: 16 cores @ 312.5k pps/core
 
 ### 2. Buffer Lifecycle
 
 A buffer is "in flight" from ingress allocation until egress completion:
 
-```
+```text
 Component                  | Latency
 ---------------------------|----------
 Packet parsing/demux       | ~100-200 ns
@@ -58,7 +58,7 @@ Buffer deallocation        | ~50 ns
 
 **Total buffer lifetime scenarios:**
 
-```
+```text
 Scenario      | io_uring Latency | Total Lifetime
 --------------|------------------|---------------
 Optimistic    | 5 µs             | ~6-8 µs
@@ -68,7 +68,7 @@ Pessimistic   | 100 µs           | ~101-103 µs
 
 ### 3. In-Flight Buffer Count
 
-```
+```text
 Buffers in flight = Packet rate × Average buffer lifetime
 
 For 312.5k pps/core (16-core system):
@@ -80,7 +80,7 @@ Pessimistic: 312,500 × 102 µs  = 31.9 buffers
 
 **With io_uring batching (SQ depth = 256):**
 
-```
+```text
 Batch window = 256 / 312,500 = 819 µs
 
 During batch window, 256 buffers accumulate.
@@ -96,7 +96,7 @@ Average in flight = 256 + (completion time × packet rate)
 
 Real multicast traffic is bursty. Bursts can be 2-5x average rate for 10-100ms.
 
-```
+```text
 Burst Example: 3x normal rate for 50ms
 
 Packets in burst = 3 × 312,500 × 0.05 = 46,875 packets
@@ -110,7 +110,7 @@ If egress can only handle 1.5x sustained:
 
 ### 5. Memory Footprint Calculations
 
-```
+```text
 Buffer Sizes:
   Small:    1,500 B (Ethernet MTU)
   Standard: 4,096 B (typical jumbo)
@@ -119,17 +119,18 @@ Buffer Sizes:
 
 **Pool Sizing Options:**
 
-| Configuration | Small | Standard | Jumbo | Per-Core | 16 Cores |
-|---------------|-------|----------|-------|----------|----------|
-| Minimal       | 50    | 50       | 50    | 725 KB   | 11 MB    |
-| Conservative  | 100   | 100      | 100   | 1.4 MB   | 23 MB    |
-| Burst-tolerant| 500   | 500      | 500   | 7.2 MB   | 116 MB   |
-| **Proposed**  | **1000** | **500** | **200** | **5.3 MB** | **85 MB** |
+| Configuration  | Small    | Standard | Jumbo   | Per-Core   | 16 Cores  |
+| -------------- | -------- | -------- | ------- | ---------- | --------- |
+| Minimal        | 50       | 50       | 50      | 725 KB     | 11 MB     |
+| Conservative   | 100      | 100      | 100     | 1.4 MB     | 23 MB     |
+| Burst-tolerant | 500      | 500      | 500     | 7.2 MB     | 116 MB    |
+| **Proposed**   | **1000** | **500**  | **200** | **5.3 MB** | **85 MB** |
 
 **Proposed configuration rationale:**
 
 Weighted by typical traffic distribution (60% small, 30% standard, 10% jumbo):
-```
+
+```text
 Small (60%):    1,000 buffers × 1,500 B = 1,500 KB
 Standard (30%):   500 buffers × 4,096 B = 2,000 KB
 Jumbo (10%):      200 buffers × 9,000 B = 1,800 KB
@@ -144,7 +145,8 @@ Total per core:                           5,300 KB (~5.3 MB)
 ### 6. Allocation Latency Model
 
 **Pool allocation (lock-free pop from free list):**
-```
+
+```text
 Operations:
   - Check if empty:     ~1 instruction  (~0.3 ns)
   - Pop pointer:        ~2 instructions (~0.6 ns)
@@ -154,7 +156,8 @@ Expected latency: 5-10 ns (in L1 cache)
 ```
 
 **Dynamic allocation (`Vec::with_capacity`):**
-```
+
+```text
 malloc/jemalloc path:
   - Lock acquisition:   ~20-50 ns (uncontended)
                         ~100-1000 ns (contended)
@@ -166,12 +169,13 @@ Fast path:  ~50-100 ns
 Slow path:  ~1,000-10,000 ns
 ```
 
-**Expected speedup: 5-1000x depending on malloc state**
+#### Expected speedup: 5-1000x depending on malloc state
 
 ### 7. Cache Behavior Model
 
 **Pool approach (buffer reuse):**
-```
+
+```text
 Reused buffers stay hot in cache:
   - L1 cache hit: ~1 ns     (32 KB typical)
   - L2 cache hit: ~3-4 ns   (256 KB typical)
@@ -181,7 +185,8 @@ Pool size (5.3 MB) < L3 size → most accesses are L3 or better
 ```
 
 **Dynamic allocation (cold memory):**
-```
+
+```text
 Every allocation returns cold memory:
   - First access:   ~100 ns (RAM) + ~10-50 ns (TLB miss)
   - Cache warming:  Multiple accesses needed
@@ -190,7 +195,8 @@ Cold buffer penalty: ~100-150 ns per packet
 ```
 
 **CPU savings at 312.5k pps/core:**
-```
+
+```text
 If pool saves 100 ns per packet:
   Time saved = 312,500 × 100 ns = 31.25 ms/second
   CPU savings = 3.125% per core
@@ -211,21 +217,24 @@ If pool saves 100 ns per packet:
 ### Implementation
 
 **Minimal Buffer Pool:**
+
 - 3 size classes (Small: 1500B, Standard: 4096B, Jumbo: 9000B)
 - Lock-free per-core pools (no cross-core sharing)
 - Fixed pre-allocation (no dynamic fallback)
 - Optional per-pool metrics (allocation count, exhaustion events)
 
 **Baseline Comparison:**
+
 - Dynamic allocation using `Vec::with_capacity()`
 - Mimics current Rust standard practice
 
 ### Test Scenarios
 
 #### 1. Latency Benchmark
+
 **Purpose:** Measure allocation/deallocation latency
 
-```
+```text
 Method: Single-threaded loop
   - Allocate buffer from pool
   - Deallocate buffer back to pool
@@ -241,9 +250,10 @@ Expected:
 ```
 
 #### 2. Throughput Benchmark
+
 **Purpose:** Saturate allocation rate
 
-```
+```text
 Method: Allocate until pool exhausted or time limit
 
 Metrics:
@@ -256,9 +266,10 @@ Expected:
 ```
 
 #### 3. Exhaustion Behavior Test
+
 **Purpose:** Characterize graceful degradation
 
-```
+```text
 Scenario: Simulate burst traffic (3x normal rate)
 
 Steps:
@@ -279,9 +290,10 @@ Expected:
 ```
 
 #### 4. Metrics Overhead Test
+
 **Purpose:** Measure cost of per-operation statistics
 
-```
+```text
 Compare:
   - Pool with per-op counter increments
   - Pool without metrics
@@ -295,9 +307,10 @@ Expected:
 ```
 
 #### 5. Cache Analysis (using `perf`)
+
 **Purpose:** Quantify cache efficiency
 
-```
+```text
 Method: Use perf stat during allocation loop
 
 Command:
@@ -323,6 +336,7 @@ All benchmarks executed successfully on 2025-11-07.
 ### Test Execution Summary
 
 **Unit Tests:** ✅ All 9 tests passed
+
 - Buffer pool creation
 - Buffer allocation/deallocation
 - Size class selection
@@ -336,12 +350,13 @@ All benchmarks executed successfully on 2025-11-07.
 Test results for different burst factors (50-buffer pool):
 
 | Burst Factor | Success Rate | Recovery Time |
-|-------------|--------------|---------------|
-| 2x          | 98.41%       | 895 ns        |
-| 5x          | 98.41%       | 795 ns        |
-| 10x         | 98.41%       | 796 ns        |
+| ------------ | ------------ | ------------- |
+| 2x           | 98.41%       | 895 ns        |
+| 5x           | 98.41%       | 795 ns        |
+| 10x          | 98.41%       | 796 ns        |
 
 100-buffer pool (3x burst):
+
 - Success rate: 99.21%
 - Recovery time: 3.5 µs
 
@@ -353,27 +368,28 @@ Test results for different burst factors (50-buffer pool):
 
 **Small Buffers (1500B):**
 
-| Test                          | Latency  | vs Target | vs Vec  |
-|-------------------------------|----------|-----------|---------|
-| Pool (no metrics)             | 26.7 ns  | ✅ < 50ns | 1.79x faster |
-| Pool (with metrics)           | 25.9 ns  | ✅ < 50ns | 1.84x faster |
-| Vec baseline                  | 47.7 ns  | -         | -       |
+| Test                | Latency | vs Target | vs Vec       |
+| ------------------- | ------- | --------- | ------------ |
+| Pool (no metrics)   | 26.7 ns | ✅ < 50ns | 1.79x faster |
+| Pool (with metrics) | 25.9 ns | ✅ < 50ns | 1.84x faster |
+| Vec baseline        | 47.7 ns | -         | -            |
 
 **Standard Buffers (4096B):**
 
-| Test                          | Latency  | vs Vec  |
-|-------------------------------|----------|---------|
-| Pool (no metrics)             | 70.9 ns  | 1.04x faster |
-| Vec baseline                  | 73.6 ns  | -       |
+| Test              | Latency | vs Vec       |
+| ----------------- | ------- | ------------ |
+| Pool (no metrics) | 70.9 ns | 1.04x faster |
+| Vec baseline      | 73.6 ns | -            |
 
 **Jumbo Buffers (9000B):**
 
-| Test                          | Latency  | vs Vec  |
-|-------------------------------|----------|---------|
-| Pool (no metrics)             | 128.0 ns | 1.03x faster |
-| Vec baseline                  | 131.8 ns | -       |
+| Test              | Latency  | vs Vec       |
+| ----------------- | -------- | ------------ |
+| Pool (no metrics) | 128.0 ns | 1.03x faster |
+| Vec baseline      | 131.8 ns | -            |
 
 **Analysis:**
+
 - Pool is **fastest for small buffers** (most common case: 60% of traffic)
 - Small buffer latency well under 50ns target (26.7 ns)
 - Larger buffers show marginal improvements (still faster than Vec)
@@ -381,11 +397,11 @@ Test results for different burst factors (50-buffer pool):
 
 #### 2. Throughput Benchmark Results
 
-| Test                          | Throughput     | vs Target     | vs Vec  |
-|-------------------------------|----------------|---------------|---------|
-| Pool (no metrics)             | 36.6 M ops/sec | ✅ > 5M       | 1.74x faster |
-| Pool (with metrics)           | 37.6 M ops/sec | ✅ > 5M       | 1.79x faster |
-| Vec baseline                  | 21.0 M ops/sec | -             | -       |
+| Test                | Throughput     | vs Target | vs Vec       |
+| ------------------- | -------------- | --------- | ------------ |
+| Pool (no metrics)   | 36.6 M ops/sec | ✅ > 5M   | 1.74x faster |
+| Pool (with metrics) | 37.6 M ops/sec | ✅ > 5M   | 1.79x faster |
+| Vec baseline        | 21.0 M ops/sec | -         | -            |
 
 **Headroom Analysis:**
 
@@ -395,6 +411,7 @@ Pool throughput: 37,600,000 ops/sec
 **Headroom: 120x over target** 🎯
 
 This massive headroom means:
+
 - Memory management is **NOT** a bottleneck
 - Plenty of CPU budget for parsing, routing, QoS logic
 - Can handle extreme burst scenarios
@@ -403,14 +420,15 @@ This massive headroom means:
 
 Performance vs pool size:
 
-| Pool Size | Latency  | Delta vs 100 |
-|-----------|----------|--------------|
-| 100       | 25.2 ns  | baseline     |
-| 500       | 25.0 ns  | -0.8%        |
-| 1000      | 27.5 ns  | +9.1%        |
-| 5000      | 37.7 ns  | +49.6%       |
+| Pool Size | Latency | Delta vs 100 |
+| --------- | ------- | ------------ |
+| 100       | 25.2 ns | baseline     |
+| 500       | 25.0 ns | -0.8%        |
+| 1000      | 27.5 ns | +9.1%        |
+| 5000      | 37.7 ns | +49.6%       |
 
 **Analysis:**
+
 - Performance is excellent up to 1000 buffers (proposed size)
 - Only 9% degradation at target pool size
 - Degradation likely due to cache effects (larger pool → more cache pressure)
@@ -421,13 +439,14 @@ Performance vs pool size:
 Batch allocation/deallocation performance:
 
 | Burst Size | Time    | Per-Buffer |
-|------------|---------|------------|
+| ---------- | ------- | ---------- |
 | 10         | 268 ns  | 26.8 ns    |
 | 50         | 1.41 µs | 28.2 ns    |
 | 100        | 2.78 µs | 27.8 ns    |
 | 500        | 13.8 µs | 27.6 ns    |
 
 **Analysis:**
+
 - Linear scaling confirmed
 - Consistent per-buffer cost (~27 ns)
 - Predictable behavior under burst conditions
@@ -439,19 +458,20 @@ Simulating real packet processing (allocate → copy data → deallocate):
 
 **Small Packets (1000B):**
 
-| Test                    | Latency  | Notes                    |
-|-------------------------|----------|--------------------------|
-| Pool + copy             | 37.3 ns  | Allocation overhead      |
-| Vec + copy              | 26.8 ns  | Compiler optimizations?  |
+| Test        | Latency | Notes                   |
+| ----------- | ------- | ----------------------- |
+| Pool + copy | 37.3 ns | Allocation overhead     |
+| Vec + copy  | 26.8 ns | Compiler optimizations? |
 
 **Jumbo Packets (8000B):**
 
-| Test                    | Latency  | Notes                    |
-|-------------------------|----------|--------------------------|
-| Pool + copy             | 162.5 ns | Copying dominates        |
-| Vec + copy              | 22.0 ns  | Suspicious - optimized away? |
+| Test        | Latency  | Notes                        |
+| ----------- | -------- | ---------------------------- |
+| Pool + copy | 162.5 ns | Copying dominates            |
+| Vec + copy  | 22.0 ns  | Suspicious - optimized away? |
 
 **Analysis:**
+
 - Vec appears faster when copying is involved
 - Likely due to compiler optimizing away unused allocations in microbenchmark
 - Real-world usage (packets written to io_uring) won't see these optimizations
@@ -459,10 +479,10 @@ Simulating real packet processing (allocate → copy data → deallocate):
 
 ### Metrics Overhead Analysis
 
-| Configuration          | Latency  | Overhead |
-|------------------------|----------|----------|
-| Pool (no metrics)      | 26.7 ns  | baseline |
-| Pool (with metrics)    | 25.9 ns  | **-3%**  |
+| Configuration       | Latency | Overhead |
+| ------------------- | ------- | -------- |
+| Pool (no metrics)   | 26.7 ns | baseline |
+| Pool (with metrics) | 25.9 ns | **-3%**  |
 
 **Finding:** Metrics overhead is **NEGATIVE** (slightly faster with metrics). This is within measurement noise.
 
@@ -481,7 +501,7 @@ From MODELING.md checklist:
 - [✅] **Memory < 100MB (16 cores):** YES - 84.8 MB (5.3 MB × 16)
 - [✅] **No panics/crashes:** YES - All tests passed
 
-**Validation: 7/7 required criteria met (8th is optional)**
+#### Validation: 7/7 required criteria met (8th is optional)
 
 ---
 
@@ -494,6 +514,7 @@ Pool allocation is **1.8x faster** than `Vec::with_capacity()` for the common ca
 ### 2. Massive Headroom
 
 37.6M ops/sec throughput provides **120x headroom** over the 312.5k pps/core target. This means:
+
 - CPU budget available for complex packet processing
 - Can handle extreme burst scenarios
 - Memory management won't limit scaling
@@ -501,6 +522,7 @@ Pool allocation is **1.8x faster** than `Vec::with_capacity()` for the common ca
 ### 3. Graceful Degradation Works
 
 Under burst traffic that exhausts pools:
+
 - No crashes or panics
 - Allocation simply returns `None`
 - Success rate remains high (98-99%)
@@ -515,6 +537,7 @@ Per-operation counter increments have **negligible cost** (< 3%). Safe to enable
 ### 5. Pool Sizing Is Adequate
 
 Proposed configuration (1000/500/200 buffers) provides:
+
 - Only 9% performance degradation vs smaller pools
 - Sufficient burst tolerance
 - Reasonable memory footprint (5.3 MB/core)
@@ -522,6 +545,7 @@ Proposed configuration (1000/500/200 buffers) provides:
 ### 6. Larger Buffers Show Smaller Gains
 
 Standard and jumbo buffers show marginal improvements over Vec (1.03-1.04x). This is acceptable because:
+
 - Small buffers (1500B) are 60% of traffic - this is where speed matters
 - Larger buffer latency (128 ns) is dominated by memory operations, not allocation overhead
 - Even marginal improvements compound at millions of packets/second
@@ -543,7 +567,8 @@ The performance advantages are clear and measurable. Proceed with buffer pool im
 ### ✅ Recommended Pool Configuration
 
 Per-core allocation:
-```
+
+```text
 Small (1500B):    1,000 buffers = 1.5 MB
 Standard (4096B):   500 buffers = 2.0 MB
 Jumbo (9000B):      200 buffers = 1.8 MB
@@ -554,6 +579,7 @@ For 16 cores: 84.8 MB total
 ```
 
 This configuration provides:
+
 - Excellent performance (27.5 ns latency)
 - Burst tolerance (98-99% success under 2-10x bursts)
 - Reasonable memory footprint
@@ -566,6 +592,7 @@ Per-pool statistics (allocation count, exhaustion events) have negligible overhe
 ### ✅ Document Exhaustion Behavior
 
 Under extreme bursts, pools **will** exhaust (by design). This is acceptable because:
+
 - Exhaustion is graceful (returns `None`, no crashes)
 - Recovery is instant (< 4 µs)
 - Drop rate is predictable
@@ -576,6 +603,7 @@ Document expected behavior in operations runbooks.
 ### ✅ Proceed to Phase 4
 
 All critical experiments now complete:
+
 1. ✅ Helper Socket Pattern (Exp #1)
 2. ✅ Privilege Drop with FD Passing (Exp #2)
 3. ✅ Buffer Pool Performance (Exp #3)
@@ -587,6 +615,7 @@ All critical experiments now complete:
 ## Success Criteria
 
 ✅ **Pass** if:
+
 - Pool allocation latency < 50 ns (p99)
 - Pool throughput > 5M ops/sec (16x headroom over 312.5k pps target)
 - Pool exhaustion is graceful (no panics/crashes)
@@ -595,6 +624,7 @@ All critical experiments now complete:
 - Pool shows measurably better cache behavior than Vec
 
 ❌ **Fail** if:
+
 - Pool performance is not significantly better than Vec (< 2x speedup)
 - Pool exhaustion causes crashes or unpredictable behavior
 - Metrics overhead > 20%
@@ -604,7 +634,7 @@ All critical experiments now complete:
 
 ## Actual Outcomes
 
-**Experiment Status: ✅ SUCCESSFUL**
+### Experiment Status: ✅ SUCCESSFUL
 
 All success criteria met. Key findings:
 
@@ -614,6 +644,7 @@ All success criteria met. Key findings:
 ✅ **Demonstrates graceful degradation** - 98-99% success rate under burst, sub-µs recovery
 
 The experiment exceeded expectations:
+
 - Latency: 26.7 ns (target: < 50 ns) - **46% better than target**
 - Throughput: 37.6M ops/sec (target: > 5M) - **7.5x better than target**
 - Recovery: 0.8-3.5 µs (target: < 100ms) - **25,000x better than target**

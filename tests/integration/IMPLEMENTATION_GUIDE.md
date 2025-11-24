@@ -30,6 +30,7 @@ Start by implementing the 3 helper functions at the top of `supervisor_resilienc
 **Purpose**: Spawn a supervisor process for testing
 
 **Implementation steps**:
+
 ```rust
 async fn start_supervisor() -> Result<(Child, PathBuf)> {
     // 1. Generate unique socket paths
@@ -64,6 +65,7 @@ async fn start_supervisor() -> Result<(Child, PathBuf)> {
 ```
 
 **Testing**: After implementing, test it in isolation:
+
 ```bash
 cargo test --test supervisor_resilience start_supervisor -- --exact --nocapture
 ```
@@ -73,6 +75,7 @@ cargo test --test supervisor_resilience start_supervisor -- --exact --nocapture
 **Purpose**: Forcibly kill a worker process to simulate crash
 
 **Implementation steps**:
+
 ```rust
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
@@ -96,6 +99,7 @@ async fn kill_worker(pid: u32) -> Result<()> {
 **Purpose**: Check if a process exists
 
 **Implementation**:
+
 ```rust
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
@@ -170,6 +174,7 @@ async fn test_supervisor_restarts_control_plane_worker() -> Result<()> {
 ```
 
 **Debugging tips**:
+
 - If test hangs, check supervisor output with `--nocapture`
 - Verify socket paths are unique
 - Check that `list-workers` command works correctly
@@ -181,6 +186,7 @@ async fn test_supervisor_restarts_control_plane_worker() -> Result<()> {
 **Key difference**: This test adds rules before killing the worker, then verifies the new worker receives them.
 
 **Implementation outline**:
+
 ```rust
 #[tokio::test]
 async fn test_supervisor_resyncs_rules_on_restart() -> Result<()> {
@@ -227,6 +233,7 @@ async fn test_supervisor_resyncs_rules_on_restart() -> Result<()> {
 ```
 
 **Note**: Verifying that rules were actually sent to the worker is challenging without adding debugging infrastructure. Consider:
+
 - Adding a `--debug-worker-state` flag that dumps worker state
 - Using traffic-based verification (more complex but more realistic)
 
@@ -237,6 +244,7 @@ async fn test_supervisor_resyncs_rules_on_restart() -> Result<()> {
 **Challenge**: This test is more complex because you need to measure timing.
 
 **Implementation outline**:
+
 ```rust
 #[tokio::test]
 async fn test_supervisor_applies_exponential_backoff() -> Result<()> {
@@ -261,21 +269,25 @@ These are lower priority and can be implemented after the core resilience tests 
 ## Common Issues and Solutions
 
 ### Issue: "Supervisor did not create socket"
+
 - **Cause**: Supervisor crashed or socket path is wrong
 - **Debug**: Run supervisor manually to see error messages
 - **Fix**: Check logs, verify paths, ensure permissions
 
 ### Issue: "Worker not found in list-workers"
+
 - **Cause**: Worker hasn't started yet or crashed immediately
 - **Debug**: Add sleeps, check supervisor logs
 - **Fix**: Increase wait time, verify worker spawn logic
 
 ### Issue: Test hangs
+
 - **Cause**: Deadlock in control client or supervisor
 - **Debug**: Use `--nocapture` and add debug prints
 - **Fix**: Add timeouts to all blocking operations
 
 ### Issue: "Process still running after kill"
+
 - **Cause**: Zombie process or PID reuse
 - **Debug**: Check `ps aux` for actual process state
 - **Fix**: Use `waitpid()` to reap zombie, increase wait time
@@ -301,6 +313,7 @@ cargo test --test supervisor_resilience -- --test-threads=1 --nocapture
 ## Success Criteria
 
 When complete, you should have:
+
 - ✅ All 5 tests passing without `#[ignore]`
 - ✅ Tests run reliably in CI
 - ✅ Tests validate core resilience promise (D18, D23)
@@ -310,6 +323,7 @@ When complete, you should have:
 ## Next Steps
 
 After implementing these tests:
+
 1. Remove all `#[ignore]` attributes
 2. Update TESTING_PLAN.md Phase 3 to mark these as complete
 3. Run full test suite to ensure no regressions

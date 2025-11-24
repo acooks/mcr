@@ -13,6 +13,7 @@ This document analyzes the ring buffer implementations used for kernel logging i
 ### Architecture Overview
 
 **Three Coordinated Rings**:
+
 1. **Descriptor Ring**: Metadata (sequence number, timestamp, log level, state, pointers to text)
 2. **Text Data Ring**: Actual log message content (byte array with data blocks)
 3. **Info Array**: Parallel metadata array (`printk_info` structs) for quick access
@@ -39,12 +40,14 @@ desc_reusable  = 3   // Can be recycled for new records
 #### Atomic Operations
 
 **Writer Path**:
+
 1. Reserve descriptor with `cmpxchg(desc_state, desc_reusable, desc_reserved)`
 2. Write text data to data ring
 3. Commit descriptor with atomic state transition to `desc_committed`
 4. Finalize with atomic state transition to `desc_finalized`
 
 **Reader Path**:
+
 1. Read descriptor state (atomic load)
 2. If state >= `desc_committed`, read descriptor metadata
 3. Read state again after copying
@@ -65,13 +68,15 @@ Paired barriers between writer commits and reader checks prevent stale reads.
 ### Logical Positions and ABA Prevention
 
 **Logical Position**: Combines actual index with wrap count bits:
+
 - Lower bits: Index into ring
 - Upper bits: Wrap count (increments each time ring wraps)
 
 **Why**: On 32-bit systems, prevents ABA problem where position value wraps and appears identical to old value.
 
 **Example**:
-```
+
+```text
 Position 0x00000005: wrap=0, index=5
 Position 0x10000005: wrap=1, index=5  // Different position despite same index
 ```
@@ -85,6 +90,7 @@ Position 0x10000005: wrap=1, index=5  // Different position despite same index
 ### Buffer Sizing
 
 **Default**: `CONFIG_LOG_BUF_SHIFT=17` → 128 KB buffer
+
 - Configurable at compile time
 - Larger for servers, smaller for embedded systems
 
@@ -95,6 +101,7 @@ Position 0x10000005: wrap=1, index=5  // Different position despite same index
 ### Architecture Overview
 
 **Single Ring Buffer** with sequence number-based indexing:
+
 - One circular byte buffer (`msg_ptr`)
 - Two sequence counters: `msg_wseq` (write), `msg_rseq` (read)
 - Spinlock protection: `msg_lock` (MTX_SPIN type)
@@ -131,6 +138,7 @@ mtx_unlock_spin(&mbp->msg_lock);
 **Sequence Modulus**: 16× buffer size allows sequence numbers to distinguish between multiple wraparounds without collision.
 
 **Example** (128 KB buffer):
+
 - Buffer size: 131,072 bytes
 - Sequence modulus: 131,072 × 16 = 2,097,152
 - Write at sequence 131,080 → position 8 (wrapped once)
@@ -139,6 +147,7 @@ mtx_unlock_spin(&mbp->msg_lock);
 ### Why Sequence Numbers Matter
 
 **Traditional Approach** (problematic):
+
 ```c
 // Writer updates write_pos
 write_pos = (write_pos + 1) % buffer_size;
@@ -150,6 +159,7 @@ available = (write_pos - read_pos) % buffer_size;
 **Problem**: Reader must access writer's pointer (cache line sharing, contention).
 
 **FreeBSD Approach** (elegant):
+
 ```c
 // Writer updates msg_wseq (independent variable)
 msg_wseq = MSGBUF_SEQNORM(mbp, msg_wseq + 1);
@@ -165,6 +175,7 @@ msg_rseq = MSGBUF_SEQNORM(mbp, msg_rseq + 1);
 ### Wraparound Handling
 
 **Detection**:
+
 ```c
 wseq = mbp->msg_wseq;
 rseq = mbp->msg_rseq;
@@ -198,6 +209,7 @@ struct msgbuf {
 ### Buffer Sizing
 
 **Default**: 96 KB (as of FreeBSD 12)
+
 - Tunable via kernel config: `options MSGBUF_SIZE=262144` (256 KB)
 - Persists across reboots if memory region preserved
 
@@ -205,19 +217,19 @@ struct msgbuf {
 
 ## Comparative Analysis
 
-| Feature | Linux `printk_ringbuffer` | FreeBSD `msgbuf` |
-|---------|---------------------------|------------------|
-| **Rings** | 3 rings (desc, text, info) | 1 ring (byte buffer) |
-| **Locking** | Lockless (per-CPU atomic CAS) | Spinlock (`MTX_SPIN`) |
-| **Readers** | Multiple concurrent readers | Single reader (or serialized) |
-| **Writers** | Per-CPU synchronization | Spinlock-protected |
-| **NMI-safe** | Yes (lockless design) | Partially (spinlocks can deadlock in NMI) |
-| **ABA Prevention** | ID field in descriptor | Sequence modulus 16× buffer size |
-| **Metadata** | Separate descriptor ring | Inline flags + checksum |
-| **Complexity** | High (state machine, 3 rings) | Low (sequence numbers, 1 buffer) |
-| **Performance** | Extremely high concurrency | Good for moderate concurrency |
-| **Memory Overhead** | Higher (descriptors + text + info) | Lower (just buffer + metadata) |
-| **Timestamp** | Per-record in descriptor | Can be added (recent enhancement) |
+| Feature             | Linux `printk_ringbuffer`          | FreeBSD `msgbuf`                          |
+| ------------------- | ---------------------------------- | ----------------------------------------- |
+| **Rings**           | 3 rings (desc, text, info)         | 1 ring (byte buffer)                      |
+| **Locking**         | Lockless (per-CPU atomic CAS)      | Spinlock (`MTX_SPIN`)                     |
+| **Readers**         | Multiple concurrent readers        | Single reader (or serialized)             |
+| **Writers**         | Per-CPU synchronization            | Spinlock-protected                        |
+| **NMI-safe**        | Yes (lockless design)              | Partially (spinlocks can deadlock in NMI) |
+| **ABA Prevention**  | ID field in descriptor             | Sequence modulus 16× buffer size          |
+| **Metadata**        | Separate descriptor ring           | Inline flags + checksum                   |
+| **Complexity**      | High (state machine, 3 rings)      | Low (sequence numbers, 1 buffer)          |
+| **Performance**     | Extremely high concurrency         | Good for moderate concurrency             |
+| **Memory Overhead** | Higher (descriptors + text + info) | Lower (just buffer + metadata)            |
+| **Timestamp**       | Per-record in descriptor           | Can be added (recent enhancement)         |
 
 ---
 
@@ -228,6 +240,7 @@ struct msgbuf {
 **Lesson from FreeBSD**: Use **sequence numbers** instead of shared read/write pointers to avoid cache line contention.
 
 **MCR Application**:
+
 ```rust
 pub struct RingBuffer {
     entries: Box<[LogEntry]>,
@@ -256,6 +269,7 @@ self.read_seq.fetch_add(1, Ordering::Relaxed);
 **Lesson from Linux**: Use atomic state transitions to signal when entries are ready for reading.
 
 **MCR Application**:
+
 ```rust
 pub struct LogEntry {
     state: AtomicU8,  // 0=empty, 1=writing, 2=ready
@@ -281,6 +295,7 @@ if entry.state.load(Ordering::Acquire) == 2 {
 **Lesson from Both**: For single-producer single-consumer (io_uring thread → consumer thread), can achieve lockless operation.
 
 **MCR Application**:
+
 - Each data plane worker (per-core) has **SPSC** ring buffer
 - Use `Ordering::Relaxed` for writes (no other writers)
 - Use `Ordering::Acquire`/`Release` only for coordination with consumer
@@ -291,6 +306,7 @@ if entry.state.load(Ordering::Acquire) == 2 {
 **Lesson from Linux**: Explicit memory barriers prevent reading stale data.
 
 **MCR Application**:
+
 ```rust
 // Writer:
 entry.timestamp = now;
@@ -312,6 +328,7 @@ if state == READY {
 **Lesson from Both**: Both kernels drop old messages on overflow (preserve latency).
 
 **MCR Options**:
+
 1. **Drop old** (kernel style): Increment `overruns`, drop message
 2. **Drop new**: Increment `drops`, skip logging (preserve history)
 3. **Backpressure**: Block writer until space available (not viable for data plane)
@@ -321,6 +338,7 @@ if state == READY {
 ### 6. Separate Metadata from Data
 
 **Lesson from Linux**: Separating descriptors from text data enables:
+
 - Efficient metadata scanning without reading full messages
 - Variable-length messages without complex allocation
 - Fast filtering by severity/facility before reading message text
@@ -332,6 +350,7 @@ if state == READY {
 **Lesson from Both**: Linux uses per-CPU writer synchronization, FreeBSD minimizes lock hold time.
 
 **MCR Application**:
+
 - Data plane: **Per-core dedicated buffers** (already in design)
 - Control plane: **Shared buffer with MPSC** (lower frequency, acceptable)
 - Each buffer sized for expected log volume (65K for ingress, 4K for supervisor)
@@ -446,13 +465,14 @@ impl ControlPlaneRingBuffer {
 
 ### Expected Latency
 
-| Operation | Data Plane (SPSC) | Control Plane (MPSC) |
-|-----------|-------------------|----------------------|
-| Write (no contention) | ~50-100 ns | ~100-200 ns |
-| Write (with contention) | N/A (single writer) | ~500 ns - 2 µs |
-| Read | ~50-100 ns | ~100-200 ns |
+| Operation               | Data Plane (SPSC)   | Control Plane (MPSC) |
+| ----------------------- | ------------------- | -------------------- |
+| Write (no contention)   | ~50-100 ns          | ~100-200 ns          |
+| Write (with contention) | N/A (single writer) | ~500 ns - 2 µs       |
+| Read                    | ~50-100 ns          | ~100-200 ns          |
 
 **Comparison**:
+
 - Linux kernel `printk`: ~100-500 ns (lockless, highly optimized)
 - FreeBSD `msgbuf`: ~200-800 ns (spinlock, simpler)
 - MCR target: < 100 ns for data plane (achievable with SPSC)
@@ -461,14 +481,17 @@ impl ControlPlaneRingBuffer {
 
 **Per log entry**: 512 bytes
 **Expected rates**:
+
 - Data plane ingress: 100,000 - 1,000,000 logs/sec (with rate limiting)
 - Control plane: 1,000 - 10,000 logs/sec
 
 **Bandwidth** (worst case):
+
 - Data plane: 512 MB/sec (1M logs/sec × 512 bytes)
 - Control plane: 5 MB/sec
 
 **L3 Cache**: ~30 MB (typical server CPU)
+
 - Ring buffer fits in cache if ≤ 60,000 entries (~30 MB)
 - Recommendation: 65,536 entries = 32 MB (close to cache size, good balance)
 

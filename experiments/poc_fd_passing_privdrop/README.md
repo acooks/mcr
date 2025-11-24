@@ -17,11 +17,13 @@ The privilege separation model requires:
 ## Why This Pattern?
 
 The relay needs to:
+
 - Create `AF_PACKET` sockets (requires root/CAP_NET_RAW)
 - Process packets in unprivileged worker processes (minimize attack surface)
 - Isolate privilege requirements to supervisor only
 
 The FD passing pattern achieves this by:
+
 - Supervisor creates sockets with necessary capabilities
 - Workers receive pre-created sockets via file descriptor passing
 - Workers never need privileges themselves
@@ -45,7 +47,7 @@ The FD passing pattern achieves this by:
 
 ### Process Architecture
 
-```
+```text
 ┌────────────────────────────────┐
 │   Privileged Parent (root)     │
 │                                │
@@ -100,12 +102,14 @@ The experiment:
 ### Success Criteria
 
 ✅ **Pass** if:
+
 - FD passes successfully via SCM_RIGHTS
 - Child can drop to `nobody:nobody` (UID/GID 65534)
 - Child cannot create new AF_PACKET sockets (privilege verification)
 - Child can receive at least 1 packet using the passed socket FD
 
 ❌ **Fail** if:
+
 - FD passing fails
 - Child retains root privileges after drop attempt
 - Passed socket FD doesn't work for packet reception
@@ -121,6 +125,7 @@ sudo ./run_test.sh
 ```
 
 The test script will:
+
 1. Build the experiment
 2. Create isolated network namespace
 3. Set up veth pair
@@ -129,7 +134,7 @@ The test script will:
 
 ### Expected Output (if successful)
 
-```
+```text
 === File Descriptor Passing with Privilege Drop Experiment ===
 
 Configuration:
@@ -192,6 +197,7 @@ Configuration:
 ✅ **Validates:** Design decision D24
 
 The security architecture can proceed as designed:
+
 - Supervisor creates sockets with privileges
 - Workers receive pre-created sockets via FD passing
 - Workers run as unprivileged users (minimal attack surface)
@@ -204,15 +210,18 @@ The security architecture can proceed as designed:
 Would require major redesign:
 
 **Option 1:** Keep workers privileged
+
 - Larger attack surface
 - Violates security best practices
 - Not acceptable for production
 
 **Option 2:** Use different socket type
+
 - Try standard `AF_INET` sockets (but requires solving RPF problem)
 - Reduced performance (kernel processing overhead)
 
 **Option 3:** Use kernel bypass (XDP/DPDK)
+
 - Entirely different architecture
 - Higher complexity, different trade-offs
 
@@ -247,32 +256,37 @@ Would require major redesign:
 ### Implementation Details
 
 **nix 0.30 API Usage:**
+
 - `sendmsg()`/`recvmsg()` accept raw `i32` file descriptors (not `BorrowedFd`)
 - `ControlMessage::ScmRights(&[i32])` for sending FDs
 - `msg.cmsgs()` returns `Result<CmsgIterator>` requiring `.context()?` handling
 - Iterator pattern: `let mut cmsgs = msg.cmsgs()?; while let Some(cmsg) = cmsgs.next() { ... }`
 
 **Fork Safety:**
+
 - Parent must close child's socket, child must close parent's socket
 - Proper cleanup required in both processes
 - Parent can wait for child completion via socketpair communication
 
 **Network Namespace Testing:**
+
 - Test harness creates isolated network environment
 - veth pair simulates real network interface
 - IPv6 neighbor discovery provides test traffic
 
 ### Architectural Impact
 
-**✅ Design Decision D24 (Privilege Separation) is VALIDATED**
+#### ✅ Design Decision D24 (Privilege Separation) is VALIDATED
 
 This confirms the core security architecture can proceed as designed:
+
 - **Phase 2**: Supervisor process creates AF_PACKET sockets with `CAP_NET_RAW`
 - **Phase 3**: Supervisor passes socket FDs to worker processes via SCM_RIGHTS
 - **Phase 3**: Worker processes drop all privileges immediately after receiving FDs
 - **Phase 4**: Workers process packets without any elevated privileges
 
 **Security Benefits Confirmed:**
+
 - Workers run as unprivileged users (e.g., `mcrelay:mcrelay`)
 - Even if a worker is compromised, attacker gains no special capabilities
 - Cannot create new privileged sockets
@@ -296,7 +310,6 @@ This confirms the core security architecture can proceed as designed:
 ## Related Documents
 
 - `ARCHITECTURE.md` - Design decisions D24, D1, D7
-- `EXPERIMENT_CANDIDATES.md` - Prioritization rationale
 - `experiments/README.md` - Experiments index
 
 ## Next Steps

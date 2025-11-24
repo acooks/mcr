@@ -23,12 +23,14 @@ The plan consists of three independent phases that eliminate custom "adapter" co
 **Goal**: Remove the "Three-Primitive Bridge" (UnixStream → tokio task → mpsc → eventfd → io_uring)
 
 **Impact**:
+
 - ✅ Eliminates tokio runtime dependency from data plane worker
 - ✅ Fixes startup deadlock bug (commit 21961ac)
 - ✅ Fixes shutdown hang bugs
 - ✅ Simplifies architecture (single threading model)
 
 **Code Changes**:
+
 - Lines deleted: ~200
 - Lines added: ~230
 - Net change: +30 lines (but much simpler)
@@ -475,6 +477,7 @@ fn handle_command(&mut self, cmd: RelayCommand) -> Result<()> {
 **File**: `src/worker/egress.rs`
 
 Apply the same pattern as ingress:
+
 - Add CommandReader (or import from shared module if extracted)
 - Replace mpsc + eventfd fields with cmd_stream_fd, cmd_reader, cmd_buffer
 - Update constructor signature
@@ -628,11 +631,13 @@ tokio_uring::start(async {
 **Goal**: Delete ~1,700 lines of custom shared memory ring buffer code and replace with pipe-based JSON logging
 
 **Impact**:
+
 - ✅ Eliminates 3 bug classes (collisions, cleanup failures, race conditions)
 - ✅ Massive simplification (-1,581 lines net)
 - ⚠️ Minor performance cost (10x slower per log, but negligible since logging is infrequent)
 
 **Code Changes**:
+
 - Lines deleted: ~1,741
 - Lines added: ~160
 - Net change: -1,581 lines
@@ -879,21 +884,25 @@ git rm src/logging/integration.rs     # 368 lines
 **File**: `src/logging/consumer.rs`
 
 Delete:
+
 - `SharedBlockingConsumer` (~150 lines)
 - All shared memory related code
 
 Keep (if still used by supervisor/control plane):
+
 - `AsyncConsumer` (for supervisor's own MPSC logging if applicable)
 - `StdoutSink`, `StderrSink`
 
 **File**: `src/logging/logger.rs`
 
 Delete:
+
 - `RingBuffer` trait implementations (~50 lines)
 - `from_spsc()`, `from_mpsc()`, `from_shared()` constructors (~60 lines)
 - Ring buffer related fields and logic (~100 lines)
 
 Keep:
+
 - `Logger` struct (now wraps tracing)
 - Public API methods (info, debug, error, etc.) - but reimplement to call tracing
 - `Facility` and `Severity` enums (still useful for structured logging)
@@ -901,6 +910,7 @@ Keep:
 **File**: `src/logging/mod.rs`
 
 Update exports:
+
 ```rust
 // DELETE:
 // pub use integration::{DataPlaneLogging, SupervisorLogging, ControlPlaneLogging, SharedMemoryLogManager};
@@ -920,6 +930,7 @@ pub use entry::LogEntry;  // May still be useful for JSON deserialization
 **File**: `Cargo.toml`
 
 **Add**:
+
 ```toml
 [dependencies]
 tracing = "0.1"
@@ -927,6 +938,7 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 ```
 
 **Consider removing** (if no longer used):
+
 ```toml
 # May no longer need these if only used for shared memory:
 # shared_memory = "..."  (already removed based on git history)
@@ -959,11 +971,13 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 **Goal**: Eliminate 95%+ of eventfd writes on ingress→egress path using conditional signaling
 
 **Impact**:
+
 - ✅ **2-5% CPU saved** at high packet rates
 - ✅ Reduces eventfd syscalls from 100,000/sec to 3,000-20,000/sec
 - ✅ Simple implementation (one atomic flag)
 
 **Code Changes**:
+
 - Lines added: ~20
 - No lines deleted
 
@@ -1186,7 +1200,7 @@ impl EgressLoop<EgressWorkItem, Arc<BufferPool>> {
 
 **Document why this is safe**:
 
-```
+```text
 Scenario 1: Ingress enqueues while egress is awake
 - Egress: sleeping = false
 - Ingress: push(item), check sleeping == false, SKIP eventfd write ✅
@@ -1219,7 +1233,7 @@ Best case (common case at high throughput) is 95%+ syscall reduction.
 
 ### Phase 3 Completion Checklist
 
-- [ ] Created Arc<AtomicBool> sleeping flag in data_plane_integrated.rs
+- [ ] Created `Arc<AtomicBool>` sleeping flag in data_plane_integrated.rs
 - [ ] Passed flag to both EgressQueueWithWakeup and EgressLoop
 - [ ] Updated EgressQueueWithWakeup::send() to check flag before writing eventfd
 - [ ] Updated EgressLoop::run() to set flag before/after blocking
@@ -1235,6 +1249,7 @@ Best case (common case at high throughput) is 95%+ syscall reduction.
 ### Unit Tests
 
 **Phase 1**:
+
 - [ ] Test CommandReader parses single frame correctly
 - [ ] Test CommandReader handles partial frames (multiple reads)
 - [ ] Test CommandReader handles multiple frames in one read
@@ -1242,11 +1257,13 @@ Best case (common case at high throughput) is 95%+ syscall reduction.
 - [ ] Mock tests for EgressLoop command handling
 
 **Phase 2**:
+
 - [ ] Test JSON log entry serialization/deserialization
 - [ ] Test supervisor log parsing handles malformed JSON gracefully
 - [ ] Test Logger::from_tracing() methods produce correct JSON
 
 **Phase 3**:
+
 - [ ] Test sleeping flag reduces syscalls (can mock with counter)
 - [ ] Test race conditions don't cause packet loss (stress test)
 
@@ -1255,6 +1272,7 @@ Best case (common case at high throughput) is 95%+ syscall reduction.
 ### Integration Tests
 
 **All Phases**:
+
 - [ ] `baseline_50k.sh` - Basic forwarding test (should pass unchanged)
 - [ ] Startup/shutdown cycles (test for deadlocks)
 - [ ] Multiple workers on different cores
@@ -1262,11 +1280,13 @@ Best case (common case at high throughput) is 95%+ syscall reduction.
 - [ ] High throughput test (100k+ pps) to verify performance
 
 **Phase 2 specific**:
+
 - [ ] Verify logs appear in supervisor output
 - [ ] Verify no /dev/shm files left after shutdown
 - [ ] Test worker crash leaves no orphaned resources
 
 **Phase 3 specific**:
+
 - [ ] Benchmark eventfd syscall count before/after (using strace or BPF)
 - [ ] Verify packet forwarding accuracy at high load
 
@@ -1275,12 +1295,14 @@ Best case (common case at high throughput) is 95%+ syscall reduction.
 ### Performance Benchmarks
 
 **Metrics to measure**:
+
 1. **Throughput**: packets/sec at saturation
 2. **CPU usage**: % per core at various loads
 3. **Latency**: packet forwarding latency (p50, p99)
 4. **Syscall count**: eventfd writes per second (Phase 3)
 
 **Expected results**:
+
 - Phase 1: Negligible performance change (command path is rare)
 - Phase 2: <1% CPU increase for logging overhead (acceptable)
 - Phase 3: 2-5% CPU reduction at high load, 95%+ fewer eventfd syscalls
@@ -1292,16 +1314,19 @@ Best case (common case at high throughput) is 95%+ syscall reduction.
 If issues arise during implementation:
 
 **Phase 1**:
+
 - Can be rolled back independently (revert commits)
 - Main risk: CommandReader buffer handling bugs
 - Mitigation: Extensive unit tests for framing logic
 
 **Phase 2**:
+
 - Can be rolled back independently
 - Main risk: Loss of structured logging metadata
 - Mitigation: JSON format preserves all metadata
 
 **Phase 3**:
+
 - Lowest risk, easiest to rollback (just remove flag and conditional)
 - Can be disabled with a feature flag if needed
 
@@ -1312,6 +1337,7 @@ If issues arise during implementation:
 ## Implementation Timeline
 
 **Estimated effort**:
+
 - Phase 1: 2-3 days (most complex, touches many files)
 - Phase 2: 1-2 days (mostly deletion, simple additions)
 - Phase 3: 0.5-1 day (simple addition)
@@ -1319,6 +1345,7 @@ If issues arise during implementation:
 **Total**: 4-6 days for complete refactoring
 
 **Recommended approach**:
+
 - Implement all three phases in sequence
 - Create one PR per phase for easier review
 - Or combine Phases 1+3 (both touch data path) and do Phase 2 separately
@@ -1352,6 +1379,7 @@ The phases are designed to be independent, but this order is recommended:
 ### Alternative: Combined Implementation
 
 Phases 1 and 3 both touch the data path and can be combined:
+
 - Update data_plane_integrated.rs once with both command FDs and sleeping flag
 - Update ingress.rs once with both CommandReader and conditional signaling
 - Update egress.rs once with both CommandReader and sleeping flag
@@ -1361,11 +1389,13 @@ This avoids touching the same files twice.
 ### Known Trade-offs
 
 **Phase 2 (Logging)**:
+
 - 10x slower per log entry (2μs vs 200ns)
 - At 1000 logs/sec: 2ms CPU time = 0.2% overhead
 - Acceptable because production logging is infrequent (Info level and above)
 
 **Phase 3 (Performance)**:
+
 - Adds atomic load per packet (~5ns overhead)
 - Saves 200-500ns syscall in 95%+ of cases
 - Net win: ~200-500ns saved per packet at high throughput
@@ -1373,6 +1403,7 @@ This avoids touching the same files twice.
 ### Future Optimizations
 
 After this refactoring, consider:
+
 1. AF_PACKET socket FD passing from supervisor (enables full privilege drop)
 2. io_uring msg_ring for ingress→egress (requires kernel 5.18+)
 3. eBPF-based packet filtering (offload rule matching to kernel)
@@ -1381,20 +1412,20 @@ After this refactoring, consider:
 
 ## Appendix: File Modification Summary
 
-| File | Phase 1 | Phase 2 | Phase 3 | Net LoC Δ |
-|------|---------|---------|---------|-----------|
-| `src/supervisor.rs` | +80 | +80 | 0 | +160 |
-| `src/worker/mod.rs` | -150, +20 | -50, +40 | 0 | -140 |
-| `src/worker/data_plane_integrated.rs` | +10 | 0 | +5 | +15 |
-| `src/worker/ingress.rs` | +90 | 0 | +10 | +100 |
-| `src/worker/egress.rs` | +90 | 0 | +5 | +95 |
-| `src/main.rs` | -3 | 0 | 0 | -3 |
-| `src/logging/logger.rs` | 0 | -200, +40 | 0 | -160 |
-| `src/logging/ringbuffer.rs` | 0 | -873 | 0 | -873 |
-| `src/logging/integration.rs` | 0 | -368 | 0 | -368 |
-| `src/logging/consumer.rs` | 0 | -300 | 0 | -300 |
-| `Cargo.toml` | 0 | +5 | 0 | +5 |
-| **TOTAL** | **+30** | **-1,581** | **+20** | **-1,531** |
+| File                                  | Phase 1   | Phase 2    | Phase 3 | Net LoC Δ  |
+| ------------------------------------- | --------- | ---------- | ------- | ---------- |
+| `src/supervisor.rs`                   | +80       | +80        | 0       | +160       |
+| `src/worker/mod.rs`                   | -150, +20 | -50, +40   | 0       | -140       |
+| `src/worker/data_plane_integrated.rs` | +10       | 0          | +5      | +15        |
+| `src/worker/ingress.rs`               | +90       | 0          | +10     | +100       |
+| `src/worker/egress.rs`                | +90       | 0          | +5      | +95        |
+| `src/main.rs`                         | -3        | 0          | 0       | -3         |
+| `src/logging/logger.rs`               | 0         | -200, +40  | 0       | -160       |
+| `src/logging/ringbuffer.rs`           | 0         | -873       | 0       | -873       |
+| `src/logging/integration.rs`          | 0         | -368       | 0       | -368       |
+| `src/logging/consumer.rs`             | 0         | -300       | 0       | -300       |
+| `Cargo.toml`                          | 0         | +5         | 0       | +5         |
+| **TOTAL**                             | **+30**   | **-1,581** | **+20** | **-1,531** |
 
 ---
 
@@ -1409,6 +1440,7 @@ After this refactoring, consider:
 **Blockers**: None
 
 **Next Steps**:
+
 1. Review this plan for completeness
 2. Choose implementation order (sequential vs. combined)
 3. Create feature branch
@@ -1416,5 +1448,5 @@ After this refactoring, consider:
 
 ---
 
-*Document version: 1.0*
-*Last updated: 2025-11-14*
+_Document version: 1.0_
+_Last updated: 2025-11-14_

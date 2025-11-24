@@ -13,7 +13,7 @@ dev: fmt clippy build-release test-fast
     @echo "  sudo just test-performance       # Run performance tests"
 
 # Run code quality checks (fast, no coverage)
-check: fmt clippy lint-docs build-release test-fast
+check: fmt clippy lint-docs check-links build-release test-fast
     @echo "\n✅ Code quality checks passed!"
     @echo ""
     @echo "Additional test suites:"
@@ -24,7 +24,7 @@ check: fmt clippy lint-docs build-release test-fast
     @echo "For full CI pipeline: just check-full"
 
 # Run ALL quality gates (slow, includes coverage)
-check-full: fmt clippy lint-docs build test audit outdated coverage unsafe-check
+check-full: fmt clippy lint-docs check-links build test audit outdated coverage unsafe-check
     @echo "\n✅ All checks passed (full CI pipeline)!"
 
 # Format check
@@ -46,6 +46,40 @@ lint-docs:
         exit 1; \
     fi
     npx markdownlint --config .markdownlint.json "**/*.md"
+
+# Auto-fix documentation formatting issues
+fix-docs:
+    @echo "--- Auto-fixing Documentation Issues ---"
+    @if ! command -v npm &> /dev/null; then \
+        echo "Error: npm is not installed."; \
+        echo "Please install Node.js and npm to run markdown fixing."; \
+        exit 1; \
+    fi
+    npx markdownlint --fix --config .markdownlint.json "**/*.md"
+    @echo "✅ Documentation auto-fixed! Review changes with 'git diff'"
+
+# Format documentation with prettier (handles tables better)
+prettier-docs:
+    @echo "--- Formatting Documentation with Prettier ---"
+    @if ! command -v prettier &> /dev/null; then \
+        echo "Error: prettier is not installed."; \
+        echo "Install with: npm install -g prettier"; \
+        exit 1; \
+    fi
+    prettier --write "**/*.md"
+    @echo "✅ Documentation formatted with prettier!"
+
+# Check for broken links in markdown files
+check-links:
+    @echo "--- Checking Markdown Links ---"
+    @if ! command -v npm &> /dev/null; then \
+        echo "Error: npm is not installed."; \
+        echo "Please install Node.js and npm to run link checking."; \
+        exit 1; \
+    fi
+    @echo "Checking internal links in documentation..."
+    @find . -name "*.md" -not -path "*/node_modules/*" -not -path "*/.git/*" -not -path "*/target/*" | \
+        xargs -I {} npx markdown-link-check --config .markdown-link-check.json --quiet {}
 
 # Build the project
 build:

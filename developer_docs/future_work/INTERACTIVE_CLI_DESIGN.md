@@ -3,6 +3,7 @@
 ## Overview
 
 This document defines the design for:
+
 1. Runtime log-level filtering and control
 2. Interactive TUI for monitoring and control
 3. Log streaming capabilities
@@ -21,11 +22,13 @@ This document defines the design for:
 **Decision**: Extend SupervisorCommand enum with logging control commands.
 
 **Rationale**:
+
 - Reuses existing Unix socket infrastructure
 - Consistent with current command architecture
 - No additional IPC mechanism needed
 
 **Implementation**:
+
 ```rust
 pub enum SupervisorCommand {
     // ... existing commands ...
@@ -51,11 +54,13 @@ pub enum SupervisorCommand {
 **Decision**: Maintain a `HashMap<Facility, Severity>` in the Logger/LogRegistry.
 
 **Rationale**:
+
 - Allows fine-grained control (e.g., "debug Ingress but warn everything else")
 - Low overhead (single hash lookup per log call)
 - Thread-safe with RwLock or atomic operations
 
 **Implementation**:
+
 ```rust
 pub struct LogRegistry {
     loggers: HashMap<Facility, Logger>,
@@ -85,6 +90,7 @@ impl Logger {
 ```
 
 **Performance**:
+
 - Fast path: 1 atomic load + comparison (~5ns)
 - Slow path: RwLock read + hash lookup (~20-50ns)
 - Total overhead: <100ns (within budget)
@@ -94,17 +100,20 @@ impl Logger {
 **Decision**: Use Unix socket with length-delimited framing for log streaming.
 
 **Rationale**:
+
 - Consistent with existing control interface
 - Lower overhead than WebSocket for local IPC
 - Simpler implementation (no HTTP/WS handshake)
 
 **Alternative Considered**: WebSocket
+
 - Pro: Browser-based UI possible
 - Con: Complexity, dependencies (tokio-tungstenite)
 - Verdict: Defer to Phase 2
 
 **Protocol**:
-```
+
+```text
 Client → Supervisor: StreamLogs { facilities: [Ingress], min_level: Debug }
 Supervisor → Client: Response::LogStream (ack)
 Supervisor → Client: [stream of length-delimited LogEntry JSON]
@@ -116,12 +125,14 @@ Client cancels by closing socket
 **Decision**: Use Ratatui for the interactive TUI.
 
 **Rationale**:
+
 - Modern, actively maintained
 - Excellent layout system (constraints, splits)
 - Good examples (bottom, gitui)
 - Crossterm backend works everywhere
 
 **Dependencies**:
+
 ```toml
 [dependencies]
 ratatui = "0.26"
@@ -134,11 +145,13 @@ tokio = { version = "1", features = ["full"] }
 **Decision**: Create `mcr-monitor` as a separate binary from `control_client`.
 
 **Rationale**:
+
 - Keep `control_client` simple for scripting/automation
 - TUI has different dependencies and runtime model
 - Allows separate evolution of interfaces
 
 **Binaries**:
+
 - `control_client` - Simple one-shot CLI (existing)
 - `mcr-monitor` - Interactive TUI (new)
 
@@ -149,6 +162,7 @@ tokio = { version = "1", features = ["full"] }
 **Status**: Completed in commits d369379 and 5c04136
 
 **Commands**:
+
 ```bash
 # CLI interface
 control_client log-level get
@@ -169,6 +183,7 @@ control_client log-level get
 ```
 
 **Implementation Summary**:
+
 1. ✅ Added `min_levels` and `global_min_level` to LogRegistry
 2. ✅ Modified Logger::should_log() with facility-override-first logic
 3. ✅ Added SetGlobalLogLevel/SetFacilityLogLevel/GetLogLevels commands
@@ -178,11 +193,13 @@ control_client log-level get
 7. ✅ Created 6 integration tests for runtime log-level changes
 
 **Test Coverage**:
+
 - Unit tests: 94 passing (5 new filtering tests in logger.rs)
 - Control client tests: 5 passing (3 new CLI parsing tests)
 - Integration tests: 6 comprehensive tests (tests/integration/log_level_control.rs)
 
 **Exit Criteria**:
+
 - ✅ Can set global log level at runtime
 - ✅ Can set per-facility log level at runtime (overrides global)
 - ✅ Filtered logs don't appear in output (verified by tests)
@@ -191,6 +208,7 @@ control_client log-level get
 ### Phase 2: Log Streaming
 
 **Commands**:
+
 ```bash
 # Tail logs (like journalctl -f)
 control_client logs tail --facility Ingress --level debug
@@ -200,6 +218,7 @@ control_client logs dump --lines 1000 > /tmp/mcr-logs.txt
 ```
 
 **Implementation Tasks**:
+
 1. Add DumpLogs/StreamLogs to SupervisorCommand
 2. Implement ring buffer dump in AsyncConsumer
 3. Implement streaming protocol (length-delimited JSON)
@@ -207,6 +226,7 @@ control_client logs dump --lines 1000 > /tmp/mcr-logs.txt
 5. Handle client disconnect gracefully
 
 **Technical Challenge**: Ring buffer is consumed by AsyncConsumer.
+
 - **Solution**: Add a "tap" mechanism to AsyncConsumer that multicasts to multiple sinks
 - Consumers can register/unregister at runtime
 
@@ -221,6 +241,7 @@ pub struct AsyncConsumer {
 ### Phase 3: Interactive TUI
 
 **Features**:
+
 - Top pane: Real-time log stream with filtering
 - Middle pane: Stats table (rules, pkt/s, errors)
 - Bottom pane: Command input (add/remove rules, change log levels)
@@ -234,6 +255,7 @@ pub struct AsyncConsumer {
   - `:`: Enter command mode
 
 **Implementation Tasks**:
+
 1. Create `mcr-monitor` binary
 2. Set up Ratatui event loop
 3. Implement 3-pane layout
@@ -244,7 +266,8 @@ pub struct AsyncConsumer {
 8. Handle terminal resize
 
 **UI State Machine**:
-```
+
+```text
 Normal Mode
   - Display logs and stats
   - Handle keypresses (q, f, l, etc.)
@@ -349,12 +372,14 @@ SupervisorCommand::StreamLogs { facilities, min_level } => {
 ### Log-Level Check Overhead
 
 **Current (no filtering)**:
+
 ```rust
 logger.log(Severity::Debug, Facility::Ingress, "Packet received");
 // → Direct ring buffer write (~50-100ns)
 ```
 
 **With filtering**:
+
 ```rust
 logger.log(Severity::Debug, Facility::Ingress, "Packet received");
 // → Check global level (atomic load: ~5ns)
@@ -378,6 +403,7 @@ registry.invalidate_caches();  // Updates all Logger cached_min_level
 ### Streaming Throughput
 
 **Scenario**: 100k log messages/sec at debug level
+
 - Log entry size: ~256 bytes (LogEntry struct)
 - Throughput: 256 bytes × 100k = 25.6 MB/sec
 - Unix socket bandwidth: ~1-2 GB/sec (local)
@@ -398,12 +424,14 @@ if tx.try_send(entry).is_err() {
 ### CLI Backward Compatibility
 
 Adding new commands to `control_client` is backward compatible:
+
 - Old binaries ignore new commands (unknown variant error)
 - New binaries support old commands
 
 ### Wire Protocol
 
 JSON-based protocol is schema-flexible:
+
 - New fields can be added (serde skip_serializing_if)
 - Old clients ignore unknown fields
 
@@ -423,17 +451,17 @@ JSON-based protocol is schema-flexible:
 
 ## Implementation Phases Summary
 
-| Phase | Status | Priority | Effort | Dependencies | Commits |
-|-------|--------|----------|--------|--------------|---------|
-| Phase 1: Runtime log-level control | ✅ DONE | HIGH | 2-3 days | Logging system | d369379, 5c04136 |
-| Phase 2: Log streaming | 📋 TODO | MEDIUM | 2-3 days | Phase 1 | - |
-| Phase 3: Interactive TUI | 📋 TODO | MEDIUM | 5-7 days | Phase 2 | - |
-| Phase 4: Advanced features | 📋 TODO | LOW | 2-4 weeks | Phase 3 | - |
+| Phase                              | Status  | Priority | Effort    | Dependencies   | Commits          |
+| ---------------------------------- | ------- | -------- | --------- | -------------- | ---------------- |
+| Phase 1: Runtime log-level control | ✅ DONE | HIGH     | 2-3 days  | Logging system | d369379, 5c04136 |
+| Phase 2: Log streaming             | 📋 TODO | MEDIUM   | 2-3 days  | Phase 1        | -                |
+| Phase 3: Interactive TUI           | 📋 TODO | MEDIUM   | 5-7 days  | Phase 2        | -                |
+| Phase 4: Advanced features         | 📋 TODO | LOW      | 2-4 weeks | Phase 3        | -                |
 
 ## References
 
-- Ratatui: https://ratatui.rs/
-- Crossterm: https://docs.rs/crossterm/
-- TUI examples: https://github.com/fdehau/tui-rs/tree/master/examples
-- Bottom (TUI app): https://github.com/ClementTsang/bottom
-- GitUI (TUI app): https://github.com/extrawurst/gitui
+- Ratatui: <https://ratatui.rs/>
+- Crossterm: <https://docs.rs/crossterm/>
+- TUI examples: <https://github.com/fdehau/tui-rs/tree/master/examples>
+- Bottom (TUI app): <https://github.com/ClementTsang/bottom>
+- GitUI (TUI app): <https://github.com/extrawurst/gitui>
