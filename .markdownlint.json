@@ -7,7 +7,7 @@
   "MD010": false,
   "MD012": { "maximum": 1 },
   "MD013": false,
-  "MD014": false,
+  "MD014": true,
   "MD019": true,
   "MD022": false,
   "MD024": false,

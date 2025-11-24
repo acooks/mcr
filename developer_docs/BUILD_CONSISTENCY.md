@@ -71,7 +71,7 @@ These dependencies can cause different feature resolution in the dependency tree
 
 ### Scenario 1: Run Integration Test
 ```bash
-$ cargo test --release test_single_hop_1000_packets
+cargo test --release test_single_hop_1000_packets
 # → Recompiles with test harness
 # → Binary is in target/release/deps/
 # → Test finds target/release/multicast_relay (may be stale!)
@@ -79,7 +79,7 @@ $ cargo test --release test_single_hop_1000_packets
 
 ### Scenario 2: Run Shell Script Test
 ```bash
-$ sudo tests/data_plane_pipeline_veth.sh
+sudo tests/data_plane_pipeline_veth.sh
 # → Runs "cargo build --release" internally
 # → May recompile if cargo test was run before
 # → Uses target/release/multicast_relay
@@ -87,9 +87,9 @@ $ sudo tests/data_plane_pipeline_veth.sh
 
 ### Scenario 3: Mixed Testing
 ```bash
-$ cargo build --release --bins          # Build 1
-$ cargo test --release                  # Build 2 (recompiles!)
-$ sudo tests/data_plane_pipeline_veth.sh  # Build 3 (may recompile!)
+cargo build --release --bins          # Build 1
+cargo test --release                  # Build 2 (recompiles!)
+sudo tests/data_plane_pipeline_veth.sh  # Build 3 (may recompile!)
 ```
 
 Result: Three compilations, confusion about which binary is tested.
