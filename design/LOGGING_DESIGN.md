@@ -688,7 +688,7 @@ mcr-control log reset-stats
 
 - RFC 5424: The Syslog Protocol
 - RFC 3164: BSD Syslog Protocol (obsolete)
-- FRR Logging Documentation: https://docs.frrouting.org/projects/dev-guide/en/latest/logging.html
+- FRR Logging Documentation: <https://docs.frrouting.org/projects/dev-guide/en/latest/logging.html>
 - Linux `io_uring` performance considerations
 - Rust `std::sync::atomic` documentation
 

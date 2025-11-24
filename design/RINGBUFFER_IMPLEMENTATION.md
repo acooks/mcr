@@ -470,6 +470,6 @@ Using `proptest`:
 
 - Linux `printk_ringbuffer`: kernel/printk/printk_ringbuffer.c
 - FreeBSD `msgbuf`: sys/kern/subr_msgbuf.c
-- Rust Atomics and Locks (Mara Bos): https://marabos.nl/atomics/
+- Rust Atomics and Locks (Mara Bos): <https://marabos.nl/atomics/>
 - crossbeam-rs: Lock-free data structures
 - Linux kernel memory barriers: Documentation/memory-barriers.txt

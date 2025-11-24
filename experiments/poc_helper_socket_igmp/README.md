@@ -304,7 +304,7 @@ This experiment **definitively validates** the core ingress design:
 
 ### References
 
-- Related Blog Post: https://www.rationali.st/blog/the-curious-case-of-the-disappearing-multicast-packet.html
+- Related Blog Post: <https://www.rationali.st/blog/the-curious-case-of-the-disappearing-multicast-packet.html>
 - Linux Multicast: `man 7 ip` (IP_ADD_MEMBERSHIP)
 - AF_PACKET: `man 7 packet`
 - Socket Ownership: Rust std::os::unix::io traits (AsRawFd vs IntoRawFd)

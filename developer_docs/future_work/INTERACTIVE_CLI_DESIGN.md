@@ -432,8 +432,8 @@ JSON-based protocol is schema-flexible:
 
 ## References
 
-- Ratatui: https://ratatui.rs/
-- Crossterm: https://docs.rs/crossterm/
-- TUI examples: https://github.com/fdehau/tui-rs/tree/master/examples
-- Bottom (TUI app): https://github.com/ClementTsang/bottom
-- GitUI (TUI app): https://github.com/extrawurst/gitui
+- Ratatui: <https://ratatui.rs/>
+- Crossterm: <https://docs.rs/crossterm/>
+- TUI examples: <https://github.com/fdehau/tui-rs/tree/master/examples>
+- Bottom (TUI app): <https://github.com/ClementTsang/bottom>
+- GitUI (TUI app): <https://github.com/extrawurst/gitui>
