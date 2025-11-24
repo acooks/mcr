@@ -64,7 +64,7 @@ Based on comprehensive analysis (see `/tmp/test_coverage_analysis.md`), the MCR 
 
 **Goal**: Cover critical multi-worker scenarios and improve infrastructure
 
-4. **Add Multi-Worker Integration Test**
+1. **Add Multi-Worker Integration Test**
 
    Create `tests/integration/multi_worker_basic.rs`:
    ```rust
@@ -72,13 +72,13 @@ Based on comprehensive analysis (see `/tmp/test_coverage_analysis.md`), the MCR 
    // Validates: fanout group IDs, concurrent rule processing, no packet duplication
    ```
 
-5. **Convert One E2E Script to Rust Benchmark**
+2. **Convert One E2E Script to Rust Benchmark**
 
    Pick the simplest bash script (e.g., `baseline_50k.sh`) and rewrite as:
    - `benches/baseline_throughput.rs` using criterion
    - Benefits: Type safety, easier debugging, performance regression detection
 
-6. **Set Up Coverage Tracking**
+3. **Set Up Coverage Tracking**
    - Add `just coverage` command to run tarpaulin
    - Optional: Add coverage badge to README
    - Document coverage improvement over time
@@ -87,12 +87,12 @@ Based on comprehensive analysis (see `/tmp/test_coverage_analysis.md`), the MCR 
 
 **Goal**: Incremental, sustainable improvement without heroic effort
 
-7. **Incremental Improvement**
+1. **Incremental Improvement**
    - Target: +5% coverage per month (realistic, achievable)
    - Focus: One module at a time (supervisor → network_monitor → rule_dispatch)
    - Approach: Add 2-3 tests per week
 
-8. **Make Testing Easier**
+2. **Make Testing Easier**
    - Create test helper utilities:
      ```rust
      // tests/helpers/mod.rs
@@ -102,7 +102,7 @@ Based on comprehensive analysis (see `/tmp/test_coverage_analysis.md`), the MCR 
      ```
    - Document testing patterns in `docs/testing/patterns.md`
 
-9. **Protect Critical Paths**
+3. **Protect Critical Paths**
    - Require tests for:
      - New worker types
      - Changes to supervisor lifecycle

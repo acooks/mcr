@@ -374,14 +374,14 @@ MD5: 48b1fcf85d86ab452099e71f0d862621
    - Buffer pool exhaustion fix (Phase 3)
 
 ### Integration
-2. **`src/worker/data_plane_integrated.rs`**
+1. **`src/worker/data_plane_integrated.rs`**
    - Added `run_unified_data_plane()` function (Phase 2)
 
-3. **`src/worker/mod.rs`**
+2. **`src/worker/mod.rs`**
    - Made unified loop the default (Phase 2)
 
 ### Documentation
-4. **`developer_docs/plans/OPTION4_UNIFIED_LOOP.md`**
+1. **`developer_docs/plans/OPTION4_UNIFIED_LOOP.md`**
    - Updated status to reflect Phase 3 completion
 
 ---

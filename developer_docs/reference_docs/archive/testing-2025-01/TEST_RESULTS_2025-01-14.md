@@ -249,12 +249,12 @@
 
 ### Phase 2 Actions (Next Week)
 
-5. **Integrate Shell Tests into CI**
+1. **Integrate Shell Tests into CI**
    - Add `just test-shell` command
    - Update `just check` to run shell tests
    - See TEST_ANALYSIS.md Phase 2
 
-6. **Create Docker Environment for Root Tests**
+2. **Create Docker Environment for Root Tests**
    - Run ignored integration tests in privileged container
    - See TEST_ANALYSIS.md Phase 4
 

@@ -302,14 +302,14 @@ cargo tarpaulin
 3. ✅ Add ingress/egress error tests (biggest coverage gaps)
 
 ### Should Do (High Impact, Medium Effort)
-4. ✅ Delete redundant logging tests
-5. ✅ Add packet parser edge cases
-6. ✅ Add supervisor error handling
+1. ✅ Delete redundant logging tests
+2. ✅ Add packet parser edge cases
+3. ✅ Add supervisor error handling
 
 ### Nice to Have (Medium Impact)
-7. ⚠️ Delete redundant control_plane tests
-8. ⚠️ Delete duplicate stats tests
-9. ⚠️ Add buffer pool stress tests
+1. ⚠️ Delete redundant control_plane tests
+2. ⚠️ Delete duplicate stats tests
+3. ⚠️ Add buffer pool stress tests
 
 ---
 

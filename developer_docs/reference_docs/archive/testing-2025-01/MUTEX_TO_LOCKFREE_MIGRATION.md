@@ -317,18 +317,18 @@ cargo build --features mutex_backend
 
 ### Medium Risk
 
-3. **Performance regression in some scenarios**
+1. **Performance regression in some scenarios**
    - **Mitigation**: Comprehensive benchmarking
    - **Fallback**: Keep mutex backend available
 
-4. **Increased memory usage**
+2. **Increased memory usage**
    - **Mitigation**: Profile memory with different backends
    - **Monitoring**: Track RSS over time
 
 ### Low Risk
 
-5. **API compatibility**: Both backends use same traits
-6. **Build complexity**: Feature flags well-understood
+1. **API compatibility**: Both backends use same traits
+2. **Build complexity**: Feature flags well-understood
 
 ---
 

@@ -241,29 +241,29 @@
 
 ### Medium Priority
 
-5. **Expand Property Tests**
+1. **Expand Property Tests**
    - Rule matching with random inputs
    - Stats aggregation fuzzing
    - Buffer pool stress testing
 
-6. **Concurrency Testing**
+2. **Concurrency Testing**
    - Use `loom` for data structure testing
    - Stress test supervisor with concurrent commands
    - Multi-threaded stats collection
 
-7. **Performance Regression Suite**
+3. **Performance Regression Suite**
    - Convert bash scripts to benchmarks
    - Use `criterion` for microbenchmarks
    - Automated threshold checking
 
 ### Low Priority
 
-8. **Test Infrastructure**
+1. **Test Infrastructure**
    - Generate unique socket paths (UUID-based)
    - Improve cleanup on test failures
    - Document test requirements
 
-9. **Chaos Testing**
+2. **Chaos Testing**
    - Randomly kill workers during operation
    - Inject random delays
    - Corrupt IPC messages

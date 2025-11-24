@@ -275,14 +275,14 @@ All tests: Yes
 3. ✅ Update `check` to use new targets (no coverage by default)
 
 ### MEDIUM PRIORITY
-4. Add `test-performance` target for performance validation
-5. Add `setup-kernel` target for one-time kernel setup
-6. Add `dev` target for quick development loop
+1. Add `test-performance` target for performance validation
+2. Add `setup-kernel` target for one-time kernel setup
+3. Add `dev` target for quick development loop
 
 ### LOW PRIORITY
-7. Update `default` to use `dev` instead of old `check`
-8. Add `test-complete` meta-target for full suite
-9. Add `quick-check` for formatting/linting only
+1. Update `default` to use `dev` instead of old `check`
+2. Add `test-complete` meta-target for full suite
+3. Add `quick-check` for formatting/linting only
 
 ---
 
