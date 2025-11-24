@@ -215,7 +215,24 @@ stateDiagram-v2
 
 ### Current Implementation vs. Target Architecture
 
-- **Current State:** The Supervisor, Control Plane, and Data Plane all currently run within a single supervisor process. While architecturally distinct, they are not yet separated into different processes with distinct privilege levels. The entire application requires `CAP_NET_RAW`.
-- **Target Architecture:** The goal is to separate these components into distinct processes. The Supervisor would retain `CAP_NET_RAW` to create sockets, while the Control Plane and Data Plane workers would run as completely unprivileged users. This would be achieved by the Supervisor passing the necessary socket file descriptors to the worker processes. This is a **high-priority future work item**.
+**Current Multi-Process Architecture:**
+
+The application uses a **multi-process architecture** where components run as separate OS processes:
+
+- **Supervisor Process**: Main tokio-based async process that spawns and monitors workers
+- **Control Plane Worker**: Separate process spawned by supervisor
+- **Data Plane Workers**: Separate processes, one per CPU core
+
+Each worker is spawned as a separate OS process with its own PID using `tokio::process::Command`.
+
+**Privilege Separation Status:**
+
+✅ **Control Plane Worker**: Successfully drops privileges to unprivileged user (`nobody:nobody` or configured user) immediately after startup. This worker handles runtime configuration and management without requiring elevated privileges.
+
+⚠️ **Data Plane Workers**: Currently **do NOT drop privileges** and run as root. This is a known limitation documented in the code (see `src/worker/mod.rs:283-307`). Data plane workers require `CAP_NET_RAW` to create `AF_PACKET` sockets, and the ambient capabilities workaround doesn't survive `setuid()`.
+
+**Target Architecture (Future Work):**
+
+The goal is to implement file descriptor passing so the Supervisor creates `AF_PACKET` sockets and passes them to data plane workers via `SCM_RIGHTS`. This would allow data plane workers to drop ALL privileges completely while still being able to use the pre-created sockets. This is a **high-priority future work item**.
 
 - **DDoS Amplification Risk (Trusted Network & QoS Mitigation):** The risk of DDoS amplification from external, malicious actors is considered mitigated by the operational requirement that the relay's ingress interfaces are connected only to physically secured, trusted network segments. The risk of accidental overload of a unicast destination due to misconfiguration is fully mitigated by the existing advanced QoS design, which allows for the classification and rate-limiting/prioritized dropping of high-bandwidth flows. No additional security-specific mechanisms are required for this threat vector.
