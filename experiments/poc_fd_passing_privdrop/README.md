@@ -296,7 +296,6 @@ This confirms the core security architecture can proceed as designed:
 ## Related Documents
 
 - `ARCHITECTURE.md` - Design decisions D24, D1, D7
-- `EXPERIMENT_CANDIDATES.md` - Prioritization rationale
 - `experiments/README.md` - Experiments index
 
 ## Next Steps

@@ -4,7 +4,7 @@ This directory contains standalone proof-of-concept (PoC) code used to de-risk c
 
 ## Purpose
 
-As stated in TESTING.md:
+As stated in testing/PRACTICAL_TESTING_GUIDE.md:
 
 > For particularly complex or high-risk features, we will first build small, standalone prototypes in the `experiments/` directory. These prototypes serve multiple critical purposes:
 >
@@ -239,7 +239,7 @@ cd experiments/poc_supervisor_failure_handling && cargo run
 
 ## Related Documentation
 
-- **TESTING.md** - Overall testing philosophy, explains the role of prototypes
+- **testing/PRACTICAL_TESTING_GUIDE.md** - Overall testing philosophy, explains the role of prototypes
 - **ARCHITECTURE.md** - Design decisions that experiments validate
 - **IMPLEMENTATION_PLAN.md** - Integration plan for proven patterns
 - **DEVLOG.md** - Historical record of why experiments were created

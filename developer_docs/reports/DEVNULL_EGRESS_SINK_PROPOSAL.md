@@ -257,6 +257,7 @@ These are rough estimates - actual measurements needed.
 ## Related Issues
 
 This would help debug:
+
 1. **Current test failure**: `test_scale_1m_packets` showing `ch_recv=0`
 2. **Multi-stream scaling**: Tests in `tests/performance/multi_stream_scaling.sh`
 3. **Worker performance**: Isolate worker overhead from network overhead
@@ -279,7 +280,7 @@ But `/dev/null` sink is simpler and solves immediate testing needs.
 2. **Add** egress worker logic for devnull destination
 3. **Create test** validating devnull sink behavior
 4. **Apply** to `test_scale_1m_packets` to isolate current issue
-5. **Document** in TESTING.md as debugging technique
+5. **Document** in testing/PRACTICAL_TESTING_GUIDE.md as debugging technique
 
 ## Open Questions
 
@@ -297,7 +298,7 @@ But `/dev/null` sink is simpler and solves immediate testing needs.
 
 ## References
 
-- Test failure: `docs/testing/test_framework_validation_results.md`
+- Test failure: `testing/test_framework_validation_results.md`
 - Egress implementation: `src/worker/egress.rs`
 - CLI parsing: (need to locate exact file)
 - Similar feature in other tools:

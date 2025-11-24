@@ -45,8 +45,8 @@ just test-all                       # Complete suite
 ### 3. ✅ Documentation Created
 
 **Testing Documentation**:
-- `docs/testing/TESTING.md` (6.6KB) - Developer guide
-- `docs/testing/test_framework_validation_results.md` (7.2KB) - Validation report
+- `testing/PRACTICAL_TESTING_GUIDE.md` (6.6KB) - Developer guide
+- `testing/test_framework_validation_results.md` (7.2KB) - Validation report
 
 **Planning Documents**:
 - `docs/plans/devnull_egress_sink.md` - `/dev/null` sink proposal
@@ -196,7 +196,7 @@ This suggests egress worker is either:
 **Test Framework**:
 - `justfile:122-167` - Test targets
 - `scripts/run-tests-in-netns.sh` - Namespace wrapper
-- `docs/testing/TESTING.md` - Usage guide
+- `testing/PRACTICAL_TESTING_GUIDE.md` - Usage guide
 
 **Failing Tests**:
 - `tests/integration/test_basic.rs:114` - test_single_hop_1000_packets

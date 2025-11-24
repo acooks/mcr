@@ -319,7 +319,6 @@ This experiment **definitively validates** the core ingress design:
 ## Related Documents
 
 - `ARCHITECTURE.md` - Design decisions D1, D3, D4, D6
-- `EXPERIMENT_CANDIDATES.md` - Prioritization rationale
 - `experiments/README.md` - Experiments index
 
 ## Next Steps
