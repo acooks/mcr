@@ -16,5 +16,5 @@ This single, consolidated guide covers:
 
 These documents provide analysis and planning related to test coverage:
 
-*   **[Test Coverage Analysis](./test_coverage_analysis.md):** A detailed analysis of current Rust code coverage.
-*   **[Improvement Plan](./improvement_plan.md):** A pragmatic, prioritized action plan for systematically increasing test coverage.
+-   **[Test Coverage Analysis](./test_coverage_analysis.md):** A detailed analysis of current Rust code coverage.
+-   **[Improvement Plan](./improvement_plan.md):** A pragmatic, prioritized action plan for systematically increasing test coverage.

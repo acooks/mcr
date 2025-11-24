@@ -2,7 +2,7 @@
   "default": true,
   "MD001": true,
   "MD003": true,
-  "MD004": false,
+  "MD004": { "style": "dash" },
   "MD007": true,
   "MD010": true,
   "MD012": { "maximum": 1 },

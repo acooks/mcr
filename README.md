@@ -17,9 +17,9 @@ In many modern network environments—such as broadcast media facilities, financ
 
 ### Who is MCR for?
 
-*   **Network Architects & Cloud Engineers:** Bridge multicast traffic (e.g., discovery protocols, service announcements) between different VPCs, subnets, or physical network segments without complex routing changes.
-*   **Broadcast & Media Engineers:** Reliably transport high-bitrate media streams (e.g., SMPTE 2110) across network boundaries in production and lab environments.
-*   **Financial Services Developers:** Distribute real-time market data feeds across multiple isolated networks with minimal and predictable latency.
+-   **Network Architects & Cloud Engineers:** Bridge multicast traffic (e.g., discovery protocols, service announcements) between different VPCs, subnets, or physical network segments without complex routing changes.
+-   **Broadcast & Media Engineers:** Reliably transport high-bitrate media streams (e.g., SMPTE 2110) across network boundaries in production and lab environments.
+-   **Financial Services Developers:** Distribute real-time market data feeds across multiple isolated networks with minimal and predictable latency.
 
 ---
 

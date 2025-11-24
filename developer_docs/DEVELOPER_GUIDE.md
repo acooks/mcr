@@ -12,28 +12,28 @@ This section covers the prerequisites you need to have installed on your Linux h
 
 First, you need a C compiler and standard development libraries. These are required to compile Rust itself and many common Rust libraries.
 
-*   **For Fedora / RHEL / CentOS:**
+-   **For Fedora / RHEL / CentOS:**
     ```bash
     sudo dnf group install "Development Tools"
     ```
 
-*   **For openSUSE:**
+-   **For openSUSE:**
     ```bash
     sudo zypper install -t pattern devel_basis
     ```
 
-*   **For Ubuntu / Debian:**
+-   **For Ubuntu / Debian:**
     ```bash
     sudo apt update
     sudo apt install build-essential
     ```
 
-*   **For Gentoo:**
+-   **For Gentoo:**
     ```bash
     sudo emerge --ask --oneshot dev-util/pkgconf dev-util/ccache
     ```
 
-*   **For Arch Linux:**
+-   **For Arch Linux:**
     ```bash
     sudo pacman -S base-devel
     ```
