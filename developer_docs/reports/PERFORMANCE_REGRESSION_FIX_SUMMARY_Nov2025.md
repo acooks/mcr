@@ -103,31 +103,17 @@ The results validated that the unified single-threaded architecture is not only 
 
 ## 5. Conclusion
 
-
-
 The performance regression was successfully resolved by addressing two critical configuration errors. The unified loop architecture is now validated as the superior approach, delivering significantly higher performance and efficiency.
-
-
 
 ---
 
-
-
 ## 6. Performance Validation
-
-
 
 **Date:** 2025-11-18
 
-
-
 This section validates MCR's performance claims across multiple dimensions after the fixes were applied.
 
-
-
 ### 6.1. Single-Hop Throughput Validation
-
-
 
 - **Objective:** Validate 439k pps egress throughput with 0% buffer exhaustion.
 
@@ -139,11 +125,7 @@ This section validates MCR's performance claims across multiple dimensions after
 
 - **Verdict:** ✅ **VALIDATED**
 
-
-
 ### 6.2. Multi-Stream Scalability
-
-
 
 - **Objective:** Validate MCR's ability to handle multiple concurrent multicast streams.
 
@@ -151,11 +133,7 @@ This section validates MCR's performance claims across multiple dimensions after
 
 - **Verdict:** ✅ **VALIDATED**
 
-
-
 ### 6.3. Extreme Fanout Beyond Kernel VIF Limit
-
-
 
 - **Objective:** Demonstrate that MCR's userspace architecture bypasses the kernel's 32 VIF limit.
 

@@ -794,4 +794,3 @@ impl Drop for SharedSPSCRingBuffer {
 - Atomic load: ~5ns
 - Memory read: ~50ns
 - Format + write to stdout: ~1-10μs (syscalls OK)
-

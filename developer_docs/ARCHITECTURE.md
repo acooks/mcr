@@ -177,113 +177,35 @@ For a comprehensive guide to the logging system, including the high-performance 
 
 ## 8. Memory Management
 
-
-
 -   **Core-Local Buffer Pools:** To avoid the performance penalty of dynamic memory allocation, the application uses a core-local buffer pool strategy. Each core-pinned data plane thread pre-allocates and manages its own independent set of fixed-size memory buffers. These buffers are organized into multiple pools based on common packet sizes (e.g., Small, Standard, Jumbo). Runtime "allocations" are fast, lock-free operations that acquire a buffer from the appropriate pool.
-
-
 
 -   **Buffer Pool Observability:** The system is designed to handle buffer pool exhaustion by dropping packets rather than falling back to slow, dynamic allocation. To make this manageable, the monitoring system exposes detailed, per-core, per-pool metrics, including the total size of each pool, the current number of buffers in use, and a counter for exhaustion events.
 
-
-
 ## 9. Reliability and Resilience
-
-
-
-
-
-
 
 -   **Supervisor Pattern for Resilience:** The application implements a supervisor pattern. The main application thread acts as the supervisor, responsible for the lifecycle of the data plane threads. It monitors its child threads for panics and will automatically restart a failed thread.
 
 -   **Network State Reconciliation (Future Work):** A high-priority item on the roadmap is to implement idempotent network state reconciliation. The target design is for the supervisor to use a Netlink socket to listen for network state changes (e.g., interfaces going up or down). This would allow it to automatically pause, resume, or re-resolve forwarding rules as network conditions change. **This feature is not yet implemented.**
 
-
-
-
-
-
-
 ### Supervisor Lifecycle Management
 
-
-
-
-
-
-
 ```mermaid
-
-
-
 stateDiagram-v2
-
-
-
     [*] --> Initializing
-
-
-
     Initializing --> Running: All workers spawned
 
-
-
-
-
-
-
     state Running {
-
-
-
         [*] --> MonitoringWorkers
-
-
-
         MonitoringWorkers --> WorkerCrashed: Worker panic/exit
-
-
-
         WorkerCrashed --> BackoffDelay: failure_count++
-
-
-
         BackoffDelay --> RespawningWorker: After delay
-
-
-
         RespawningWorker --> ResyncingRules: Worker restarted
-
-
-
         ResyncingRules --> MonitoringWorkers: Rules sent
-
-
-
     }
 
-
-
-
-
-
-
     Running --> ShuttingDown: SIGTERM/SIGINT
-
-
-
     ShuttingDown --> [*]: All workers stopped
-
-
-
 ```
-
-
-
-
-
-
 
 ## 10. Security and Privilege Model
 
