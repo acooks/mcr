@@ -211,16 +211,16 @@ pub enum Severity {
 
 ### Severity Guidelines
 
-| Severity | Use Case | Examples |
-|----------|----------|----------|
-| Emergency | Process cannot continue | Supervisor panic, all workers dead |
-| Alert | Requires immediate admin action | Lost CAP_NET_RAW, AF_PACKET socket failure |
-| Critical | Component degraded/restarting | Worker crash, control plane reconnect |
-| Error | Operation failed | Packet parsing error, failed rule dispatch |
-| Warning | Potential problem | Buffer pool 90% full, worker backoff |
-| Notice | Normal significant event | Worker started, interface configured |
-| Info | Routine information | Rule added, stats snapshot |
-| Debug | Detailed diagnostic | Packet hexdump, io_uring CQE details |
+| Severity  | Use Case                        | Examples                                   |
+| --------- | ------------------------------- | ------------------------------------------ |
+| Emergency | Process cannot continue         | Supervisor panic, all workers dead         |
+| Alert     | Requires immediate admin action | Lost CAP_NET_RAW, AF_PACKET socket failure |
+| Critical  | Component degraded/restarting   | Worker crash, control plane reconnect      |
+| Error     | Operation failed                | Packet parsing error, failed rule dispatch |
+| Warning   | Potential problem               | Buffer pool 90% full, worker backoff       |
+| Notice    | Normal significant event        | Worker started, interface configured       |
+| Info      | Routine information             | Rule added, stats snapshot                 |
+| Debug     | Detailed diagnostic             | Packet hexdump, io_uring CQE details       |
 
 ## Facilities
 
@@ -258,18 +258,18 @@ pub enum Facility {
 
 ### Facility Characteristics
 
-| Facility | Threading Model | Volume | Buffering Strategy |
-|----------|----------------|--------|-------------------|
-| Supervisor | Tokio async | Low | Shared buffer with mutex |
-| RuleDispatch | Tokio async | Low-Medium | Shared buffer |
-| ControlPlane | Tokio async | Low-Medium | Per-worker buffer |
-| DataPlane | Dedicated thread | Medium | Per-core ring buffer |
-| Ingress | io_uring (blocking) | **Very High** | Per-core ring buffer (lock-free) |
-| Egress | io_uring (blocking) | High | Per-core ring buffer (lock-free) |
-| BufferPool | Shared (mutex) | Medium | Shared buffer |
-| PacketParser | Called from Ingress | **Very High** | Same as Ingress |
-| Stats | Tokio async | Low | Shared buffer |
-| Security | Various | Low | Shared buffer |
+| Facility     | Threading Model     | Volume        | Buffering Strategy               |
+| ------------ | ------------------- | ------------- | -------------------------------- |
+| Supervisor   | Tokio async         | Low           | Shared buffer with mutex         |
+| RuleDispatch | Tokio async         | Low-Medium    | Shared buffer                    |
+| ControlPlane | Tokio async         | Low-Medium    | Per-worker buffer                |
+| DataPlane    | Dedicated thread    | Medium        | Per-core ring buffer             |
+| Ingress      | io_uring (blocking) | **Very High** | Per-core ring buffer (lock-free) |
+| Egress       | io_uring (blocking) | High          | Per-core ring buffer (lock-free) |
+| BufferPool   | Shared (mutex)      | Medium        | Shared buffer                    |
+| PacketParser | Called from Ingress | **Very High** | Same as Ingress                  |
+| Stats        | Tokio async         | Low           | Shared buffer                    |
+| Security     | Various             | Low           | Shared buffer                    |
 
 ## Ring Buffer Architecture
 
@@ -346,15 +346,15 @@ pub struct KeyValue {
 
 Optimized for small systems (1-2 CPUs) with 256-byte entries:
 
-| Facility | Buffer Size | Memory per Buffer | Rationale |
-|----------|-------------|-------------------|-----------|
-| Ingress (per-core) | 16,384 entries | 4 MB | Highest frequency facility |
-| Egress (per-core) | 4,096 entries | 1 MB | High frequency transmit |
-| PacketParser (per-core) | 4,096 entries | 1 MB | Called from ingress path |
-| DataPlane | 2,048 entries | 512 KB | Coordinator messages |
-| Supervisor | 1,024 entries | 256 KB | Low-frequency control |
-| ControlPlane | 1,024 entries | 256 KB | Low-frequency async |
-| Other facilities | 512 entries | 128 KB | Default for utilities |
+| Facility                | Buffer Size    | Memory per Buffer | Rationale                  |
+| ----------------------- | -------------- | ----------------- | -------------------------- |
+| Ingress (per-core)      | 16,384 entries | 4 MB              | Highest frequency facility |
+| Egress (per-core)       | 4,096 entries  | 1 MB              | High frequency transmit    |
+| PacketParser (per-core) | 4,096 entries  | 1 MB              | Called from ingress path   |
+| DataPlane               | 2,048 entries  | 512 KB            | Coordinator messages       |
+| Supervisor              | 1,024 entries  | 256 KB            | Low-frequency control      |
+| ControlPlane            | 1,024 entries  | 256 KB            | Low-frequency async        |
+| Other facilities        | 512 entries    | 128 KB            | Default for utilities      |
 
 **Memory Footprint Examples:**
 
@@ -660,13 +660,13 @@ mcr-control log reset-stats
 
 ## Performance Targets
 
-| Metric | Target | Rationale |
-|--------|--------|-----------|
-| Logging latency (data plane) | < 100ns | Minimal impact on packet processing |
-| Logging latency (control plane) | < 1µs | Acceptable for async operations |
-| Memory overhead | < 100 MB | Bounded ring buffers |
-| Log throughput | > 1M msgs/sec | High-frequency ingress events |
-| Overrun rate | < 0.01% | Rarely drop messages |
+| Metric                          | Target        | Rationale                           |
+| ------------------------------- | ------------- | ----------------------------------- |
+| Logging latency (data plane)    | < 100ns       | Minimal impact on packet processing |
+| Logging latency (control plane) | < 1µs         | Acceptable for async operations     |
+| Memory overhead                 | < 100 MB      | Bounded ring buffers                |
+| Log throughput                  | > 1M msgs/sec | High-frequency ingress events       |
+| Overrun rate                    | < 0.01%       | Rarely drop messages                |
 
 ## Open Questions
 

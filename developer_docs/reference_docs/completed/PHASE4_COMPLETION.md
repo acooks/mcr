@@ -32,19 +32,19 @@ Phase 4 has been completed with **actual measured performance data** from real-w
 
 **Measured Results:**
 
-| Component | Metric | Value |
-|-----------|--------|-------|
-| Traffic Generator | Actual send rate | 733k pps (target: 1M pps) |
-| Traffic Generator | Throughput | 8.22 Gbps |
-| MCR-1 Ingress | Peak receive rate | 490k pps |
-| MCR-1 Ingress | Matched packets | 3.88M (63%) |
-| MCR-1 Ingress | Buffer exhaustion | 2.25M packets (37%) |
-| MCR-1 Egress | Sustained send rate | 307k pps |
-| MCR-1 Egress | Bytes sent | 5.85 GB |
-| MCR-1 Egress | Errors | 0 |
-| MCR-2 Ingress | Receive rate | 300k pps |
-| MCR-2 Egress | Send rate | 300k pps |
-| MCR-2 Ingress | Buffer exhaustion | 0% |
+| Component         | Metric              | Value                     |
+| ----------------- | ------------------- | ------------------------- |
+| Traffic Generator | Actual send rate    | 733k pps (target: 1M pps) |
+| Traffic Generator | Throughput          | 8.22 Gbps                 |
+| MCR-1 Ingress     | Peak receive rate   | 490k pps                  |
+| MCR-1 Ingress     | Matched packets     | 3.88M (63%)               |
+| MCR-1 Ingress     | Buffer exhaustion   | 2.25M packets (37%)       |
+| MCR-1 Egress      | Sustained send rate | 307k pps                  |
+| MCR-1 Egress      | Bytes sent          | 5.85 GB                   |
+| MCR-1 Egress      | Errors              | 0                         |
+| MCR-2 Ingress     | Receive rate        | 300k pps                  |
+| MCR-2 Egress      | Send rate           | 300k pps                  |
+| MCR-2 Ingress     | Buffer exhaustion   | 0%                        |
 
 ### Key Finding: Performance Asymmetry
 
@@ -193,13 +193,13 @@ fn create_dummy_packet(interface_name: &str, dest_addr: SocketAddr) -> EgressPac
 
 ## Files Modified
 
-| File | Purpose | Changes |
-|------|---------|---------|
-| `tests/data_plane_pipeline_veth.sh` | Created | Full 3-hop pipeline test with veth pairs |
-| `src/worker/ingress.rs` | Stats logging | Changed to `[STATS:Ingress]` |
-| `src/worker/egress.rs` | Stats logging + test fix | Changed to `[STATS:Egress]`, fixed test helper |
-| `src/worker/data_plane_integrated.rs` | Stats logging | Changed to `[STATS:Egress]` |
-| `src/supervisor.rs` | GetStats impl | Return configured rules with zero counters |
+| File                                  | Purpose                  | Changes                                        |
+| ------------------------------------- | ------------------------ | ---------------------------------------------- |
+| `tests/data_plane_pipeline_veth.sh`   | Created                  | Full 3-hop pipeline test with veth pairs       |
+| `src/worker/ingress.rs`               | Stats logging            | Changed to `[STATS:Ingress]`                   |
+| `src/worker/egress.rs`                | Stats logging + test fix | Changed to `[STATS:Egress]`, fixed test helper |
+| `src/worker/data_plane_integrated.rs` | Stats logging            | Changed to `[STATS:Egress]`                    |
+| `src/supervisor.rs`                   | GetStats impl            | Return configured rules with zero counters     |
 
 ---
 
@@ -378,16 +378,16 @@ MCR-3 (veth2b):
 
 ## Success Metrics - Final Assessment
 
-| Metric | Target | Actual | Status |
-|--------|--------|--------|--------|
-| Pipeline throughput | 312.5k pps/core | **490k pps** ingress | ✅ **157% of target** |
-| Egress throughput | N/A | **307k pps** sustained | ✅ **Stable at capacity** |
-| Buffer pool allocation | <200ns | 113ns (range: 105-120ns) | ✅ **43% better** |
-| Packet parsing | <100ns | 11ns (range: 8-30ns) | ✅ **89% better** |
-| Rule lookup | <100ns | 15ns (range: 7-27ns) | ✅ **85% better** |
-| Functional correctness | Pass | ✅ Pass | ✅ **3-hop pipeline validated** |
-| Telemetry sufficiency | Observable at capacity | ✅ Yes | ✅ **Diagnosed correctly** |
-| Error handling | Graceful degradation | ✅ Buffer exhaustion | ✅ **Predictable behavior** |
+| Metric                 | Target                 | Actual                   | Status                          |
+| ---------------------- | ---------------------- | ------------------------ | ------------------------------- |
+| Pipeline throughput    | 312.5k pps/core        | **490k pps** ingress     | ✅ **157% of target**           |
+| Egress throughput      | N/A                    | **307k pps** sustained   | ✅ **Stable at capacity**       |
+| Buffer pool allocation | <200ns                 | 113ns (range: 105-120ns) | ✅ **43% better**               |
+| Packet parsing         | <100ns                 | 11ns (range: 8-30ns)     | ✅ **89% better**               |
+| Rule lookup            | <100ns                 | 15ns (range: 7-27ns)     | ✅ **85% better**               |
+| Functional correctness | Pass                   | ✅ Pass                  | ✅ **3-hop pipeline validated** |
+| Telemetry sufficiency  | Observable at capacity | ✅ Yes                   | ✅ **Diagnosed correctly**      |
+| Error handling         | Graceful degradation   | ✅ Buffer exhaustion     | ✅ **Predictable behavior**     |
 
 ---
 

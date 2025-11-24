@@ -252,12 +252,12 @@ async fn test_scale_1m_packets_devnull() {
 
 Expected improvements from avoiding network I/O:
 
-| Metric | With Network | With /dev/null | Improvement |
-|--------|-------------|----------------|-------------|
-| Max PPS (single stream) | ~150k | ~500k+ | 3-4x |
-| CPU per packet | ~6µs | ~2µs | 3x |
-| Jitter | Variable | Minimal | Stable |
-| Multi-stream scaling | Limited by NIC | Limited by CPU | Clear |
+| Metric                  | With Network   | With /dev/null | Improvement |
+| ----------------------- | -------------- | -------------- | ----------- |
+| Max PPS (single stream) | ~150k          | ~500k+         | 3-4x        |
+| CPU per packet          | ~6µs           | ~2µs           | 3x          |
+| Jitter                  | Variable       | Minimal        | Stable      |
+| Multi-stream scaling    | Limited by NIC | Limited by CPU | Clear       |
 
 These are rough estimates - actual measurements needed.
 

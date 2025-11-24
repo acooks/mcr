@@ -4,7 +4,7 @@
 
 In many real-world networks, multicast traffic originates in a secure or isolated network segment, but it needs to be consumed in another. For security and network hygiene, the source of the traffic in the isolated segment is often "unroutable" from the consumer's network.
 
-When a standard Linux server receives this kind of multicast traffic, a kernel security feature called a **Reverse Path Forwarding (RPF) check** is triggered. The kernel looks at the source IP address of the multicast packet and checks if it has a path to send return traffic *back* to that source. If it doesn't (i.e., the source is "unroutable"), the kernel assumes the packet is misconfigured or malicious and **silently drops it**.
+When a standard Linux server receives this kind of multicast traffic, a kernel security feature called a **Reverse Path Forwarding (RPF) check** is triggered. The kernel looks at the source IP address of the multicast packet and checks if it has a path to send return traffic _back_ to that source. If it doesn't (i.e., the source is "unroutable"), the kernel assumes the packet is misconfigured or malicious and **silently drops it**.
 
 This is a common and frustrating problem in many industries, including:
 
@@ -24,7 +24,7 @@ When the server's `eth0` receives the multicast packet, the kernel's RPF check f
 
 MCR solves this problem by acting as a userspace relay. It operates at a low level, bypassing the kernel's routing and RPF checks.
 
-1. **Bypasses RPF:** MCR uses a low-level `AF_PACKET` socket to receive raw Ethernet frames directly from the network interface. This occurs *before* the kernel's IP stack can process them and apply the RPF check. By intervening at Layer 2, MCR ensures packets are not dropped due to routing limitations.
+1. **Bypasses RPF:** MCR uses a low-level `AF_PACKET` socket to receive raw Ethernet frames directly from the network interface. This occurs _before_ the kernel's IP stack can process them and apply the RPF check. By intervening at Layer 2, MCR ensures packets are not dropped due to routing limitations.
 2. **Re-Transmits Cleanly:** MCR then takes the UDP payload from the packet and re-transmits it as a brand new multicast packet from a different interface. Because MCR originates this new packet, the kernel treats it as legitimate local traffic, and the RPF check does not apply to the re-transmitted packet.
 
 This allows MCR to create a clean, one-way bridge for multicast traffic between isolated networks without compromising their security posture. The entire process is optimized for efficiency through the use of Linux's `io_uring` asynchronous I/O interface, minimizing syscall overhead and maximizing throughput.
@@ -36,7 +36,7 @@ The "unroutable source" problem is fundamentally a **routing challenge**. While 
 - **Complexity and Risk of Custom Kernels:** Implementing solutions as custom kernel modules introduces high complexity, requires specialized kernel development expertise, and can pose significant system stability and security risks. Maintaining a non-standard kernel version or custom modules adds a considerable operational burden.
 - **Lack of Current Functionality in Standard Tools:** Standard kernel tools, such as Netfilter, currently **do not provide** the necessary functionality to perform Network Address Translation (NAT) on incoming multicast streams. This is due to fundamental design constraints (e.g., Netfilter's `conntrack` subsystem not handling connectionless multicast traffic), as demonstrated by extensive research.
 
-MCR, as a high-performance **userspace relay**, offers an accessible, flexible, and rapidly deployable solution that works *today*. It delivers the necessary functionality directly to the user in a self-contained application, overcoming these practical barriers to multicast routing without requiring kernel modifications or reliance on unimplemented features in standard tools.
+MCR, as a high-performance **userspace relay**, offers an accessible, flexible, and rapidly deployable solution that works _today_. It delivers the necessary functionality directly to the user in a self-contained application, overcoming these practical barriers to multicast routing without requiring kernel modifications or reliance on unimplemented features in standard tools.
 
 ## What About `socat`?
 

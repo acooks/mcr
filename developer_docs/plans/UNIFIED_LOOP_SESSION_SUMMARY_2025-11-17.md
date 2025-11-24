@@ -132,15 +132,15 @@ Added capacity checks before submitting operations:
 
 fn submit_recv_buffers(&mut self) -> Result<()> {
     // ... allocate buffers ...
-    
+
     // Check available space in submission queue
     let sq = self.ring.submission();
     let sq_available = sq.capacity() - sq.len();
     drop(sq); // Release borrow before loop
-    
+
     // Only submit as many as we have space for
     let to_submit = self.recv_buffers.len().min(sq_available);
-    
+
     for _ in 0..to_submit {
         // ... create and push operation ...
     }
@@ -152,12 +152,12 @@ fn submit_send_batch(&mut self) -> Result<()> {
     let sq = self.ring.submission();
     let sq_available = sq.capacity() - sq.len();
     drop(sq); // Release borrow before loop
-    
+
     // Limit batch size to available space
     let batch_size = self.send_queue.len()
         .min(self.config.send_batch_size)
         .min(sq_available);  // ✅ Never overflow!
-    
+
     for _ in 0..batch_size {
         // ... create and push operation ...
     }

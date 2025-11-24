@@ -214,6 +214,7 @@ The test framework is working exactly as designed:
 ### Bit-Rot Confirmed ⚠️
 
 All 8 ignored tests are failing, validating the original hypothesis:
+
 > "the actual problem is that the tests have bit-rotted, because they never run,
 > because they require root and because we don't have a good, repeatable test-running framework"
 

@@ -82,12 +82,12 @@ cargo bench
 
 ## Performance Targets (from design spec)
 
-| Metric | SPSC Target | MPSC Target |
-|--------|-------------|-------------|
-| Write latency (p50) | < 100 ns | < 200 ns |
-| Write latency (p99) | < 500 ns | < 2 µs |
+| Metric              | SPSC Target   | MPSC Target  |
+| ------------------- | ------------- | ------------ |
+| Write latency (p50) | < 100 ns      | < 200 ns     |
+| Write latency (p99) | < 500 ns      | < 2 µs       |
 | Throughput (single) | > 10M ops/sec | > 5M ops/sec |
-| Overrun rate | < 0.01% | < 0.1% |
+| Overrun rate        | < 0.01%       | < 0.1%       |
 
 ## Implementation Details
 

@@ -1412,20 +1412,20 @@ After this refactoring, consider:
 
 ## Appendix: File Modification Summary
 
-| File | Phase 1 | Phase 2 | Phase 3 | Net LoC Δ |
-|------|---------|---------|---------|-----------|
-| `src/supervisor.rs` | +80 | +80 | 0 | +160 |
-| `src/worker/mod.rs` | -150, +20 | -50, +40 | 0 | -140 |
-| `src/worker/data_plane_integrated.rs` | +10 | 0 | +5 | +15 |
-| `src/worker/ingress.rs` | +90 | 0 | +10 | +100 |
-| `src/worker/egress.rs` | +90 | 0 | +5 | +95 |
-| `src/main.rs` | -3 | 0 | 0 | -3 |
-| `src/logging/logger.rs` | 0 | -200, +40 | 0 | -160 |
-| `src/logging/ringbuffer.rs` | 0 | -873 | 0 | -873 |
-| `src/logging/integration.rs` | 0 | -368 | 0 | -368 |
-| `src/logging/consumer.rs` | 0 | -300 | 0 | -300 |
-| `Cargo.toml` | 0 | +5 | 0 | +5 |
-| **TOTAL** | **+30** | **-1,581** | **+20** | **-1,531** |
+| File                                  | Phase 1   | Phase 2    | Phase 3 | Net LoC Δ  |
+| ------------------------------------- | --------- | ---------- | ------- | ---------- |
+| `src/supervisor.rs`                   | +80       | +80        | 0       | +160       |
+| `src/worker/mod.rs`                   | -150, +20 | -50, +40   | 0       | -140       |
+| `src/worker/data_plane_integrated.rs` | +10       | 0          | +5      | +15        |
+| `src/worker/ingress.rs`               | +90       | 0          | +10     | +100       |
+| `src/worker/egress.rs`                | +90       | 0          | +5      | +95        |
+| `src/main.rs`                         | -3        | 0          | 0       | -3         |
+| `src/logging/logger.rs`               | 0         | -200, +40  | 0       | -160       |
+| `src/logging/ringbuffer.rs`           | 0         | -873       | 0       | -873       |
+| `src/logging/integration.rs`          | 0         | -368       | 0       | -368       |
+| `src/logging/consumer.rs`             | 0         | -300       | 0       | -300       |
+| `Cargo.toml`                          | 0         | +5         | 0       | +5         |
+| **TOTAL**                             | **+30**   | **-1,581** | **+20** | **-1,531** |
 
 ---
 
@@ -1448,5 +1448,5 @@ After this refactoring, consider:
 
 ---
 
-*Document version: 1.0*
-*Last updated: 2025-11-14*
+_Document version: 1.0_
+_Last updated: 2025-11-14_

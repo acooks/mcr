@@ -67,7 +67,7 @@ Multi-homed relay: veth-mcr0, veth-mcr1
 - `test_socat_single_bridge.sh` - 3-namespace test (works but wrong topology)
 - `test_dual_bridge_with_route.sh` - Modified MCR test with relay route (still fails)
 - `README.md` - Updated with findings and limitations
-- Multiple test variant scripts (test_no_*.sh)
+- Multiple test variant scripts (test*no*\*.sh)
 
 ## Conclusion
 

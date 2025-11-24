@@ -217,55 +217,55 @@ sudo -E just test-privileged
 
 ### Building
 
-| Command | What It Does | Time |
-|---------|--------------|------|
+| Command              | What It Does                        | Time   |
+| -------------------- | ----------------------------------- | ------ |
 | `just build-release` | Build release binaries (production) | ~2 min |
-| `just build-test` | Build test binaries (debug) | ~2 min |
-| `just build` | Build all targets (debug) | ~2 min |
+| `just build-test`    | Build test binaries (debug)         | ~2 min |
+| `just build`         | Build all targets (debug)           | ~2 min |
 
 ### Testing (No Root)
 
-| Command | What It Does | Time |
-|---------|--------------|------|
-| `just test-fast` | Unit + unprivileged integration | ~30 sec |
-| `just test-unit` | Unit tests only | ~10 sec |
-| `just test-integration-light` | Unprivileged integration | ~20 sec |
-| `just test-all` | All unprivileged tests | ~1 min |
+| Command                       | What It Does                    | Time    |
+| ----------------------------- | ------------------------------- | ------- |
+| `just test-fast`              | Unit + unprivileged integration | ~30 sec |
+| `just test-unit`              | Unit tests only                 | ~10 sec |
+| `just test-integration-light` | Unprivileged integration        | ~20 sec |
+| `just test-all`               | All unprivileged tests          | ~1 min  |
 
 ### Testing (Requires Root)
 
-| Command | What It Does | Time |
-|---------|--------------|------|
-| `sudo -E just test-privileged` | Privileged Rust tests | ~1 min |
-| `sudo just test-e2e-bash` | Bash E2E tests | ~1 min |
-| `sudo just test-performance` | Full performance test | ~15 sec |
-| `sudo just test-perf-quick` | Quick 10 packet test | ~5 sec |
+| Command                        | What It Does          | Time    |
+| ------------------------------ | --------------------- | ------- |
+| `sudo -E just test-privileged` | Privileged Rust tests | ~1 min  |
+| `sudo just test-e2e-bash`      | Bash E2E tests        | ~1 min  |
+| `sudo just test-performance`   | Full performance test | ~15 sec |
+| `sudo just test-perf-quick`    | Quick 10 packet test  | ~5 sec  |
 
 ### Quality Checks
 
-| Command | What It Does | Time |
-|---------|--------------|------|
-| `just fmt` | Format check | ~5 sec |
-| `just clippy` | Linter check | ~30 sec |
-| `just audit` | Security audit | ~10 sec |
-| `just unsafe-check` | Unsafe code check | ~5 sec |
+| Command             | What It Does      | Time    |
+| ------------------- | ----------------- | ------- |
+| `just fmt`          | Format check      | ~5 sec  |
+| `just clippy`       | Linter check      | ~30 sec |
+| `just audit`        | Security audit    | ~10 sec |
+| `just unsafe-check` | Unsafe code check | ~5 sec  |
 
 ### Meta Commands
 
-| Command | What It Does | Time |
-|---------|--------------|------|
+| Command              | What It Does             | Time     |
+| -------------------- | ------------------------ | -------- |
 | `just` or `just dev` | Default development loop | ~2-3 min |
-| `just check` | Fast quality checks | ~2-3 min |
-| `just check-full` | Full CI pipeline | ~10+ min |
+| `just check`         | Fast quality checks      | ~2-3 min |
+| `just check-full`    | Full CI pipeline         | ~10+ min |
 
 ### Utilities
 
-| Command | What It Does |
-|---------|--------------|
-| `just setup-kernel` | Setup kernel tuning |
-| `just clean` | Clean build artifacts |
-| `just outdated` | Check outdated dependencies |
-| `just coverage` | Generate coverage report |
+| Command             | What It Does                |
+| ------------------- | --------------------------- |
+| `just setup-kernel` | Setup kernel tuning         |
+| `just clean`        | Clean build artifacts       |
+| `just outdated`     | Check outdated dependencies |
+| `just coverage`     | Generate coverage report    |
 
 ---
 

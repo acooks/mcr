@@ -46,7 +46,7 @@ gen-ns (veth0) <-> (veth1) relay-ns (veth2) <-> (veth3) sink-ns
 #### Results
 
 | Packet Rate | MCR Loss | socat Loss | Performance Gap |
-|-------------|----------|------------|-----------------|
+| ----------- | -------- | ---------- | --------------- |
 | 50k pps     | 0.00%    | 0.00%      | None            |
 | 200k pps    | 0.00%    | 0.00%      | None            |
 | 400k pps    | 0.20%    | 15.33%     | **15.13%**      |
@@ -68,11 +68,11 @@ br0 (Network Segment A)         br1 (Network Segment B)
 
 #### Results
 
-| Metric             | MCR         | socat       | Comparison      |
-|--------------------|-------------|-------------|-----------------|
-| Packets Delivered  | 1,000,000   | 0           | MCR: ∞ advantage|
-| Packet Loss        | 0.00%       | 100.00%     | MCR: Perfect    |
-| Result             | ✅ EXCELLENT | ❌ FAILED   | **MCR succeeds**|
+| Metric            | MCR          | socat     | Comparison       |
+| ----------------- | ------------ | --------- | ---------------- |
+| Packets Delivered | 1,000,000    | 0         | MCR: ∞ advantage |
+| Packet Loss       | 0.00%        | 100.00%   | MCR: Perfect     |
+| Result            | ✅ EXCELLENT | ❌ FAILED | **MCR succeeds** |
 
 **Analysis:**
 
@@ -96,11 +96,11 @@ br0 (Network Segment A)         br1 (Network Segment B)
 ### Multi-Stream Scalability
 
 | Streams | MCR Process Count | socat Process Count | MCR Advantage |
-|---------|------------------|---------------------|---------------|
-| 1       | 1 supervisor     | 2 processes         | 50% fewer     |
-| 5       | 1 supervisor     | 10 processes        | 90% fewer     |
-| 10      | 1 supervisor     | 20 processes        | 95% fewer     |
-| 20      | 1 supervisor     | 40 processes        | 97.5% fewer   |
+| ------- | ----------------- | ------------------- | ------------- |
+| 1       | 1 supervisor      | 2 processes         | 50% fewer     |
+| 5       | 1 supervisor      | 10 processes        | 90% fewer     |
+| 10      | 1 supervisor      | 20 processes        | 95% fewer     |
+| 20      | 1 supervisor      | 40 processes        | 97.5% fewer   |
 
 **Analysis:** MCR's supervisor-worker model is significantly more efficient for managing multiple streams, requiring far fewer processes than `socat`.
 

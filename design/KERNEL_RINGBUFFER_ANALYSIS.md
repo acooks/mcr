@@ -217,19 +217,19 @@ struct msgbuf {
 
 ## Comparative Analysis
 
-| Feature | Linux `printk_ringbuffer` | FreeBSD `msgbuf` |
-|---------|---------------------------|------------------|
-| **Rings** | 3 rings (desc, text, info) | 1 ring (byte buffer) |
-| **Locking** | Lockless (per-CPU atomic CAS) | Spinlock (`MTX_SPIN`) |
-| **Readers** | Multiple concurrent readers | Single reader (or serialized) |
-| **Writers** | Per-CPU synchronization | Spinlock-protected |
-| **NMI-safe** | Yes (lockless design) | Partially (spinlocks can deadlock in NMI) |
-| **ABA Prevention** | ID field in descriptor | Sequence modulus 16× buffer size |
-| **Metadata** | Separate descriptor ring | Inline flags + checksum |
-| **Complexity** | High (state machine, 3 rings) | Low (sequence numbers, 1 buffer) |
-| **Performance** | Extremely high concurrency | Good for moderate concurrency |
-| **Memory Overhead** | Higher (descriptors + text + info) | Lower (just buffer + metadata) |
-| **Timestamp** | Per-record in descriptor | Can be added (recent enhancement) |
+| Feature             | Linux `printk_ringbuffer`          | FreeBSD `msgbuf`                          |
+| ------------------- | ---------------------------------- | ----------------------------------------- |
+| **Rings**           | 3 rings (desc, text, info)         | 1 ring (byte buffer)                      |
+| **Locking**         | Lockless (per-CPU atomic CAS)      | Spinlock (`MTX_SPIN`)                     |
+| **Readers**         | Multiple concurrent readers        | Single reader (or serialized)             |
+| **Writers**         | Per-CPU synchronization            | Spinlock-protected                        |
+| **NMI-safe**        | Yes (lockless design)              | Partially (spinlocks can deadlock in NMI) |
+| **ABA Prevention**  | ID field in descriptor             | Sequence modulus 16× buffer size          |
+| **Metadata**        | Separate descriptor ring           | Inline flags + checksum                   |
+| **Complexity**      | High (state machine, 3 rings)      | Low (sequence numbers, 1 buffer)          |
+| **Performance**     | Extremely high concurrency         | Good for moderate concurrency             |
+| **Memory Overhead** | Higher (descriptors + text + info) | Lower (just buffer + metadata)            |
+| **Timestamp**       | Per-record in descriptor           | Can be added (recent enhancement)         |
 
 ---
 
@@ -465,11 +465,11 @@ impl ControlPlaneRingBuffer {
 
 ### Expected Latency
 
-| Operation | Data Plane (SPSC) | Control Plane (MPSC) |
-|-----------|-------------------|----------------------|
-| Write (no contention) | ~50-100 ns | ~100-200 ns |
-| Write (with contention) | N/A (single writer) | ~500 ns - 2 µs |
-| Read | ~50-100 ns | ~100-200 ns |
+| Operation               | Data Plane (SPSC)   | Control Plane (MPSC) |
+| ----------------------- | ------------------- | -------------------- |
+| Write (no contention)   | ~50-100 ns          | ~100-200 ns          |
+| Write (with contention) | N/A (single writer) | ~500 ns - 2 µs       |
+| Read                    | ~50-100 ns          | ~100-200 ns          |
 
 **Comparison**:
 

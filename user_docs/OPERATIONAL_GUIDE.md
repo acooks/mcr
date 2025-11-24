@@ -27,7 +27,7 @@ The Ingress stats line shows how many packets are being received from the networ
 - **`parse_err`**: The number of packets that were dropped because they were not valid Ethernet/IP/UDP frames. A high number may indicate non-IP traffic on the network.
 - **`no_match`**: The number of valid UDP packets that did not match any active forwarding rule. This is expected if there is other multicast traffic on the network that you don't intend to relay.
 - **`buf_exhaust` (Buffer Exhaustion):** This is a critical health metric. It counts how many incoming packets were dropped because the internal memory buffers were all in use. This is the primary indicator of **back-pressure**.
-- **`pps` (Packets Per Second):** The current rate of *received* packets. Actual rates depend on system hardware and traffic load.
+- **`pps` (Packets Per Second):** The current rate of _received_ packets. Actual rates depend on system hardware and traffic load.
 
 ### Egress Statistics
 
@@ -40,7 +40,7 @@ The Egress stats line shows how many packets are being sent out.
 - **`submitted`**: The total number of packets that the MCR application has submitted to the `io_uring` kernel interface for sending.
 - **`errors`**: The number of packets that the kernel reported as failing to send. This counter **should always be 0** in a healthy system.
 - **`bytes`**: The total number of bytes sent.
-- **`pps` (Packets Per Second):** The current rate of *sent* packets.
+- **`pps` (Packets Per Second):** The current rate of _sent_ packets.
 
 ## Interpreting Common Scenarios
 

@@ -277,7 +277,7 @@ All benchmarks completed successfully. Key findings below.
 **Test:** 1000-byte packets, queue depth 128, varying batch sizes
 
 | Batch Size | Time per Batch | Throughput (Melem/s) | Packets/Sec |
-|------------|----------------|----------------------|-------------|
+| ---------- | -------------- | -------------------- | ----------- |
 | 1          | 776 ns         | 1.29                 | 1.29M       |
 | 16         | 8.88 µs        | 1.80                 | 1.80M       |
 | 32         | 17.47 µs       | 1.83                 | 1.83M       |
@@ -302,7 +302,7 @@ All benchmarks completed successfully. Key findings below.
 **Test:** 64-packet batches, 1000-byte packets, varying queue depths
 
 | Queue Depth | Time per Batch | Delta vs QD=32 |
-|-------------|----------------|----------------|
+| ----------- | -------------- | -------------- |
 | 32          | 34.68 µs       | baseline       |
 | 64          | 34.53 µs       | -0.4%          |
 | 128         | 34.59 µs       | -0.3%          |
@@ -320,7 +320,7 @@ All benchmarks completed successfully. Key findings below.
 **Test:** 64-packet batches, queue depth 128, varying packet sizes
 
 | Packet Size | Time per Batch | Throughput (MiB/s) |
-|-------------|----------------|--------------------|
+| ----------- | -------------- | ------------------ |
 | 100 bytes   | 33.91 µs       | 2.81               |
 | 500 bytes   | 60.48 µs       | 7.88               |
 | 1000 bytes  | 43.25 µs       | 22.05              |
@@ -340,7 +340,7 @@ All benchmarks completed successfully. Key findings below.
 **Test:** 64-packet batches, 1000-byte packets, queue depth 128
 
 | Configuration | Time per Batch | Overhead |
-|---------------|----------------|----------|
+| ------------- | -------------- | -------- |
 | With stats    | 34.548 µs      | baseline |
 | Without stats | 34.506 µs      | -0.12%   |
 
@@ -418,7 +418,7 @@ CPU saved: 71.7% per core
 **Per-packet overhead:**
 
 | Batch Size | Total Time | Per-Packet | Efficiency vs Batch 1 |
-|------------|------------|------------|-----------------------|
+| ---------- | ---------- | ---------- | --------------------- |
 | 1          | 776 ns     | 776 ns     | 1.0x (baseline)       |
 | 16         | 8.88 µs    | 555 ns     | 1.40x faster          |
 | 32         | 17.47 µs   | 546 ns     | 1.42x faster          |

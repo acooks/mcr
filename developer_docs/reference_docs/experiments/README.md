@@ -11,18 +11,18 @@ This directory contains historical scripts and analyses used to investigate comp
 The experiments in this directory have produced several critical insights that directly shaped MCR's architecture and roadmap.
 
 1. **MCR Outperforms `socat` at High Load:**
-    - In sustained, high-rate, single-stream tests (150k pps), MCR demonstrates **3.3% higher throughput** than a process-per-stream `socat` equivalent. While both tools show packet loss at this load, MCR's performance advantage is clear.
-    - _Source: [High_Density_Stream_Test.md](./High_Density_Stream_Test.md)_
+   - In sustained, high-rate, single-stream tests (150k pps), MCR demonstrates **3.3% higher throughput** than a process-per-stream `socat` equivalent. While both tools show packet loss at this load, MCR's performance advantage is clear.
+   - _Source: [High_Density_Stream_Test.md](./High_Density_Stream_Test.md)_
 
 2. **Discovery of the Multi-Worker Duplication Bug:**
-    - The high-density performance test was the first to uncover the critical bug where running MCR with more than one worker (`--num-workers > 1`) caused massive packet duplication (a 1.28x factor).
-    - This finding directly led to the implementation of the `PACKET_FANOUT` architecture, which is a cornerstone of MCR's multi-core scaling.
-    - _Source: [High_Density_Stream_Test.md](./High_Density_Stream_Test.md)_
+   - The high-density performance test was the first to uncover the critical bug where running MCR with more than one worker (`--num-workers > 1`) caused massive packet duplication (a 1.28x factor).
+   - This finding directly led to the implementation of the `PACKET_FANOUT` architecture, which is a cornerstone of MCR's multi-core scaling.
+   - _Source: [High_Density_Stream_Test.md](./High_Density_Stream_Test.md)_
 
 3. **`socat` Fails in Realistic Topologies:**
-    - While `socat` can be made to relay multicast in simple, artificial 3-namespace "chain" topologies, it **consistently fails** with 0% packet delivery in MCR's more realistic single-namespace, dual-bridge topology.
-    - This proves that `socat` is not a viable alternative for MCR's target use cases without significant, and as-yet-undiscovered, configuration. This validates the need for MCR's Layer 2 (`AF_PACKET`) approach.
-    - _Source: [multicast_routing_analysis.md](./multicast_routing_analysis.md), [SESSION_NOTES_2025-11-15.md](./SESSION_NOTES_2025-11-15.md)_
+   - While `socat` can be made to relay multicast in simple, artificial 3-namespace "chain" topologies, it **consistently fails** with 0% packet delivery in MCR's more realistic single-namespace, dual-bridge topology.
+   - This proves that `socat` is not a viable alternative for MCR's target use cases without significant, and as-yet-undiscovered, configuration. This validates the need for MCR's Layer 2 (`AF_PACKET`) approach.
+   - _Source: [multicast_routing_analysis.md](./multicast_routing_analysis.md), [SESSION_NOTES_2025-11-15.md](./SESSION_NOTES_2025-11-15.md)_
 
 ---
 

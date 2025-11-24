@@ -304,15 +304,15 @@
 
 ## Specific Gaps to Address
 
-| Component | Current | Needed | Risk |
-|-----------|---------|--------|------|
-| Supervisor | 0 tests | 10-15 tests | **CRITICAL** |
-| Data Plane Loop | 2 tests | 8-10 tests | **HIGH** |
-| Network Monitor | 0 tests | 5 tests | MEDIUM |
-| Rule Dispatch | 0 tests | 5 tests | MEDIUM |
-| Adaptive Wakeup | 1 test | 6 tests | MEDIUM |
-| Buffer Pool | 0 tests | 4 tests | MEDIUM |
-| Ingress/Egress | 2 tests | 10 tests | HIGH |
+| Component       | Current | Needed      | Risk         |
+| --------------- | ------- | ----------- | ------------ |
+| Supervisor      | 0 tests | 10-15 tests | **CRITICAL** |
+| Data Plane Loop | 2 tests | 8-10 tests  | **HIGH**     |
+| Network Monitor | 0 tests | 5 tests     | MEDIUM       |
+| Rule Dispatch   | 0 tests | 5 tests     | MEDIUM       |
+| Adaptive Wakeup | 1 test  | 6 tests     | MEDIUM       |
+| Buffer Pool     | 0 tests | 4 tests     | MEDIUM       |
+| Ingress/Egress  | 2 tests | 10 tests    | HIGH         |
 
 ---
 

@@ -93,11 +93,11 @@ The following fixes were implemented in the `unified_loop.rs` data plane:
 
 ### 4.1. Performance Metrics
 
-| Metric             | Before Fixes (Nov 16) | After Fixes (Nov 18) | Improvement |
-|--------------------|-----------------------|----------------------|-------------|
-| Egress Throughput  | 97,000 pps            | 439,418 pps          | +353%       |
-| Buffer Exhaustion  | 86%                   | 0%                   | -100%       |
-| vs. PHASE4 Target  | -68%                  | +43%                 |             |
+| Metric            | Before Fixes (Nov 16) | After Fixes (Nov 18) | Improvement |
+| ----------------- | --------------------- | -------------------- | ----------- |
+| Egress Throughput | 97,000 pps            | 439,418 pps          | +353%       |
+| Buffer Exhaustion | 86%                   | 0%                   | -100%       |
+| vs. PHASE4 Target | -68%                  | +43%                 |             |
 
 ### 4.2. Analysis
 
@@ -122,7 +122,6 @@ This section validates MCR's performance claims across multiple dimensions after
 - **Objective:** Validate 439k pps egress throughput with 0% buffer exhaustion.
 
 - **Results:**
-
   - Egress rate: 434,853 pps (within 1% of documented)
 
   - Buffer exhaustion: 0%

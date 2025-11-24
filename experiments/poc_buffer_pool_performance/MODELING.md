@@ -23,11 +23,11 @@ Where Buffer_lifetime = Parse + Copy + Submit + Completion + Dealloc
 
 **Example calculations (312.5k pps/core):**
 
-| Scenario | Completion | Total Lifetime | Buffers In-Flight |
-|----------|------------|----------------|-------------------|
-| Optimistic | 5 µs | 7 µs | 2.2 |
-| Realistic | 20 µs | 22 µs | 6.9 |
-| Pessimistic | 100 µs | 102 µs | 31.9 |
+| Scenario    | Completion | Total Lifetime | Buffers In-Flight |
+| ----------- | ---------- | -------------- | ----------------- |
+| Optimistic  | 5 µs       | 7 µs           | 2.2               |
+| Realistic   | 20 µs      | 22 µs          | 6.9               |
+| Pessimistic | 100 µs     | 102 µs         | 31.9              |
 
 ### 2. io_uring Batch Effects
 
@@ -164,14 +164,14 @@ This weighting balances:
 
 Based on this model, experiment success criteria:
 
-| Metric | Target | Rationale |
-|--------|--------|-----------|
-| Pool alloc latency (p99) | < 50 ns | 5-10x better than Vec |
-| Pool throughput | > 5M ops/sec | 16x headroom over 312.5k pps |
-| Exhaustion behavior | Graceful drop | No crashes, predictable |
-| Recovery time | < 100 ms | Fast return to normal |
-| Metrics overhead | < 10% | Acceptable for observability |
-| Cache benefit | 10-100x fewer L3 misses | Quantifiable via perf |
+| Metric                   | Target                  | Rationale                    |
+| ------------------------ | ----------------------- | ---------------------------- |
+| Pool alloc latency (p99) | < 50 ns                 | 5-10x better than Vec        |
+| Pool throughput          | > 5M ops/sec            | 16x headroom over 312.5k pps |
+| Exhaustion behavior      | Graceful drop           | No crashes, predictable      |
+| Recovery time            | < 100 ms                | Fast return to normal        |
+| Metrics overhead         | < 10%                   | Acceptable for observability |
+| Cache benefit            | 10-100x fewer L3 misses | Quantifiable via perf        |
 
 ## Validation Checklist
 

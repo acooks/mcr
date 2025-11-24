@@ -37,8 +37,8 @@ Runs as part of `just check` and verifies:
 
 - ✅ Unsafe block count is within limits
 - ✅ Unsafe code percentage is acceptable
-- ⚠️  Safety documentation exists for unsafe functions
-- ⚠️  No dangerous patterns (excessive transmute, raw pointers)
+- ⚠️ Safety documentation exists for unsafe functions
+- ⚠️ No dangerous patterns (excessive transmute, raw pointers)
 - 📊 Tracks changes from baseline
 
 **Usage**:
@@ -102,14 +102,14 @@ Functions  Expressions  Impls  Traits  Methods  Dependency
 
 **Total**: 17 unsafe blocks (0.35% of codebase)
 
-| File | Count | Purpose | Status |
-|------|-------|---------|--------|
-| `worker/ingress.rs` | 6 | io_uring, AF_PACKET sockets, FFI | ✅ Justified |
-| `worker/egress.rs` | 4 | io_uring send operations, FD conversion | ✅ Justified |
-| `worker/mod.rs` | 4 | Privilege checks, Unix stream conversion | ✅ Justified |
-| `worker/data_plane.rs` | 2 | Socket ownership transfer | ✅ Justified |
-| `worker/buffer_pool.rs` | 1 | Zero-copy buffer management | ⚠️ Needs doc |
-| `packet_parser.rs` | 0 | (Future optimization candidate) | N/A |
+| File                    | Count | Purpose                                  | Status       |
+| ----------------------- | ----- | ---------------------------------------- | ------------ |
+| `worker/ingress.rs`     | 6     | io_uring, AF_PACKET sockets, FFI         | ✅ Justified |
+| `worker/egress.rs`      | 4     | io_uring send operations, FD conversion  | ✅ Justified |
+| `worker/mod.rs`         | 4     | Privilege checks, Unix stream conversion | ✅ Justified |
+| `worker/data_plane.rs`  | 2     | Socket ownership transfer                | ✅ Justified |
+| `worker/buffer_pool.rs` | 1     | Zero-copy buffer management              | ⚠️ Needs doc |
+| `packet_parser.rs`      | 0     | (Future optimization candidate)          | N/A          |
 
 ### Dependencies with Heavy Unsafe
 
@@ -136,7 +136,7 @@ Zero unsafe (safe abstractions):
 
 ### Safety Documentation Template
 
-```rust
+````rust
 /// Brief description of what this does
 ///
 /// # Safety
@@ -154,7 +154,7 @@ Zero unsafe (safe abstractions):
 pub unsafe fn dangerous_operation() {
     // ...
 }
-```
+````
 
 ### Code Review Checklist
 
@@ -174,7 +174,7 @@ The unsafe check is integrated into CI as part of `just check`:
 ```yaml
 # .github/workflows/ci.yml (example)
 - name: Run Quality Checks
-  run: just check  # Includes unsafe-check
+  run: just check # Includes unsafe-check
 ```
 
 ## Monitoring and Trends

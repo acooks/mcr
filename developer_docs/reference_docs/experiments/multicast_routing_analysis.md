@@ -61,6 +61,7 @@ ip route add 224.0.0.0/4 dev veth-mcr1
 ```
 
 This creates an explicit routing entry that instructs the kernel:
+
 > "All multicast destinations (224.0.0.0/4 range) should egress via veth-mcr1"
 
 Now when socat sends to 239.9.9.9, the kernel routing lookup succeeds and correctly uses veth-mcr1 as the egress interface.

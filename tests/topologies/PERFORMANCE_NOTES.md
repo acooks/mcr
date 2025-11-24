@@ -41,11 +41,11 @@ Buffer exhaustion: 62,316 packets (21% of received)
 
 ## Performance Comparison
 
-| Configuration | Interfaces | Workers | Throughput | Notes |
-|---------------|------------|---------|------------|-------|
-| **Production** (PHASE4) | Real veth (point-to-point) | 1 | **490k pps** ingress | With kernel buffer tuning |
-| **Test** (chain_3hop) | Virtual veth (in namespace) | 1 | **240k pps** effective | Untuned kernel, isolated namespace |
-| **Theoretical** | Real NIC | 8 | >3M pps | Multi-core, lazy socket creation |
+| Configuration           | Interfaces                  | Workers | Throughput             | Notes                              |
+| ----------------------- | --------------------------- | ------- | ---------------------- | ---------------------------------- |
+| **Production** (PHASE4) | Real veth (point-to-point)  | 1       | **490k pps** ingress   | With kernel buffer tuning          |
+| **Test** (chain_3hop)   | Virtual veth (in namespace) | 1       | **240k pps** effective | Untuned kernel, isolated namespace |
+| **Theoretical**         | Real NIC                    | 8       | >3M pps                | Multi-core, lazy socket creation   |
 
 ## Why veth Performance is Lower
 

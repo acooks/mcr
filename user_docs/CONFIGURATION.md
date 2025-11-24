@@ -21,12 +21,12 @@ sudo ./scripts/setup_kernel_tuning.sh
 
 The script sets the following `sysctl` parameters. To make them permanent, add them to `/etc/sysctl.conf`.
 
-| Parameter | Recommended Value | Description |
-| :--- | :--- | :--- |
-| `net.core.wmem_max` | `16777216` (16 MB) | Maximum UDP send buffer size for a socket. |
-| `net.core.wmem_default`| `4194304` (4 MB) | Default UDP send buffer size. |
-| `net.core.rmem_max` | `16777216` (16 MB) | Maximum UDP receive buffer size for a socket. |
-| `net.core.rmem_default`| `4194304` (4 MB) | Default UDP receive buffer size. |
+| Parameter               | Recommended Value  | Description                                   |
+| :---------------------- | :----------------- | :-------------------------------------------- |
+| `net.core.wmem_max`     | `16777216` (16 MB) | Maximum UDP send buffer size for a socket.    |
+| `net.core.wmem_default` | `4194304` (4 MB)   | Default UDP send buffer size.                 |
+| `net.core.rmem_max`     | `16777216` (16 MB) | Maximum UDP receive buffer size for a socket. |
+| `net.core.rmem_default` | `4194304` (4 MB)   | Default UDP receive buffer size.              |
 
 ---
 
@@ -34,16 +34,16 @@ The script sets the following `sysctl` parameters. To make them permanent, add t
 
 These environment variables can be used to fine-tune the data plane's performance characteristics. They are intended for advanced users who are diagnosing performance issues or optimizing for specific workloads.
 
-| Variable | Default Value | Description |
-| :--- | :--- | :--- |
-| `MCR_SOCKET_SNDBUF` | `4194304` (4 MB) | Sets the `SO_SNDBUF` (send buffer) size in bytes for egress UDP sockets. |
-| `MCR_IO_URING_DEPTH`| `1024` | The number of submission queue entries for `io_uring`. Higher values allow more operations to be in-flight. |
-| `MCR_SEND_BATCH_SIZE`| `64` | The maximum number of packets to send in a single batch syscall. |
-| `MCR_NUM_WORKERS` | `1` | The number of data plane worker threads to spawn. |
-| `MCR_BUFFER_POOL_SMALL`| `1000` | Number of small buffers (up to 2KB) to pre-allocate. |
-| `MCR_BUFFER_POOL_STANDARD`| `500` | Number of standard buffers (up to 4KB) to pre-allocate. |
-| `MCR_BUFFER_POOL_JUMBO`| `200` | Number of jumbo buffers (up to 64KB) to pre-allocate. |
-| `MCR_VERBOSE` | `0` | Set to `1` to enable verbose logging for debugging. |
+| Variable                   | Default Value    | Description                                                                                                 |
+| :------------------------- | :--------------- | :---------------------------------------------------------------------------------------------------------- |
+| `MCR_SOCKET_SNDBUF`        | `4194304` (4 MB) | Sets the `SO_SNDBUF` (send buffer) size in bytes for egress UDP sockets.                                    |
+| `MCR_IO_URING_DEPTH`       | `1024`           | The number of submission queue entries for `io_uring`. Higher values allow more operations to be in-flight. |
+| `MCR_SEND_BATCH_SIZE`      | `64`             | The maximum number of packets to send in a single batch syscall.                                            |
+| `MCR_NUM_WORKERS`          | `1`              | The number of data plane worker threads to spawn.                                                           |
+| `MCR_BUFFER_POOL_SMALL`    | `1000`           | Number of small buffers (up to 2KB) to pre-allocate.                                                        |
+| `MCR_BUFFER_POOL_STANDARD` | `500`            | Number of standard buffers (up to 4KB) to pre-allocate.                                                     |
+| `MCR_BUFFER_POOL_JUMBO`    | `200`            | Number of jumbo buffers (up to 64KB) to pre-allocate.                                                       |
+| `MCR_VERBOSE`              | `0`              | Set to `1` to enable verbose logging for debugging.                                                         |
 
 **Example:**
 
@@ -88,14 +88,14 @@ Adds a new rule to forward an input stream to one or more outputs.
 
 **Arguments:**
 
-| Argument | Description |
-| :--- | :--- |
-| `--input-interface` | Network interface for the input stream (e.g., `eth0`). |
-| `--input-group` | Input multicast group IP address. |
-| `--input-port` | Input multicast UDP port. |
-| `--output-interface`| Network interface for the output stream. Can be specified multiple times for fan-out. |
-| `--output-group` | Output multicast group IP address. |
-| `--output-port` | Output multicast UDP port. |
+| Argument             | Description                                                                           |
+| :------------------- | :------------------------------------------------------------------------------------ |
+| `--input-interface`  | Network interface for the input stream (e.g., `eth0`).                                |
+| `--input-group`      | Input multicast group IP address.                                                     |
+| `--input-port`       | Input multicast UDP port.                                                             |
+| `--output-interface` | Network interface for the output stream. Can be specified multiple times for fan-out. |
+| `--output-group`     | Output multicast group IP address.                                                    |
+| `--output-port`      | Output multicast UDP port.                                                            |
 
 ### 4.2. Remove a Forwarding Rule
 
@@ -158,10 +158,10 @@ A utility for sending test multicast traffic.
 
 **Arguments:**
 
-| Argument | Description |
-| :--- | :--- |
+| Argument      | Description                                          |
+| :------------ | :--------------------------------------------------- |
 | `--interface` | The source IP address of the interface to send from. |
-| `--group` | The destination multicast group IP address. |
-| `--port` | The destination multicast UDP port. |
-| `--rate` | The target send rate in packets per second. |
-| `--size` | The size of the UDP payload in bytes. |
+| `--group`     | The destination multicast group IP address.          |
+| `--port`      | The destination multicast UDP port.                  |
+| `--rate`      | The target send rate in packets per second.          |
+| `--size`      | The size of the UDP payload in bytes.                |

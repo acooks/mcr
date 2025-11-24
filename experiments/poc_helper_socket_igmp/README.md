@@ -278,12 +278,12 @@ Would require major redesign:
 
 This experiment **definitively validates** the core ingress design:
 
-| Design Decision | Status | Notes |
-|----------------|--------|-------|
+| Design Decision                | Status       | Notes                                        |
+| ------------------------------ | ------------ | -------------------------------------------- |
 | **D6 - Helper Socket Pattern** | ✅ Validated | IGMP join works perfectly from unused socket |
-| **D4 - Hardware Filtering** | ✅ Validated | NIC MAC filter programmed correctly |
-| **D3 - Userspace Demux** | ✅ Required | Still needed to filter UDP by group/port |
-| **D1 - AF_PACKET** | ✅ Validated | Raw packet reception works as designed |
+| **D4 - Hardware Filtering**    | ✅ Validated | NIC MAC filter programmed correctly          |
+| **D3 - Userspace Demux**       | ✅ Required  | Still needed to filter UDP by group/port     |
+| **D1 - AF_PACKET**             | ✅ Validated | Raw packet reception works as designed       |
 
 **No architectural changes needed** - proceed with data plane implementation!
 

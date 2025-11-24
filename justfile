@@ -58,6 +58,17 @@ fix-docs:
     npx markdownlint --fix --config .markdownlint.json "**/*.md"
     @echo "✅ Documentation auto-fixed! Review changes with 'git diff'"
 
+# Format documentation with prettier (handles tables better)
+prettier-docs:
+    @echo "--- Formatting Documentation with Prettier ---"
+    @if ! command -v prettier &> /dev/null; then \
+        echo "Error: prettier is not installed."; \
+        echo "Install with: npm install -g prettier"; \
+        exit 1; \
+    fi
+    prettier --write "**/*.md"
+    @echo "✅ Documentation formatted with prettier!"
+
 # Check for broken links in markdown files
 check-links:
     @echo "--- Checking Markdown Links ---"

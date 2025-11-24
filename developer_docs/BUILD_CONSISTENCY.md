@@ -387,13 +387,15 @@ pub fn binary_path(name: &str) -> PathBuf {
 
 Add to `README.md`:
 
-```markdown
+````markdown
 ## Testing
 
 ### Build Once
+
 ```bash
 cargo build --release --bins
 ```
+````
 
 ### Run Tests
 
@@ -459,10 +461,6 @@ Cargo rebuilds when:
 2. Add warning in `binary_path()` for stale binaries
 3. Document workflow in README
 
-**MEDIUM PRIORITY:**
-4. Create `scripts/build_all.sh` and `scripts/run_tests.sh`
-5. Add Makefile or justfile
+**MEDIUM PRIORITY:** 4. Create `scripts/build_all.sh` and `scripts/run_tests.sh` 5. Add Makefile or justfile
 
-**LOW PRIORITY:**
-6. Add CI checks to ensure consistent builds
-7. Consider binary caching strategies
+**LOW PRIORITY:** 6. Add CI checks to ensure consistent builds 7. Consider binary caching strategies

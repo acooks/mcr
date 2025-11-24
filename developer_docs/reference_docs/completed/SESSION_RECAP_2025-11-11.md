@@ -45,13 +45,13 @@ The system provides **sufficient telemetry** to diagnose "at capacity but operat
 
 ### Code Changes
 
-| File | Change | Purpose |
-|------|--------|---------|
-| `tests/data_plane_pipeline_veth.sh` | Created | 3-hop performance test with veth pairs |
-| `src/worker/ingress.rs:306` | `[Ingress Stats]` → `[STATS:Ingress]` | Distinguish stats from debug |
-| `src/worker/data_plane_integrated.rs:242` | `[Egress Stats]` → `[STATS:Egress]` | Distinguish stats from debug |
-| `src/supervisor.rs:118-136` | Implement GetStats | Return configured rules |
-| `src/worker/egress.rs:512` | Add payload_len to test | Fix compilation |
+| File                                      | Change                                | Purpose                                |
+| ----------------------------------------- | ------------------------------------- | -------------------------------------- |
+| `tests/data_plane_pipeline_veth.sh`       | Created                               | 3-hop performance test with veth pairs |
+| `src/worker/ingress.rs:306`               | `[Ingress Stats]` → `[STATS:Ingress]` | Distinguish stats from debug           |
+| `src/worker/data_plane_integrated.rs:242` | `[Egress Stats]` → `[STATS:Egress]`   | Distinguish stats from debug           |
+| `src/supervisor.rs:118-136`               | Implement GetStats                    | Return configured rules                |
+| `src/worker/egress.rs:512`                | Add payload_len to test               | Fix compilation                        |
 
 ### Documentation Created
 

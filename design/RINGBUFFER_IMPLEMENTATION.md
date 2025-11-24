@@ -28,10 +28,10 @@ Position:    0,   1,   2,   3,   0,   1,   2,   3,   0,   1,   2, ... (capacity=
 
 **Decision**: Two ring buffer implementations for different concurrency patterns.
 
-| Buffer Type | Use Case | Writers | Readers | Synchronization |
-|-------------|----------|---------|---------|-----------------|
-| **SPSC** | Data plane (io_uring) | 1 per core | 1 (consumer) | Lock-free, Relaxed atomics |
-| **MPSC** | Control plane (async) | N (tokio tasks) | 1 (consumer) | CAS-based reservation |
+| Buffer Type | Use Case              | Writers         | Readers      | Synchronization            |
+| ----------- | --------------------- | --------------- | ------------ | -------------------------- |
+| **SPSC**    | Data plane (io_uring) | 1 per core      | 1 (consumer) | Lock-free, Relaxed atomics |
+| **MPSC**    | Control plane (async) | N (tokio tasks) | 1 (consumer) | CAS-based reservation      |
 
 ### 3. Entry State Machine
 
@@ -58,13 +58,13 @@ Reader: READY → EMPTY (after consuming)
 
 **Critical for Correctness**:
 
-| Operation | Ordering | Rationale |
-|-----------|----------|-----------|
-| Write seq increment | `Relaxed` (SPSC) / `AcqRel` (MPSC) | SPSC has no contention, MPSC needs synchronization |
-| Read seq load | `Acquire` | Synchronize with writer |
-| Entry state → WRITING | `Release` | Signal start of write |
-| Entry state → READY | `Release` | Ensure data visible before ready |
-| Entry state load | `Acquire` | Ensure reading latest data |
+| Operation             | Ordering                           | Rationale                                          |
+| --------------------- | ---------------------------------- | -------------------------------------------------- |
+| Write seq increment   | `Relaxed` (SPSC) / `AcqRel` (MPSC) | SPSC has no contention, MPSC needs synchronization |
+| Read seq load         | `Acquire`                          | Synchronize with writer                            |
+| Entry state → WRITING | `Release`                          | Signal start of write                              |
+| Entry state → READY   | `Release`                          | Ensure data visible before ready                   |
+| Entry state load      | `Acquire`                          | Ensure reading latest data                         |
 
 **Key Insight**: Paired `Release`/`Acquire` creates happens-before relationship.
 
@@ -329,14 +329,14 @@ Reader implementation identical to SPSC (single consumer in both cases).
 
 ### Memory Budget
 
-| Component | Buffer Size | Entry Size | Total Memory | Rationale |
-|-----------|-------------|------------|--------------|-----------|
-| Ingress (per-core) | 65,536 | 512 B | 32 MB | Fits in L3 cache, handles bursts |
-| Egress (per-core) | 16,384 | 512 B | 8 MB | Lower volume than ingress |
-| DataPlane | 8,192 | 512 B | 4 MB | Coordinator, moderate volume |
-| Supervisor | 4,096 | 512 B | 2 MB | Low frequency |
-| ControlPlane | 4,096 | 512 B | 2 MB | Low frequency |
-| Other facilities | 2,048 | 512 B | 1 MB | Default for misc facilities |
+| Component          | Buffer Size | Entry Size | Total Memory | Rationale                        |
+| ------------------ | ----------- | ---------- | ------------ | -------------------------------- |
+| Ingress (per-core) | 65,536      | 512 B      | 32 MB        | Fits in L3 cache, handles bursts |
+| Egress (per-core)  | 16,384      | 512 B      | 8 MB         | Lower volume than ingress        |
+| DataPlane          | 8,192       | 512 B      | 4 MB         | Coordinator, moderate volume     |
+| Supervisor         | 4,096       | 512 B      | 2 MB         | Low frequency                    |
+| ControlPlane       | 4,096       | 512 B      | 2 MB         | Low frequency                    |
+| Other facilities   | 2,048       | 512 B      | 1 MB         | Default for misc facilities      |
 
 **4-Core System Total**: (32 + 8) × 4 cores + 4 + 2 + 2 + 5 × 1 = **173 MB**
 
@@ -386,14 +386,14 @@ Therefore: Writer's data store (1) happens-before Reader's data load (6) ✓
 
 ## Performance Targets
 
-| Metric | SPSC (Data Plane) | MPSC (Control Plane) |
-|--------|-------------------|----------------------|
-| Write latency (p50) | < 100 ns | < 200 ns |
-| Write latency (p99) | < 500 ns | < 2 µs |
-| Read latency | < 100 ns | < 200 ns |
-| Throughput (single thread) | > 10M ops/sec | > 5M ops/sec |
-| Throughput (4 writers) | N/A | > 15M ops/sec |
-| Overrun rate | < 0.01% | < 0.1% |
+| Metric                     | SPSC (Data Plane) | MPSC (Control Plane) |
+| -------------------------- | ----------------- | -------------------- |
+| Write latency (p50)        | < 100 ns          | < 200 ns             |
+| Write latency (p99)        | < 500 ns          | < 2 µs               |
+| Read latency               | < 100 ns          | < 200 ns             |
+| Throughput (single thread) | > 10M ops/sec     | > 5M ops/sec         |
+| Throughput (4 writers)     | N/A               | > 15M ops/sec        |
+| Overrun rate               | < 0.01%           | < 0.1%               |
 
 **Baseline Comparison**:
 

@@ -199,12 +199,12 @@ With synchronous `send_batch()`:
 
 ## Performance Comparison
 
-| Metric | PHASE4 (Sync) | Current (Async) | Impact |
-|--------|---------------|-----------------|--------|
-| Egress Rate | 307k pps | 97k pps | **-68%** |
-| Buffer Exhaustion | 37% | 86% | +132% |
-| In-flight Buffers | ~32 (one batch) | ~64 (saturated) | +100% |
-| Buffer Lifetime | ~35µs | ~660µs | +1786% |
+| Metric            | PHASE4 (Sync)   | Current (Async) | Impact   |
+| ----------------- | --------------- | --------------- | -------- |
+| Egress Rate       | 307k pps        | 97k pps         | **-68%** |
+| Buffer Exhaustion | 37%             | 86%             | +132%    |
+| In-flight Buffers | ~32 (one batch) | ~64 (saturated) | +100%    |
+| Buffer Lifetime   | ~35µs           | ~660µs          | +1786%   |
 
 ---
 

@@ -43,8 +43,7 @@ With the core logic validated, the investigation turned to the test environment 
 2. **Kernel IGMP Membership Limit:** As tests scaled, they began failing silently at 20 streams. This was traced to the default Linux kernel limit `/proc/sys/net/ipv4/igmp_max_memberships`, which was subsequently raised by the test script for testing purposes.
 
 3. **The `ENOBUFS` Root Cause:** With the IGMP limit raised, tests began failing again at ~40 concurrent streams. Worker logs revealed the true culprit: `ENOBUFS` (errno 105 - "No buffer space available").
-
-    - **Analysis:** The Linux kernel's ability to handle multicast group memberships is tied to the socket's buffer size. The default receive/send buffer sizes (`net.core.rmem_max`, `net.core.wmem_max`, ~208KB) were insufficient to handle more than ~40 group memberships on a single helper socket.
+   - **Analysis:** The Linux kernel's ability to handle multicast group memberships is tied to the socket's buffer size. The default receive/send buffer sizes (`net.core.rmem_max`, `net.core.wmem_max`, ~208KB) were insufficient to handle more than ~40 group memberships on a single helper socket.
 
 This was the critical insight. The problem was not an application bug but a resource limitation that required both an immediate fix and a long-term architectural solution.
 

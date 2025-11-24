@@ -119,12 +119,12 @@ Buffer Sizes:
 
 **Pool Sizing Options:**
 
-| Configuration | Small | Standard | Jumbo | Per-Core | 16 Cores |
-|---------------|-------|----------|-------|----------|----------|
-| Minimal       | 50    | 50       | 50    | 725 KB   | 11 MB    |
-| Conservative  | 100   | 100      | 100   | 1.4 MB   | 23 MB    |
-| Burst-tolerant| 500   | 500      | 500   | 7.2 MB   | 116 MB   |
-| **Proposed**  | **1000** | **500** | **200** | **5.3 MB** | **85 MB** |
+| Configuration  | Small    | Standard | Jumbo   | Per-Core   | 16 Cores  |
+| -------------- | -------- | -------- | ------- | ---------- | --------- |
+| Minimal        | 50       | 50       | 50      | 725 KB     | 11 MB     |
+| Conservative   | 100      | 100      | 100     | 1.4 MB     | 23 MB     |
+| Burst-tolerant | 500      | 500      | 500     | 7.2 MB     | 116 MB    |
+| **Proposed**   | **1000** | **500**  | **200** | **5.3 MB** | **85 MB** |
 
 **Proposed configuration rationale:**
 
@@ -350,10 +350,10 @@ All benchmarks executed successfully on 2025-11-07.
 Test results for different burst factors (50-buffer pool):
 
 | Burst Factor | Success Rate | Recovery Time |
-|-------------|--------------|---------------|
-| 2x          | 98.41%       | 895 ns        |
-| 5x          | 98.41%       | 795 ns        |
-| 10x         | 98.41%       | 796 ns        |
+| ------------ | ------------ | ------------- |
+| 2x           | 98.41%       | 895 ns        |
+| 5x           | 98.41%       | 795 ns        |
+| 10x          | 98.41%       | 796 ns        |
 
 100-buffer pool (3x burst):
 
@@ -368,25 +368,25 @@ Test results for different burst factors (50-buffer pool):
 
 **Small Buffers (1500B):**
 
-| Test                          | Latency  | vs Target | vs Vec  |
-|-------------------------------|----------|-----------|---------|
-| Pool (no metrics)             | 26.7 ns  | ✅ < 50ns | 1.79x faster |
-| Pool (with metrics)           | 25.9 ns  | ✅ < 50ns | 1.84x faster |
-| Vec baseline                  | 47.7 ns  | -         | -       |
+| Test                | Latency | vs Target | vs Vec       |
+| ------------------- | ------- | --------- | ------------ |
+| Pool (no metrics)   | 26.7 ns | ✅ < 50ns | 1.79x faster |
+| Pool (with metrics) | 25.9 ns | ✅ < 50ns | 1.84x faster |
+| Vec baseline        | 47.7 ns | -         | -            |
 
 **Standard Buffers (4096B):**
 
-| Test                          | Latency  | vs Vec  |
-|-------------------------------|----------|---------|
-| Pool (no metrics)             | 70.9 ns  | 1.04x faster |
-| Vec baseline                  | 73.6 ns  | -       |
+| Test              | Latency | vs Vec       |
+| ----------------- | ------- | ------------ |
+| Pool (no metrics) | 70.9 ns | 1.04x faster |
+| Vec baseline      | 73.6 ns | -            |
 
 **Jumbo Buffers (9000B):**
 
-| Test                          | Latency  | vs Vec  |
-|-------------------------------|----------|---------|
-| Pool (no metrics)             | 128.0 ns | 1.03x faster |
-| Vec baseline                  | 131.8 ns | -       |
+| Test              | Latency  | vs Vec       |
+| ----------------- | -------- | ------------ |
+| Pool (no metrics) | 128.0 ns | 1.03x faster |
+| Vec baseline      | 131.8 ns | -            |
 
 **Analysis:**
 
@@ -397,11 +397,11 @@ Test results for different burst factors (50-buffer pool):
 
 #### 2. Throughput Benchmark Results
 
-| Test                          | Throughput     | vs Target     | vs Vec  |
-|-------------------------------|----------------|---------------|---------|
-| Pool (no metrics)             | 36.6 M ops/sec | ✅ > 5M       | 1.74x faster |
-| Pool (with metrics)           | 37.6 M ops/sec | ✅ > 5M       | 1.79x faster |
-| Vec baseline                  | 21.0 M ops/sec | -             | -       |
+| Test                | Throughput     | vs Target | vs Vec       |
+| ------------------- | -------------- | --------- | ------------ |
+| Pool (no metrics)   | 36.6 M ops/sec | ✅ > 5M   | 1.74x faster |
+| Pool (with metrics) | 37.6 M ops/sec | ✅ > 5M   | 1.79x faster |
+| Vec baseline        | 21.0 M ops/sec | -         | -            |
 
 **Headroom Analysis:**
 
@@ -420,12 +420,12 @@ This massive headroom means:
 
 Performance vs pool size:
 
-| Pool Size | Latency  | Delta vs 100 |
-|-----------|----------|--------------|
-| 100       | 25.2 ns  | baseline     |
-| 500       | 25.0 ns  | -0.8%        |
-| 1000      | 27.5 ns  | +9.1%        |
-| 5000      | 37.7 ns  | +49.6%       |
+| Pool Size | Latency | Delta vs 100 |
+| --------- | ------- | ------------ |
+| 100       | 25.2 ns | baseline     |
+| 500       | 25.0 ns | -0.8%        |
+| 1000      | 27.5 ns | +9.1%        |
+| 5000      | 37.7 ns | +49.6%       |
 
 **Analysis:**
 
@@ -439,7 +439,7 @@ Performance vs pool size:
 Batch allocation/deallocation performance:
 
 | Burst Size | Time    | Per-Buffer |
-|------------|---------|------------|
+| ---------- | ------- | ---------- |
 | 10         | 268 ns  | 26.8 ns    |
 | 50         | 1.41 µs | 28.2 ns    |
 | 100        | 2.78 µs | 27.8 ns    |
@@ -458,17 +458,17 @@ Simulating real packet processing (allocate → copy data → deallocate):
 
 **Small Packets (1000B):**
 
-| Test                    | Latency  | Notes                    |
-|-------------------------|----------|--------------------------|
-| Pool + copy             | 37.3 ns  | Allocation overhead      |
-| Vec + copy              | 26.8 ns  | Compiler optimizations?  |
+| Test        | Latency | Notes                   |
+| ----------- | ------- | ----------------------- |
+| Pool + copy | 37.3 ns | Allocation overhead     |
+| Vec + copy  | 26.8 ns | Compiler optimizations? |
 
 **Jumbo Packets (8000B):**
 
-| Test                    | Latency  | Notes                    |
-|-------------------------|----------|--------------------------|
-| Pool + copy             | 162.5 ns | Copying dominates        |
-| Vec + copy              | 22.0 ns  | Suspicious - optimized away? |
+| Test        | Latency  | Notes                        |
+| ----------- | -------- | ---------------------------- |
+| Pool + copy | 162.5 ns | Copying dominates            |
+| Vec + copy  | 22.0 ns  | Suspicious - optimized away? |
 
 **Analysis:**
 
@@ -479,10 +479,10 @@ Simulating real packet processing (allocate → copy data → deallocate):
 
 ### Metrics Overhead Analysis
 
-| Configuration          | Latency  | Overhead |
-|------------------------|----------|----------|
-| Pool (no metrics)      | 26.7 ns  | baseline |
-| Pool (with metrics)    | 25.9 ns  | **-3%**  |
+| Configuration       | Latency | Overhead |
+| ------------------- | ------- | -------- |
+| Pool (no metrics)   | 26.7 ns | baseline |
+| Pool (with metrics) | 25.9 ns | **-3%**  |
 
 **Finding:** Metrics overhead is **NEGATIVE** (slightly faster with metrics). This is within measurement noise.
 

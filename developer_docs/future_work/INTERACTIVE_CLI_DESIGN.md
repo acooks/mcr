@@ -451,12 +451,12 @@ JSON-based protocol is schema-flexible:
 
 ## Implementation Phases Summary
 
-| Phase | Status | Priority | Effort | Dependencies | Commits |
-|-------|--------|----------|--------|--------------|---------|
-| Phase 1: Runtime log-level control | ✅ DONE | HIGH | 2-3 days | Logging system | d369379, 5c04136 |
-| Phase 2: Log streaming | 📋 TODO | MEDIUM | 2-3 days | Phase 1 | - |
-| Phase 3: Interactive TUI | 📋 TODO | MEDIUM | 5-7 days | Phase 2 | - |
-| Phase 4: Advanced features | 📋 TODO | LOW | 2-4 weeks | Phase 3 | - |
+| Phase                              | Status  | Priority | Effort    | Dependencies   | Commits          |
+| ---------------------------------- | ------- | -------- | --------- | -------------- | ---------------- |
+| Phase 1: Runtime log-level control | ✅ DONE | HIGH     | 2-3 days  | Logging system | d369379, 5c04136 |
+| Phase 2: Log streaming             | 📋 TODO | MEDIUM   | 2-3 days  | Phase 1        | -                |
+| Phase 3: Interactive TUI           | 📋 TODO | MEDIUM   | 5-7 days  | Phase 2        | -                |
+| Phase 4: Advanced features         | 📋 TODO | LOW      | 2-4 weeks | Phase 3        | -                |
 
 ## References
 
