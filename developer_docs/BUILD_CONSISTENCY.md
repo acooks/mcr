@@ -191,26 +191,26 @@ BINARIES := multicast_relay control_client traffic_generator
 all: build
 
 build:
-	$(CARGO) build --release --bins
-	@echo ""
-	@echo "=== Binaries built ==="
-	@ls -lh $(RELEASE_DIR)/multicast_relay
-	@ls -lh $(RELEASE_DIR)/control_client
-	@ls -lh $(RELEASE_DIR)/traffic_generator
+    $(CARGO) build --release --bins
+    @echo ""
+    @echo "=== Binaries built ==="
+    @ls -lh $(RELEASE_DIR)/multicast_relay
+    @ls -lh $(RELEASE_DIR)/control_client
+    @ls -lh $(RELEASE_DIR)/traffic_generator
 
 test: build
-	@echo "=== Running integration tests ==="
-	$(CARGO) test --release --no-fail-fast -- --test-threads=1 --ignored
+    @echo "=== Running integration tests ==="
+    $(CARGO) test --release --no-fail-fast -- --test-threads=1 --ignored
 
 test-shell: build
-	@echo "=== Running shell tests ==="
-	sudo tests/data_plane_pipeline_veth.sh
+    @echo "=== Running shell tests ==="
+    sudo tests/data_plane_pipeline_veth.sh
 
 test-all: test test-shell
 
 clean:
-	$(CARGO) clean
-	rm -f /tmp/mcr_*.sock /tmp/mcr_*.log
+    $(CARGO) clean
+    rm -f /tmp/mcr_*.sock /tmp/mcr_*.log
 
 rebuild: clean build
 ```

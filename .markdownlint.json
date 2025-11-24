@@ -4,7 +4,7 @@
   "MD003": true,
   "MD004": false,
   "MD007": true,
-  "MD010": false,
+  "MD010": true,
   "MD012": { "maximum": 1 },
   "MD013": false,
   "MD014": true,

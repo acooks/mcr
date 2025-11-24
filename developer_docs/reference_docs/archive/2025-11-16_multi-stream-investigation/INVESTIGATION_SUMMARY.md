@@ -114,9 +114,9 @@ This line is **printed by the worker AFTER completing the second `add_rule()` ca
 
 4. **Kernel State**: Both groups visible in `/proc/net/igmp`
    ```
-   32	veth1     :     3      V3
-   				020101EF     1 0:00000000		0  ← 239.1.1.2
-   				010101EF     1 0:00000000		0  ← 239.1.1.1
+   32  veth1     :     3      V3
+                   020101EF     1 0:00000000    0  ← 239.1.1.2
+                   010101EF     1 0:00000000    0  ← 239.1.1.1
    ```
 
 5. **Error Handling**: Production-ready with proper propagation
