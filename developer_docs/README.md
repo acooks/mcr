@@ -14,7 +14,7 @@ If you are a new contributor, start here.
 Understand how MCR is designed.
 
 - **[ARCHITECTURE.md](./ARCHITECTURE.md):** The definitive guide to the system's design, components, and data flow.
-- **[design/README.md](./design/README.md):** Detailed design specifications for various MCR subsystems.
+- **[design/](../design/):** Detailed design specifications for various MCR subsystems.
 
 ## 3. Development & Testing
 
@@ -32,4 +32,4 @@ Deeper dives into specific topics, policies, and historical analysis.
 - **[policies/README.md](./policies/README.md):** Important policy documents, like our **[Unsafe Code Policy](./policies/UNSAFE_CODE_POLICY.md)**.
 - **[reports/README.md](./reports/README.md):** Summary reports from major investigations and decisions.
 - **[comparisons/README.md](./comparisons/README.md):** Analysis and comparison of MCR with other networking tools.
-- **[reference_docs/](./reference_docs/):** Detailed investigation archives and completed implementation plans (see [completed/](./reference_docs/completed/) and [archive/](./reference_docs/archive/))
+- **[reference_docs/](./reference_docs/):** Detailed investigation archives and completed implementation plans (see [completed/](./reference_docs/completed/) and [experiments/](./reference_docs/experiments/))

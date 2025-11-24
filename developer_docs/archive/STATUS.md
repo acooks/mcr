@@ -17,7 +17,7 @@ While the basics are working, the project is still "rough around the edges" and 
 
 - **Architectural Pivot to Unified Data Plane:** The data plane was refactored from a complex, two-thread (ingress/egress) model to a simpler and more performant **single-threaded, unified event loop**. This architectural change completely eliminates the need for inter-thread communication (channels, eventfds, wakeup strategies), resolving a major source of complexity and bugs.
 - **Performance Regression Addressed:** A severe performance regression was identified and **fixed**. The egress path has been reverted to a synchronous submit-and-reap model, restoring performance to historical levels.
-- **Scaling Bugs Addressed:** Critical bugs preventing scaling beyond a single stream or worker have been fixed. See the full report in [`developer_docs/reports/MULTI_STREAM_SCALING_REPORT.md`](./developer_docs/reports/MULTI_STREAM_SCALING_REPORT.md).
+- **Scaling Bugs Addressed:** Critical bugs preventing scaling beyond a single stream or worker have been fixed. See the full report in [`developer_docs/reports/MULTI_STREAM_SCALING_REPORT.md`](../reports/MULTI_STREAM_SCALING_REPORT.md).
 - **Logging System Refactored:** The original, complex shared memory logging system has been replaced with a simpler, more robust pipe-based mechanism.
 - **Technical Investigation Completed:** A detailed investigation of the remaining high-priority architectural refactoring tasks is complete.
 

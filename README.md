@@ -1,8 +1,5 @@
 # MCR: A High-Performance Userspace Multicast Relay
 
-[![Build Status](https://github.com/your-repo/mcr/actions/workflows/rust.yml/badge.svg)](https://github.com/your-repo/mcr/actions/workflows/rust.yml)
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](./licenses.html)
-
 **MCR** is a specialized, high-performance multicast relay for Linux, designed to forward multicast traffic between network segments where conventional routing is impossible or inefficient.
 
 It is built for engineers who face challenges with kernel-level multicast forwarding, such as the Reverse Path Forwarding (RPF) check, and require a flexible, scalable, and extremely fast userspace solution.

@@ -1,8 +1,6 @@
 # Multicast Relay Logging System Design
 
-> **NOTE**: For user-facing documentation, see **[docs/LOGGING.md](../docs/LOGGING.md)**
->
-> This document contains technical implementation details. Most users should start with the consolidated guide above.
+> **NOTE**: This document contains technical implementation details for the logging system design.
 
 ## The Cross-Process Logging Challenge
 
