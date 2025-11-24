@@ -1219,7 +1219,7 @@ Best case (common case at high throughput) is 95%+ syscall reduction.
 
 ### Phase 3 Completion Checklist
 
-- [ ] Created Arc<AtomicBool> sleeping flag in data_plane_integrated.rs
+- [ ] Created `Arc<AtomicBool>` sleeping flag in data_plane_integrated.rs
 - [ ] Passed flag to both EgressQueueWithWakeup and EgressLoop
 - [ ] Updated EgressQueueWithWakeup::send() to check flag before writing eventfd
 - [ ] Updated EgressLoop::run() to set flag before/after blocking
