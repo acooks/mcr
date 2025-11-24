@@ -188,6 +188,7 @@ sudo -E just test-privileged
 ## Complete Command Reference
 
 ### Building
+
 | Command | What It Does | Time |
 |---------|--------------|------|
 | `just build-release` | Build release binaries (production) | ~2 min |
@@ -195,6 +196,7 @@ sudo -E just test-privileged
 | `just build` | Build all targets (debug) | ~2 min |
 
 ### Testing (No Root)
+
 | Command | What It Does | Time |
 |---------|--------------|------|
 | `just test-fast` | Unit + unprivileged integration | ~30 sec |
@@ -203,6 +205,7 @@ sudo -E just test-privileged
 | `just test-all` | All unprivileged tests | ~1 min |
 
 ### Testing (Requires Root)
+
 | Command | What It Does | Time |
 |---------|--------------|------|
 | `sudo -E just test-privileged` | Privileged Rust tests | ~1 min |
@@ -211,6 +214,7 @@ sudo -E just test-privileged
 | `sudo just test-perf-quick` | Quick 10 packet test | ~5 sec |
 
 ### Quality Checks
+
 | Command | What It Does | Time |
 |---------|--------------|------|
 | `just fmt` | Format check | ~5 sec |
@@ -219,6 +223,7 @@ sudo -E just test-privileged
 | `just unsafe-check` | Unsafe code check | ~5 sec |
 
 ### Meta Commands
+
 | Command | What It Does | Time |
 |---------|--------------|------|
 | `just` or `just dev` | Default development loop | ~2-3 min |
@@ -226,6 +231,7 @@ sudo -E just test-privileged
 | `just check-full` | Full CI pipeline | ~10+ min |
 
 ### Utilities
+
 | Command | What It Does |
 |---------|--------------|
 | `just setup-kernel` | Setup kernel tuning |

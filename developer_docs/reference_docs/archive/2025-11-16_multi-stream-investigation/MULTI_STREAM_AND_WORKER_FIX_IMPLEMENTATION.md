@@ -230,6 +230,7 @@ sudo ./tests/performance/multi_stream_scaling.sh 5
 ```
 
 **Expected Results**:
+
 | Streams | Expected | Received | Loss % |
 |---------|----------|----------|---------|
 | 1       | 10,000   | ~10,000  | <1%     |

@@ -124,12 +124,14 @@ sudo ./tests/performance/multi_stream_scaling.sh 5
 ```
 
 **Expected Before Fix**:
+
 | Streams | Loss % |
 |---------|--------|
 | 1       | 0%     |
 | 2+      | 100%   |
 
 **Expected After Fix**:
+
 | Streams | Loss % |
 |---------|--------|
 | 1       | <1%    |
