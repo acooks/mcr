@@ -23,7 +23,8 @@ integration/
 
 ## Running Tests
 
-**Step 1: Build as regular user (important!)**
+### Step 1: Build as regular user (important!)
+
 ```bash
 cargo build --release --bins
 cargo test --test integration --no-run
@@ -34,7 +35,8 @@ This ensures:
 - No permission issues with cargo cache/target directory
 - Tests are compiled but not run yet
 
-**Step 2: Run tests with sudo**
+### Step 2: Run tests with sudo
+
 ```bash
 # Run all network integration tests
 sudo -E cargo test --test integration test_basic -- --ignored --test-threads=1

@@ -300,7 +300,7 @@ self.process_cqe_batch()?;
 
 ## Recommended Fix
 
-**Revert send_batch() to synchronous submission + completion reaping**
+### Revert send_batch() to synchronous submission + completion reaping
 
 This is the simplest fix that restores PHASE4 performance levels. The async refactor was well-intentioned but broke a critical performance assumption.
 

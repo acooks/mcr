@@ -115,7 +115,7 @@ just build-release
 
 ### 2. Run Test Suites
 
-**Unprivileged Tests**
+#### Unprivileged Tests
 
 Run all unit tests and integration tests that do not require root privileges. This is the most common command needed during development.
 
@@ -123,7 +123,7 @@ Run all unit tests and integration tests that do not require root privileges. Th
 just test-fast
 ```
 
-**Privileged Tests (Requires Sudo)**
+#### Privileged Tests (Requires Sudo)
 
 Run the integration tests that require root for network namespace manipulation.
 

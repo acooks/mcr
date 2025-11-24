@@ -32,32 +32,37 @@ sudo just test-performance       # Performance validation
 
 ### Development Loop
 
-**Option 1: Default (Recommended)**
+#### Option 1: Default (Recommended)
+
 ```bash
 just           # Runs 'dev' by default
 ```
+
 - ✅ Formats code
 - ✅ Runs linter
 - ✅ Builds release binaries
 - ✅ Runs fast tests (unit + unprivileged integration)
 - ⏱️ Time: ~2-3 minutes
 
-**Option 2: Explicit Dev**
+#### Option 2: Explicit Dev
+
 ```bash
 just dev       # Same as default
 ```
 
-**Option 3: Even Faster (Skip Build)**
+#### Option 3: Even Faster (Skip Build)
 ```bash
 just test-fast # Just run fast tests (assumes binaries built)
 ```
 
 ### Pre-Commit Checks
 
-**Fast Quality Check**
+#### Fast Quality Check
+
 ```bash
 just check
 ```
+
 Same as `just dev` but emphasizes it's a quality gate.
 
 **Full CI Pipeline** (slow)
@@ -68,25 +73,29 @@ Includes coverage report (adds ~5-10 minutes).
 
 ### Testing Levels
 
-**Level 1: Fast Tests (No Root)**
+#### Level 1: Fast Tests (No Root)
+
 ```bash
 just test-fast        # Unit + unprivileged integration
 just test-unit        # Unit tests only
 just test-integration-light  # Unprivileged integration only
 ```
 
-**Level 2: All Unprivileged Tests**
+#### Level 2: All Unprivileged Tests
+
 ```bash
 just test-all         # Builds test binaries, runs all unprivileged
 ```
 
-**Level 3: Privileged Tests (Requires Root)**
+#### Level 3: Privileged Tests (Requires Root)
+
 ```bash
 sudo -E just test-integration-privileged  # Rust integration tests
 sudo just test-e2e-bash                   # Bash E2E tests
 ```
 
-**Level 4: Performance Tests (Requires Root)**
+#### Level 4: Performance Tests (Requires Root)
+
 ```bash
 sudo just test-performance   # Full 10M packet test
 sudo just test-perf-quick    # Quick 10 packet test

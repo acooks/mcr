@@ -62,7 +62,8 @@ Successfully implemented and debugged the unified single-threaded data plane loo
 - Initializes `UnifiedDataPlane` with supervisor-provided FD
 - Calls `unified.run()` to start event loop
 
-**B. Made unified loop the DEFAULT**
+#### B. Made unified loop the DEFAULT
+
 - File: `/home/acooks/mcr/src/worker/mod.rs`
 - Changed import to use `run_unified_data_plane`:
   ```rust
@@ -293,7 +294,8 @@ Operating margin: 62% of total pool available
 
 ### Startup Tests ✅
 
-**Test 1: Single Worker Startup**
+#### Test 1: Single Worker Startup
+
 ```bash
 sudo multicast_relay supervisor \
     --control-socket-path /tmp/test.sock \
@@ -313,7 +315,8 @@ sudo multicast_relay supervisor \
 ```
 ✅ **PASS:** Worker started successfully, event loop running
 
-**Test 2: Multi-Worker Startup (20 workers)**
+#### Test 2: Multi-Worker Startup (20 workers)
+
 ```bash
 cargo test --release test_add_and_remove_rule_e2e
 ```
@@ -328,7 +331,8 @@ cargo test --release test_add_and_remove_rule_e2e
 
 ### Stability Tests ✅
 
-**Test: Extended Run**
+#### Test: Extended Run
+
 - Duration: 10+ minutes
 - Workers: 20 (default for 20-core system)
 - Load: Rule add/remove operations
@@ -481,4 +485,4 @@ The architecture eliminates the cross-thread communication bottleneck that was h
 
 ---
 
-**End of Session Summary**
+## End of Session Summary

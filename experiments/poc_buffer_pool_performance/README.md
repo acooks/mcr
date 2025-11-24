@@ -40,7 +40,7 @@ Cores    | Per-Core Rate | Inter-Packet Time
 32 cores | 156.25k pps   | 6.4 µs
 ```
 
-**Reference configuration for modeling: 16 cores @ 312.5k pps/core**
+#### Reference configuration for modeling: 16 cores @ 312.5k pps/core
 
 ### 2. Buffer Lifecycle
 
@@ -166,7 +166,7 @@ Fast path:  ~50-100 ns
 Slow path:  ~1,000-10,000 ns
 ```
 
-**Expected speedup: 5-1000x depending on malloc state**
+#### Expected speedup: 5-1000x depending on malloc state
 
 ### 7. Cache Behavior Model
 
@@ -481,7 +481,7 @@ From MODELING.md checklist:
 - [✅] **Memory < 100MB (16 cores):** YES - 84.8 MB (5.3 MB × 16)
 - [✅] **No panics/crashes:** YES - All tests passed
 
-**Validation: 7/7 required criteria met (8th is optional)**
+#### Validation: 7/7 required criteria met (8th is optional)
 
 ---
 
@@ -604,7 +604,7 @@ All critical experiments now complete:
 
 ## Actual Outcomes
 
-**Experiment Status: ✅ SUCCESSFUL**
+### Experiment Status: ✅ SUCCESSFUL
 
 All success criteria met. Key findings:
 

@@ -264,7 +264,7 @@ Would require major redesign:
 
 ### Architectural Impact
 
-**✅ Design Decision D24 (Privilege Separation) is VALIDATED**
+#### ✅ Design Decision D24 (Privilege Separation) is VALIDATED
 
 This confirms the core security architecture can proceed as designed:
 - **Phase 2**: Supervisor process creates AF_PACKET sockets with `CAP_NET_RAW`

@@ -417,7 +417,7 @@ From modeling and experiment design:
 - [✅] **Errors reported in CQ:** YES - Framework supports error handling (not tested with failures in this run)
 - [✅] **Syscall reduction > 10x:** YES - Achieved 32x reduction
 
-**Validation: 4/5 criteria met, 1 partially met (throughput adequate for typical case)**
+#### Validation: 4/5 criteria met, 1 partially met (throughput adequate for typical case)
 
 ---
 
@@ -440,7 +440,7 @@ Beyond batch 64, there's **no performance gain**. Batch 32-64 hits the sweet spo
 
 Queue depth has **no measurable performance impact**. Use smaller queues to save memory.
 
-**Recommendation: Queue depth 64-128**
+#### Recommendation: Queue depth 64-128
 
 ### 4. Stats Are Free
 

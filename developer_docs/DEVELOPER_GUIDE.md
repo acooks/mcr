@@ -77,7 +77,7 @@ Install the `just` command runner once globally:
 cargo install just
 ```
 
-**Documentation Linter**
+### Documentation Linter
 
 To ensure documentation is consistent and well-formatted, we use `markdownlint-cli`. Install it globally via `npm`:
 ```bash

@@ -161,7 +161,7 @@ While it didn't improve throughput, CPU isolation still provides:
 
 ### Amplification-Specific Issues
 
-**CRITICAL FINDING: Buffer Pool Size is NOT the Bottleneck**
+#### CRITICAL FINDING: Buffer Pool Size is NOT the Bottleneck
 
 Experiment tested buffer pool sizing impact on 3x amplification:
 - **Before:** 1000 small buffers → 64% buffer exhaustion (126k / 206k)

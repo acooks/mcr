@@ -138,7 +138,7 @@ control_client add \
 
 ## Recommended Approach
 
-**Option 1: Special "devnull" output keyword**
+### Option 1: Special "devnull" output keyword
 
 This provides the clearest benefit for the use cases:
 

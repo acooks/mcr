@@ -45,7 +45,8 @@ Phase 4 has been completed with **actual measured performance data** from real-w
 | MCR-2 Egress | Send rate | 300k pps |
 | MCR-2 Ingress | Buffer exhaustion | 0% |
 
-**Key Finding: Performance Asymmetry**
+### Key Finding: Performance Asymmetry
+
 - **Ingress (AF_PACKET + io_uring):** 490k pps capability
 - **Egress (UDP sockets + io_uring):** 307k pps maximum
 - **Throughput deficit:** 37% slower egress
