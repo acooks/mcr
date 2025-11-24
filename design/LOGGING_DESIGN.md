@@ -77,12 +77,14 @@ Data Plane Worker Process                 Supervisor Process
 ## Implementation Status
 
 **Phase 1: COMPLETE** ✅ (commits d72eb93, 99423bd)
+
 - Lock-free SPSC and MPSC ring buffers
 - LogEntry (256 bytes, cache-line optimized)
 - Severity levels (RFC 5424) and Facilities
 - Comprehensive test suite (35 tests)
 
 **Phase 2: COMPLETE** ✅ (commit 99423bd)
+
 - Logger API with severity helpers
 - LogRegistry for managing per-facility ring buffers
 - Logging macros (`log_info!`, `log_error!`, `log_kv!`, etc.)
@@ -90,18 +92,21 @@ Data Plane Worker Process                 Supervisor Process
 - Pluggable output sinks (stdout, stderr, custom)
 
 **Phase 3: COMPLETE** ✅ (commits 2833697, eb97bce, f05a370)
+
 - Supervisor integrated with structured logging (15+ log sites)
 - RuleDispatcher using logging for warnings
 - Workers migrated from old `log` crate to eprintln!
 - All 89 tests passing with new logging system
 
 **Phase 4: COMPLETE** ✅ (commits d369379, 5c04136)
+
 - Runtime log level filtering (global and per-facility)
 - Control client CLI commands for log-level management
 - Comprehensive unit and integration tests (101 tests passing)
 - Performance: <100ns overhead for log-level checks
 
 **Phase 5: COMPLETE** ✅ (commits 06f5273, cc4bf9d)
+
 - Shared memory ring buffers for data plane workers (lock-free cross-process)
 - Control plane workers use MPSC ring buffers (async-safe)
 - All workers integrated with structured logging
@@ -109,6 +114,7 @@ Data Plane Worker Process                 Supervisor Process
 - 106/107 tests passing
 
 **Phase 6: AVAILABLE FOR FUTURE ENHANCEMENT** ⏳
+
 - Additional output sinks (file, syslog) - infrastructure exists, not yet configured
 - Metrics extraction from logs
 - Log streaming to control_client (see INTERACTIVE_CLI_DESIGN.md)
@@ -332,6 +338,7 @@ pub struct KeyValue {
 ```
 
 **Cache Line Optimization:** The 256-byte structure is designed for optimal cache performance:
+
 - **Line 0** contains all fields accessed during write/read operations
 - **Lines 1-2** contain the bulk of the message data
 - **Line 3** contains structured logging data (accessed less frequently)
@@ -352,6 +359,7 @@ Optimized for small systems (1-2 CPUs) with 256-byte entries:
 | Other facilities | 512 entries | 128 KB | Default for utilities |
 
 **Memory Footprint Examples:**
+
 - **2-core system**: ~12.5 MB total
   - Ingress: 2 × 4 MB = 8 MB
   - Egress: 2 × 1 MB = 2 MB
@@ -362,6 +370,7 @@ Optimized for small systems (1-2 CPUs) with 256-byte entries:
 ### Lock-Free Single-Producer Single-Consumer (SPSC)
 
 For data plane workers (io_uring threads):
+
 - **Single Writer**: Each io_uring thread writes only to its own per-core buffer
 - **Single Reader**: Background consumer thread reads from all buffers
 - **Atomic Operations**: `write_pos` and `read_pos` use `Ordering::Relaxed` for writer, `Ordering::Acquire`/`Release` for coordination
@@ -370,6 +379,7 @@ For data plane workers (io_uring threads):
 ### Multi-Producer Single-Consumer (MPSC)
 
 For supervisor and async workers:
+
 - **Multiple Writers**: Tokio tasks may log concurrently
 - **Atomic CAS**: Use `compare_and_swap` on `write_pos`
 - **Fallback**: On contention, can fall back to immediate console output
@@ -790,13 +800,15 @@ impl Drop for SharedSPSCRingBuffer {
 ### Performance Characteristics
 
 **Writer (Data Plane) - Hot Path:**
+
 - Atomic load: ~5ns
-- Atomic CAS: ~10ns  
+- Atomic CAS: ~10ns
 - Memory copy: ~50ns (256 bytes)
 - **Total: ~65ns per log entry**
 - **Zero syscalls**
 
 **Reader (Supervisor Consumer Thread):**
+
 - Atomic load: ~5ns
 - Memory read: ~50ns
 - Format + write to stdout: ~1-10μs (syscalls OK)

@@ -11,6 +11,7 @@ This document specifies the ring buffer implementation for MCR's logging system,
 **Decision**: Use monotonic sequence numbers (u64) instead of wrap-around pointers.
 
 **Rationale**:
+
 - Avoids reader-writer cache line sharing (FreeBSD msgbuf insight)
 - u64 never wraps in practice (584 years at 1B ops/sec)
 - Simpler than Linux's ID+wrap count approach
@@ -83,6 +84,7 @@ if entry.state.load(Ordering::Acquire) == READY { // Acquire: see all writer's s
 **Decision**: Drop oldest entries (overwrite), track overrun count.
 
 **Rationale**:
+
 - Preserves low latency (no blocking)
 - Recent logs are more valuable than old logs
 - Overrun counter signals buffer sizing issues
@@ -143,6 +145,7 @@ pub struct KeyValue {
 ```
 
 **Design Choices**:
+
 - **Cache line aligned**: Prevents false sharing between adjacent entries
 - **Fixed size**: Zero-allocation, predictable memory layout
 - **Power-of-2 size**: Fast modulo via bitwise AND
@@ -393,6 +396,7 @@ Therefore: Writer's data store (1) happens-before Reader's data load (6) ✓
 | Overrun rate | < 0.01% | < 0.1% |
 
 **Baseline Comparison**:
+
 - Linux `printk`: ~100-500 ns
 - FreeBSD `msgbuf`: ~200-800 ns (spinlock overhead)
 - Rust `crossbeam::queue`: ~50-150 ns (similar SPSC design)
@@ -423,6 +427,7 @@ Therefore: Writer's data store (1) happens-before Reader's data load (6) ✓
 ### Property-Based Tests
 
 Using `proptest`:
+
 1. **Sequential Consistency**: All reads occur in write order
 2. **No Lost Messages**: Read count + overrun count = write count
 3. **No Duplicates**: Every sequence number appears at most once

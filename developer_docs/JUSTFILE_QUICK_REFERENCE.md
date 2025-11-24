@@ -149,6 +149,7 @@ just check-full  # Full CI pipeline (if you really need it)
 ### Migration
 
 If you were using:
+
 - `just check` → Now faster! Still works but doesn't include coverage
 - `just test` → Use `just test-fast` (same behavior, clearer name)
 - Want coverage? → Use `just check-full` or `just coverage`

@@ -25,6 +25,7 @@ grep "STATS:Egress FINAL" results.txt
 2. ✅ **UDP socket buffer:** default (~208 KB) → 4 MB (prevents blocking)
 
 **Expected performance:**
+
 - Egress throughput: 439k pps (validated)
 - Buffer exhaustion: 0% (perfect backpressure)
 - Packet loss: 0% (under tested conditions)
@@ -71,16 +72,19 @@ echo "Buffer exhaustion: $((100 * $BUF_EXHAUST / $INGRESS))%"
 ### Success Criteria
 
 ✅ **EXCELLENT (Production Ready):**
+
 - Egress ≥ 400k pps
 - Buffer exhaustion = 0%
 - No errors
 
 ✅ **GOOD:**
+
 - Egress 300-399k pps
 - Buffer exhaustion < 10%
 - No errors
 
 ⚠️ **NEEDS TUNING:**
+
 - Egress < 300k pps
 - Buffer exhaustion > 10%
 - Check kernel tuning and configuration

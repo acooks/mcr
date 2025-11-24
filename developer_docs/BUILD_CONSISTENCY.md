@@ -8,6 +8,7 @@
 ## Problem Statement
 
 When running tests, Cargo rebuilds the project with different compile-time configurations, resulting in:
+
 1. Multiple binaries with different feature flags
 2. Stale binaries in different target directories
 3. Confusion about which binary is actually being tested
@@ -20,6 +21,7 @@ When running tests, Cargo rebuilds the project with different compile-time confi
 ### 1. Test vs Non-Test Builds
 
 **Issue:** `cargo test` and `cargo build` create different compilation units:
+
 - `cargo build --release` → `target/release/multicast_relay`
 - `cargo test --release` → `target/release/deps/multicast_relay-<hash>` + test harness
 
@@ -438,6 +440,7 @@ ls -lh target/release/multicast_relay
 ## Root Cause: Why Cargo Rebuilds
 
 Cargo rebuilds when:
+
 1. **Different profiles**: `--release` vs debug
 2. **Different features**: `--features testing` changes compilation
 3. **Test harness**: `cargo test` adds test runtime
@@ -451,6 +454,7 @@ Cargo rebuilds when:
 ## Implementation Priority
 
 **HIGH PRIORITY:**
+
 1. Modify all shell scripts to check for binaries instead of building
 2. Add warning in `binary_path()` for stale binaries
 3. Document workflow in README

@@ -7,6 +7,7 @@ In many real-world networks, multicast traffic originates in a secure or isolate
 When a standard Linux server receives this kind of multicast traffic, a kernel security feature called a **Reverse Path Forwarding (RPF) check** is triggered. The kernel looks at the source IP address of the multicast packet and checks if it has a path to send return traffic *back* to that source. If it doesn't (i.e., the source is "unroutable"), the kernel assumes the packet is misconfigured or malicious and **silently drops it**.
 
 This is a common and frustrating problem in many industries, including:
+
 - **Broadcast Media:** Relaying real-time video feeds from an isolated "media network" to a corporate or distribution network.
 - **Financial Services:** Forwarding market data feeds from a secure exchange network to an internal analysis or trading network.
 - **Enterprise & Datacenters:** Distributing sensor data or application messages between different VLANs, security zones, or VPCs where direct routing is forbidden.
@@ -42,6 +43,7 @@ MCR, as a high-performance **userspace relay**, offers an accessible, flexible, 
 For simpler, lower-rate scenarios, the versatile `socat` tool can sometimes be used to achieve a similar outcome. However, `socat` is a general-purpose tool, whereas MCR is a purpose-built application designed specifically for this problem, leveraging modern Linux kernel features for efficiency.
 
 MCR is the superior solution when you need:
+
 - **High Throughput:** Designed for scenarios demanding high packet rates.
 - **High Density:** To manage dozens or hundreds of concurrent multicast streams efficiently.
 - **Dynamic Reconfiguration:** To add, remove, and manage forwarding rules at runtime without service interruption.
