@@ -92,11 +92,11 @@ Here are some common examples of how to use the `control_client` to manage the r
 **Remove a Rule:**
 
 ```bash
-./target/release/control_client remove-rule \
-    --input-interface eth0 \
-    --input-group 239.10.1.2 \
-    --input-port 8001
+./target/release/control_client remove \
+    --rule-id <rule_id>
 ```
+
+**Note:** Use `./target/release/control_client list` to see all rules and their IDs.
 
 **View Statistics:**
 

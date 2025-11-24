@@ -97,13 +97,14 @@ Adds a new rule to forward an input stream to one or more outputs.
 
 ### 4.2. Remove a Forwarding Rule
 
-Removes an existing rule, identified by its input group and port.
+Removes an existing rule, identified by its rule ID.
 
 ```bash
-./target/release/control_client remove-rule \
-    --input-group <ip> \
-    --input-port <port>
+./target/release/control_client remove \
+    --rule-id <rule_id>
 ```
+
+**Note:** Use the `list` command to see all rules and their IDs.
 
 ### 4.3. List Rules
 
