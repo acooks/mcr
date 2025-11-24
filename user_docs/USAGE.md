@@ -89,6 +89,35 @@ Here are some common examples of how to use the `control_client` to manage the r
 ./target/release/control_client list
 ```
 
+**Remove a Rule:**
+
+```bash
+./target/release/control_client remove-rule \
+    --input-interface eth0 \
+    --input-group 239.10.1.2 \
+    --input-port 8001
+```
+
+**View Statistics:**
+
+```bash
+./target/release/control_client stats
+```
+
+**List Workers:**
+
+```bash
+./target/release/control_client list-workers
+```
+
+**Health Check:**
+
+```bash
+./target/release/control_client ping
+```
+
+For a complete command reference and advanced configuration options, see **[CONFIGURATION.md](./CONFIGURATION.md)**.
+
 ## Basic `traffic_generator` Example
 
 The `traffic_generator` can be used to send multicast traffic for testing purposes.
