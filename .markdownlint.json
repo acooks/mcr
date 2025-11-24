@@ -10,7 +10,7 @@
   "MD014": true,
   "MD019": true,
   "MD022": false,
-  "MD024": false,
+  "MD024": { "siblings_only": true },
   "MD026": true,
   "MD029": false,
   "MD030": false,
