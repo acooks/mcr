@@ -12,28 +12,28 @@ This section covers the prerequisites you need to have installed on your Linux h
 
 First, you need a C compiler and standard development libraries. These are required to compile Rust itself and many common Rust libraries.
 
--   **For Fedora / RHEL / CentOS:**
+- **For Fedora / RHEL / CentOS:**
     ```bash
     sudo dnf group install "Development Tools"
     ```
 
--   **For openSUSE:**
+- **For openSUSE:**
     ```bash
     sudo zypper install -t pattern devel_basis
     ```
 
--   **For Ubuntu / Debian:**
+- **For Ubuntu / Debian:**
     ```bash
     sudo apt update
     sudo apt install build-essential
     ```
 
--   **For Gentoo:**
+- **For Gentoo:**
     ```bash
     sudo emerge --ask --oneshot dev-util/pkgconf dev-util/ccache
     ```
 
--   **For Arch Linux:**
+- **For Arch Linux:**
     ```bash
     sudo pacman -S base-devel
     ```
@@ -50,14 +50,14 @@ Distribution packages for Rust can be months or even years out of date, which ca
 
 When you use `rustup`, it will automatically detect this file and ensure you are using the same toolchain as every other developer and our CI server. This completely eliminates "it works on my machine" errors related to the compiler version.
 
-1.  **Install `rustup`:**
+1. **Install `rustup`:**
     The following command will download and run the official `rustup` installer. It's the same for all distributions.
     ```bash
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
     ```
     When prompted, choose the default installation option.
 
-2.  **Configure your shell:**
+2. **Configure your shell:**
     After the installation is complete, you must configure your current shell to add Cargo's binary directory to your `PATH`.
     ```bash
     source "${HOME}/.cargo/env"
@@ -103,15 +103,15 @@ This command provides a fast development cycle (~2-3 minutes) by building binari
 
 Before committing your changes or submitting a pull request, run the full suite of quality gates:
 
-1.  **Run Fast Checks:**
+1. **Run Fast Checks:**
     ```bash
     just check # Formats, lints code and docs, builds, and runs fast tests.
     ```
-2.  **Run Privileged Tests (Requires `sudo`):**
+2. **Run Privileged Tests (Requires `sudo`):**
     ```bash
     sudo -E just test-privileged # Runs Rust integration tests that require root privileges.
     ```
-3.  **Run Performance Tests (Requires `sudo`):**
+3. **Run Performance Tests (Requires `sudo`):**
     ```bash
     sudo just test-performance # Runs the comprehensive performance validation test.
     ```

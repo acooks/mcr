@@ -13,9 +13,9 @@ The `multicast_relay` is a high-performance userspace application designed to ad
 
 The architecture is designed around three core principles:
 
-1.  **Peak Performance:** To handle millions of packets per second by minimizing system calls, memory copies, and cross-core cache misses.
-2.  **Dynamic Reconfiguration:** To allow for adding, removing, and monitoring forwarding flows at runtime without service interruption.
-3.  **Testability:** To structure the code in a way that is modular and verifiable.
+1. **Peak Performance:** To handle millions of packets per second by minimizing system calls, memory copies, and cross-core cache misses.
+2. **Dynamic Reconfiguration:** To allow for adding, removing, and monitoring forwarding flows at runtime without service interruption.
+3. **Testability:** To structure the code in a way that is modular and verifiable.
 
 ## 2. Architectural Principles
 
@@ -69,10 +69,10 @@ graph TD
     style DN fill:#bbf,stroke:#333,stroke-width:2px
 ```
 
--   **User/Operator:** Interacts with the system via the `control_client`.
--   **`control_client`:** A command-line tool that sends JSON-RPC commands to the supervisor.
--   **Supervisor Process:** The main process that manages workers, handles configuration commands, and centralizes logging and statistics. It runs with privileges but does not handle high-speed packet forwarding.
--   **Worker Processes:** High-performance data plane processes, each pinned to a specific CPU core. They receive, process, and re-transmit all multicast traffic.
+- **User/Operator:** Interacts with the system via the `control_client`.
+- **`control_client`:** A command-line tool that sends JSON-RPC commands to the supervisor.
+- **Supervisor Process:** The main process that manages workers, handles configuration commands, and centralizes logging and statistics. It runs with privileges but does not handle high-speed packet forwarding.
+- **Worker Processes:** High-performance data plane processes, each pinned to a specific CPU core. They receive, process, and re-transmit all multicast traffic.
 
 ## 4. The Data Plane: A Unified, Single-Threaded Architecture
 
@@ -83,10 +83,10 @@ The MCR data plane uses a single-threaded, unified event loop model to eliminate
 - **Unified `io_uring` Instance:** Each worker thread uses a **single `io_uring` instance** to manage all asynchronous I/O operations for both ingress and egress. This provides a unified, highly efficient event queue.
 
 - **Event Loop Architecture:**
-    1.  **Ingress (`AF_PACKET`):** The worker submits multiple `Recv` operations to the `io_uring` for its `AF_PACKET` socket.
-    2.  **Egress (`AF_INET`):** When a received packet is processed and ready to be forwarded, the worker submits one or more `Send` operations to the *same* `io_uring` instance for the appropriate `AF_INET` egress sockets.
-    3.  **Unified Completion:** The worker makes a single blocking call (`submit_and_wait()`) that waits for *any* type of event to complete—a packet being received, a packet having been sent, or a command arriving from the supervisor.
-    4.  **Processing:** When the loop wakes, it processes all available completion events, frees buffers from sent packets, forwards newly received packets, and then submits new I/O operations to the ring.
+    1. **Ingress (`AF_PACKET`):** The worker submits multiple `Recv` operations to the `io_uring` for its `AF_PACKET` socket.
+    2. **Egress (`AF_INET`):** When a received packet is processed and ready to be forwarded, the worker submits one or more `Send` operations to the *same* `io_uring` instance for the appropriate `AF_INET` egress sockets.
+    3. **Unified Completion:** The worker makes a single blocking call (`submit_and_wait()`) that waits for *any* type of event to complete—a packet being received, a packet having been sent, or a command arriving from the supervisor.
+    4. **Processing:** When the loop wakes, it processes all available completion events, frees buffers from sent packets, forwards newly received packets, and then submits new I/O operations to the ring.
 
 ### Data Plane Packet Flow
 
@@ -123,9 +123,9 @@ flowchart LR
 - **Egress Path and Zero-Copy Fan-Out:** MCR now supports high-performance, multi-output "fan-out." When a packet needs to be forwarded to multiple destinations, the payload of the single received packet is wrapped in a reference-counted pointer (`Arc<[u8]>`). This allows the same memory to be queued for sending on multiple egress sockets without any memory copying, which is critical for scalable performance. This also applies to single-output forwarding, eliminating the previous `memcpy` overhead.
 
   The application utilizes three distinct egress paths:
-  1.  **Control Plane:** Uses `AF_UNIX` sockets for local IPC. MTU is not applicable.
-  2.  **IGMP Signaling:** Uses `AF_INET` sockets managed by the Supervisor. MTU is not a practical concern.
-  3.  **Fast Data Path:** Uses `AF_INET` sockets managed by the data plane workers. This is the exclusive subject of all high-performance design decisions concerning MTU handling, fragmentation, and NIC offloading.
+  1. **Control Plane:** Uses `AF_UNIX` sockets for local IPC. MTU is not applicable.
+  2. **IGMP Signaling:** Uses `AF_INET` sockets managed by the Supervisor. MTU is not a practical concern.
+  3. **Fast Data Path:** Uses `AF_INET` sockets managed by the data plane workers. This is the exclusive subject of all high-performance design decisions concerning MTU handling, fragmentation, and NIC offloading.
 
 - **Egress Error Handling:** The application will use a "Drop and Count" strategy for transient egress errors. Packets that fail to send due to transient errors will be dropped immediately, with no retry mechanism, to preserve low latency and prevent head-of-line blocking. A new metric, `egress_errors_total`, will be tracked on a per-output-destination basis and exposed via the control plane to provide immediate visibility into egress failures.
 
@@ -177,15 +177,15 @@ For a comprehensive guide to the logging system, including the high-performance 
 
 ## 8. Memory Management
 
--   **Core-Local Buffer Pools:** To avoid the performance penalty of dynamic memory allocation, the application uses a core-local buffer pool strategy. Each core-pinned data plane thread pre-allocates and manages its own independent set of fixed-size memory buffers. These buffers are organized into multiple pools based on common packet sizes (e.g., Small, Standard, Jumbo). Runtime "allocations" are fast, lock-free operations that acquire a buffer from the appropriate pool.
+- **Core-Local Buffer Pools:** To avoid the performance penalty of dynamic memory allocation, the application uses a core-local buffer pool strategy. Each core-pinned data plane thread pre-allocates and manages its own independent set of fixed-size memory buffers. These buffers are organized into multiple pools based on common packet sizes (e.g., Small, Standard, Jumbo). Runtime "allocations" are fast, lock-free operations that acquire a buffer from the appropriate pool.
 
--   **Buffer Pool Observability:** The system is designed to handle buffer pool exhaustion by dropping packets rather than falling back to slow, dynamic allocation. To make this manageable, the monitoring system exposes detailed, per-core, per-pool metrics, including the total size of each pool, the current number of buffers in use, and a counter for exhaustion events.
+- **Buffer Pool Observability:** The system is designed to handle buffer pool exhaustion by dropping packets rather than falling back to slow, dynamic allocation. To make this manageable, the monitoring system exposes detailed, per-core, per-pool metrics, including the total size of each pool, the current number of buffers in use, and a counter for exhaustion events.
 
 ## 9. Reliability and Resilience
 
--   **Supervisor Pattern for Resilience:** The application implements a supervisor pattern. The main application thread acts as the supervisor, responsible for the lifecycle of the data plane threads. It monitors its child threads for panics and will automatically restart a failed thread.
+- **Supervisor Pattern for Resilience:** The application implements a supervisor pattern. The main application thread acts as the supervisor, responsible for the lifecycle of the data plane threads. It monitors its child threads for panics and will automatically restart a failed thread.
 
--   **Network State Reconciliation (Future Work):** A high-priority item on the roadmap is to implement idempotent network state reconciliation. The target design is for the supervisor to use a Netlink socket to listen for network state changes (e.g., interfaces going up or down). This would allow it to automatically pause, resume, or re-resolve forwarding rules as network conditions change. **This feature is not yet implemented.**
+- **Network State Reconciliation (Future Work):** A high-priority item on the roadmap is to implement idempotent network state reconciliation. The target design is for the supervisor to use a Netlink socket to listen for network state changes (e.g., interfaces going up or down). This would allow it to automatically pause, resume, or re-resolve forwarding rules as network conditions change. **This feature is not yet implemented.**
 
 ### Supervisor Lifecycle Management
 
@@ -211,7 +211,7 @@ stateDiagram-v2
 
 ### Current Implementation vs. Target Architecture
 
--   **Current State:** The Supervisor, Control Plane, and Data Plane all currently run within a single supervisor process. While architecturally distinct, they are not yet separated into different processes with distinct privilege levels. The entire application requires `CAP_NET_RAW`.
--   **Target Architecture:** The goal is to separate these components into distinct processes. The Supervisor would retain `CAP_NET_RAW` to create sockets, while the Control Plane and Data Plane workers would run as completely unprivileged users. This would be achieved by the Supervisor passing the necessary socket file descriptors to the worker processes. This is a **high-priority future work item**.
+- **Current State:** The Supervisor, Control Plane, and Data Plane all currently run within a single supervisor process. While architecturally distinct, they are not yet separated into different processes with distinct privilege levels. The entire application requires `CAP_NET_RAW`.
+- **Target Architecture:** The goal is to separate these components into distinct processes. The Supervisor would retain `CAP_NET_RAW` to create sockets, while the Control Plane and Data Plane workers would run as completely unprivileged users. This would be achieved by the Supervisor passing the necessary socket file descriptors to the worker processes. This is a **high-priority future work item**.
 
 - **DDoS Amplification Risk (Trusted Network & QoS Mitigation):** The risk of DDoS amplification from external, malicious actors is considered mitigated by the operational requirement that the relay's ingress interfaces are connected only to physically secured, trusted network segments. The risk of accidental overload of a unicast destination due to misconfiguration is fully mitigated by the existing advanced QoS design, which allows for the classification and rate-limiting/prioritized dropping of high-bandwidth flows. No additional security-specific mechanisms are required for this threat vector.

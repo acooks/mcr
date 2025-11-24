@@ -17,9 +17,9 @@ In many modern network environments—such as broadcast media facilities, financ
 
 ### Who is MCR for?
 
--   **Network Architects & Cloud Engineers:** Bridge multicast traffic (e.g., discovery protocols, service announcements) between different VPCs, subnets, or physical network segments without complex routing changes.
--   **Broadcast & Media Engineers:** Reliably transport high-bitrate media streams (e.g., SMPTE 2110) across network boundaries in production and lab environments.
--   **Financial Services Developers:** Distribute real-time market data feeds across multiple isolated networks with minimal and predictable latency.
+- **Network Architects & Cloud Engineers:** Bridge multicast traffic (e.g., discovery protocols, service announcements) between different VPCs, subnets, or physical network segments without complex routing changes.
+- **Broadcast & Media Engineers:** Reliably transport high-bitrate media streams (e.g., SMPTE 2110) across network boundaries in production and lab environments.
+- **Financial Services Developers:** Distribute real-time market data feeds across multiple isolated networks with minimal and predictable latency.
 
 ---
 
@@ -27,11 +27,11 @@ In many modern network environments—such as broadcast media facilities, financ
 
 MCR is architected from the ground up for maximum throughput and minimal latency. The design combines several modern Linux technologies to achieve near line-rate speeds.
 
--   **Userspace Operation:** Provides maximum flexibility and control, avoiding the limitations and overhead of kernel-level forwarding.
--   **`io_uring` for Asynchronous I/O:** Utilizes Linux's most advanced I/O interface to dramatically reduce syscall overhead and minimize kernel-userspace context switching.
--   **`AF_PACKET` for Raw Sockets:** Reads and writes raw Ethernet frames, allowing for efficient processing and bypassing the kernel's IP stack.
--   **Single-Threaded, Unified Event Loop:** A single thread handles ingress, processing, and egress within one `io_uring` instance, eliminating cross-thread communication overhead and maximizing cache efficiency.
--   **Zero-Copy Fan-Out:** A single ingress packet can be efficiently replicated to multiple egress destinations using a zero-copy `Arc<[u8]>` based architecture.
+- **Userspace Operation:** Provides maximum flexibility and control, avoiding the limitations and overhead of kernel-level forwarding.
+- **`io_uring` for Asynchronous I/O:** Utilizes Linux's most advanced I/O interface to dramatically reduce syscall overhead and minimize kernel-userspace context switching.
+- **`AF_PACKET` for Raw Sockets:** Reads and writes raw Ethernet frames, allowing for efficient processing and bypassing the kernel's IP stack.
+- **Single-Threaded, Unified Event Loop:** A single thread handles ingress, processing, and egress within one `io_uring` instance, eliminating cross-thread communication overhead and maximizing cache efficiency.
+- **Zero-Copy Fan-Out:** A single ingress packet can be efficiently replicated to multiple egress destinations using a zero-copy `Arc<[u8]>` based architecture.
 
 This combination of technologies allows MCR to operate at speeds approaching line-rate, typically limited only by the underlying hardware.
 
@@ -84,13 +84,13 @@ This project provides separate documentation for users and developers.
 
 ### For Users
 
--   **[USAGE.md](./user_docs/USAGE.md):** A quick-start guide to get MCR up and running.
--   **[CONFIGURATION.md](./user_docs/CONFIGURATION.md):** The complete guide to configuring MCR, including kernel tuning, environment variables, and control plane commands.
--   **[WHY_USE_MCR.md](./user_docs/WHY_USE_MCR.md):** Explains the core problem MCR solves and compares it to other tools like `socat`.
+- **[USAGE.md](./user_docs/USAGE.md):** A quick-start guide to get MCR up and running.
+- **[CONFIGURATION.md](./user_docs/CONFIGURATION.md):** The complete guide to configuring MCR, including kernel tuning, environment variables, and control plane commands.
+- **[WHY_USE_MCR.md](./user_docs/WHY_USE_MCR.md):** Explains the core problem MCR solves and compares it to other tools like `socat`.
 
 ### For Developers
 
--   **[DEVELOPER_DOCS](./developer_docs/README.md):** The main entry point for all developer-focused documentation, including architecture, testing, and contribution guidelines.
+- **[DEVELOPER_DOCS](./developer_docs/README.md):** The main entry point for all developer-focused documentation, including architecture, testing, and contribution guidelines.
 
 ---
 
@@ -98,8 +98,8 @@ This project provides separate documentation for users and developers.
 
 This project is dual-licensed under either of:
 
--   Apache License, Version 2.0 ([LICENSE-APACHE](./LICENSE-APACHE) or <http://www.apache.org/licenses/LICENSE-2.0>)
--   MIT license ([LICENSE-MIT](./LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
+- Apache License, Version 2.0 ([LICENSE-APACHE](./LICENSE-APACHE) or <http://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](./LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
 
 at your option.
 
