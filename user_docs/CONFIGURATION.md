@@ -34,16 +34,14 @@ The script sets the following `sysctl` parameters. To make them permanent, add t
 
 These environment variables can be used to fine-tune the data plane's performance characteristics. They are intended for advanced users who are diagnosing performance issues or optimizing for specific workloads.
 
-| Variable                   | Default Value    | Description                                                                                                 |
-| :------------------------- | :--------------- | :---------------------------------------------------------------------------------------------------------- |
-| `MCR_SOCKET_SNDBUF`        | `4194304` (4 MB) | Sets the `SO_SNDBUF` (send buffer) size in bytes for egress UDP sockets.                                    |
-| `MCR_IO_URING_DEPTH`       | `1024`           | The number of submission queue entries for `io_uring`. Higher values allow more operations to be in-flight. |
-| `MCR_SEND_BATCH_SIZE`      | `64`             | The maximum number of packets to send in a single batch syscall.                                            |
-| `MCR_NUM_WORKERS`          | `1`              | The number of data plane worker threads to spawn.                                                           |
-| `MCR_BUFFER_POOL_SMALL`    | `1000`           | Number of small buffers (up to 2KB) to pre-allocate.                                                        |
-| `MCR_BUFFER_POOL_STANDARD` | `500`            | Number of standard buffers (up to 4KB) to pre-allocate.                                                     |
-| `MCR_BUFFER_POOL_JUMBO`    | `200`            | Number of jumbo buffers (up to 64KB) to pre-allocate.                                                       |
-| `MCR_VERBOSE`              | `0`              | Set to `1` to enable verbose logging for debugging.                                                         |
+| Variable                   | Default Value    | Description                                                              |
+| :------------------------- | :--------------- | :----------------------------------------------------------------------- |
+| `MCR_SOCKET_SNDBUF`        | `4194304` (4 MB) | Sets the `SO_SNDBUF` (send buffer) size in bytes for egress UDP sockets. |
+| `MCR_BUFFER_POOL_SMALL`    | `1000`           | Number of small buffers (up to 2KB) to pre-allocate.                     |
+| `MCR_BUFFER_POOL_STANDARD` | `500`            | Number of standard buffers (up to 4KB) to pre-allocate.                  |
+| `MCR_BUFFER_POOL_JUMBO`    | `200`            | Number of jumbo buffers (up to 64KB) to pre-allocate.                    |
+
+**Note:** The number of data plane workers is configured via the `--num-workers` flag on the supervisor command, not via an environment variable.
 
 **Example:**
 
