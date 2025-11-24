@@ -30,6 +30,6 @@ Guides for the day-to-day development process.
 Deeper dives into specific topics, policies, and historical analysis.
 
 -   **[policies/README.md](./policies/README.md):** Important policy documents, like our **[Unsafe Code Policy](./policies/UNSAFE_CODE_POLICY.md)**.
--   **[reports/README.md](./reports/README.md):** A collection of summary reports for major investigations and decisions.
+-   **[reports/README.md](./reports/README.md):** Summary reports from major investigations and decisions.
 -   **[comparisons/README.md](./comparisons/README.md):** Analysis and comparison of MCR with other networking tools.
--   **[archive/](./archive/):** Historical documents, outdated plans, and detailed investigation trails.
+-   **[reference_docs/](./reference_docs/):** Detailed investigation archives and completed implementation plans (see [completed/](./reference_docs/completed/) and [archive/](./reference_docs/archive/))
