@@ -1,6 +1,9 @@
 # MCR: A High-Performance Userspace Multicast Relay
 
-[![Rust CI](https://github.com/acooks/mcr/actions/workflows/rust.yml/badge.svg)](https://github.com/acooks/mcr/actions/workflows/rust.yml)
+
+[![Build Status](https://github.com/acooks/mcr/actions/workflows/rust.yml/badge.svg)](https://github.com/acooks/mcr/actions/workflows/rust.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](./licenses.html)
+
 
 **MCR** is a specialized, high-performance multicast relay for Linux, designed to forward multicast traffic between network segments where conventional routing is impossible or inefficient.
 
