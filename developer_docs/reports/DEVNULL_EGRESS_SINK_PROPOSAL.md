@@ -14,6 +14,7 @@ Egress: sent=0 ch_recv=0 ❌
 ```
 
 A `/dev/null` egress sink would help:
+
 1. **Isolate ingress performance** - Measure pure ingress throughput without network I/O overhead
 2. **Debug egress issues** - Validate that ingress→egress channel is working
 3. **Simplify tests** - No need for receiver setup in some performance tests
@@ -100,11 +101,13 @@ control_client add \
 ```
 
 **Pros**:
+
 - Simple to implement
 - Clear intent in configuration
 - No network resources needed
 
 **Cons**:
+
 - Special case in output parsing
 - Not a "real" multicast group
 
@@ -119,11 +122,13 @@ control_client add \
 ```
 
 **Pros**:
+
 - Fits existing syntax
 - Exercises full egress path
 - Tests egress socket creation/sending
 
 **Cons**:
+
 - Still creates UDP socket
 - OS might reject 0.0.0.0:0
 - Less clear intent
@@ -140,11 +145,13 @@ control_client add \
 ```
 
 **Pros**:
+
 - Exercises full pipeline
 - Can still configure "output" for testing
 - Clear opt-in behavior
 
 **Cons**:
+
 - More complex CLI
 - Still processes full egress path
 

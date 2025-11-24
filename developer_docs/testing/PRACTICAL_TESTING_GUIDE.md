@@ -75,6 +75,7 @@ A key component of our framework is the `scripts/run-tests-in-netns.sh` script. 
 The `just test-integration-privileged` command handles this for you. It finds the compiled test binary and executes it using the network namespace wrapper script.
 
 This ensures that privileged tests are:
+
 - **Isolated:** They cannot interfere with your local network.
 - **Repeatable:** They run in a clean, consistent environment every time.
 - **CI-Friendly:** This approach works reliably in automated CI/CD pipelines.

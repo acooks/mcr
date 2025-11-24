@@ -9,6 +9,7 @@
 To design and document a performance and scalability benchmark that clearly demonstrates the architectural strengths of MCR over simpler tools like `socat`. This experiment will focus on a realistic, high-density use case: relaying a large number of concurrent, medium-rate multicast streams.
 
 This test is specifically designed to highlight MCR's advantages in:
+
 - **Resource Efficiency:** Handling many streams within a single, multi-core application vs. one process per stream.
 - **Scalability:** Managing a high aggregate packet rate distributed across many flows.
 - **Dynamic Configuration:** Adding a large number of forwarding rules to a live service.
@@ -85,6 +86,7 @@ gen-ns (veth0) <-> (veth1) relay-ns (veth2) <-> (veth3) sink-ns
 **Note**: Tests were performed using the simpler chain topology from `tests/performance/compare_socat_chain.sh` rather than the complex multi-stream dual-bridge topology originally planned. This provides a baseline single-stream comparison.
 
 **Test Parameters**:
+
 - Workload: 9,000,000 packets over 60 seconds
 - Rate: 150,000 pps (1.23 Gbps)
 - Packet size: 1024 bytes

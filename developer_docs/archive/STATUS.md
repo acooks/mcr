@@ -8,6 +8,7 @@
 ## Current State: Core Functionality Complete, Test Coverage & Hardening In Progress
 
 The core data plane of MCR is functional and its basic performance has been validated. The project is currently in a phase of active development focused on two key areas:
+
 1. **Expanding Test Coverage:** Systematically increasing unit and integration test coverage to harden the existing codebase and prevent regressions.
 2. **Architectural Hardening:** Executing a series of planned refactoring tasks to improve security, scalability, and maintainability.
 

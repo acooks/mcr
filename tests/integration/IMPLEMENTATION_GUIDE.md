@@ -174,6 +174,7 @@ async fn test_supervisor_restarts_control_plane_worker() -> Result<()> {
 ```
 
 **Debugging tips**:
+
 - If test hangs, check supervisor output with `--nocapture`
 - Verify socket paths are unique
 - Check that `list-workers` command works correctly
@@ -232,6 +233,7 @@ async fn test_supervisor_resyncs_rules_on_restart() -> Result<()> {
 ```
 
 **Note**: Verifying that rules were actually sent to the worker is challenging without adding debugging infrastructure. Consider:
+
 - Adding a `--debug-worker-state` flag that dumps worker state
 - Using traffic-based verification (more complex but more realistic)
 
@@ -311,6 +313,7 @@ cargo test --test supervisor_resilience -- --test-threads=1 --nocapture
 ## Success Criteria
 
 When complete, you should have:
+
 - ✅ All 5 tests passing without `#[ignore]`
 - ✅ Tests run reliably in CI
 - ✅ Tests validate core resilience promise (D18, D23)
@@ -320,6 +323,7 @@ When complete, you should have:
 ## Next Steps
 
 After implementing these tests:
+
 1. Remove all `#[ignore]` attributes
 2. Update TESTING_PLAN.md Phase 3 to mark these as complete
 3. Run full test suite to ensure no regressions

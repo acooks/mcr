@@ -12,12 +12,14 @@
 Egress performance regressed from 307k pps (PHASE4, commit 2d5e8ef) to 96k pps (current) due to commit e3fbf90 breaking the buffer pool feedback loop.
 
 **Root Cause:**
+
 - Commit e3fbf90 changed `send_batch()` from synchronous (submit + reap) to async (just prepare)
 - Buffers stay in "in_flight" state longer
 - Ingress can't allocate buffers → 86% buffer exhaustion
 - Egress bottlenecked at ~96k pps
 
 **Failed Fix Attempts:**
+
 1. **Synchronous revert:** Blocked event loop → 71k pps (worse)
 2. **Timeout-based waiting:** Added 1ms delays → 96k pps (no improvement)
 3. **Current async:** Original problem persists → 96k pps
@@ -27,6 +29,7 @@ Egress performance regressed from 307k pps (PHASE4, commit 2d5e8ef) to 96k pps (
 ## Solution: Event-Driven io_uring (Option 2)
 
 Use io_uring's `PollAdd` to monitor multiple event sources simultaneously:
+
 1. **Eventfd** - Packet arrivals from ingress
 2. **Send completions** - UDP packets sent to network
 
@@ -340,6 +343,7 @@ fn send_batch_nonblocking(&mut self) -> Result<usize> {
 ### Step 6: Remove obsolete code
 
 **Remove:**
+
 - `reap_completions_blocking()` function (no longer needed)
 - `TIMEOUT_USER_DATA` constant (no longer needed)
 - Timeout handling in `process_cqe_batch()` (no longer needed)
@@ -349,11 +353,13 @@ fn send_batch_nonblocking(&mut self) -> Result<usize> {
 ## Expected Performance
 
 **Target:** Match or exceed PHASE4 performance
+
 - Egress: 307k pps (currently 96k pps)
 - Buffer exhaustion: <40% (currently 86%)
 - Ingress: Maintain current 689k pps
 
 **Why this will work:**
+
 1. **Immediate buffer return:** Completions processed in same loop iteration
 2. **No artificial delays:** No timeouts or blocking on specific operations
 3. **Continuous processing:** Eventfd wakes us immediately when packets arrive
@@ -376,6 +382,7 @@ fn send_batch_nonblocking(&mut self) -> Result<usize> {
 ## Fallback Plan
 
 If Option 2 doesn't achieve target performance:
+
 - Revert to commit 2d5e8ef entirely
 - Re-apply only critical fixes (logging removal)
 - Accept PHASE4 architecture as-is
@@ -392,11 +399,13 @@ If Option 2 doesn't achieve target performance:
 ## Risk Assessment
 
 **Low Risk:**
+
 - Architecture is well-understood (standard io_uring pattern)
 - Eventfd infrastructure already exists
 - Can revert if needed
 
 **Testing Required:**
+
 - Performance regression testing
 - Shutdown behavior validation
 - Buffer pool leak detection

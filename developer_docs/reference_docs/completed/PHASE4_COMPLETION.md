@@ -24,6 +24,7 @@ Phase 4 has been completed with **actual measured performance data** from real-w
 **Created:** `tests/data_plane_pipeline_veth.sh`
 
 **Test Setup:**
+
 - 3-hop MCR pipeline using veth pairs (point-to-point virtual interfaces)
 - Traffic Generator → MCR-1 → MCR-2 → MCR-3
 - 10 million packets @ 1400 bytes (total: 14 GB)
@@ -125,12 +126,14 @@ Phase 4 has been completed with **actual measured performance data** from real-w
 **Problem:** Using `println!` instead of proper logging system, no distinction between debug logging and telemetry.
 
 **Solution:**
+
 - Changed stats format: `[Ingress Stats]` → `[STATS:Ingress]`
 - Changed stats format: `[Egress Stats]` → `[STATS:Egress]`
 - Integrated with `Facility::Stats` logging
 - Updated test script grep patterns
 
 **Benefit:** Clear visual distinction between:
+
 - **Periodic telemetry:** `[STATS:Ingress]` (automatic, every 1 second)
 - **Debug logging:** `[Ingress]` (one-time events, rule changes)
 - **Errors:** `[Ingress] FATAL:` (exceptional conditions)
@@ -162,6 +165,7 @@ SupervisorCommand::GetStats => {
 ```
 
 **Benefit:**
+
 - Shows which rules are configured
 - Returns valid structure (zero counters as placeholder)
 - Documents future enhancement path (query workers for actual stats)
@@ -242,27 +246,32 @@ MCR-3 (veth2b):
 ### 1. Logging System Integration 🔴 HIGH PRIORITY
 
 **Current State:**
+
 - Data plane workers use `println!` for stats/debug
 - No proper `Logger` integration
 - Stats labeled with `[STATS:...]` prefix as temporary solution
 
 **Requirements:**
+
 - Integrate `Logger` with `Facility::Stats` / `Facility::Ingress` / `Facility::Egress`
 - Proper `Severity` levels (Info for stats, Debug for verbose traces)
 - Design calls for workers to report stats periodically (not queried by supervisor)
 
 **Scope:**
+
 - Plumb `Logger` instances through to data plane workers
 - Replace `println!` with proper log macros
 - Maintain periodic stats reporting (every 1 second)
 - Ensure zero-allocation logging in hot path
 
 **Files to modify:**
+
 - `src/worker/ingress.rs` (lines 297, 305, 166, 187, 371, 524-570)
 - `src/worker/data_plane_integrated.rs` (lines 232, 241, 226)
 - `src/worker/egress.rs` (debug prints)
 
 **Files to modify:**
+
 - `src/worker/ingress.rs` (lines 297, 305, 166, 187, 371, 524-570)
 - `src/worker/data_plane_integrated.rs` (lines 232, 241, 226)
 - `src/worker/egress.rs` (debug prints)
@@ -272,21 +281,25 @@ MCR-3 (veth2b):
 ### 2. Actual Stats Aggregation from Workers 🟡 MEDIUM PRIORITY
 
 **Current State:**
+
 - `GetStats` returns configured rules with zero counters
 - No IPC mechanism to query data plane workers for actual stats
 
 **Requirements:**
+
 - Query data plane workers for live IngressStats/EgressStats
 - Aggregate stats from multiple workers
 - Return actual per-rule packet/byte counters
 
 **Scope:**
+
 - Add `GetStats` to `RelayCommand` enum
 - Implement stats query handler in data plane worker
 - Aggregate stats in supervisor
 - Map worker-level stats to per-rule FlowStats
 
 **Design considerations:**
+
 - Stats are currently aggregate (not per-rule) in workers
 - Would need per-rule tracking in ingress/egress loops
 - Or accept worker-level aggregates and document limitation
@@ -298,11 +311,13 @@ MCR-3 (veth2b):
 ### 3. Performance Asymmetry Mitigation 🟢 LOW PRIORITY (Production Tuning)
 
 **Current State:**
+
 - AF_PACKET ingress: 490k pps
 - UDP egress: 307k pps
 - 37% throughput gap
 
 **Potential optimizations:**
+
 - Investigate UDP socket tuning (SO_SNDBUF, etc.)
 - Consider io_uring SEND_ZC (zero-copy send) for UDP
 - Profile egress path to identify bottleneck
@@ -315,16 +330,19 @@ MCR-3 (veth2b):
 ### 4. Integration Tests 🟡 MEDIUM PRIORITY
 
 **Current State:**
+
 - Unit tests: 122 passing
 - Manual end-to-end test: `data_plane_pipeline_veth.sh`
 - No automated integration test suite
 
 **Requirements:**
+
 - Automated CI/CD integration tests
 - Network namespace isolation
 - Multiple test scenarios (fragmentation, buffer exhaustion, multi-output, etc.)
 
 **Scope:**
+
 - Create `tests/integration/` directory
 - Port veth test to Rust integration test
 - Add test scenarios for edge cases
@@ -337,6 +355,7 @@ MCR-3 (veth2b):
 ### 5. Documentation Updates 📝 IN PROGRESS (This Document)
 
 **Completed:**
+
 - ✅ This completion document (`PHASE4_COMPLETION.md`)
 
 ---
@@ -416,6 +435,7 @@ Phase 4 is **COMPLETE** with real-world validation. The system:
 - ✅ Has identified clear performance asymmetry (AF_PACKET vs UDP)
 
 **Outstanding work:**
+
 - 🔴 Logging system integration (high priority)
 - 🟡 Actual stats aggregation from workers (medium priority)
 - 🟢 Performance profiling and optimization (low priority - defer to production)

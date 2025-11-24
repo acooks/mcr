@@ -7,6 +7,7 @@ This experiment validates the io_uring-based egress strategy for the multicast r
 ## The Problem
 
 The data plane egress path must:
+
 1. Send packets to multiple interfaces at line rate (5M pps total system)
 2. Use batched async I/O for efficiency (D8: io_uring for Egress)
 3. Bind sockets to specific source IPs (D5: Memory Copy Egress)
@@ -132,6 +133,7 @@ Target validated if:
 ### Implementation
 
 **Minimal io_uring Egress:**
+
 - Create UDP socket, bind to specific source IP
 - Set up io_uring with configurable queue depth
 - Submit batched `sendto()` operations via `IORING_OP_SENDTO`
@@ -139,6 +141,7 @@ Target validated if:
 - Handle errors from CQ entries
 
 **Test Scenarios:**
+
 - Localhost loopback (low latency, high throughput)
 - Network namespace (isolated testing)
 - Error injection (unreachable destinations)
@@ -252,11 +255,13 @@ All tests and benchmarks executed successfully on 2025-11-07.
 ### Test Execution Summary
 
 **Unit Tests:** ✅ All 3 tests passed
+
 - Sender creation
 - Source IP binding
 - Send single packet
 
 **Functional Tests:** ✅ All 5 tests passed
+
 - Basic send/receive (1 packet)
 - Batched send (10 packets)
 - Source IP binding verification
@@ -280,12 +285,14 @@ All benchmarks completed successfully. Key findings below.
 | 128        | 68.97 µs       | 1.86                 | 1.86M       |
 
 **Analysis:**
+
 - Throughput **increases** from batch 1 to 16 (1.29M → 1.80M = 40% improvement)
 - Throughput **plateaus** at batch 32-64 (1.83M → 1.85M = minimal gain)
 - Batch 128 shows **no further improvement** (1.86M ≈ 1.85M)
 - **Optimal batch size: 32-64 packets** ✅
 
 **Per-packet cost:**
+
 - Batch 1: 776 ns/packet
 - Batch 64: 540 ns/packet (34.61 µs / 64)
 - **30% reduction** in per-packet overhead with batching
@@ -302,6 +309,7 @@ All benchmarks completed successfully. Key findings below.
 | 256         | 34.56 µs       | -0.3%          |
 
 **Analysis:**
+
 - Queue depth has **no measurable impact** in the 32-256 range
 - All measurements within 0.4% of each other (measurement noise)
 - Smaller queues save memory without performance cost
@@ -321,6 +329,7 @@ All benchmarks completed successfully. Key findings below.
 | 8000 bytes  | 46.63 µs       | 163.63             |
 
 **Analysis:**
+
 - Larger packets = higher MiB/s throughput (expected)
 - Time per batch varies (33-60 µs range)
 - Variance likely due to CPU cache effects and memory copy overhead
@@ -336,6 +345,7 @@ All benchmarks completed successfully. Key findings below.
 | Without stats | 34.506 µs      | -0.12%   |
 
 **Analysis:**
+
 - Stats overhead is **0.12%** (essentially zero, within measurement noise)
 - Similar to buffer pool results (Exp #3) - stats are free
 - ✅ **Enable stats in production** (full observability at zero cost)
@@ -345,10 +355,12 @@ All benchmarks completed successfully. Key findings below.
 #### Throughput vs Target
 
 **Target (from modeling):**
+
 - Worst-case: 3.1M pps/core (1:10 ingress:egress amplification)
 - Typical: 1.56M pps/core (1:5 amplification)
 
 **Achieved:**
+
 - Best throughput: **1.85M pps** (batch 64-128)
 
 **Comparison:**
@@ -370,6 +382,7 @@ The 1.85M pps throughput is **40% below** the worst-case 3.1M target. However, t
 **For typical 1:5 amplification:** ✅ Target met with 18.6% headroom
 
 **For extreme 1:10 amplification:** ⚠️ Options:
+
 - Use 2 egress workers per core (1.85M × 2 = 3.7M > 3.1M)
 - Accept backpressure on extreme amplification scenarios
 - Re-test with real NICs (likely faster than loopback)
@@ -439,6 +452,7 @@ CPU overhead for egress drops from 74% to 2.3% at 1.85M pps.
 ### 2. Optimal Batch Size is 32-64 Packets
 
 Beyond batch 64, there's **no performance gain**. Batch 32-64 hits the sweet spot:
+
 - Good throughput (1.83-1.85M pps)
 - Low latency (17-35 µs per batch)
 - Diminishing returns beyond this point
@@ -460,6 +474,7 @@ Safe to enable full per-packet observability in production.
 **1.85M pps** is excellent for typical multicast relay scenarios (1:5 amplification).
 
 For extreme amplification (1:10), may need:
+
 - Multiple egress workers per core
 - Or accept that extreme scenarios will backpressure
 
@@ -506,6 +521,7 @@ Single egress worker per core is sufficient for typical multicast relay scenario
 **For 1:10 amplification:** 1.85M pps < 3.1M target
 
 **Options:**
+
 1. Use 2 egress workers per core (1.85M × 2 = 3.7M > 3.1M)
 2. Accept backpressure on extreme scenarios (graceful degradation)
 3. Re-test with real NICs (likely faster than loopback)
@@ -525,6 +541,7 @@ Egress batching strategy is **validated and ready for implementation**.
 ## Success Criteria
 
 ✅ **Pass** if:
+
 - Throughput > 3M packets/sec/core (worst-case 1:10 amplification)
 - Latency p99 < 200 µs (acceptable for multicast relay)
 - Source IP binding works correctly
@@ -532,6 +549,7 @@ Egress batching strategy is **validated and ready for implementation**.
 - System call reduction > 10x vs non-batched
 
 ❌ **Fail** if:
+
 - Throughput < 1M pps/core (insufficient for target workload)
 - Errors cause ring corruption or crashes
 - Source IP binding breaks sendto() functionality
@@ -549,6 +567,7 @@ Egress batching strategy is **validated and ready for implementation**.
 ✅ Demonstrates syscall reduction benefit
 
 **Production Recommendations:**
+
 - Use io_uring for all egress operations
 - Queue depth: 64-128 (to be determined by benchmarks)
 - Batch size: 32-64 packets
@@ -560,6 +579,7 @@ Egress batching strategy is **validated and ready for implementation**.
 ❌ Would require rethinking egress strategy
 
 **Options:**
+
 1. Fall back to blocking sendto() with thread pool
 2. Investigate tokio-uring or other async I/O frameworks
 3. Re-evaluate if 5M pps target is achievable

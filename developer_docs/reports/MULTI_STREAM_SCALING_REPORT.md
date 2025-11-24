@@ -8,6 +8,7 @@
 This report documents the investigation and resolution of two critical, related bugs that prevented the Multicast Relay (MCR) from scaling beyond a single stream or single worker process. The investigation revealed multiple issues, culminating in the discovery of a fundamental kernel resource limit (`ENOBUFS`) that was the primary scaling bottleneck.
 
 The resolution involved two key architectural changes:
+
 1. **Shared IGMP Helper Sockets:** A move from a one-socket-per-group model to a one-socket-per-interface model for managing IGMP memberships.
 2. **Kernel-Level Packet Distribution:** The introduction of the `PACKET_FANOUT` socket option to eliminate packet duplication across multiple worker processes.
 

@@ -45,6 +45,7 @@ pub fn send_batch(&mut self) -> Result<usize> {
 ```
 
 **Key behaviors:**
+
 1. **Immediate submission** after preparing batch
 2. **Synchronous completion reaping** - waits for sends to complete
 3. **Buffer deallocation** happens immediately after completion
@@ -72,6 +73,7 @@ pub fn send_batch(&mut self) -> Result<usize> {
 ```
 
 **Changed behaviors:**
+
 1. **No submission** in send_batch() - operations stay in submission queue
 2. **No completion reaping** - buffers stay allocated
 3. **Deferred submission** - happens later in event loop
@@ -117,6 +119,7 @@ pub fn run(&mut self, packet_rx: &crossbeam_queue::SegQueue<EgressWorkItem>) -> 
 ```
 
 **The Problem:**
+
 1. Packets are prepared in `send_batch()` but NOT submitted
 2. Submission happens once per loop iteration at line 485
 3. Completion reaping happens once per loop iteration at line 445
@@ -173,6 +176,7 @@ Iteration N+1:
 - **In-flight capacity:** ~64 packets maximum
 
 **Saturation calculation:**
+
 - Ingress can queue packets at ~689k pps
 - Egress can only have 64 in-flight at once
 - At 97k pps completion rate: 64 buffers / 97k pps = **0.66ms buffer lifetime**
@@ -185,6 +189,7 @@ Iteration N+1:
 ## Why PHASE4 Worked
 
 With synchronous `send_batch()`:
+
 - Each batch completes BEFORE next batch starts
 - Buffer lifetime = batch processing time (~34.6µs for 64 packets from Exp #5)
 - Buffers return to pool before ingress needs them again
@@ -257,11 +262,13 @@ pub fn send_batch(&mut self) -> Result<usize> {
 ```
 
 **Pros:**
+
 - Proven to work (PHASE4 results)
 - Simple revert
 - Restores buffer pool feedback loop
 
 **Cons:**
+
 - May block event loop during completion waiting
 - Could affect responsiveness to shutdown signals
 
@@ -272,6 +279,7 @@ pub fn send_batch(&mut self) -> Result<usize> {
 **Change:** Increase buffer pool from current size to accommodate in-flight delay
 
 **Why not:**
+
 - Doesn't fix root cause
 - Wastes memory
 - Still limits maximum throughput
@@ -291,10 +299,12 @@ self.process_cqe_batch()?;
 ```
 
 **Pros:**
+
 - Keeps async event loop
 - Reduces buffer lifetime
 
 **Cons:**
+
 - Still has 1-iteration delay
 - More complex
 - Unproven

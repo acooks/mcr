@@ -121,6 +121,7 @@ Expected for systems programming:
 - **libc** (5% unsafe): FFI bindings by definition
 
 Zero unsafe (safe abstractions):
+
 - anyhow, clap, thiserror, serde, serde_json, uuid
 
 ## Recommendations for Developers

@@ -5,6 +5,7 @@
 ### Single-Worker Configuration (`--num-workers 1`)
 
 **Test Setup:**
+
 - Virtual ethernet (veth) interfaces
 - Network namespace isolation
 - 3-hop chain topology
@@ -68,6 +69,7 @@ ip link show veth0 | grep qlen         # Interface queue length
 ### 3. **Single Worker Architecture**
 
 Current test uses `--num-workers 1` due to architectural limitations:
+
 - **Issue**: Eager AF_PACKET socket creation (see STATUS.md, D23)
 - **Impact**: All workers create identical sockets, exhausting resources
 - **Workaround**: Force single worker
@@ -104,16 +106,19 @@ ip link set veth0 txqueuelen 10000
 ### Long-Term (Architecture)
 
 **Implement Lazy Socket Creation (D23):**
+
 - Workers create AF_PACKET sockets only when rules are added
 - Enables multi-worker configuration
 - Each worker handles subset of flows (consistent hashing)
 
 **Expected improvement:** Linear scaling with CPU cores
+
 - 1 worker: ~300k pps
 - 4 workers: ~1.2M pps
 - 8 workers: ~2.4M pps
 
 **Implement Privilege Separation (D24):**
+
 - Supervisor creates AF_PACKET sockets
 - Passes FDs to unprivileged workers
 - Improves security without performance impact
@@ -165,6 +170,7 @@ Each instance on dedicated core
 ### Value of CPU Isolation
 
 While it didn't improve throughput, CPU isolation still provides:
+
 - ✅ **Stability** - No thread contention between MCR instances
 - ✅ **Predictability** - Each instance has guaranteed CPU time
 - ✅ **Testing** - Isolates per-instance performance issues
@@ -175,6 +181,7 @@ While it didn't improve throughput, CPU isolation still provides:
 #### CRITICAL FINDING: Buffer Pool Size is NOT the Bottleneck
 
 Experiment tested buffer pool sizing impact on 3x amplification:
+
 - **Before:** 1000 small buffers → 64% buffer exhaustion (126k / 206k)
 - **After:** 4000 small buffers (4x capacity) → 65% buffer exhaustion (135k / 207k)
 - **Result:** NO IMPROVEMENT - same exhaustion percentage!
@@ -182,17 +189,20 @@ Experiment tested buffer pool sizing impact on 3x amplification:
 **Conclusion:** Egress throughput is the real bottleneck, not buffer capacity.
 
 **Root Cause Analysis:**
+
 1. **Egress Saturation:** Must send 3x packets (to 3 outputs), ~219k pps egress vs 73k pps ingress
 2. **Single Worker Limitation:** One thread alternates ingress ↔ egress, can't parallelize
 3. **Buffers Fill Regardless:** Egress can't drain fast enough, any size buffer pool eventually fills
 4. **Ingress Blocks:** When buffers full, ingress drops packets, limiting overall throughput
 
 **Why Increasing Buffers Doesn't Help:**
+
 - Larger buffers delay the problem but don't solve it
 - If egress sends 200k pps but needs 300k pps, buffers will always fill
 - It's like trying to fix a traffic jam by building a bigger parking lot
 
 **The Real Fixes:**
+
 1. **Separate Ingress/Egress Workers (D23)** - Run on different cores in parallel
 2. **Batch Egress Operations** - Send multiple packets per syscall
 3. **Backpressure** - Slow ingress to match egress capacity
@@ -203,12 +213,14 @@ Experiment tested buffer pool sizing impact on 3x amplification:
 **Goal:** Validate **functionality**, not maximum performance
 
 **Approach:**
+
 - Use realistic packet rates (250k pps) that work reliably
 - Focus on end-to-end packet flow validation
 - Accept buffer exhaustion as expected behavior
 - Document performance characteristics for future optimization
 
 **Non-Goals:**
+
 - ❌ Stress testing at maximum capacity (different test needed)
 - ❌ Multi-core performance testing (blocked by D23)
 - ❌ Production-level throughput benchmarks (use real NICs)
@@ -243,6 +255,7 @@ Validate: Stable throughput, no memory growth
 ## Conclusion
 
 **Current topology tests are fit for purpose:**
+
 - ✅ Validate end-to-end packet flow
 - ✅ Detect configuration errors
 - ✅ Verify stats accuracy

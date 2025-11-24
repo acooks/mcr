@@ -21,6 +21,7 @@ Successfully implemented and debugged the unified single-threaded data plane loo
 **Objective:** Integrate packet parsing logic from the existing ingress module
 
 **Work Done:**
+
 - Added `parse_packet` import from `packet_parser` module
 - Created `ForwardingTarget` struct for clean separation of concerns:
 
@@ -54,6 +55,7 @@ Successfully implemented and debugged the unified single-threaded data plane loo
 **Work Done:**
 
 **A. Created `run_unified_data_plane()` function**
+
 - Location: `/home/acooks/mcr/src/worker/data_plane_integrated.rs:176-238`
 - Extracts command stream FD from ingress channels
 - Reads buffer pool configuration from environment variables:
@@ -81,6 +83,7 @@ Successfully implemented and debugged the unified single-threaded data plane loo
 - Easy to switch back if needed
 
 **Verification:**
+
 - Compiles cleanly with no warnings
 - Supervisor spawns workers using unified loop
 
@@ -114,6 +117,7 @@ for _ in 0..num_recv_buffers {
 ```
 
 Under high load:
+
 1. Event loop processes completions slowly
 2. More receives/sends submitted than completions processed
 3. Submission queue fills to capacity (default: 128)
@@ -162,12 +166,14 @@ fn submit_send_batch(&mut self) -> Result<()> {
 ```
 
 **Verification:**
+
 - Test: `cargo test --release test_add_and_remove_rule_e2e`
 - Result: Workers ran for 10+ minutes without crashes
 - Previous behavior: Crashed at ~5 minutes
 - ✅ Bug FIXED
 
 **Files Modified:**
+
 - `/home/acooks/mcr/src/worker/unified_loop.rs:499-542` (`submit_recv_buffers`)
 - `/home/acooks/mcr/src/worker/unified_loop.rs:545-599` (`submit_send_batch`)
 
@@ -239,12 +245,14 @@ Operating margin: 62% of total pool available
 ```
 
 **Verification:**
+
 - Test: Manual startup with 1 worker and 20 workers
 - Result: No buffer pool exhaustion errors
 - Workers initialize successfully
 - ✅ Bug FIXED
 
 **File Modified:**
+
 - `/home/acooks/mcr/src/worker/unified_loop.rs:95`
 
 ---
@@ -285,6 +293,7 @@ Operating margin: 62% of total pool available
 ### Benefits Over Two-Thread Model
 
 **Eliminated:**
+
 - ❌ Cross-thread queue (SegQueue/mpsc)
 - ❌ Eventfd wakeup mechanism
 - ❌ Context switches between threads
@@ -292,6 +301,7 @@ Operating margin: 62% of total pool available
 - ❌ Arc<Mutex<>> for buffer pool synchronization
 
 **Gained:**
+
 - ✅ Single-threaded simplicity
 - ✅ Better cache locality
 - ✅ Natural batching (receive N, process N, send N)
@@ -334,6 +344,7 @@ cargo test --release test_add_and_remove_rule_e2e
 ```
 
 **Result:**
+
 - All 20 workers started successfully
 - No buffer pool exhaustion errors
 - No submission queue overflow errors
@@ -350,10 +361,12 @@ cargo test --release test_add_and_remove_rule_e2e
 - Load: Rule add/remove operations
 
 **Previous Behavior (before fixes):**
+
 - Crashed at ~5 minutes with "submission queue is full"
 - OR crashed immediately with "Buffer pool exhausted"
 
 **Current Behavior:**
+
 - ✅ No crashes
 - ✅ No submission queue errors
 - ✅ No buffer pool errors
@@ -415,6 +428,7 @@ MD5: 48b1fcf85d86ab452099e71f0d862621
 **Objective:** Verify packet forwarding actually works
 
 **Test Plan:**
+
 - Start supervisor with unified loop
 - Add forwarding rule via control_client
 - Send multicast traffic
@@ -428,6 +442,7 @@ MD5: 48b1fcf85d86ab452099e71f0d862621
 **Objective:** Compare against baselines
 
 **Baselines:**
+
 - PHASE4 (historical best): 307k pps egress
 - Current two-thread model: ~97k pps egress (regressed)
 
@@ -438,6 +453,7 @@ sudo tests/data_plane_pipeline_veth.sh
 ```
 
 **Success Criteria:**
+
 - Ingress ≥ 690k pps (current baseline)
 - Egress ≥ 307k pps (PHASE4 target)
 - Buffer exhaustion < 40%
@@ -447,6 +463,7 @@ sudo tests/data_plane_pipeline_veth.sh
 ### 3. Optimization (if needed)
 
 Potential areas:
+
 - io_uring queue depth tuning
 - Batch size optimization
 - Buffer pool sizing
@@ -485,20 +502,24 @@ Potential areas:
 The unified single-threaded loop (Option 4) is now in a stable, testable state:
 
 ✅ **Implementation Complete**
+
 - Packet parsing integrated
 - Data plane wired up
 - Default in supervisor
 
 ✅ **Critical Bugs Fixed**
+
 - Submission queue overflow resolved
 - Buffer pool exhaustion resolved
 
 ✅ **Stable Operation**
+
 - Workers start successfully
 - Run for 10+ minutes without crashes
 - No resource errors
 
 🔄 **Ready for Testing**
+
 - Functional testing: Verify packet forwarding
 - Performance testing: Compare vs baselines
 

@@ -9,6 +9,7 @@ This directory contains plans and design documents that have been completed or s
 **Original Status:** Planning Complete - Ready for Implementation (2025-11-14)
 **Implementation:** Completed via "Option 4: Unified Single-Threaded Loop" approach
 **Related Work:**
+
 - `plans/OPTION4_UNIFIED_LOOP.md` - The chosen implementation approach
 - `plans/UNIFIED_LOOP_SESSION_SUMMARY_2025-11-17.md` - Implementation session notes
 - Git commit `e3fbf90` - "Eliminate tokio bridge and shared memory logging"
@@ -20,6 +21,7 @@ This directory contains plans and design documents that have been completed or s
 **Original Status:** PLANNED (2025-11-17)
 **Outcome:** Superseded by Option 4 (Unified Loop)
 **Related Work:**
+
 - `plans/OPTION4_UNIFIED_LOOP.md` - The solution that was actually implemented
 - `reports/EGRESS_REGRESSION_ANALYSIS_2025-11-16.md` - Problem analysis
 - `reports/PERFORMANCE_REGRESSION_FIX_SUMMARY_Nov2025.md` - Resolution summary

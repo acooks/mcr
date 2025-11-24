@@ -47,6 +47,17 @@ lint-docs:
     fi
     npx markdownlint --config .markdownlint.json "**/*.md"
 
+# Auto-fix documentation formatting issues
+fix-docs:
+    @echo "--- Auto-fixing Documentation Issues ---"
+    @if ! command -v npm &> /dev/null; then \
+        echo "Error: npm is not installed."; \
+        echo "Please install Node.js and npm to run markdown fixing."; \
+        exit 1; \
+    fi
+    npx markdownlint --fix --config .markdownlint.json "**/*.md"
+    @echo "✅ Documentation auto-fixed! Review changes with 'git diff'"
+
 # Check for broken links in markdown files
 check-links:
     @echo "--- Checking Markdown Links ---"

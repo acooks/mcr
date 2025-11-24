@@ -6,6 +6,7 @@
 ## Executive Summary
 
 The network namespace test framework has been successfully implemented and validated. The framework correctly:
+
 - Builds test binaries as a regular user
 - Finds and executes privileged tests with sudo
 - Runs tests in isolated network namespaces
@@ -64,6 +65,7 @@ just test-integration-privileged
 ### Framework Status: ✅ Working Correctly
 
 **Test Execution**: Successfully ran all 8 ignored tests
+
 - Test discovery: ✅ Found test binary `integration-ecf9645beee77a53`
 - Privilege escalation: ✅ sudo -E working correctly
 - Namespace isolation: ✅ Tests running in isolated namespaces
@@ -79,6 +81,7 @@ test result: FAILED. 0 passed; 8 failed; 0 ignored; 0 measured; 12 filtered out
 ```
 
 **Failed Tests**:
+
 1. `test_basic::test_minimal_10_packets` - Zero packets received
 2. `test_basic::test_single_hop_1000_packets` - Zero packets matched
 3. `test_scaling::test_scale_1000_packets` - Zero packets forwarded
@@ -100,6 +103,7 @@ Egress: sent=0 submitted=0 ch_recv=0 errors=0 bytes=0
 ```
 
 **Likely Root Causes**:
+
 1. **Ingress socket not receiving**: Multicast packets not reaching the socket
 2. **Network setup issues**: Routing, IGMP, or interface configuration
 3. **Process startup timing**: MCR not ready when packets sent
@@ -115,6 +119,7 @@ Egress: sent=0 submitted=0 ch_recv=0 errors=0 bytes=0
 ```
 
 **Analysis**:
+
 - ✅ Ingress working: Received and matched 1M packets
 - ✅ Ingress→Egress channel: Sent 1M packets to egress
 - ❌ Egress broken: `ch_recv=0` - egress never received from channel
@@ -131,6 +136,7 @@ for '--outputs <OUTPUTS>': Invalid format. Expected group:port:interface[:dtls]
 ```
 
 **Analysis**:
+
 - Test attempts to add multiple outputs with comma-separated format
 - CLI parser expects different format or doesn't support multiple outputs
 - Test may be using outdated API format
@@ -138,6 +144,7 @@ for '--outputs <OUTPUTS>': Invalid format. Expected group:port:interface[:dtls]
 ## File References
 
 **Test Failures Locations**:
+
 - `tests/integration/test_basic.rs:201` - test_minimal_10_packets panic
 - `tests/integration/test_basic.rs:114` - test_single_hop_1000_packets panic
 - `tests/integration/test_scaling.rs:95` - test_scale_1000_packets panic
@@ -147,6 +154,7 @@ for '--outputs <OUTPUTS>': Invalid format. Expected group:port:interface[:dtls]
 - `tests/integration/test_topologies.rs:309` - test_chain_3hop panic
 
 **Framework Implementation**:
+
 - `justfile:122-167` - New test framework targets
 - `scripts/run-tests-in-netns.sh` - Network namespace wrapper (not needed for Rust tests)
 
@@ -195,6 +203,7 @@ cat /tmp/test_mcr_*.log
 ### Framework Success ✅
 
 The test framework is working exactly as designed:
+
 - Clean separation between build (user) and test (root) phases
 - Correct test binary discovery and execution
 - Network namespace isolation working via `NetworkNamespace::enter()`

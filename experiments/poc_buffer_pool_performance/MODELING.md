@@ -155,6 +155,7 @@ Jumbo packets (< 9KB):      10%  →    200 buffers
 ```
 
 This weighting balances:
+
 - Memory efficiency (don't over-allocate large buffers)
 - Common case performance (most packets are small)
 - Burst tolerance (enough headroom for temporary spikes)

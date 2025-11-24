@@ -5,6 +5,7 @@ This experiment implements and validates lockless ring buffers for the MCR loggi
 ## Overview
 
 The PoC demonstrates two ring buffer implementations:
+
 - **SPSC** (Single-Producer Single-Consumer): For data plane workers (io_uring threads)
 - **MPSC** (Multiple-Producer Single-Consumer): For control plane (async Tokio tasks)
 
@@ -112,11 +113,13 @@ pub struct SPSCRingBuffer {
 ### Safety Invariants
 
 **SPSC**:
+
 - Only one thread writes (`write_seq`)
 - Only one thread reads (`read_seq`)
 - State machine prevents concurrent access to same entry
 
 **MPSC**:
+
 - Multiple writers use CAS to reserve slots
 - Only one reader
 - State machine prevents concurrent access
@@ -124,6 +127,7 @@ pub struct SPSCRingBuffer {
 ## Unit Tests
 
 Tests cover:
+
 - Basic write/read operations
 - Wraparound after filling buffer
 - Overrun detection and counting

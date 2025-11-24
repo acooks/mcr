@@ -58,6 +58,7 @@ Traffic Gen → MCR-1 → MCR-2 → MCR-3
 ```
 
 **Tests:**
+
 - Serial forwarding through multiple hops
 - Buffer management across hops
 - Stats accuracy at each hop
@@ -70,6 +71,7 @@ sudo tests/topologies/chain_3hop.sh
 ```
 
 **Expected Outcome:**
+
 - MCR-1: Receives ~1M packets, forwards most
 - MCR-2: Receives packets from MCR-1, forwards most
 - MCR-3: Receives packets from MCR-2 (terminus)
@@ -88,6 +90,7 @@ Traffic Gen → MCR-1 ┼→ MCR-3
 ```
 
 **Tests:**
+
 - Head-end replication (1 input → N outputs)
 - Buffer pool under amplification (3x traffic)
 - Per-output stats tracking
@@ -112,6 +115,7 @@ Traffic Gen 3 → MCR-3 ┘
 ```
 
 **Tests:**
+
 - Multiple sources to single destination
 - Ingress demultiplexing
 - Per-rule isolation
@@ -130,6 +134,7 @@ Traffic Gen → MCR-1      → MCR-4
 ```
 
 **Tests:**
+
 - Multiple paths converge at destination
 - No duplicate packets
 - Timing/ordering consistency
@@ -146,6 +151,7 @@ Every MCR instance forwards to every other MCR instance
 ```
 
 **Tests:**
+
 - Scalability (N² connections)
 - Cross-talk isolation
 - Rule management complexity
@@ -266,6 +272,7 @@ These topology tests provide end-to-end coverage for:
 - ✅ **Head-end replication** - 1:N amplification
 
 **Not covered** (blocked by architectural debt):
+
 - ⚠️ Privilege separation (workers run as root - D24)
 - ⚠️ Lazy socket creation (eager creation - D23)
 - ⚠️ Multi-interface per worker (--interface parameter - D21)

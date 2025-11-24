@@ -30,6 +30,7 @@ The system provides **sufficient telemetry** to diagnose "at capacity but operat
 ```
 
 **Diagnosis from stats alone:**
+
 - Ingress receiving at 490k pps ✅
 - Egress sending at 307k pps ✅
 - Zero errors (`errors=0`) ✅
@@ -73,6 +74,7 @@ The system provides **sufficient telemetry** to diagnose "at capacity but operat
 **Estimated time:** 3.5 hours
 
 **Files to modify:**
+
 - Create `src/worker/logger.rs` (new)
 - Update `src/worker/ingress.rs`
 - Update `src/worker/data_plane_integrated.rs`
@@ -85,6 +87,7 @@ The system provides **sufficient telemetry** to diagnose "at capacity but operat
 **Problem:** GetStats returns configured rules with zero counters (no actual packet counts)
 
 **Options:**
+
 1. Query data plane workers via IPC for live stats
 2. Add per-rule tracking in workers
 3. Accept worker-level aggregates (current)
@@ -98,6 +101,7 @@ The system provides **sufficient telemetry** to diagnose "at capacity but operat
 **Finding:** 37% throughput gap between ingress (490k pps) and egress (307k pps)
 
 **Potential fixes:**
+
 - UDP socket tuning (SO_SNDBUF, etc.)
 - io_uring SEND_ZC (zero-copy send)
 - Profile egress path
@@ -220,6 +224,7 @@ tail -30 /tmp/mcr1_veth.log | grep -E "\[STATS:Ingress\]|\[STATS:Egress\]" | tai
 ## Status: Phase 4 COMPLETE ✅
 
 The data plane is **functionally complete** with **real-world validation**. Outstanding work is:
+
 - 🔴 Logging integration (high priority)
 - 🟡 Stats aggregation design (medium priority)
 - 🟢 Performance optimization (low priority - defer to production)

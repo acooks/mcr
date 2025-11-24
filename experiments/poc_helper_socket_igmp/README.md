@@ -19,6 +19,7 @@ The architecture relies on a non-standard socket pattern:
 ## Why This Pattern?
 
 The relay needs to:
+
 - Bypass the kernel's IP/UDP stack (use `AF_PACKET`)
 - Bypass RPF (Reverse Path Forwarding) checks
 - Still trigger IGMP joins so upstream switches forward multicast traffic
@@ -95,11 +96,13 @@ The experiment:
 ### Success Criteria
 
 ✅ **Pass** if:
+
 - All 10 multicast packets arrive at the `AF_PACKET` socket
 - Helper socket has no readable data
 - IGMP join was triggered (packets arrive at all)
 
 ❌ **Fail** if:
+
 - Packets don't arrive (IGMP join didn't work or MAC filter not programmed)
 - Packets arrive at helper socket instead of `AF_PACKET` socket
 - Only some packets arrive (unreliable filtering)
@@ -114,6 +117,7 @@ sudo ./run_test.sh
 ```
 
 The test script will:
+
 1. Build the experiment
 2. Create isolated network namespaces
 3. Set up veth pair and IP addressing
@@ -179,6 +183,7 @@ Configuration:
 ✅ **Validates:** Design decisions D6, D4, D3
 
 The architecture can proceed as designed:
+
 - Use helper sockets for IGMP signaling
 - Use `AF_PACKET` for actual packet reception
 - NIC hardware filtering will work correctly
@@ -191,14 +196,17 @@ The architecture can proceed as designed:
 Would require major redesign:
 
 **Option 1:** Use `PACKET_ADD_MEMBERSHIP` on `AF_PACKET` socket
+
 - May not trigger IGMP to upstream switches
 - Need to verify with network equipment
 
 **Option 2:** Use BPF filter on `AF_PACKET`
+
 - Software filtering instead of hardware
 - Performance impact unknown, needs benchmarking
 
 **Option 3:** Use standard `AF_INET` socket with RPF workaround
+
 - Need to solve RPF problem differently
 - May require source routing or policy routing
 
@@ -232,18 +240,21 @@ Would require major redesign:
 ### Implementation Discoveries
 
 **Critical Bug Fixed:**
+
 - **Problem:** Initial implementation used `socket.as_raw_fd()` which only borrows the FD
 - **Symptom:** "EBADF: Bad file number" when attempting to join multicast group
 - **Solution:** Use `socket.into_raw_fd()` to transfer ownership and prevent socket from closing
 - **Learning:** File descriptor ownership is critical when returning raw FDs from functions
 
 **AF_PACKET Behavior:**
+
 - With `ETH_P_ALL`, socket receives all Ethernet frames on the interface
 - Captured traffic included: IPv6 neighbor discovery, IGMP messages, ARP (if any)
 - For production: use `ETH_P_IP` (0x0800) or BPF filter to reduce noise
 - Userspace demultiplexing still needed to filter by UDP + dest IP/port
 
 **SO_RCVBUF Behavior:**
+
 - Attempted to set to 1 byte, kernel rounded up to 2304 bytes (minimum)
 - Helper socket never accumulated data despite being joined to multicast group
 - Packets correctly routed to AF_PACKET socket, not helper socket
@@ -251,12 +262,14 @@ Would require major redesign:
 ### Performance Implications
 
 **Validated for Production:**
+
 - ✅ Helper socket overhead is minimal (one socket per multicast group)
 - ✅ No packet duplication (packets go to AF_PACKET, not helper socket)
 - ✅ IGMP join is fire-and-forget (no ongoing maintenance needed)
 - ✅ Pattern scales to hundreds/thousands of multicast groups
 
 **Remaining Optimizations:**
+
 - AF_PACKET with `ETH_P_IP` instead of `ETH_P_ALL` to skip non-IPv4
 - BPF filter to drop non-UDP packets at kernel level (optional)
 - Socket ring buffers (PACKET_RX_RING) for zero-copy reception (future)
@@ -293,11 +306,13 @@ This experiment **definitively validates** the core ingress design:
 ### Next Steps
 
 **Immediate:**
+
 - ✅ Mark D6, D4, D3 as validated in ARCHITECTURE.md
 - ✅ Proceed with Phase 4 (Data Plane) implementation
 - ✅ No redesign of ingress filtering strategy needed
 
 **Future Experiments:**
+
 - Test interface up/down events with helper socket open
 - Test helper socket behavior under high packet load
 - Validate IGMP leave when helper socket closes

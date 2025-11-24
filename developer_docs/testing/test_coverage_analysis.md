@@ -65,6 +65,7 @@
 - **Deferred**: 7 resilience tests need API rewrite
 
 **Missing Coverage:**
+
 - Worker restart logic (exponential backoff)
 - Multi-worker scenarios
 - Concurrent request handling
@@ -78,6 +79,7 @@
 - Integration tests cover E2E but not internal state management
 
 **Missing Coverage:**
+
 - Buffer pool exhaustion handling
 - Queue overflow scenarios
 - Wakeup strategy transitions
@@ -90,6 +92,7 @@
 - **Critical Gap**: Main packet processing paths
 
 **Missing Coverage:**
+
 - AF_PACKET socket error handling
 - PACKET_FANOUT behavior
 - Queue full scenarios
@@ -102,6 +105,7 @@
 - **Critical Gap**: Hybrid strategy switching logic
 
 **Missing Coverage:**
+
 - Eventfd blocking/signaling
 - Rate calculation and threshold crossing
 - Strategy transition scenarios
@@ -156,6 +160,7 @@
 **Issue**: Most tests use `--num-workers 1`. Multi-worker bugs (discovered in performance testing) are not caught by test suite.
 
 **Example weaknesses:**
+
 - Worker fanout group ID conflicts
 - AF_PACKET PACKET_FANOUT_CPU behavior with >1 worker
 - Concurrent rule updates across workers
@@ -164,10 +169,12 @@
 ### 3. **Error Path Coverage Gap**
 
 **Unit tests heavily favor happy path:**
+
 - Packet parser: Great error coverage
 - Everything else: Minimal error injection
 
 **Missing:**
+
 - Syscall failures (socket(), bind(), io_uring_setup())
 - Memory allocation failures
 - IPC channel failures
@@ -176,10 +183,12 @@
 ### 4. **Concurrency Testing Weakness**
 
 **Only 2 concurrency tests:**
+
 1. `logging::ringbuffer::tests::test_mpsc_concurrent`
 2. `logging::logger::tests::test_log_registry_mpsc`
 
 **Missing concurrency testing:**
+
 - Supervisor handling simultaneous worker failures
 - Multiple control clients issuing concurrent commands
 - Data plane workers processing overlapping rules
@@ -188,11 +197,13 @@
 ### 5. **Performance Regression Detection**
 
 **Current approach**: Manual bash scripts for performance testing
+
 - Not integrated with CI/CD
 - No automated regression detection
 - Results not tracked over time
 
 **Bash scripts exist but aren't programmatic:**
+
 - `tests/performance/compare_socat_chain.sh`
 - `tests/performance/multi_stream_scaling.sh`
 
@@ -201,6 +212,7 @@
 **Only 1 proptest module:** `tests/proptests/packet_parser.rs`
 
 **Could benefit from proptests:**
+
 - Rule matching logic (random IPs/ports)
 - Stats aggregation (random packet counts)
 - Buffer pool allocation patterns
@@ -307,12 +319,14 @@
 ## Conclusion
 
 **Strengths:**
+
 - Excellent packet parser coverage with property testing
 - Good logging system testing
 - Comprehensive control plane command coverage
 - Integration tests verify key E2E flows
 
 **Critical Weaknesses:**
+
 - Supervisor has almost zero test coverage (1,540 LoC)
 - Multi-worker scenarios largely untested
 - Error paths and edge cases undertested
@@ -320,6 +334,7 @@
 - Concurrency testing minimal
 
 **Immediate Actions:**
+
 1. Add supervisor unit tests (worker management critical path)
 2. Create multi-worker integration test
 3. Enable coverage reporting with `cargo tarpaulin`

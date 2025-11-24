@@ -76,6 +76,7 @@ fn send_fd(socket_fd: RawFd, fd_to_send: RawFd) -> Result<(), Error> {
 ```
 
 **Key components**:
+
 - `iov`: I/O vector with at least one byte of data
 - `cmsg`: Control message array containing `SCM_RIGHTS` with the FD(s)
 - The kernel handles the FD translation and security checks
@@ -106,6 +107,7 @@ fn recv_fd(socket_fd: RawFd) -> Result<RawFd, Error> {
 ```
 
 **Key components**:
+
 - `cmsg_buffer`: Pre-allocated buffer sized by `cmsg_space!` macro
 - `msg.cmsgs()`: Iterator over received control messages
 - `ScmRights`: Extracted file descriptors

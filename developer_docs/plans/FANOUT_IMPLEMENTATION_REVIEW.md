@@ -11,6 +11,7 @@
 The unified loop currently only forwards to the **first output** of a rule, even if multiple outputs are defined. This is a **regression** from the two-thread architecture, which correctly implemented fan-out by iterating over all outputs.
 
 **Impact:**
+
 - ❌ Multi-destination forwarding broken in unified loop
 - ✅ Works in two-thread model (but slower)
 - 🎯 Must restore to achieve feature parity
@@ -41,6 +42,7 @@ for output in &rule.outputs {
 ```
 
 **How it works:**
+
 - ✅ Iterates over ALL outputs
 - ❌ Allocates NEW buffer for EACH output (inefficient)
 - ❌ Copies payload N times (memory bandwidth waste)
@@ -55,6 +57,7 @@ for output in &rule.outputs {
 ```
 
 **How it works:**
+
 - ❌ Only forwards to first output
 - ⚠️ Silently ignores other outputs
 - Result: **Missing core functionality**
@@ -74,6 +77,7 @@ Operations per second:
 ```
 
 **Why it's slow:**
+
 1. Buffer pool pressure (1.6M allocations/sec)
 2. Memory bandwidth (2.24 GB/sec copying)
 3. CPU cache pollution (16 copies of same data)
@@ -90,6 +94,7 @@ Operations per second:
 ```
 
 **Performance improvement:**
+
 - Eliminates 2.24 GB/sec memory copying
 - Reduces buffer allocations by 16x
 - Minimal CPU overhead (Arc increment/decrement)
@@ -117,6 +122,7 @@ fn process_received_packet(&mut self, packet_data: &[u8])
 **Rationale:** Simple, clear, idiomatic Rust.
 
 **Impact:**
+
 - Empty vec = no rule match
 - 1+ elements = forward to those destinations
 - Caller must iterate over vec
@@ -165,6 +171,7 @@ for target in targets {
 ```
 
 **Problems:**
+
 - N buffer allocations per packet
 - N memory copies per packet
 - Buffer pool exhaustion at high fan-out
@@ -174,6 +181,7 @@ for target in targets {
 #### Option 2: Arc-Based Sharing (RECOMMENDED)
 
 **Strategy:**
+
 1. Receive packet, parse headers
 2. Extract payload into `Arc<[u8]>`
 3. For each output, clone the Arc (cheap refcount increment)
@@ -201,6 +209,7 @@ drop(recv_buffer);
 ```
 
 **Benefits:**
+
 - ✅ 1 allocation per received packet (same as single-output)
 - ✅ Zero payload copying
 - ✅ Minimal overhead (Arc refcount operations)
@@ -328,6 +337,7 @@ let send_op = opcode::Send::new(
 ```
 
 **No changes needed in `handle_send_completion`:**
+
 - SendWorkItem dropped automatically
 - Arc refcount decremented
 - When last Arc clone dropped, payload freed
@@ -403,6 +413,7 @@ PACKET_COUNT=1000000
 ```
 
 **Success Criteria:**
+
 - ✅ All 16 destinations receive packets
 - ✅ Buffer exhaustion < 5% (similar to single-output)
 - ✅ Throughput maintained (100k pps input = 1.6M pps total output)
@@ -433,18 +444,21 @@ fn test_single_output_still_works() {
 ### After Fan-Out (Arc-based)
 
 **1-to-1 forwarding (regression check):**
+
 - Ingress: ~439k pps (same)
 - Egress: ~439k pps (same)
 - Buffer exhaustion: ~0% (same)
 - **Overhead:** Minimal (Arc allocation + drop vs ManagedBuffer)
 
 **1-to-4 forwarding:**
+
 - Ingress: ~439k pps
 - Egress: ~1.76M pps (4× output)
 - Buffer exhaustion: < 5% (no N× allocation)
 - **Bottleneck:** Likely egress socket writes (not memory)
 
 **1-to-16 forwarding:**
+
 - Ingress: ~100k pps (realistic load)
 - Egress: ~1.6M pps (16× output)
 - Buffer exhaustion: < 10%
@@ -459,6 +473,7 @@ fn test_single_output_still_works() {
 **Concern:** Adding Arc for all cases when most rules have 1 output.
 
 **Mitigation:**
+
 - Arc overhead is **minimal** (2× usize for refcount)
 - Allocation overhead same as ManagedBuffer
 - Clone is just refcount increment (nanoseconds)
@@ -471,6 +486,7 @@ fn test_single_output_still_works() {
 **Concern:** What if Arc::from() fails (OOM)?
 
 **Mitigation:**
+
 - Same as current buffer allocation failure
 - Drop packet, increment error counter
 - Already handled in existing error paths
@@ -480,6 +496,7 @@ fn test_single_output_still_works() {
 **Concern:** Slower than two-thread model.
 
 **Mitigation:**
+
 - Run performance tests before/after
 - Compare against two-thread model
 - Should be **faster** due to zero-copy
@@ -523,11 +540,13 @@ fn test_single_output_still_works() {
 ## Estimated Effort
 
 **Implementation:** 2-3 hours
+
 - Core changes: 1 hour
 - Testing: 1 hour
 - Performance validation: 30-60 min
 
 **Risk:** Low
+
 - Well-defined scope
 - Clear implementation path
 - Existing two-thread model as reference
@@ -539,17 +558,20 @@ fn test_single_output_still_works() {
 The fan-out implementation plan is **sound and ready to execute**. The Arc-based approach is the correct choice for maintaining high performance while restoring this critical feature.
 
 **Key decisions validated:**
+
 1. ✅ Use `Vec<ForwardingTarget>` return type
 2. ✅ Use `Arc<[u8]>` for zero-copy payload sharing
 3. ✅ Keep implementation simple (always use Arc, don't optimize single-output case)
 4. ✅ Comprehensive testing strategy
 
 **Next session priorities:**
+
 1. Implement core changes (Phase 1)
 2. Write and run functional tests (Phase 2)
 3. Performance validation (Phase 3)
 
 **Expected outcome:**
+
 - ✅ Feature parity with two-thread model
 - ✅ Maintained performance (no regression)
 - ✅ Better performance than two-thread at high fan-out ratios
