@@ -3,6 +3,7 @@
     "mermaid": "^11.12.1"
   },
   "devDependencies": {
-    "markdownlint-cli": "^0.46.0"
+    "markdownlint-cli": "^0.46.0",
+    "markdown-link-check": "^3.13.6"
   }
 }

@@ -1,0 +1,37 @@
+{
+  "ignorePatterns": [
+    {
+      "comment": "Ignore localhost URLs",
+      "pattern": "^http://localhost"
+    },
+    {
+      "comment": "Ignore 127.0.0.1 URLs",
+      "pattern": "^http://127\\.0\\.0\\.1"
+    },
+    {
+      "comment": "Ignore example.com URLs",
+      "pattern": "^https?://example\\.com"
+    }
+  ],
+  "replacementPatterns": [
+    {
+      "comment": "Convert repository-root-relative links to filesystem paths",
+      "pattern": "^/",
+      "replacement": "{{BASEURL}}/"
+    }
+  ],
+  "httpHeaders": [
+    {
+      "comment": "Add user agent to avoid 403 errors from some sites",
+      "urls": ["https://github.com"],
+      "headers": {
+        "User-Agent": "Mozilla/5.0 (compatible; markdown-link-check)"
+      }
+    }
+  ],
+  "timeout": "10s",
+  "retryOn429": true,
+  "retryCount": 3,
+  "fallbackRetryDelay": "5s",
+  "aliveStatusCodes": [200, 206, 299]
+}
