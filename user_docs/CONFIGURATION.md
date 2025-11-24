@@ -39,9 +39,11 @@ These environment variables can be used to fine-tune the data plane's performanc
 | `MCR_SOCKET_SNDBUF`        | `4194304` (4 MB) | Sets the `SO_SNDBUF` (send buffer) size in bytes for egress UDP sockets. |
 | `MCR_BUFFER_POOL_SMALL`    | `1000`           | Number of small buffers (up to 2KB) to pre-allocate.                     |
 | `MCR_BUFFER_POOL_STANDARD` | `500`            | Number of standard buffers (up to 4KB) to pre-allocate.                  |
-| `MCR_BUFFER_POOL_JUMBO`    | `200`            | Number of jumbo buffers (up to 64KB) to pre-allocate.                    |
+| `MCR_BUFFER_POOL_JUMBO`    | `200`            | Number of jumbo buffers (9KB each) to pre-allocate.                      |
 
 **Note:** The number of data plane workers is configured via the `--num-workers` flag on the supervisor command, not via an environment variable.
+
+**⚠️ Known Limitation:** Jumbo buffers are currently 9KB (9216 bytes), which holds exactly one jumbo frame. This may limit batching efficiency for high-throughput scenarios. The original design specified 64KB buffers to enable multi-packet batching. This sizing should be re-evaluated for performance optimization.
 
 **Example:**
 
