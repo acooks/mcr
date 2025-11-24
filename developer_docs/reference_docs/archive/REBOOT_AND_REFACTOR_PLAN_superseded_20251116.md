@@ -10,7 +10,7 @@
 
 ---
 
-### **Phase 1: Stabilize the Core Architecture (The "Big Fix")**
+## **Phase 1: Stabilize the Core Architecture (The "Big Fix")**
 
 **Goal:** Create a single, simple, and robust architecture for IPC and logging that eliminates the major bug classes we've discovered. This phase implements the "Pragmatic Refactoring" plan.
 

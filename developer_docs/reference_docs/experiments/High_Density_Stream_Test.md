@@ -4,7 +4,7 @@
 **Date:** 2025-11-14
 **Status:** Proposed
 
-### **1. Objective**
+## **1. Objective**
 
 To design and document a performance and scalability benchmark that clearly demonstrates the architectural strengths of MCR over simpler tools like `socat`. This experiment will focus on a realistic, high-density use case: relaying a large number of concurrent, medium-rate multicast streams.
 
