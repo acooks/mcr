@@ -261,7 +261,7 @@ echo "✅ All tests passed"
 
 ## Development Workflow
 
-### When writing new code:
+### When writing new code
 ```bash
 # 1. Make changes to src/
 
@@ -275,7 +275,7 @@ cargo test --release test_name -- --ignored --nocapture
 sudo tests/data_plane_pipeline_veth.sh
 ```
 
-### Before committing:
+### Before committing
 ```bash
 # Run all tests
 ./scripts/build_all.sh

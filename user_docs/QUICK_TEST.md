@@ -33,7 +33,7 @@ grep "STATS:Egress FINAL" results.txt
 
 ## Interpreting Results
 
-### Look for these metrics in the output:
+### Look for these metrics in the output
 
 **Traffic Generator:**
 ```

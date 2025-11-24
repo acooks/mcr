@@ -272,7 +272,7 @@ cargo tarpaulin
 
 ## Specific Files to Modify
 
-### Delete Tests From:
+### Delete Tests From
 1. `src/worker/data_plane_integrated.rs` - Remove all 12 tests (mod tests block)
 2. `src/logging/entry.rs` - Remove 5 tests
 3. `src/logging/logger.rs` - Remove 4 tests
@@ -282,14 +282,14 @@ cargo tarpaulin
 7. `src/worker/control_plane.rs` - Remove 4 tests
 8. `tests/integration/common/stats.rs` - Remove duplicate test functions
 
-### Add Tests To:
+### Add Tests To
 1. `src/worker/ingress.rs` - Add 5 error handling tests
 2. `src/worker/egress.rs` - Add 4 error handling tests
 3. `src/worker/packet_parser.rs` - Add 3 edge case tests
 4. `src/worker/buffer_pool.rs` - Add 2 stress tests
 5. `src/supervisor.rs` - Add 4 error handling tests
 
-### Configure:
+### Configure
 1. `Cargo.toml` - Add proptest [[test]] section
 
 ---
