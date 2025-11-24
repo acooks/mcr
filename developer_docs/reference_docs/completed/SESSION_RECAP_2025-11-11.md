@@ -109,6 +109,7 @@ The system provides **sufficient telemetry** to diagnose "at capacity but operat
 ## Test Results Summary
 
 ### Library Tests
+
 ```text
 cargo test --lib
 running 122 tests
@@ -116,6 +117,7 @@ test result: ok. 122 passed; 0 failed; 0 ignored
 ```
 
 ### Pipeline Test (Latest Run)
+
 ```text
 Traffic Generator: 733k pps, 8.22 Gbps, 10M packets in 13.63s
 
@@ -159,16 +161,19 @@ MCR-3 (veth2b):
 ## What's Next?
 
 ### This Session (if continuing)
+
 1. ✅ Recap completed (this document)
 2. 🔲 Update PHASE4_PLAN.md with measured results
 3. 🔲 Update DEVLOG.md with session summary
 
 ### Next Session
+
 1. **Implement logging integration** (see LOGGING_INTEGRATION_PLAN.md)
 2. **Decide on stats aggregation approach** (per-rule vs per-worker)
 3. **Create automated integration test suite**
 
 ### Future Sessions
+
 1. **Performance profiling** - Identify egress bottleneck
 2. **Load testing** - Multi-hour sustained tests
 3. **Failure scenarios** - Worker crashes, network failures
@@ -178,6 +183,7 @@ MCR-3 (veth2b):
 ## Quick Reference
 
 ### Run Tests
+
 ```bash
 # Unit tests
 cargo test --lib
@@ -190,6 +196,7 @@ cargo check
 ```
 
 ### View Stats
+
 ```bash
 # During test run
 tail -f /tmp/mcr1_veth.log | grep STATS
@@ -199,6 +206,7 @@ tail -30 /tmp/mcr1_veth.log | grep -E "\[STATS:Ingress\]|\[STATS:Egress\]" | tai
 ```
 
 ### Key Metrics to Watch
+
 - **recv** - Total packets received by ingress
 - **matched** - Packets matching forwarding rules
 - **buf_exhaust** - Packets dropped due to buffer pool exhaustion

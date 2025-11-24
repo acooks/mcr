@@ -11,21 +11,25 @@ The PoC demonstrates two ring buffer implementations:
 ## Key Design Features
 
 ### 1. Sequence Number-Based Indexing
+
 - Uses monotonic `u64` sequence numbers instead of wrap-around pointers
 - Eliminates reader-writer cache line sharing (FreeBSD insight)
 - Fast position calculation: `pos = seq & (capacity - 1)`
 
 ### 2. State Machine for Entry Validity
+
 - States: `EMPTY → WRITING → READY → EMPTY`
 - Readers can detect partial writes and wait safely
 - Based on Linux printk's descriptor state machine
 
 ### 3. UnsafeCell for Interior Mutability
+
 - Entries wrapped in `UnsafeCell<LogEntry>`
 - Allows mutation through shared reference `&self`
 - Safety guaranteed by state machine protocol
 
 ### 4. Memory Ordering
+
 - `Ordering::Relaxed` for SPSC writes (no contention)
 - `Ordering::AcqRel` for MPSC CAS operations
 - `Ordering::Release` when marking READY (publish data)
@@ -50,11 +54,13 @@ cargo bench
 ## Demos
 
 ### SPSC Demo
+
 - Single writer thread sends 10 messages
 - Single reader thread consumes them
 - Validates sequence numbers and message content
 
 ### MPSC Demo
+
 - 4 writer threads (simulating cores) send 5 messages each
 - Single reader thread consumes all 20 messages
 - Demonstrates CAS-based coordination
@@ -62,11 +68,13 @@ cargo bench
 ## Benchmarks
 
 ### SPSC Benchmark
+
 - 1 million write/read operations
 - Measures throughput (ops/sec) and latency (ns/op)
 - Target: >10M ops/sec, <100ns latency
 
 ### MPSC Benchmark
+
 - 4 writers × 250K operations each = 1M total
 - Measures CAS contention and overrun rate
 - Target: >5M ops/sec aggregate
@@ -83,11 +91,13 @@ cargo bench
 ## Implementation Details
 
 ### LogEntry Structure
+
 - Size: 512 bytes (cache-friendly, power-of-2)
 - Fields: state, timestamp, sequence, core_id, message (256B)
 - Cache-line aligned (`#[repr(align(64))]`)
 
 ### Ring Buffer Structure
+
 ```rust
 pub struct SPSCRingBuffer {
     entries: Box<[UnsafeCell<LogEntry>]>,  // Heap-allocated

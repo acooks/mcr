@@ -427,23 +427,27 @@ Using `proptest`:
 ## Implementation Phases
 
 ### Phase 1: Core SPSC Implementation ✓ (PoC)
+
 - [ ] `LogEntry` struct with state field
 - [ ] `SPSCRingBuffer` with sequence numbers
 - [ ] Basic write/read operations
 - [ ] Unit tests
 
 ### Phase 2: Core MPSC Implementation ✓ (PoC)
+
 - [ ] `MPSCRingBuffer` with CAS-based write
 - [ ] Concurrent write tests
 - [ ] Benchmarks vs SPSC
 
 ### Phase 3: Performance Validation
+
 - [ ] Latency benchmarks (compare vs targets)
 - [ ] Throughput benchmarks
 - [ ] Memory ordering verification (miri)
 - [ ] Optimize hot paths if needed
 
 ### Phase 4: Integration
+
 - [ ] Integrate into logging infrastructure
 - [ ] Add facility-specific buffers
 - [ ] Consumer task implementation

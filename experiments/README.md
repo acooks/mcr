@@ -18,6 +18,7 @@ As stated in TESTING.md:
 ## Experiments Index
 
 ### 1. `closure_passing_test.rs`
+
 **Topic:** Async Closure Passing
 
 **Problem:** How to pass async closures to a function expecting `FnMut` when the closure needs to be called multiple times.
@@ -31,6 +32,7 @@ As stated in TESTING.md:
 ---
 
 ### 2. `poc_closure_ownership.rs`
+
 **Topic:** Correct Ownership for `FnMut` Closures
 
 **Problem:** When a closure captures a non-Copy type (like `PathBuf` or `String`), calling it multiple times can violate the `FnMut` contract by moving the captured value.
@@ -47,6 +49,7 @@ As stated in TESTING.md:
 ---
 
 ### 3. `poc_io_uring_af_packet/`
+
 **Topic:** `io_uring` Integration with `AF_PACKET` Sockets
 
 **Problem:** Can raw `AF_PACKET` file descriptors created via `libc` be integrated with `tokio-uring`?
@@ -67,6 +70,7 @@ As stated in TESTING.md:
 ---
 
 ### 4. `poc_tokio_uring_concurrency/`
+
 **Topic:** Task Management in Single-Threaded `tokio-uring`
 
 **Problem:** `tokio-uring` is single-threaded, so types don't need to be `Send`. But `tokio::spawn` requires `Send`. How do we spawn concurrent tasks?
@@ -87,6 +91,7 @@ As stated in TESTING.md:
 ---
 
 ### 5. `poc_supervisor_lifecycle/`
+
 **Topic:** Supervisor Process Lifecycle Management
 
 **Problem:** How does the supervisor track and restart worker processes?
@@ -105,6 +110,7 @@ As stated in TESTING.md:
 ---
 
 ### 6. `poc_supervisor_failure_handling/`
+
 **Topic:** Supervisor Failure Detection and Recovery
 
 **Problem:** How does the supervisor detect when a worker crashes and trigger a restart?
@@ -123,6 +129,7 @@ As stated in TESTING.md:
 ---
 
 ### 7. `poc_helper_socket_igmp/` ✅ COMPLETED
+
 **Topic:** Helper Socket Pattern for IGMP + NIC Filtering
 
 **Problem:** Can we use an AF_INET socket SOLELY to trigger IGMP joins while receiving packets via a separate AF_PACKET socket?
@@ -147,6 +154,7 @@ As stated in TESTING.md:
 ---
 
 ### 8. `poc_fd_passing_privdrop/` ✅ COMPLETED
+
 **Topic:** File Descriptor Passing with Privilege Drop
 
 **Problem:** Can AF_PACKET sockets created with CAP_NET_RAW be passed to unprivileged worker processes and still function correctly?

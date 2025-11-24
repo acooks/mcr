@@ -261,21 +261,25 @@ These are lower priority and can be implemented after the core resilience tests 
 ## Common Issues and Solutions
 
 ### Issue: "Supervisor did not create socket"
+
 - **Cause**: Supervisor crashed or socket path is wrong
 - **Debug**: Run supervisor manually to see error messages
 - **Fix**: Check logs, verify paths, ensure permissions
 
 ### Issue: "Worker not found in list-workers"
+
 - **Cause**: Worker hasn't started yet or crashed immediately
 - **Debug**: Add sleeps, check supervisor logs
 - **Fix**: Increase wait time, verify worker spawn logic
 
 ### Issue: Test hangs
+
 - **Cause**: Deadlock in control client or supervisor
 - **Debug**: Use `--nocapture` and add debug prints
 - **Fix**: Add timeouts to all blocking operations
 
 ### Issue: "Process still running after kill"
+
 - **Cause**: Zombie process or PID reuse
 - **Debug**: Check `ps aux` for actual process state
 - **Fix**: Use `waitpid()` to reap zombie, increase wait time

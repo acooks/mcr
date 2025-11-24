@@ -7,23 +7,27 @@ This document analyzes why `socat` requires explicit multicast routes in the dua
 When a userspace application (like socat) sends a multicast packet using `sendto()`, the kernel must determine which network interface to use for egress. The decision process follows these steps:
 
 ### 1. **Socket Options** (IP_MULTICAST_IF)
+
 The kernel first checks if `IP_MULTICAST_IF` is set on the socket.
 - This socket option explicitly specifies which interface to use for multicast egress
 - `socat` does NOT appear to set this option (it only uses `bind=`)
 
 ### 2. **Routing Table Lookup**
+
 If `IP_MULTICAST_IF` is not set, the kernel consults the routing table:
 - The kernel looks for a route to the multicast destination address
 - For multicast (224.0.0.0/4), this requires an explicit multicast route
 - Without a matching route, the packet may be dropped or sent to the wrong interface
 
 ### 3. **Default Route Fallback**
+
 If no multicast-specific route exists:
 - The kernel may fall back to the default route
 - However, default routes typically don't handle multicast correctly
 - This often results in packets being dropped or sent to the wrong interface
 
 ### 4. **bind() Limitation**
+
 Using `bind=IP_ADDRESS` only sets the SOURCE IP address:
 - It does NOT influence interface selection for outgoing packets
 - The kernel still needs routing information to choose the egress interface
@@ -76,6 +80,7 @@ However, the multicast route is the simplest and most direct solution for UDP-ba
 ## Testing Status
 
 ### Initial Hypothesis
+
 Adding `ip route add 224.0.0.0/4 dev veth-mcr1` OR using `ip-multicast-if=10.0.1.20` would allow socat to successfully forward packets in the dual-bridge topology.
 
 ### Test Results

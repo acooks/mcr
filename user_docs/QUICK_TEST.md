@@ -86,6 +86,7 @@ echo "Buffer exhaustion: $((100 * $BUF_EXHAUST / $INGRESS))%"
 ## Quick Comparison
 
 ### Historical (Before Optimization)
+
 ```text
 Ingress:  689k pps  ✅
 Egress:   97k pps   ❌ (Bottlenecked)
@@ -93,6 +94,7 @@ Buf Ex:   86%       ❌
 ```
 
 ### Current (Validated Performance)
+
 ```text
 Ingress:  439k pps  ✅
 Egress:   439k pps  ✅ (143% of original target)
@@ -106,17 +108,20 @@ See `developer_docs/PERFORMANCE_VALIDATION_REPORT.md` for detailed validation.
 ## Troubleshooting
 
 ### "Binary not found"
+
 ```bash
 cargo build --release --bins
 ```
 
 ### "Permission denied" on test
+
 ```bash
 # Must run with sudo
 sudo tests/data_plane_pipeline_veth.sh
 ```
 
 ### "Cannot set SO_SNDBUF"
+
 ```bash
 # Kernel limit too low
 ./scripts/setup_kernel_tuning.sh

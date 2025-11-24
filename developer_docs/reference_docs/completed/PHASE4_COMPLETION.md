@@ -55,33 +55,40 @@ Phase 4 has been completed with **actual measured performance data** from real-w
 ### 2. Debugging Journey
 
 #### Issue #1: Loopback Feedback Loop ✅ FIXED
+
 - **Problem:** All MCR instances saw all traffic (3x packet inflation)
 - **Fix:** Used veth pairs for point-to-point isolation
 
 #### Issue #2: Interface Binding ✅ FIXED
+
 - **Problem:** All MCR instances bound to "lo" instead of veth interfaces
 - **Fix:** Added `--interface` parameter to supervisor commands
 
 #### Issue #3: Socket Conflict ✅ FIXED
+
 - **Problem:** MCR-2 failed with "Address already in use"
 - **Fix:** Unique `--relay-command-socket-path` for each instance
 
 #### Issue #4: Packet Fragmentation ✅ FIXED
+
 - **Problem:** 99.9% parse errors - fragmented packets
 - **Root cause:** 1500-byte payload + 42-byte headers > 1500 MTU
 - **Fix:** Reduced payload to 1400 bytes
 
 #### Issue #5: Egress Buffer Size Bug ✅ FIXED
+
 - **Problem:** MCR-1 egress sending 1500-byte packets despite 1400-byte input
 - **Root cause:** Sending `buffer.len()` instead of actual `payload_len`
 - **Fix:** Added `payload_len` field to `EgressPacket` struct
 
 #### Issue #6: Truncation Panic ✅ FIXED
+
 - **Problem:** Panic on "range end index 1442 out of range for slice of length 177"
 - **Root cause:** AF_PACKET captures all traffic (ARP, ICMP) - small packets
 - **Fix:** Added bounds checking before payload copy
 
 #### Issue #7: Buffer Exhaustion ✅ DIAGNOSED
+
 - **Problem:** 52% packet loss due to buffer pool exhaustion
 - **Root cause:** Egress only reaped completions during `send_batch()` calls
 - **Fix:** Added eager completion reaping on every egress loop iteration
@@ -193,12 +200,14 @@ fn create_dummy_packet(interface_name: &str, dest_addr: SocketAddr) -> EgressPac
 ## Test Results
 
 ### Library Tests
+
 ```text
 running 122 tests
 test result: ok. 122 passed; 0 failed; 0 ignored; 0 measured
 ```
 
 ### Latest Pipeline Test Results
+
 ```text
 Traffic Generator:
   Packets sent: 10,000,000

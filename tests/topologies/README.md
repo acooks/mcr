@@ -149,32 +149,38 @@ Every MCR instance forwards to every other MCR instance
 The `common.sh` library provides reusable functions for all topology tests:
 
 ### Network Setup
+
 - `enable_loopback()` - Enable lo interface in namespace
 - `setup_veth_pair <n1> <n2> <ip1> <ip2>` - Create and configure veth pair
 
 ### MCR Management
+
 - `start_mcr <name> <iface> <socket> [logfile]` - Start MCR instance
 - `wait_for_sockets <sock1> [sock2] ...` - Wait for control sockets
 - `add_rule <socket> <in_if> <in_grp> <in_port> <out_spec>` - Configure rule
 
 ### Traffic & Validation
+
 - `run_traffic <ip> <group> <port> <count> <size> <rate>` - Generate traffic
 - `get_stats <logfile>` - Extract final stats
 - `validate_stat <log> <type> <field> <min> <desc>` - Assert stat value
 
 ### Monitoring & Cleanup
+
 - `start_log_monitor <name> <logfile>` - Monitor logs in background
 - `cleanup_all()` - Clean up processes and sockets
 
 ## Running Tests
 
 ### Single Test
+
 ```bash
 # Run specific topology test
 sudo tests/topologies/chain_3hop.sh
 ```
 
 ### All Tests
+
 ```bash
 # Run all topology tests sequentially
 for test in tests/topologies/*.sh; do
@@ -185,6 +191,7 @@ done
 ```
 
 ### With Coverage
+
 ```bash
 # Run tests with coverage measurement (future)
 sudo tests/topologies/run_with_coverage.sh
@@ -199,6 +206,7 @@ sudo tests/topologies/run_with_coverage.sh
 ## Debugging
 
 ### View Logs
+
 Logs persist after test completion in `/tmp/`:
 ```bash
 tail -f /tmp/mcr1.log
@@ -206,6 +214,7 @@ tail -50 /tmp/mcr1.log | grep STATS
 ```
 
 ### Run Test Manually
+
 To debug interactively, extract the inner bash script and run it:
 ```bash
 # Enter isolated namespace

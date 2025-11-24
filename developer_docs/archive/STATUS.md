@@ -30,26 +30,32 @@ The next phase of work focuses on executing the now well-defined architectural r
 ### 🔴 HIGH PRIORITY
 
 #### 1. Architectural Refactor: Supervisor-to-Worker IPC & Configuration
+
 - **Goal:** Simplify worker startup and centralize configuration by passing it over IPC instead of command-line arguments.
 - **Action:** Refactor the supervisor-to-worker communication to send an initial `Initialize` command containing the worker's full configuration (core ID, interfaces, etc.) over the existing `UnixStream`. This will eliminate the need for most command-line argument parsing in the worker, making it a more generic "dumb" process.
 
 #### 3. Security: Privilege Separation via FD Passing
+
 - **Goal:** Achieve a true least-privilege model where data plane workers run with zero privileges.
 - **Action:** Move `AF_PACKET` socket creation from the worker to the supervisor and pass the file descriptor to the worker using the existing FD-passing mechanism.
 
 #### 4. Scaling: Lazy AF_PACKET Socket Creation
+
 - **Goal:** Allow MCR to scale to many cores without eagerly allocating resources.
 - **Action:** Modify the `IngressLoop::add_rule` function to create `AF_PACKET` sockets on-demand based on the rule's `input_interface`.
 
 ### 🟡 MEDIUM PRIORITY
 
 #### 1. Stats Aggregation from Workers
+
 - **Problem:** The `GetStats` command does not include live packet/byte counters from workers.
 - **Action:** Design and implement an IPC mechanism for the supervisor to query workers for live statistics.
 
 #### 2. Consolidate and Harden Test Suite
+
 - **Goal:** Make the test suite the single source of truth for application correctness.
 - **Action:** Create a definitive performance benchmark script. Deprecate and remove redundant legacy test scripts.
 
 ### 🟢 LOW PRIORITY
+
 (No low priority items at this time)

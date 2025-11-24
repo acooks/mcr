@@ -1,11 +1,13 @@
 # Research Session Notes - 2025-11-15
 
 ## Session Goal
+
 Determine if socat can relay multicast traffic and what requirements are needed.
 
 ## What We Learned
 
 ### 1. socat CAN relay multicast (in some topologies)
+
 - Confirmed socat has the necessary socket options
 - Working socat command pattern:
   ```bash
@@ -16,6 +18,7 @@ Determine if socat can relay multicast traffic and what requirements are needed.
 - Requires different input/output multicast addresses
 
 ### 2. Topology Matters
+
 **3-Namespace Topology (WORKS):**
 ```text
 src-ns ↔ relay-ns ↔ sink-ns
@@ -33,6 +36,7 @@ Multi-homed relay: veth-mcr0, veth-mcr1
 - Suggests test infrastructure issue or fundamental limitation
 
 ### 3. Testing Issues Discovered
+
 1. **Wrong topology**: 3-namespace test doesn't match MCR's use case
 2. **Verification gaps**: Some "disabled" settings weren't actually disabled
 3. **Background processes**: Created hung processes that interfered with testing

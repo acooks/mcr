@@ -3,17 +3,20 @@
 ## Current Test Statistics (as of 2025-11-16)
 
 ### Unit Tests
+
 - **Total unit tests**: 106 (all passing)
 - **Test markers**: 112 `#[test]` functions
 - **Test modules**: 23 `#[cfg(test)]` modules
 - **Source LoC**: ~10,236 lines across core modules
 
 ### Integration Tests
+
 - **Integration test files**: 6 active modules
 - **Deferred tests**: 7 (supervisor resilience - needs API rewrite)
 - **Removed**: 6 tests (redundant or broken)
 
 ### End-to-End & Performance Tests
+
 - **Bash scripts**: 10+ test scripts
 - **Performance tests**: Multi-stream scaling, compare with socat
 - **Topology tests**: Chain (3-hop), tree fanout, baseline tests
@@ -25,23 +28,27 @@
 ### ✅ **Well-Covered Components**
 
 #### 1. Packet Parser (`src/worker/packet_parser.rs`)
+
 - **768 LoC, ~20 unit tests**
 - Coverage: Checksum validation, fragmentation, invalid packets, edge cases
 - **Property tests**: `tests/proptests/packet_parser.rs`
 - **Strength**: Excellent low-level coverage with proptest fuzzing
 
 #### 2. Logging System (`src/logging/`)
+
 - **~2,000 LoC, ~15 unit tests**
 - Coverage: Ring buffer (SPSC/MPSC), log levels, async/blocking consumers
 - **Strength**: Comprehensive concurrency testing
 
 #### 3. Control Plane (`src/worker/control_plane.rs`)
+
 - **428 LoC, ~14 unit tests**
 - Coverage: All IPC commands (add/remove rules, get stats, log levels)
 - **Strength**: Complete command handler coverage
 - **Integration**: `tests/integration/rule_management.rs` tests E2E propagation
 
 #### 4. Stats & Monitoring (`src/worker/stats.rs`)
+
 - **144 LoC, 2 unit tests**
 - Coverage: Stats aggregator, monitoring task
 - **Strength**: Task coordination tested
@@ -51,6 +58,7 @@
 ### ⚠️ **Partially Covered Components**
 
 #### 1. Supervisor (`src/supervisor.rs`)
+
 - **1,540 LoC, ~0 active unit tests**
 - **Critical Gap**: Worker management, health checks, rule dispatch
 - **Why**: Tests were removed as "redundant" but integration tests don't fully replace them
@@ -64,6 +72,7 @@
 - Log consumer task spawning
 
 #### 2. Data Plane Worker (`src/worker/mod.rs`, `data_plane*.rs`)
+
 - **~1,043 LoC, ~2 unit tests**
 - **Critical Gap**: Actual packet processing loop
 - Integration tests cover E2E but not internal state management
@@ -76,6 +85,7 @@
 - Worker lifecycle edge cases
 
 #### 3. Ingress/Egress (`src/worker/ingress.rs`, `egress.rs`)
+
 - **1,393 LoC combined, ~2 unit tests**
 - **Critical Gap**: Main packet processing paths
 
@@ -87,6 +97,7 @@
 - Network interface failures
 
 #### 4. Adaptive Wakeup (`src/worker/adaptive_wakeup.rs`)
+
 - **293 LoC, 1 unit test** (just `test_spin_is_noop_signal`)
 - **Critical Gap**: Hybrid strategy switching logic
 
@@ -101,21 +112,25 @@
 ### ❌ **Untested Components**
 
 #### 1. Network Monitor (`src/supervisor/network_monitor.rs`)
+
 - **452 LoC, 0 tests**
 - Watches for interface state changes via netlink
 - **Risk**: Silent failures in network monitoring
 
 #### 2. Rule Dispatch (`src/supervisor/rule_dispatch.rs`)
+
 - **389 LoC, 0 tests**
 - Distributes rules to workers
 - **Risk**: Incorrect rule routing
 
 #### 3. Buffer Pool (`src/worker/buffer_pool.rs`)
+
 - **147 LoC, 0 tests in main code**
 - **Note**: Has experimental exhaustion test in PoC directory
 - **Risk**: Memory leaks, allocation failures
 
 #### 4. Command Reader (`src/worker/command_reader.rs`)
+
 - **216 LoC, 3 tests**
 - **Weakness**: Only tests partial frame handling, not full protocol
 
@@ -195,21 +210,25 @@
 ## Test Infrastructure Weaknesses
 
 ### 1. **Coverage Tooling**
+
 - **Just fixed**: Type mismatches preventing `cargo tarpaulin`
 - **Unknown**: Actual line/branch coverage percentages
 - **No CI integration** for coverage tracking
 
 ### 2. **Test Isolation**
+
 - Some bash scripts don't clean up on failure
 - Hardcoded paths like `/tmp/mcr_test.sock` can conflict
 - Network namespaces sometimes leak
 
 ### 3. **Test Documentation**
+
 - Many bash scripts lack header comments
 - Integration test organization improved recently but still evolving
 - No test plan document
 
 ### 4. **Flakiness**
+
 - Network tests require root (expected)
 - Timing-dependent tests use hardcoded sleeps
 - Some tests assume interface availability (lo, veth)

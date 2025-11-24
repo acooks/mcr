@@ -418,6 +418,7 @@ fn test_single_output_still_works() {
 ## Performance Predictions
 
 ### Current (Unified Loop, Single Output)
+
 - Ingress: 439k pps ✅
 - Egress: 439k pps ✅
 - Buffer exhaustion: 0% ✅
@@ -481,6 +482,7 @@ fn test_single_output_still_works() {
 ## Implementation Checklist
 
 ### Phase 1: Core Implementation
+
 - [ ] Change `process_received_packet()` return type to `Vec<ForwardingTarget>`
 - [ ] Update `process_received_packet()` to iterate over all outputs
 - [ ] Modify `SendWorkItem` to use `Arc<[u8]>` for payload
@@ -489,6 +491,7 @@ fn test_single_output_still_works() {
 - [ ] Verify `handle_send_completion()` works with Arc (should be automatic)
 
 ### Phase 2: Testing
+
 - [ ] Write functional test: 1→4 fan-out
 - [ ] Write functional test: 1→16 fan-out
 - [ ] Write regression test: single output still works
@@ -496,12 +499,14 @@ fn test_single_output_still_works() {
 - [ ] Run performance test: 1→16 @ 100k pps
 
 ### Phase 3: Validation
+
 - [ ] Verify buffer exhaustion remains low
 - [ ] Verify no packet loss
 - [ ] Compare performance vs two-thread model
 - [ ] Check stats accuracy (1 recv = N sent)
 
 ### Phase 4: Documentation
+
 - [ ] Update ARCHITECTURE.md with fan-out details
 - [ ] Document Arc-based zero-copy approach
 - [ ] Add performance benchmarks to SUCCESS report

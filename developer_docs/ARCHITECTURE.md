@@ -22,15 +22,19 @@ The architecture is designed around three core principles:
 The current architecture is the result of a significant refactor guided by the following principles:
 
 ### 1. Simplicity Through Unification
+
 Use a single, consistent mechanism for asynchronous I/O to reduce complexity and eliminate entire classes of synchronization bugs. The project has standardized on `io_uring` for all performance-critical I/O, and `tokio` for the less-critical supervisor tasks.
 
 ### 2. Kernel-Managed State
+
 Let the kernel manage as much state and synchronization as possible. The kernel's event notification mechanisms (e.g., pipes, sockets) are well-tested and highly optimized. This is preferred over custom, error-prone userspace synchronization primitives.
 
 ### 3. Zero-Copy Where Possible
+
 Minimize data copying in the fast path. The architecture prefers passing metadata and buffer references between threads and processes over copying entire packets, especially at high packet rates.
 
 ### 4. Fail-Fast Error Handling
+
 Worker threads are designed as isolated, restartable processes. They prefer to panic on unrecoverable errors rather than continuing in a potentially corrupt state. The Supervisor process is responsible for monitoring workers and restarting them if they fail.
 
 ## 3. High-Level Design

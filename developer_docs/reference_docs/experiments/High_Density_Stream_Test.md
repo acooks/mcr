@@ -117,16 +117,19 @@ gen-ns (veth0) <-> (veth1) relay-ns (veth2) <-> (veth3) sink-ns
 ### Performance Analysis
 
 #### Low Load (50k pps, 100k packets)
+
 - **MCR**: 99,677/100,000 (0.32% loss)
 - **socat**: 99,880/100,000 (0.12% loss)
 - **Difference**: Nearly equivalent performance
 
 #### High Load (150k pps, 9M packets)
+
 - **MCR**: 79.63% delivery rate
 - **socat**: 77.08% delivery rate
 - **Difference**: MCR's advantage becomes clear under sustained load
 
 #### Scalability
+
 - At low load, both tools achieve >99% delivery
 - At high sustained load, MCR maintains 3.3% better throughput
 - Both tools show packet loss at 150k pps, indicating we're pushing beyond single-core userspace relay capacity

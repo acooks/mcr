@@ -122,6 +122,7 @@ Based on comprehensive analysis (see `/tmp/test_coverage_analysis.md`), the MCR 
 Pick exactly one of these to start TODAY:
 
 ### Option A: See the Numbers (15 minutes)
+
 ```bash
 cargo tarpaulin --out Html --output-dir coverage
 firefox coverage/index.html  # or your browser
@@ -129,9 +130,11 @@ firefox coverage/index.html  # or your browser
 This shows actual coverage percentages and uncovered lines.
 
 ### Option B: Highest Impact Test (30 minutes)
+
 Add `test_worker_restart_on_failure()` to `src/supervisor.rs`. This one test covers the most critical supervisor functionality.
 
 ### Option C: Document Only (5 minutes)
+
 Just run tarpaulin and document the baseline coverage percentage in this file. No code changes needed.
 
 ## Success Metrics
@@ -160,6 +163,7 @@ Just run tarpaulin and document the baseline coverage percentage in this file. N
 Key findings from cargo tarpaulin:
 
 ### Well-Covered Modules (>50% coverage)
+
 - `logging/macros.rs`: 100% (10/10 lines)
 - `worker/stats.rs`: 100% (18/18 lines)
 - `worker/packet_parser.rs`: 94% (99/105 lines) ✓
@@ -172,6 +176,7 @@ Key findings from cargo tarpaulin:
 - `command_reader.rs`: 77% (20/26 lines)
 
 ### Critically Under-Covered Modules (<10% coverage)
+
 - **`supervisor.rs`: 9.5% (37/390 lines)** ⚠️ HIGHEST PRIORITY
 - **`worker/ingress.rs`: 0% (0/366 lines)** ⚠️ CRITICAL
 - **`worker/egress.rs`: 0% (0/230 lines)** ⚠️ CRITICAL
@@ -184,10 +189,12 @@ Key findings from cargo tarpaulin:
 - `logging/mod.rs`: 0% (0/8 lines)
 
 ### Coverage Report
+
 - HTML report available at: `coverage/tarpaulin-report.html`
 - Command to regenerate: `cargo tarpaulin --out html --output-dir coverage`
 
 ### Next Steps
+
 1. ✅ Baseline established (34.03%)
 2. 🔄 Add 3-5 critical supervisor tests (targeting 20%+ supervisor coverage)
 3. ⏳ Add ingress/egress worker tests

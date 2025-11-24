@@ -285,16 +285,19 @@ fn worker_main(command_sock: RawFd) {
 ## References
 
 ### Man Pages
+
 - `unix(7)` - Unix domain sockets
 - `cmsg(3)` - Control message ancillary data
 - `sendmsg(2)` - Send message with ancillary data
 - `recvmsg(2)` - Receive message with ancillary data
 
 ### Kernel Documentation
+
 - [SCM_RIGHTS implementation](https://elixir.bootlin.com/linux/latest/source/net/unix/af_unix.c)
 - [File descriptor passing in Unix sockets](https://man7.org/linux/man-pages/man7/unix.7.html)
 
 ### Rust Crates
+
 - [`nix`](https://docs.rs/nix/) - Safe Rust bindings to Unix APIs
 - Provides `sendmsg`, `recvmsg`, `ControlMessage`, etc.
 

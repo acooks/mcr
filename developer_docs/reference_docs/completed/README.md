@@ -5,6 +5,7 @@ This directory contains plans and design documents that have been completed or s
 ## Completed Implementations
 
 ### REFACTORING_PLAN_implemented_as_option4.md
+
 **Original Status:** Planning Complete - Ready for Implementation (2025-11-14)
 **Implementation:** Completed via "Option 4: Unified Single-Threaded Loop" approach
 **Related Work:**
@@ -15,6 +16,7 @@ This directory contains plans and design documents that have been completed or s
 **Summary:** This three-phase refactoring plan aimed to simplify MCR architecture by eliminating impedance mismatches between concurrency models. The plan was successfully implemented through the "Unified Single-Threaded Loop" (Option 4) approach, which achieved the same goals with a cleaner design.
 
 ### EGRESS_EVENT_DRIVEN_FIX_option2_not_chosen.md
+
 **Original Status:** PLANNED (2025-11-17)
 **Outcome:** Superseded by Option 4 (Unified Loop)
 **Related Work:**
@@ -27,7 +29,9 @@ This directory contains plans and design documents that have been completed or s
 ## Previously Completed Work
 
 ### PHASE4_PLAN.md & PHASE4_COMPLETION.md
+
 Earlier phase of development work that has been completed.
 
 ### SESSION_RECAP_2025-11-11.md
+
 Historical session notes from November 2025 development work.

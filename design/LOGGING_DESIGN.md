@@ -610,12 +610,14 @@ mcr-control log reset-stats
 ## Migration Strategy
 
 ### Phase 1: Core Infrastructure ✅ COMPLETE
+
 1. ✅ Implement `SPSCRingBuffer`, `MPSCRingBuffer` (lock-free, cache-optimized)
 2. ✅ Implement `LogEntry` (256 bytes, 4 cache lines)
 3. ✅ Implement `Severity` (RFC 5424) and `Facility` (MCR-specific)
 4. ✅ Comprehensive test suite (35 tests, all passing)
 
 ### Phase 2: Logger and Consumer ✅ COMPLETE
+
 1. ✅ Implement `Logger` with severity helper methods
 2. ✅ Implement `LogRegistry` (per-facility ring buffers)
 3. ✅ Implement logging macros: `log_info!`, `log_error!`, `log_kv!`, etc.
@@ -623,6 +625,7 @@ mcr-control log reset-stats
 5. ✅ Implement output sinks (stdout, stderr, custom)
 
 ### Phase 3: Integration ✅ COMPLETE
+
 1. ✅ Created `SupervisorLogging` with MPSC buffers and AsyncConsumer
 2. ✅ Created `ControlPlaneLogging` with MPSC buffers and AsyncConsumer
 3. ✅ Created `SharedMemoryLogManager` for data plane cross-process logging
@@ -632,6 +635,7 @@ mcr-control log reset-stats
 7. ✅ Documented intentional remaining prints (pre-logging initialization, CLI tools)
 
 ### Phase 4: Advanced Features ⏳ AVAILABLE FOR FUTURE ENHANCEMENT
+
 1. ⏳ Implement `FileConsumer` with rotation support (infrastructure exists)
 2. ⏳ Implement `SyslogConsumer` (local/remote) (infrastructure exists)
 3. ⏳ Wire up runtime log level filtering via control socket (commands exist)

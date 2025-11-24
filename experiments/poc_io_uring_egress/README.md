@@ -146,6 +146,7 @@ Target validated if:
 ### Test Scenarios
 
 #### 1. Throughput Benchmark
+
 **Purpose:** Measure sustained egress throughput
 
 ```text
@@ -168,6 +169,7 @@ Expected:
 ```
 
 #### 2. Latency Benchmark
+
 **Purpose:** Measure per-packet egress latency
 
 ```text
@@ -183,6 +185,7 @@ Expected:
 ```
 
 #### 3. Source IP Binding Test
+
 **Purpose:** Verify bind() + sendto() pattern
 
 ```text
@@ -198,6 +201,7 @@ Expected:
 ```
 
 #### 4. Error Handling Test
+
 **Purpose:** Characterize error reporting
 
 ```text
@@ -218,6 +222,7 @@ Expected:
 ```
 
 #### 5. System Call Reduction (via perf)
+
 **Purpose:** Quantify syscall savings
 
 ```text
@@ -571,27 +576,32 @@ Egress batching strategy is **validated and ready for implementation**.
 ## Implementation Plan
 
 ### Phase 1: Basic Setup ✅
+
 1. Create UDP socket with source IP binding
 2. Set up io_uring with minimal queue depth
 3. Submit single sendto() operation
 4. Verify packet is sent correctly
 
 ### Phase 2: Batching 🔵 IN PROGRESS
+
 1. Submit multiple sendto() operations in batch
 2. Reap completions from CQ
 3. Verify all packets sent successfully
 
 ### Phase 3: Benchmarks ⏳
+
 1. Implement Criterion benchmarks for throughput
 2. Test various batch sizes and queue depths
 3. Measure latency distribution
 
 ### Phase 4: Error Handling ⏳
+
 1. Inject error scenarios (unreachable destinations)
 2. Verify error reporting in CQ
 3. Confirm ring recovery after errors
 
 ### Phase 5: Analysis ⏳
+
 1. Run perf stat for syscall analysis
 2. Document optimal configuration
 3. Update ARCHITECTURE.md if needed

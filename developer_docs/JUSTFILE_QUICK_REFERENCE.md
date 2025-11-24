@@ -8,18 +8,23 @@
 ## TL;DR - What You Should Use
 
 ### For Regular Development
+
 ```bash
 just           # or: just dev
 ```
+
 Fast loop: format → lint → build release → run fast tests (~2-3 min)
 
 ### Before Committing
+
 ```bash
 just check
 ```
+
 Quality gates: format → lint → build → fast tests (~2-3 min)
 
 ### Full Test Suite
+
 ```bash
 just check                       # Fast quality checks
 sudo -E just test-privileged     # Privileged Rust tests
@@ -51,6 +56,7 @@ just dev       # Same as default
 ```
 
 #### Option 3: Even Faster (Skip Build)
+
 ```bash
 just test-fast # Just run fast tests (assumes binaries built)
 ```
@@ -144,6 +150,7 @@ If you were using:
 ## Common Workflows
 
 ### Daily Development
+
 ```bash
 # 1. Make changes to code
 
@@ -156,6 +163,7 @@ git commit -m "your message"
 ```
 
 ### Before Pull Request
+
 ```bash
 # 1. Run quality checks
 just check
@@ -171,6 +179,7 @@ git push
 ```
 
 ### Performance Testing Only
+
 ```bash
 # 1. Build once
 just build-release
@@ -182,6 +191,7 @@ sudo just test-performance
 ```
 
 ### After Pulling Changes
+
 ```bash
 # Rebuild everything
 just build-release

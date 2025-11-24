@@ -70,6 +70,7 @@ These dependencies can cause different feature resolution in the dependency tree
 ## Current Workflow Problems
 
 ### Scenario 1: Run Integration Test
+
 ```bash
 cargo test --release test_single_hop_1000_packets
 # → Recompiles with test harness
@@ -78,6 +79,7 @@ cargo test --release test_single_hop_1000_packets
 ```
 
 ### Scenario 2: Run Shell Script Test
+
 ```bash
 sudo tests/data_plane_pipeline_veth.sh
 # → Runs "cargo build --release" internally
@@ -86,6 +88,7 @@ sudo tests/data_plane_pipeline_veth.sh
 ```
 
 ### Scenario 3: Mixed Testing
+
 ```bash
 cargo build --release --bins          # Build 1
 cargo test --release                  # Build 2 (recompiles!)
@@ -273,6 +276,7 @@ just test-all        # All tests
 ## Recommended Workflow
 
 ### For Development
+
 ```bash
 # 1. Build once
 cargo build --release --bins
@@ -288,6 +292,7 @@ cargo build --release --bins
 ```
 
 ### For CI/CD
+
 ```bash
 # Single build step
 cargo build --release --bins
@@ -374,6 +379,7 @@ cargo build --release --bins
 ```
 
 ### Run Tests
+
 ```bash
 # Rust integration tests
 cargo test --release -- --ignored --test-threads=1

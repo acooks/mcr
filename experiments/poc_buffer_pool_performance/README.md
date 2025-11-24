@@ -223,6 +223,7 @@ If pool saves 100 ns per packet:
 ### Test Scenarios
 
 #### 1. Latency Benchmark
+
 **Purpose:** Measure allocation/deallocation latency
 
 ```text
@@ -241,6 +242,7 @@ Expected:
 ```
 
 #### 2. Throughput Benchmark
+
 **Purpose:** Saturate allocation rate
 
 ```text
@@ -256,6 +258,7 @@ Expected:
 ```
 
 #### 3. Exhaustion Behavior Test
+
 **Purpose:** Characterize graceful degradation
 
 ```text
@@ -279,6 +282,7 @@ Expected:
 ```
 
 #### 4. Metrics Overhead Test
+
 **Purpose:** Measure cost of per-operation statistics
 
 ```text
@@ -295,6 +299,7 @@ Expected:
 ```
 
 #### 5. Cache Analysis (using `perf`)
+
 **Purpose:** Quantify cache efficiency
 
 ```text

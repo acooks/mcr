@@ -48,11 +48,13 @@ Buffer exhaustion: 62,316 packets (21% of received)
 ## Why veth Performance is Lower
 
 ### 1. **Virtual vs. Real Interfaces**
+
 - Real veth pairs (host namespace): Near-native performance
 - Virtual veth (namespace-isolated): More kernel overhead
 - Namespace isolation adds context switching costs
 
 ### 2. **Kernel Buffer Limits**
+
 In isolated namespace, default kernel parameters are conservative:
 ```bash
 # Check current values
@@ -62,6 +64,7 @@ ip link show veth0 | grep qlen         # Interface queue length
 ```
 
 ### 3. **Single Worker Architecture**
+
 Current test uses `--num-workers 1` due to architectural limitations:
 - **Issue**: Eager AF_PACKET socket creation (see STATUS.md, D23)
 - **Impact**: All workers create identical sockets, exhausting resources
@@ -114,11 +117,13 @@ ip link set veth0 txqueuelen 10000
 ## CPU Isolation Findings
 
 ### Test Configuration
+
 - Each MCR instance pinned to separate CPU core via `taskset`
 - Tree fanout topology: 4 MCR instances on cores 0-3
 - 500k packets @ 300k pps with 3x amplification
 
 ### Results
+
 **Before CPU isolation (all on core 0):**
 ```text
 MCR-1 matched: 87k (29% efficiency)
@@ -205,6 +210,7 @@ Experiment tested buffer pool sizing impact on 3x amplification:
 ## Future Test Ideas
 
 ### 1. **High-Performance Test** (Post-D23)
+
 ```bash
 # Multi-worker, real interfaces, kernel tuning
 --num-workers 8
@@ -213,6 +219,7 @@ Target: >2M pps sustained
 ```
 
 ### 2. **Stress Test**
+
 ```bash
 # Deliberately overload to test backpressure
 SEND_RATE=1000000  # 1M pps
@@ -220,6 +227,7 @@ Validate: No crashes, stats accurate, graceful degradation
 ```
 
 ### 3. **Long-Duration Test**
+
 ```bash
 # Run for hours to detect memory leaks, degradation
 DURATION=3600  # 1 hour

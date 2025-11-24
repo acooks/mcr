@@ -21,6 +21,7 @@ A `/dev/null` egress sink would help:
 ## Use Cases
 
 ### 1. Ingress-Only Performance Testing
+
 Measure pure packet reception and matching performance:
 ```rust
 #[tokio::test]
@@ -42,6 +43,7 @@ async fn test_ingress_max_throughput() {
 ```
 
 ### 2. Channel Communication Debugging
+
 Verify ingress→egress channel works before testing network egress:
 ```rust
 #[tokio::test]
@@ -60,6 +62,7 @@ async fn test_ingress_egress_channel() {
 This would have helped diagnose the current test failure where `ch_recv=0`.
 
 ### 3. Multi-Stream Scaling Tests
+
 Test scaling without network I/O becoming the bottleneck:
 ```bash
 # Test 100 concurrent streams without network overhead
@@ -72,6 +75,7 @@ send_traffic_to_all_streams
 ```
 
 ### 4. CPU Profiling
+
 Profile CPU usage of packet processing without I/O noise:
 ```bash
 perf record -g ./multicast_relay --output devnull ...
@@ -81,6 +85,7 @@ perf record -g ./multicast_relay --output devnull ...
 ## Implementation Options
 
 ### Option 1: Special Output Syntax
+
 ```bash
 control_client add \
   --input-interface eth0 \
@@ -99,6 +104,7 @@ control_client add \
 - Not a "real" multicast group
 
 ### Option 2: Dummy Network Sink
+
 ```bash
 control_client add \
   --input-interface eth0 \
@@ -118,6 +124,7 @@ control_client add \
 - Less clear intent
 
 ### Option 3: Egress Flag
+
 ```bash
 control_client add \
   --input-interface eth0 \
@@ -192,6 +199,7 @@ Egress: sent=1000000 (to devnull) ch_recv=1000000 errors=0
 ## Testing Strategy
 
 ### Validate the /dev/null Sink Works
+
 ```rust
 #[tokio::test]
 async fn test_devnull_sink_basic() {
@@ -209,6 +217,7 @@ async fn test_devnull_sink_basic() {
 ```
 
 ### Use in Existing Failing Test
+
 Apply to `test_scale_1m_packets` to isolate the issue:
 ```rust
 #[tokio::test]
