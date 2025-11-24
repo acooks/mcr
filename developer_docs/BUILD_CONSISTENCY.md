@@ -384,7 +384,6 @@ sudo tests/data_plane_pipeline_veth.sh
 
 **Important:** Always build with `cargo build --release --bins` before running tests.
 Do NOT rely on `cargo test` to build binaries - it creates test harness builds.
-```
 
 ---
 

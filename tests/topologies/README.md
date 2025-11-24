@@ -52,7 +52,7 @@ unshare --net --mount-proc --map-root-user bash -c '
 **Status:** ✅ Implemented
 
 **Topology:**
-```
+```text
 Traffic Gen → MCR-1 → MCR-2 → MCR-3
 ```
 
@@ -78,7 +78,7 @@ sudo tests/topologies/chain_3hop.sh
 **Status:** 🔜 Planned
 
 **Topology:**
-```
+```text
                     ┌→ MCR-2
 Traffic Gen → MCR-1 ┼→ MCR-3
                     └→ MCR-4
@@ -100,7 +100,7 @@ sudo tests/topologies/tree_fanout.sh
 **Status:** 🔜 Planned
 
 **Topology:**
-```
+```text
 Traffic Gen 1 → MCR-1 ┐
 Traffic Gen 2 → MCR-2 ┼→ MCR-4 (convergence)
 Traffic Gen 3 → MCR-3 ┘
@@ -117,7 +117,7 @@ Traffic Gen 3 → MCR-3 ┘
 **Status:** 🔜 Planned
 
 **Topology:**
-```
+```text
                ┌→ MCR-2 ┐
 Traffic Gen → MCR-1      → MCR-4
                └→ MCR-3 ┘
@@ -134,7 +134,7 @@ Traffic Gen → MCR-1      → MCR-4
 **Status:** 🔜 Planned
 
 **Topology:**
-```
+```text
 Every MCR instance forwards to every other MCR instance
 ```
 

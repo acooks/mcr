@@ -4,7 +4,7 @@ This directory contains integration tests for the multicast relay that test the 
 
 ## Structure
 
-```
+```text
 integration/
 ├── common/              # Shared test utilities
 │   ├── mod.rs          # Module exports

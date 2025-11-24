@@ -10,7 +10,7 @@
 
 MCR uses a **multi-process architecture** where data plane workers run as separate processes:
 
-```
+```text
 Supervisor Process (async tokio)
 ├─ Control Plane Worker (process) - async, handles management
 └─ Data Plane Workers (processes) - sync io_uring, packet forwarding
@@ -64,7 +64,7 @@ while let Some(entry) = shm.read() {
 
 **Architecture:**
 
-```
+```text
 Data Plane Worker Process                 Supervisor Process
 ┌─────────────────────┐                   ┌──────────────────┐
 │ packet_processing() │                   │                  │
@@ -577,7 +577,7 @@ mcr-control log reset-stats
 
 ### Text Format (Human-Readable)
 
-```
+```text
 2025-11-09T13:45:23.123456789Z [Supervisor] INFO [pid:1234 tid:5678] Starting 4 workers
 2025-11-09T13:45:23.145678901Z [DataPlane] NOTICE [pid:1235 tid:5679 core:0] Worker started worker_id=dp-0 interface=eth0
 2025-11-09T13:45:24.234567890Z [Ingress] ERROR [pid:1235 tid:5679 core:0] Failed to parse packet src_ip=192.168.1.1 error="invalid checksum"
@@ -602,7 +602,7 @@ mcr-control log reset-stats
 
 ### Syslog Format (RFC 5424)
 
-```
+```text
 <14>1 2025-11-09T13:45:23.123456Z hostname mcr 1234 Supervisor - Starting 4 workers
 <13>1 2025-11-09T13:45:24.234567Z hostname mcr 1235 Ingress - Failed to parse packet [src_ip="192.168.1.1" error="invalid checksum"]
 ```
@@ -698,7 +698,7 @@ mcr-control log reset-stats
 
 The shared memory region contains the complete ring buffer structure:
 
-```
+```text
 Shared Memory Region: /dev/shm/mcr_log_dp{worker_id}
 ┌──────────────────────────────────────────────────────────┐
 │ Header (metadata)                                        │

@@ -77,7 +77,7 @@ This test will demonstrate that while `socat` is excellent for simple tasks, MCR
 **Date**: 2025-11-15
 
 **Topology**: Simplified Chain (3-namespace) instead of dual-bridge
-```
+```text
 gen-ns (veth0) <-> (veth1) relay-ns (veth2) <-> (veth3) sink-ns
 ```
 

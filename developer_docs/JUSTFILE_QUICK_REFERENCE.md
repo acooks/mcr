@@ -273,7 +273,8 @@ sudo just setup-kernel
 ### "Binary not found" Error
 
 **Problem:**
-```
+
+```text
 ERROR: Binary not found: target/release/multicast_relay
 ```
 
@@ -342,7 +343,7 @@ A: `just test-fast` (30 seconds, assumes binaries already built)
 
 ## Visual Workflow
 
-```
+```text
 Daily Development:
   Code → just → [fmt → clippy → build → test-fast] → ✅ or ❌
 

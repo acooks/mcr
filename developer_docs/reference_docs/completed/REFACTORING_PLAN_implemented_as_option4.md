@@ -1186,7 +1186,7 @@ impl EgressLoop<EgressWorkItem, Arc<BufferPool>> {
 
 **Document why this is safe**:
 
-```
+```text
 Scenario 1: Ingress enqueues while egress is awake
 - Egress: sleeping = false
 - Ingress: push(item), check sleeping == false, SKIP eventfd write ✅

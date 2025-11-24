@@ -87,7 +87,7 @@ Successfully implemented and debugged the unified single-threaded data plane loo
 #### Bug 1: Submission Queue Overflow (CRITICAL)
 
 **Symptoms:**
-```
+```text
 [Worker 1741402] Data Plane worker process failed: submission queue is full
 ```
 - Workers crashed after ~5 minutes of operation
@@ -169,7 +169,7 @@ fn submit_send_batch(&mut self) -> Result<()> {
 #### Bug 2: Buffer Pool Exhaustion at Startup
 
 **Symptoms:**
-```
+```text
 [Worker 1745431] Data Plane worker process failed: Buffer pool exhausted during recv buffer setup
 ```
 - Workers failed to initialize
@@ -179,7 +179,7 @@ fn submit_send_batch(&mut self) -> Result<()> {
 **Root Cause:**
 Configuration mismatch between per-worker buffer allocation and total pool size:
 
-```
+```text
 Default Configuration (BEFORE):
 - num_recv_buffers per worker: 64
 - Number of workers: 20 (on 20-core system)
@@ -218,7 +218,7 @@ impl Default for UnifiedConfig {
 ```
 
 **New Calculation:**
-```
+```text
 After Fix:
 - num_recv_buffers per worker: 32
 - Number of workers: 20
@@ -243,7 +243,7 @@ Operating margin: 62% of total pool available
 
 ### Single-Threaded Unified Event Loop
 
-```
+```text
 ┌───────────────────────────────────────────────────────────┐
 │                    Single Thread                          │
 │                                                            │
@@ -304,7 +304,7 @@ sudo multicast_relay supervisor \
 ```
 
 **Result:**
-```
+```text
 [Worker 1747319] [run_unified_data_plane] Entry point reached
 [Worker 1747319] {"facility":"DataPlane","level":"Info","message":"Unified data plane starting",...}
 [Worker 1747319] [run_unified_data_plane] Creating UnifiedDataPlane
@@ -360,7 +360,7 @@ $ cargo build --release
 ✅ **Clean build with ZERO warnings**
 
 ### Binary Info
-```
+```text
 File: /home/acooks/mcr/target/release/multicast_relay
 Built: 2025-11-17 20:13
 Size: 3,364,664 bytes

@@ -7,7 +7,7 @@
 ## Motivation
 
 During test framework validation, we identified that `test_scale_1m_packets` shows:
-```
+```text
 Ingress: recv=1000018 matched=1000000 egr_sent=1000000 ✅
 Egress: sent=0 ch_recv=0 ❌
 ```
@@ -185,7 +185,7 @@ match output_dest {
 
 **3. Stats Reporting**:
 Add clarity to stats when using devnull:
-```
+```text
 Egress: sent=1000000 (to devnull) ch_recv=1000000 errors=0
 ```
 

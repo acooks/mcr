@@ -17,7 +17,8 @@ This document specifies the ring buffer implementation for MCR's logging system,
 - Fast position calculation: `pos = seq & (capacity - 1)` (for power-of-2 capacity)
 
 **Example**:
-```
+
+```text
 Sequence:    0,   1,   2,   3,   4,   5,   6,   7,   8,   9,  10, ...
 Position:    0,   1,   2,   3,   0,   1,   2,   3,   0,   1,   2, ... (capacity=4)
 ```
@@ -43,7 +44,8 @@ const READY: u8   = 2;  // Entry ready for reading
 ```
 
 **State Transitions**:
-```
+
+```text
 Writer: EMPTY → WRITING → READY
 Reader: READY → EMPTY (after consuming)
 ```
@@ -363,7 +365,7 @@ pos = seq % capacity        // Slow: division instruction
 
 **Happens-Before Relationships**:
 
-```
+```text
 Writer: entry.data = X (1)
 Writer: fence(Release) (2)
 Writer: state.store(READY, Release) (3)

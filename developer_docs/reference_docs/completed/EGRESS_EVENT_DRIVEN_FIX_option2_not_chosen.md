@@ -36,7 +36,7 @@ This creates a truly event-driven loop that wakes on ANY event.
 
 ## Architecture
 
-```
+```text
 ┌─────────────────────────────────────────────┐
 │          Egress Event Loop                  │
 │                                             │

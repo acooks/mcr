@@ -38,7 +38,7 @@ This is the **egress hot path**. Poor batching = system call overhead kills thro
 
 Each ingress packet may be forwarded to **multiple egress interfaces**:
 
-```
+```text
 Amplification scenarios:
   1:1 (single egress)      → 312,500 egress pps/core
   1:2 (two egress)         → 625,000 egress pps/core
@@ -50,7 +50,7 @@ Amplification scenarios:
 
 ### System Call Overhead Without Batching
 
-```
+```text
 Traditional approach (sendto() per packet):
 
 System calls/second = 3,125,000 sendto() calls
@@ -67,7 +67,7 @@ Result: IMPOSSIBLE - CPU saturated by syscalls alone
 
 ### System Call Savings with io_uring Batching
 
-```
+```text
 io_uring batched approach:
 
 Batch size: 64 packets/batch
@@ -89,7 +89,7 @@ Syscall reduction: 3,125,000 → 97,656 = 32x fewer syscalls
 
 ### Expected Latency
 
-```
+```text
 Egress path (per packet):
   1. Copy to buffer:           ~500-2000 ns (size-dependent)
   2. Prepare SQE:              ~50 ns
@@ -101,7 +101,7 @@ Total latency: ~6-103 µs per packet (kernel-limited, not CPU)
 
 ### Throughput Target
 
-```
+```text
 Per-core egress target: 3.1M pps (worst case 1:10 amplification)
 
 With 64-packet batches:
@@ -148,7 +148,7 @@ Target validated if:
 #### 1. Throughput Benchmark
 **Purpose:** Measure sustained egress throughput
 
-```
+```text
 Method: Send packets in batches via io_uring
 
 Variables:
@@ -170,7 +170,7 @@ Expected:
 #### 2. Latency Benchmark
 **Purpose:** Measure per-packet egress latency
 
-```
+```text
 Method: Submit → Wait → Reap loop
 
 Metrics:
@@ -185,7 +185,7 @@ Expected:
 #### 3. Source IP Binding Test
 **Purpose:** Verify bind() + sendto() pattern
 
-```
+```text
 Test:
   1. Create UDP socket
   2. Bind to specific source IP (e.g., 192.168.1.100)
@@ -200,7 +200,7 @@ Expected:
 #### 4. Error Handling Test
 **Purpose:** Characterize error reporting
 
-```
+```text
 Test scenarios:
   1. Send to unreachable destination (EHOSTUNREACH)
   2. Send to down interface (ENETDOWN)
@@ -220,7 +220,7 @@ Expected:
 #### 5. System Call Reduction (via perf)
 **Purpose:** Quantify syscall savings
 
-```
+```text
 Method: Use perf stat during benchmark
 
 Commands:
@@ -347,7 +347,7 @@ All benchmarks completed successfully. Key findings below.
 - Best throughput: **1.85M pps** (batch 64-128)
 
 **Comparison:**
-```
+```text
 vs 1:10 amplification (3.1M target): 1.85M / 3.1M = 59.7% ⚠️
 vs 1:5 amplification (1.56M target): 1.85M / 1.56M = 118.6% ✅
 ```
@@ -372,7 +372,7 @@ The 1.85M pps throughput is **40% below** the worst-case 3.1M target. However, t
 
 **Calculation (64-packet batches at 1.85M pps):**
 
-```
+```text
 Batches per second = 1,850,000 / 64 = 28,906 batches/sec
 Syscalls per batch = 2 (submit + reap)
 Total syscalls = 28,906 × 2 = 57,812 syscalls/sec
@@ -386,7 +386,7 @@ Syscall reduction = 1,850,000 / 57,812 = 32x fewer syscalls ✅
 This **32x reduction** matches the theoretical model exactly.
 
 **CPU savings:**
-```
+```text
 Without batching: 1,850,000 × 400ns = 740ms/sec = 74% CPU
 With batching:    57,812 × 400ns = 23ms/sec = 2.3% CPU
 
@@ -482,7 +482,7 @@ Batching delivers **32x syscall reduction** and **2.3% CPU overhead** at 1.85M p
 
 ### ✅ Recommended Configuration
 
-```
+```text
 Queue depth: 64-128 (balance memory vs flexibility)
 Batch size: 32-64 packets (optimal performance)
 Stats: Enable (0.12% overhead - negligible)

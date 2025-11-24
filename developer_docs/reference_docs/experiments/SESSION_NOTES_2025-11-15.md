@@ -17,7 +17,7 @@ Determine if socat can relay multicast traffic and what requirements are needed.
 
 ### 2. Topology Matters
 **3-Namespace Topology (WORKS):**
-```
+```text
 src-ns ↔ relay-ns ↔ sink-ns
 [isolated]  [relay]  [isolated]
 ```
@@ -25,7 +25,7 @@ src-ns ↔ relay-ns ↔ sink-ns
 - Requirements: Different mcast groups, relay egress route
 
 **MCR's Dual-Bridge Topology (FAILS):**
-```
+```text
 Single namespace with br0, br1
 Multi-homed relay: veth-mcr0, veth-mcr1
 ```

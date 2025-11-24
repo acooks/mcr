@@ -11,7 +11,7 @@
 - 1400-byte packets
 
 **Results @ 500k pps target:**
-```
+```text
 Traffic sent: 1,000,000 packets @ 500k pps
 MCR-1 received: 301,950 packets (30%)
 MCR-1 matched: 239,634 packets (24%)
@@ -120,13 +120,13 @@ ip link set veth0 txqueuelen 10000
 
 ### Results
 **Before CPU isolation (all on core 0):**
-```
+```text
 MCR-1 matched: 87k (29% efficiency)
 All instances competing for 1 core (8 threads total)
 ```
 
 **After CPU isolation (cores 0-3):**
-```
+```text
 MCR-1 matched: 85k (17% efficiency)
 Each instance on dedicated core
 ```

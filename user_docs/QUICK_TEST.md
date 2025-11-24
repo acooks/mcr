@@ -36,14 +36,14 @@ grep "STATS:Egress FINAL" results.txt
 ### Look for these metrics in the output
 
 **Traffic Generator:**
-```
+```text
 Actual packet rate: ~808k pps (achieved)
 ```
 - Sends 10M packets at high rate
 - Actual throughput: ~9 Gbps
 
 **MCR-1 Stats:**
-```
+```text
 [STATS:Ingress FINAL] total: recv=X matched=X egr_sent=X ... buf_exhaust=X
 [STATS:Egress FINAL] total: sent=X submitted=X ch_recv=X errors=X bytes=X
 ```
@@ -86,14 +86,14 @@ echo "Buffer exhaustion: $((100 * $BUF_EXHAUST / $INGRESS))%"
 ## Quick Comparison
 
 ### Historical (Before Optimization)
-```
+```text
 Ingress:  689k pps  ✅
 Egress:   97k pps   ❌ (Bottlenecked)
 Buf Ex:   86%       ❌
 ```
 
 ### Current (Validated Performance)
-```
+```text
 Ingress:  439k pps  ✅
 Egress:   439k pps  ✅ (143% of original target)
 Buf Ex:   0%        ✅ (Perfect)

@@ -71,7 +71,8 @@ Paired barriers between writer commits and reader checks prevent stale reads.
 **Why**: On 32-bit systems, prevents ABA problem where position value wraps and appears identical to old value.
 
 **Example**:
-```
+
+```text
 Position 0x00000005: wrap=0, index=5
 Position 0x10000005: wrap=1, index=5  // Different position despite same index
 ```

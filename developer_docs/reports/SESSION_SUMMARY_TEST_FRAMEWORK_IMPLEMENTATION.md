@@ -54,7 +54,7 @@ just test-all                       # Complete suite
 ### 4. ✅ /dev/null Egress Sink Proposal
 
 **Motivation**: From test failure analysis:
-```
+```text
 Ingress: recv=1000018 matched=1000000 egr_sent=1000000 ✅
 Egress: sent=0 ch_recv=0 ❌
 ```
@@ -80,7 +80,7 @@ control_client add \
 
 After running `test_scale_1m_packets` with full diagnostics, confirmed the exact failure:
 
-```
+```text
 Ingress: recv=1000018 matched=1000000 egr_sent=1000000 ✅
 Egress: sent=0 submitted=0 ch_recv=0 ❌
 ```
@@ -209,7 +209,7 @@ This suggests egress worker is either:
 ### Pattern 1: Zero Packets (7 tests)
 
 **Symptom**:
-```
+```text
 Ingress: recv=0 matched=0 egr_sent=0
 Egress: sent=0 ch_recv=0
 ```
@@ -230,7 +230,7 @@ Egress: sent=0 ch_recv=0
 ### Pattern 2: Partial Success (1 test)
 
 **Symptom**:
-```
+```text
 Ingress: recv=1000018 matched=1000000 egr_sent=1000000 ✅
 Egress: sent=0 ch_recv=0 ❌
 ```
@@ -255,7 +255,7 @@ Egress: sent=0 ch_recv=0 ❌
 ### Pattern 3: CLI Parsing Error (1 test)
 
 **Symptom**:
-```
+```text
 Error: invalid value '239.2.2.2:5002:veth1a,239.3.3.3:5003:veth2a,239.4.4.4:5004:veth3a'
 for '--outputs': Invalid format
 ```

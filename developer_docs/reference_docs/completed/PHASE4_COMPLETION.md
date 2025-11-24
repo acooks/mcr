@@ -193,13 +193,13 @@ fn create_dummy_packet(interface_name: &str, dest_addr: SocketAddr) -> EgressPac
 ## Test Results
 
 ### Library Tests
-```
+```text
 running 122 tests
 test result: ok. 122 passed; 0 failed; 0 ignored; 0 measured
 ```
 
 ### Latest Pipeline Test Results
-```
+```text
 Traffic Generator:
   Packets sent: 10,000,000
   Actual rate: 733k pps (target: 1M pps)

@@ -104,7 +104,8 @@ impl Logger {
 - Verdict: Defer to Phase 2
 
 **Protocol**:
-```
+
+```text
 Client → Supervisor: StreamLogs { facilities: [Ingress], min_level: Debug }
 Supervisor → Client: Response::LogStream (ack)
 Supervisor → Client: [stream of length-delimited LogEntry JSON]
@@ -244,7 +245,8 @@ pub struct AsyncConsumer {
 8. Handle terminal resize
 
 **UI State Machine**:
-```
+
+```text
 Normal Mode
   - Display logs and stats
   - Handle keypresses (q, f, l, etc.)

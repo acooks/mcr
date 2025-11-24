@@ -129,7 +129,7 @@ pub fn run(&mut self, packet_rx: &crossbeam_queue::SegQueue<EgressWorkItem>) -> 
 ### Buffer Pool Exhaustion Mechanism
 
 **PHASE4 behavior (synchronous):**
-```
+```text
 Iteration N:
   1. Ingress allocates 32 buffers from pool
   2. Sends to egress channel
@@ -141,7 +141,7 @@ Iteration N:
 ```
 
 **Current behavior (asynchronous):**
-```
+```text
 Iteration N:
   1. Ingress allocates 32 buffers from pool
   2. Sends to egress channel

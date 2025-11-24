@@ -20,7 +20,7 @@ In multicast_relay, we need to:
 
 `SCM_RIGHTS` (Socket Control Message - Rights) is a kernel mechanism for transferring file descriptors between processes through Unix domain sockets.
 
-```
+```text
 ┌──────────────────────────────────────────────────────────────┐
 │  Process A (Supervisor)         Process B (Worker)           │
 │                                                               │
@@ -155,7 +155,7 @@ cargo run
 
 ### Expected Output
 
-```
+```text
 ╔════════════════════════════════════════════════════════╗
 ║   File Descriptor Passing - Educational Demonstration  ║
 ║   Showing SCM_RIGHTS mechanism used in multicast_relay ║

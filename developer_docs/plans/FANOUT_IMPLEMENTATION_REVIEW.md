@@ -67,7 +67,7 @@ for output in &rule.outputs {
 
 **Scenario:** 1 packet → 16 destinations @ 100k pps
 
-```
+```text
 Operations per second:
 - Buffer allocations: 100k × 16 = 1.6M/sec
 - Memory copies: 100k × 16 × 1400 bytes = 2.24 GB/sec copied
@@ -82,7 +82,7 @@ Operations per second:
 
 **Use Arc<[u8]> for payload sharing:**
 
-```
+```text
 Operations per second:
 - Buffer allocations: 100k (1 per received packet)
 - Arc clones: 100k × 16 = 1.6M/sec (just increment refcount)

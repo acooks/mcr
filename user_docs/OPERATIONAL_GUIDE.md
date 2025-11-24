@@ -50,7 +50,7 @@ By comparing the Ingress and Egress stats, you can quickly diagnose the health o
 
 **Scenario:** You are intentionally sending more traffic than MCR can handle.
 
-```
+```text
 [STATS:Ingress] recv=1000 matched=1000 ... buf_exhaust=200 ... (high pps)
 [STATS:Egress]  sent=800  submitted=800  errors=0 ... (high pps)
 ```
@@ -64,7 +64,7 @@ By comparing the Ingress and Egress stats, you can quickly diagnose the health o
 
 **Scenario:** The network downstream of MCR is having problems (e.g., a saturated switch, a disconnected cable).
 
-```
+```text
 [STATS:Ingress] recv=1000 matched=1000 ... buf_exhaust=0 ... (high pps)
 [STATS:Egress]  sent=750  submitted=800  errors=50 ... (lower pps)
 ```
@@ -77,7 +77,7 @@ By comparing the Ingress and Egress stats, you can quickly diagnose the health o
 
 **Scenario:** MCR is running, but no traffic is being forwarded.
 
-```
+```text
 [STATS:Ingress] recv=1000 matched=0 no_match=1000 ... (high pps)
 [STATS:Egress]  sent=0   submitted=0   errors=0 ... (0 pps)
 ```

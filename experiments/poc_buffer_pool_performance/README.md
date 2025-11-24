@@ -32,7 +32,7 @@ This is **the** memory management bottleneck. Poor design = unacceptable latency
 
 ### 1. Per-Core Packet Rate
 
-```
+```text
 Cores    | Per-Core Rate | Inter-Packet Time
 ---------|---------------|------------------
 8 cores  | 625k pps      | 1.6 µs
@@ -46,7 +46,7 @@ Cores    | Per-Core Rate | Inter-Packet Time
 
 A buffer is "in flight" from ingress allocation until egress completion:
 
-```
+```text
 Component                  | Latency
 ---------------------------|----------
 Packet parsing/demux       | ~100-200 ns
@@ -58,7 +58,7 @@ Buffer deallocation        | ~50 ns
 
 **Total buffer lifetime scenarios:**
 
-```
+```text
 Scenario      | io_uring Latency | Total Lifetime
 --------------|------------------|---------------
 Optimistic    | 5 µs             | ~6-8 µs
@@ -68,7 +68,7 @@ Pessimistic   | 100 µs           | ~101-103 µs
 
 ### 3. In-Flight Buffer Count
 
-```
+```text
 Buffers in flight = Packet rate × Average buffer lifetime
 
 For 312.5k pps/core (16-core system):
@@ -80,7 +80,7 @@ Pessimistic: 312,500 × 102 µs  = 31.9 buffers
 
 **With io_uring batching (SQ depth = 256):**
 
-```
+```text
 Batch window = 256 / 312,500 = 819 µs
 
 During batch window, 256 buffers accumulate.
@@ -96,7 +96,7 @@ Average in flight = 256 + (completion time × packet rate)
 
 Real multicast traffic is bursty. Bursts can be 2-5x average rate for 10-100ms.
 
-```
+```text
 Burst Example: 3x normal rate for 50ms
 
 Packets in burst = 3 × 312,500 × 0.05 = 46,875 packets
@@ -110,7 +110,7 @@ If egress can only handle 1.5x sustained:
 
 ### 5. Memory Footprint Calculations
 
-```
+```text
 Buffer Sizes:
   Small:    1,500 B (Ethernet MTU)
   Standard: 4,096 B (typical jumbo)
@@ -129,7 +129,7 @@ Buffer Sizes:
 **Proposed configuration rationale:**
 
 Weighted by typical traffic distribution (60% small, 30% standard, 10% jumbo):
-```
+```text
 Small (60%):    1,000 buffers × 1,500 B = 1,500 KB
 Standard (30%):   500 buffers × 4,096 B = 2,000 KB
 Jumbo (10%):      200 buffers × 9,000 B = 1,800 KB
@@ -144,7 +144,7 @@ Total per core:                           5,300 KB (~5.3 MB)
 ### 6. Allocation Latency Model
 
 **Pool allocation (lock-free pop from free list):**
-```
+```text
 Operations:
   - Check if empty:     ~1 instruction  (~0.3 ns)
   - Pop pointer:        ~2 instructions (~0.6 ns)
@@ -154,7 +154,7 @@ Expected latency: 5-10 ns (in L1 cache)
 ```
 
 **Dynamic allocation (`Vec::with_capacity`):**
-```
+```text
 malloc/jemalloc path:
   - Lock acquisition:   ~20-50 ns (uncontended)
                         ~100-1000 ns (contended)
@@ -171,7 +171,7 @@ Slow path:  ~1,000-10,000 ns
 ### 7. Cache Behavior Model
 
 **Pool approach (buffer reuse):**
-```
+```text
 Reused buffers stay hot in cache:
   - L1 cache hit: ~1 ns     (32 KB typical)
   - L2 cache hit: ~3-4 ns   (256 KB typical)
@@ -181,7 +181,7 @@ Pool size (5.3 MB) < L3 size → most accesses are L3 or better
 ```
 
 **Dynamic allocation (cold memory):**
-```
+```text
 Every allocation returns cold memory:
   - First access:   ~100 ns (RAM) + ~10-50 ns (TLB miss)
   - Cache warming:  Multiple accesses needed
@@ -190,7 +190,7 @@ Cold buffer penalty: ~100-150 ns per packet
 ```
 
 **CPU savings at 312.5k pps/core:**
-```
+```text
 If pool saves 100 ns per packet:
   Time saved = 312,500 × 100 ns = 31.25 ms/second
   CPU savings = 3.125% per core
@@ -225,7 +225,7 @@ If pool saves 100 ns per packet:
 #### 1. Latency Benchmark
 **Purpose:** Measure allocation/deallocation latency
 
-```
+```text
 Method: Single-threaded loop
   - Allocate buffer from pool
   - Deallocate buffer back to pool
@@ -243,7 +243,7 @@ Expected:
 #### 2. Throughput Benchmark
 **Purpose:** Saturate allocation rate
 
-```
+```text
 Method: Allocate until pool exhausted or time limit
 
 Metrics:
@@ -258,7 +258,7 @@ Expected:
 #### 3. Exhaustion Behavior Test
 **Purpose:** Characterize graceful degradation
 
-```
+```text
 Scenario: Simulate burst traffic (3x normal rate)
 
 Steps:
@@ -281,7 +281,7 @@ Expected:
 #### 4. Metrics Overhead Test
 **Purpose:** Measure cost of per-operation statistics
 
-```
+```text
 Compare:
   - Pool with per-op counter increments
   - Pool without metrics
@@ -297,7 +297,7 @@ Expected:
 #### 5. Cache Analysis (using `perf`)
 **Purpose:** Quantify cache efficiency
 
-```
+```text
 Method: Use perf stat during allocation loop
 
 Command:
@@ -543,7 +543,7 @@ The performance advantages are clear and measurable. Proceed with buffer pool im
 ### ✅ Recommended Pool Configuration
 
 Per-core allocation:
-```
+```text
 Small (1500B):    1,000 buffers = 1.5 MB
 Standard (4096B):   500 buffers = 2.0 MB
 Jumbo (9000B):      200 buffers = 1.8 MB

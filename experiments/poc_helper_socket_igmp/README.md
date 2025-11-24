@@ -44,7 +44,7 @@ The "helper socket" pattern achieves all of this by separating the control plane
 
 ### Network Setup
 
-```
+```text
 ┌─────────────────────────┐         ┌─────────────────────────┐
 │   Sender Namespace      │         │   Relay Namespace       │
 │                         │         │                         │
@@ -123,7 +123,7 @@ The test script will:
 
 ### Expected Output
 
-```
+```text
 === Helper Socket Pattern Experiment ===
 
 Configuration:

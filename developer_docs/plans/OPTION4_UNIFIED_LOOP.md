@@ -17,7 +17,7 @@ Option 4 eliminates the cross-thread communication bottleneck by merging ingress
 
 ### Current Two-Thread Architecture Issues
 
-```
+```text
 Ingress Thread          SegQueue/mpsc          Egress Thread
 io_uring (RX) --------> [bottleneck] --------> io_uring (TX)
    Fast                    Slow?                   Fast
@@ -48,7 +48,7 @@ Result: 99.8% buffer exhaustion, egress froze with zero stats output.
 
 ### Design
 
-```
+```text
 Single Thread, One io_uring Instance
 ┌─────────────────────────────────────────────────┐
 │  io_uring Submission Queue (SQ):                │
@@ -196,7 +196,7 @@ loop {
 
 ## Code Structure
 
-```
+```text
 src/worker/unified_loop.rs
 ├── UnifiedDataPlane struct
 │   ├── ring: IoUring (single instance!)

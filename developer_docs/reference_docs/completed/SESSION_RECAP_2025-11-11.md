@@ -24,7 +24,7 @@
 
 The system provides **sufficient telemetry** to diagnose "at capacity but operating correctly":
 
-```
+```text
 [STATS:Ingress] recv=6129022 matched=3881980 parse_err=1 no_match=21 buf_exhaust=2247020 (490000 pps)
 [STATS:Egress] sent=4176384 submitted=4176384 errors=0 bytes=5846937600 (307000 pps)
 ```
@@ -109,14 +109,14 @@ The system provides **sufficient telemetry** to diagnose "at capacity but operat
 ## Test Results Summary
 
 ### Library Tests
-```
+```text
 cargo test --lib
 running 122 tests
 test result: ok. 122 passed; 0 failed; 0 ignored
 ```
 
 ### Pipeline Test (Latest Run)
-```
+```text
 Traffic Generator: 733k pps, 8.22 Gbps, 10M packets in 13.63s
 
 MCR-1 (veth0p → veth1a):

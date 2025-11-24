@@ -38,7 +38,7 @@ The fundamental difference between MCR and `socat` lies in how they interact wit
 
 This topology represents a typical Layer 3 multicast routing scenario.
 
-```
+```text
 gen-ns (veth0) <-> (veth1) relay-ns (veth2) <-> (veth3) sink-ns
 10.0.0.1              10.0.0.2  10.0.1.1         10.0.1.2
 ```
@@ -60,7 +60,7 @@ gen-ns (veth0) <-> (veth1) relay-ns (veth2) <-> (veth3) sink-ns
 
 This topology represents a Layer 2 bridging scenario between two separate network segments.
 
-```
+```text
 br0 (Network Segment A)         br1 (Network Segment B)
   ├─ veth-gen (10.0.0.10)         ├─ veth-sink (10.0.1.30)
   └─ veth-mcr0 (10.0.0.20) <─ Relay ─> veth-mcr1 (10.0.1.20)

@@ -45,7 +45,7 @@ The FD passing pattern achieves this by:
 
 ### Process Architecture
 
-```
+```text
 ┌────────────────────────────────┐
 │   Privileged Parent (root)     │
 │                                │
@@ -129,7 +129,7 @@ The test script will:
 
 ### Expected Output (if successful)
 
-```
+```text
 === File Descriptor Passing with Privilege Drop Experiment ===
 
 Configuration:

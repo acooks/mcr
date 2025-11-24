@@ -23,7 +23,7 @@ Phase 4 implements the high-performance data plane for the multicast relay. This
 
 ### Core Data Path
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────┐
 │                     Data Plane Worker                        │
 │                  (One per CPU core, pinned)                  │

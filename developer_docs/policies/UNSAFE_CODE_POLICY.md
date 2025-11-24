@@ -48,7 +48,7 @@ just unsafe-report        # Detailed cargo-geiger report
 ```
 
 **Output Example**:
-```
+```text
 🔒 Checking unsafe code usage...
 
 Current Unsafe Usage:
@@ -83,7 +83,7 @@ just unsafe-report   # Generates target/geiger-report.txt
 ```
 
 **Sample Output**:
-```
+```text
 Functions  Expressions  Impls  Traits  Methods  Dependency
 327/697    29568/43304  466/568 52/55  825/1120  multicast_relay
 0/90       34/687       0/2    0/0     8/92     ├── libc 0.2.177

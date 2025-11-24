@@ -4,7 +4,7 @@ This document contains the mathematical model and key calculations for buffer po
 
 ## System Parameters
 
-```
+```text
 Target throughput:    5M packets/second (total system)
 Reference config:     16 cores
 Per-core rate:        312,500 packets/second
@@ -15,7 +15,7 @@ Inter-packet time:    3.2 µs
 
 ### 1. In-Flight Buffer Count
 
-```
+```text
 Buffers_in_flight = Packet_rate × Buffer_lifetime
 
 Where Buffer_lifetime = Parse + Copy + Submit + Completion + Dealloc
@@ -31,7 +31,7 @@ Where Buffer_lifetime = Parse + Copy + Submit + Completion + Dealloc
 
 ### 2. io_uring Batch Effects
 
-```
+```text
 Batch_window = SQ_depth / Packet_rate
 Buffers_accumulated = SQ_depth
 Buffers_in_completion = Completion_time × Packet_rate
@@ -41,7 +41,7 @@ Total_in_flight = Buffers_accumulated + Buffers_in_completion
 
 **For SQ depth = 256, 312.5k pps/core, 20 µs completion:**
 
-```
+```text
 Batch_window = 256 / 312,500 = 819 µs
 Accumulated = 256 buffers
 In_completion = 20 µs × 312,500 = 6.25 buffers
@@ -50,7 +50,7 @@ Total = 262 buffers
 
 ### 3. Burst Traffic Modeling
 
-```
+```text
 Burst_packets = Burst_factor × Nominal_rate × Burst_duration
 
 Queue_buildup = (Ingress_rate - Egress_rate) × Burst_duration
@@ -58,7 +58,7 @@ Queue_buildup = (Ingress_rate - Egress_rate) × Burst_duration
 
 **Example: 3x burst for 50ms, egress handles 1.5x:**
 
-```
+```text
 Burst_packets = 3 × 312,500 × 0.05 = 46,875 packets
 Queue_buildup = (3 - 1.5) × 312,500 × 0.05 = 23,437 buffers
 ```
@@ -67,7 +67,7 @@ Queue_buildup = (3 - 1.5) × 312,500 × 0.05 = 23,437 buffers
 
 ### 4. Memory Footprint
 
-```
+```text
 Pool_memory = Σ(Buffer_count × Buffer_size) for each size class
 
 Total_memory = Pool_memory × Core_count
@@ -75,7 +75,7 @@ Total_memory = Pool_memory × Core_count
 
 **Proposed configuration:**
 
-```
+```text
 Small (1500B):    1,000 × 1,500 = 1,500 KB
 Standard (4096B):   500 × 4,096 = 2,000 KB
 Jumbo (9000B):      200 × 9,000 = 1,800 KB
@@ -89,7 +89,7 @@ For 16 cores:    16 × 5.3 MB = 84.8 MB
 
 **Allocation Latency:**
 
-```
+```text
 Pool_latency = Check_empty + Pop + Update_counter
              ≈ 5-10 ns (L1 cache hit)
 
@@ -102,7 +102,7 @@ Speedup = Vec_latency / Pool_latency = 5-1000x
 
 **Cache Savings:**
 
-```
+```text
 Cold_buffer_penalty = RAM_access + TLB_miss
                     ≈ 100-150 ns
 
@@ -114,13 +114,13 @@ CPU_savings = Packet_rate × Cold_buffer_penalty
 
 ### 6. Exhaustion Time
 
-```
+```text
 Time_to_exhaustion = Pool_size / (Burst_rate - Nominal_rate)
 ```
 
 **Example: 1000-buffer pool, 3x burst (937.5k pps burst vs 312.5k nominal):**
 
-```
+```text
 Time_to_exhaustion = 1,000 / (937,500 - 312,500)
                    = 1,000 / 625,000
                    = 1.6 ms
@@ -132,13 +132,13 @@ Time_to_exhaustion = 1,000 / (937,500 - 312,500)
 
 After burst ends, how long to refill pool?
 
-```
+```text
 Recovery_time = Pool_size / Deallocation_rate
 ```
 
 Assuming egress completes at normal rate after burst:
 
-```
+```text
 Recovery_time = 1,000 / 312,500 = 3.2 ms
 ```
 
@@ -148,7 +148,7 @@ Recovery_time = 1,000 / 312,500 = 3.2 ms
 
 Typical multicast traffic distribution (assumption):
 
-```
+```text
 Small packets (< 1500B):    60%  →  1,000 buffers
 Standard packets (< 4KB):   30%  →    500 buffers
 Jumbo packets (< 9KB):      10%  →    200 buffers
