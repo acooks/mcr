@@ -43,9 +43,8 @@ struct Worker {
     // Control plane workers have ONE command stream
     ingress_cmd_stream: Option<Arc<tokio::sync::Mutex<UnixStream>>>,
     egress_cmd_stream: Option<Arc<tokio::sync::Mutex<UnixStream>>>,
-    #[allow(dead_code)]
-    req_stream: Arc<tokio::sync::Mutex<UnixStream>>,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // TODO: Will be used when GetWorkerRules is implemented
+    req_stream: Option<Arc<tokio::sync::Mutex<UnixStream>>>, // Request stream for control plane (Request::ListRules etc)
     log_pipe: Option<std::os::unix::io::OwnedFd>, // Pipe for reading worker's stderr (JSON logs)
 }
 
@@ -272,7 +271,7 @@ pub async fn spawn_control_plane_worker(
 
     let child = command.spawn()?;
 
-    // Send the request/response socket to the child process via SCM_RIGHTS
+    // Send request socket pair (used for Request::ListRules and similar requests)
     let req_supervisor_stream = create_and_send_socketpair(&supervisor_sock).await?;
 
     Ok((child, supervisor_sock, req_supervisor_stream))
@@ -288,7 +287,6 @@ pub async fn spawn_data_plane_worker(
     logger: &crate::logging::Logger,
 ) -> Result<(
     Child,
-    UnixStream,
     UnixStream,
     UnixStream,
     Option<std::os::unix::io::OwnedFd>,
@@ -380,9 +378,6 @@ pub async fn spawn_data_plane_worker(
     #[cfg(feature = "testing")]
     let log_pipe = None;
 
-    // Send the request/response socket to the child process
-    let req_supervisor_stream = create_and_send_socketpair(&supervisor_sock).await?;
-
     // Send TWO command sockets to the child process (one for ingress, one for egress)
     let ingress_cmd_supervisor_stream = create_and_send_socketpair(&supervisor_sock).await?;
     let egress_cmd_supervisor_stream = create_and_send_socketpair(&supervisor_sock).await?;
@@ -391,7 +386,6 @@ pub async fn spawn_data_plane_worker(
         child,
         ingress_cmd_supervisor_stream,
         egress_cmd_supervisor_stream,
-        req_supervisor_stream,
         log_pipe,
     ))
 }
@@ -449,7 +443,7 @@ impl WorkerManager {
                 child,
                 ingress_cmd_stream: Some(cmd_stream_arc.clone()),
                 egress_cmd_stream: Some(cmd_stream_arc), // Same stream for CP
-                req_stream: req_stream_arc,
+                req_stream: Some(req_stream_arc),
                 log_pipe: None, // Control plane uses MPSC ring buffer
             },
         );
@@ -462,7 +456,7 @@ impl WorkerManager {
 
     /// Spawn a data plane worker for the given core
     async fn spawn_data_plane(&mut self, core_id: u32) -> Result<()> {
-        let (child, ingress_cmd_stream, egress_cmd_stream, req_stream, log_pipe) =
+        let (child, ingress_cmd_stream, egress_cmd_stream, log_pipe) =
             spawn_data_plane_worker(
                 core_id,
                 self.uid,
@@ -477,7 +471,6 @@ impl WorkerManager {
         let pid = child.id().unwrap();
         let ingress_cmd_stream_arc = Arc::new(tokio::sync::Mutex::new(ingress_cmd_stream));
         let egress_cmd_stream_arc = Arc::new(tokio::sync::Mutex::new(egress_cmd_stream));
-        let req_stream_arc = Arc::new(tokio::sync::Mutex::new(req_stream));
 
         // Store worker info with separate command streams
         self.workers.insert(
@@ -488,7 +481,7 @@ impl WorkerManager {
                 child,
                 ingress_cmd_stream: Some(ingress_cmd_stream_arc),
                 egress_cmd_stream: Some(egress_cmd_stream_arc),
-                req_stream: req_stream_arc,
+                req_stream: None, // Data plane workers don't use req_stream
                 log_pipe,
             },
         );
@@ -1173,43 +1166,6 @@ async fn create_and_send_socketpair(supervisor_sock: &UnixStream) -> Result<Unix
 mod tests {
     use super::*;
 
-    // --- Test Helpers ---
-
-    #[allow(dead_code)]
-    #[allow(clippy::type_complexity)] // Test helper with intentionally complex return type
-    fn create_test_logger() -> (
-        Logger,
-        Arc<std::sync::atomic::AtomicU8>,
-        Arc<
-            std::sync::RwLock<
-                std::collections::HashMap<crate::logging::Facility, crate::logging::Severity>,
-            >,
-        >,
-    ) {
-        let ringbuffer = Arc::new(MPSCRingBuffer::new(64));
-        let global_min_level = Arc::new(std::sync::atomic::AtomicU8::new(
-            crate::logging::Severity::Info as u8,
-        ));
-        let facility_min_levels =
-            Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
-        let logger = Logger::from_mpsc(
-            ringbuffer,
-            Arc::clone(&global_min_level),
-            Arc::clone(&facility_min_levels),
-        );
-        (logger, global_min_level, facility_min_levels)
-    }
-
-    #[allow(dead_code)]
-    fn spawn_failing_worker() -> anyhow::Result<Child> {
-        let mut command = tokio::process::Command::new("sh");
-        command.arg("-c").arg("exit 1");
-        command
-            .spawn()
-            .map_err(anyhow::Error::from)
-            .context("Failed to spawn failing worker")
-    }
-
     // --- Unit Tests for handle_supervisor_command ---
 
     #[test]
@@ -1467,17 +1423,5 @@ mod tests {
             _ => panic!("Expected LogLevels response"),
         }
         assert_eq!(action, CommandAction::None);
-    }
-
-    // --- Existing Integration Tests ---
-
-    #[allow(dead_code)]
-    fn spawn_sleeping_worker() -> anyhow::Result<Child> {
-        let mut command = tokio::process::Command::new("sleep");
-        command.arg("30");
-        command
-            .spawn()
-            .map_err(anyhow::Error::from)
-            .context("Failed to spawn sleeping worker")
     }
 }

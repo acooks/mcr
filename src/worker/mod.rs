@@ -13,8 +13,6 @@ pub mod command_reader;
 pub mod control_plane;
 pub mod data_plane;
 pub mod data_plane_integrated;
-pub mod egress;
-pub mod ingress;
 pub mod metrics;
 pub mod packet_parser;
 pub mod stats;
@@ -25,11 +23,8 @@ use crate::logging::ControlPlaneLogging;
 use crate::logging::{Facility, Logger};
 use crate::{ControlPlaneConfig, DataPlaneConfig, RelayCommand};
 use control_plane::ControlPlane;
-// Option 4: Unified single-threaded loop (default)
+// Unified single-threaded data plane with io_uring
 use data_plane_integrated::run_unified_data_plane as data_plane_task;
-
-// Option 3: Two-thread model (legacy)
-// use data_plane_integrated::run_data_plane as data_plane_task;
 
 use caps::{CapSet, Capability};
 use nix::sys::eventfd::EventFd;
@@ -207,17 +202,14 @@ pub async fn run_control_plane(config: ControlPlaneConfig) -> Result<()> {
         UnixStream::from_std(std_sock)?
     };
 
+    // Receive request stream FD from supervisor (used for Request::ListRules etc)
     let request_fd = recv_fd(&supervisor_sock).await?;
-
-    // Set request_fd to non-blocking before wrapping in tokio UnixStream
     let request_stream = unsafe {
         let std_sock = std::os::unix::net::UnixStream::from_raw_fd(request_fd);
         std_sock.set_nonblocking(true)?;
         UnixStream::from_std(std_sock)?
     };
 
-    // Control plane no longer needs a separate relay stream connection
-    // All communication happens via supervisor_sock (FD 3)
     let result =
         run_control_plane_generic_with_logger(supervisor_sock, request_stream, logger.clone())
             .await;
@@ -367,11 +359,6 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
         UnixStream::from_std(std_sock)?
     };
 
-    eprintln!("[DataPlane] Receiving request FD...");
-    std::io::stderr().flush().ok();
-
-    let _request_fd = recv_fd(&supervisor_sock).await?;
-
     eprintln!("[DataPlane] Receiving ingress command FD...");
     std::io::stderr().flush().ok();
 
@@ -382,7 +369,7 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
 
     let egress_cmd_fd = recv_fd(&supervisor_sock).await?;
 
-    eprintln!("[DataPlane] Got all FDs from supervisor (request, ingress_cmd, egress_cmd)");
+    eprintln!("[DataPlane] Got all FDs from supervisor (ingress_cmd, egress_cmd)");
     std::io::stderr().flush().ok();
 
     // Create shutdown eventfd for egress (data path wakeup from ingress)

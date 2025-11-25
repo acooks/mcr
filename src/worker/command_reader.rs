@@ -89,18 +89,6 @@ impl CommandReader {
 
         Ok(commands)
     }
-
-    /// Get the current buffer size (for debugging/monitoring)
-    #[allow(dead_code)]
-    pub fn buffer_len(&self) -> usize {
-        self.buffer.len()
-    }
-
-    /// Get the pending frame length if we're waiting for more data
-    #[allow(dead_code)]
-    pub fn pending_frame_len(&self) -> Option<usize> {
-        self.pending_frame_len
-    }
 }
 
 impl Default for CommandReader {
