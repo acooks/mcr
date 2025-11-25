@@ -88,25 +88,38 @@ The `control_client` is the command-line tool for managing the MCR supervisor at
 Adds a new rule to forward an input stream to one or more outputs.
 
 ```bash
-./target/release/control_client add-rule \
+./target/release/control_client add \
     --input-interface <iface> \
     --input-group <ip> \
     --input-port <port> \
-    --output-interface <iface> \
-    --output-group <ip> \
-    --output-port <port>
+    --outputs <group>:<port>:<interface>[,<group>:<port>:<interface>...]
 ```
 
 **Arguments:**
 
-| Argument             | Description                                                                           |
-| :------------------- | :------------------------------------------------------------------------------------ |
-| `--input-interface`  | Network interface for the input stream (e.g., `eth0`).                                |
-| `--input-group`      | Input multicast group IP address.                                                     |
-| `--input-port`       | Input multicast UDP port.                                                             |
-| `--output-interface` | Network interface for the output stream. Can be specified multiple times for fan-out. |
-| `--output-group`     | Output multicast group IP address.                                                    |
-| `--output-port`      | Output multicast UDP port.                                                            |
+| Argument            | Description                                                                                     |
+| :------------------ | :---------------------------------------------------------------------------------------------- |
+| `--input-interface` | Network interface for the input stream (e.g., `eth0`).                                          |
+| `--input-group`     | Input multicast group IP address.                                                               |
+| `--input-port`      | Input multicast UDP port.                                                                       |
+| `--outputs`         | Comma-separated list of outputs in format `group:port:interface[:dtls]`. DTLS defaults to false. |
+| `--rule-id`         | (Optional) Custom rule ID. If omitted, a UUID will be auto-generated.                           |
+
+**Examples:**
+
+```bash
+# Single output
+control_client add --input-interface eth0 --input-group 239.1.1.1 \
+    --input-port 5000 --outputs 239.2.2.2:6000:eth1
+
+# Fan-out to multiple outputs
+control_client add --input-interface eth0 --input-group 239.1.1.1 \
+    --input-port 5000 --outputs 239.2.2.2:6000:eth1,239.3.3.3:7000:eth2
+
+# With custom rule ID and DTLS
+control_client add --rule-id my-stream --input-interface eth0 \
+    --input-group 239.1.1.1 --input-port 5000 --outputs 239.2.2.2:6000:eth1:true
+```
 
 ### 4.2. Remove a Forwarding Rule
 

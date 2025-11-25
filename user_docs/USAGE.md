@@ -59,28 +59,21 @@ Here are some common examples of how to use the `control_client` to manage the r
 **Add a 1-to-1 Forwarding Rule:**
 
 ```bash
-./target/release/control_client add-rule \
+./target/release/control_client add \
     --input-interface eth0 \
     --input-group 239.10.1.2 \
     --input-port 8001 \
-    --output-interface eth1 \
-    --output-group 239.20.3.4 \
-    --output-port 9002
+    --outputs 239.20.3.4:9002:eth1
 ```
 
 **Add a 1-to-2 Fan-Out Rule:**
 
 ```bash
-./target/release/control_client add-rule \
+./target/release/control_client add \
     --input-interface eth0 \
     --input-group 239.10.1.2 \
     --input-port 8001 \
-    --output-interface eth1 \
-    --output-group 239.30.1.1 \
-    --output-port 7001 \
-    --output-interface eth1 \
-    --output-group 239.30.1.2 \
-    --output-port 7002
+    --outputs 239.30.1.1:7001:eth1,239.30.1.2:7002:eth1
 ```
 
 **List Active Rules:**
