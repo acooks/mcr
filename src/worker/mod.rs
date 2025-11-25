@@ -25,11 +25,8 @@ use crate::logging::ControlPlaneLogging;
 use crate::logging::{Facility, Logger};
 use crate::{ControlPlaneConfig, DataPlaneConfig, RelayCommand};
 use control_plane::ControlPlane;
-// Option 4: Unified single-threaded loop (default)
+// Unified single-threaded data plane with io_uring
 use data_plane_integrated::run_unified_data_plane as data_plane_task;
-
-// Option 3: Two-thread model (legacy)
-// use data_plane_integrated::run_data_plane as data_plane_task;
 
 use caps::{CapSet, Capability};
 use nix::sys::eventfd::EventFd;
