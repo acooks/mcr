@@ -49,7 +49,7 @@ These environment variables can be used to fine-tune the data plane's performanc
 
 ```bash
 # Run MCR with an 8 MB socket buffer and 4 worker threads
-MCR_SOCKET_SNDBUF=8388608 MCR_NUM_WORKERS=4 sudo ./target/release/multicast_relay
+MCR_SOCKET_SNDBUF=8388608 sudo ./target/release/multicast_relay supervisor --num-workers 4
 ```
 
 ---
