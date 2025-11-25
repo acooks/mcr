@@ -109,6 +109,21 @@ Here are some common examples of how to use the `control_client` to manage the r
 ./target/release/control_client ping
 ```
 
+**Manage Log Levels:**
+
+```bash
+# Get current log levels
+./target/release/control_client log-level get
+
+# Set global log level
+./target/release/control_client log-level set --global info
+
+# Set facility-specific log level
+./target/release/control_client log-level set --facility DataPlane --level debug
+```
+
+Available log levels (least to most verbose): `emergency`, `alert`, `critical`, `error`, `warning`, `notice`, `info`, `debug`
+
 For a complete command reference and advanced configuration options, see **[CONFIGURATION.md](./CONFIGURATION.md)**.
 
 ## Basic `traffic_generator` Example
