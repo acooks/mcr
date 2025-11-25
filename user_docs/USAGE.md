@@ -141,6 +141,8 @@ The `traffic_generator` can be used to send multicast traffic for testing purpos
     --size 1200
 ```
 
+**Note:** The `--interface` parameter expects a source IP address (e.g., `10.0.0.1`), not an interface name like `eth0`.
+
 ## Running Tests
 
 The project uses `cargo-nextest` for a more robust test execution experience and `just` to simplify the workflow.

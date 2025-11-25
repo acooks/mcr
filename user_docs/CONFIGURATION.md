@@ -118,10 +118,10 @@ Adds a new rule to forward an input stream to one or more outputs.
 
 | Argument            | Description                                                                                     |
 | :------------------ | :---------------------------------------------------------------------------------------------- |
-| `--input-interface` | Network interface for the input stream (e.g., `eth0`).                                          |
+| `--input-interface` | Network interface name for the input stream (e.g., `eth0`, `lo`).                               |
 | `--input-group`     | Input multicast group IP address.                                                               |
 | `--input-port`      | Input multicast UDP port.                                                                       |
-| `--outputs`         | Comma-separated list of outputs in format `group:port:interface[:dtls]`. DTLS defaults to false. |
+| `--outputs`         | Comma-separated list in format `group:port:interface[:dtls]` where `interface` is a network interface name (e.g., `eth0`). DTLS defaults to false. |
 | `--rule-id`         | (Optional) Custom rule ID. If omitted, a UUID will be auto-generated.                           |
 
 **Examples:**
@@ -209,3 +209,5 @@ A utility for sending test multicast traffic.
 | `--port`      | The destination multicast UDP port.                  |
 | `--rate`      | The target send rate in packets per second.          |
 | `--size`      | The size of the UDP payload in bytes.                |
+
+**Note:** Unlike `control_client` which uses network interface names (e.g., `eth0`), the `traffic_generator` `--interface` parameter expects an IP address (e.g., `10.0.0.1`).
