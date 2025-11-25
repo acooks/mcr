@@ -7,7 +7,7 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 anyhow = "1.0.100"
 chrono = "0.4"
-clap = { version = "4.5.52", features = ["derive"] }
+clap = { version = "4.5.53", features = ["derive"] }
 io-uring = "0.7.11"
 libc = "0.2.155"
 metrics = "0.23.0"
