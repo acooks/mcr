@@ -64,7 +64,18 @@ The main `multicast_relay` application is the supervisor. It has minimal command
 sudo ./target/release/multicast_relay
 ```
 
-There are no command-line flags for adding rules or configuring workers; use the `control_client` for all runtime operations.
+**Optional Flags:**
+
+- `--num-workers <N>`: Override the number of worker processes to spawn. Default: number of detected CPU cores.
+
+**Example:**
+
+```bash
+# Start with 4 workers instead of default (all cores)
+sudo ./target/release/multicast_relay --num-workers 4
+```
+
+All forwarding rules are managed dynamically at runtime via the `control_client`.
 
 ---
 

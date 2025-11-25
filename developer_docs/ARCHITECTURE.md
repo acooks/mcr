@@ -48,7 +48,7 @@ graph TD
     end
 
     subgraph MCR Application
-        B -- JSON-RPC over Unix Socket --> C[Supervisor Process];
+        B -- JSON over Unix Socket --> C[Supervisor Process];
 
         subgraph "Data Plane (Privileged)"
             C -- Command Dispatch --> D1[Worker 1 (Core 0)];
@@ -74,7 +74,7 @@ graph TD
 ```
 
 - **User/Operator:** Interacts with the system via the `control_client`.
-- **`control_client`:** A command-line tool that sends JSON-RPC commands to the supervisor.
+- **`control_client`:** A command-line tool that sends JSON commands to the supervisor over a Unix socket.
 - **Supervisor Process:** The main process that manages workers, handles configuration commands, and centralizes logging and statistics. It runs with privileges but does not handle high-speed packet forwarding.
 - **Worker Processes:** High-performance data plane processes, each pinned to a specific CPU core. They receive, process, and re-transmit all multicast traffic.
 

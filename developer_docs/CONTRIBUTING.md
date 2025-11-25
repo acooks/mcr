@@ -30,7 +30,7 @@ The project's module structure directly mirrors the multi-process architecture t
 
 - **`main.rs` (Binary Entry Point):** Responsible only for parsing arguments, initializing the environment, and launching the Supervisor Process.
 - **`supervisor.rs`:** Contains all logic for the privileged Supervisor Process, including lifecycle management of worker processes, privileged operations, and handling network interface changes.
-- **`control_plane.rs`:** Contains all logic for the unprivileged Control Plane Process, including managing the JSON-RPC Unix socket and communicating with the Supervisor.
+- **`control_plane.rs`:** Contains all logic for the unprivileged Control Plane Worker Process, including managing the JSON Unix socket and communicating with the Supervisor.
 - **`data_plane.rs`:** Contains all logic for the unprivileged Data Plane Worker Processes. This is the performance-critical "hot path" for packet processing.
 - **`lib.rs` (Shared Library Crate):** Defines all shared data structures, types, and constants used across the different processes (e.g., `ForwardingRule`, `Command`, `Response`).
 
