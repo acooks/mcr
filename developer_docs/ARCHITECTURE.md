@@ -44,25 +44,25 @@ The system is architected as a multi-process application to ensure robust privil
 ```mermaid
 graph TD
     subgraph User Space
-        A[User/Operator] --> B{control_client};
+        A["User/Operator"] --> B{"control_client"};
     end
 
     subgraph MCR Application
-        B -- JSON over Unix Socket --> C[Supervisor Process];
+        B -- JSON over Unix Socket --> C["Supervisor Process"];
 
         subgraph "Data Plane (Privileged)"
-            C -- Command Dispatch --> D1[Worker 1 (Core 0)];
-            C -- Command Dispatch --> D2[Worker 2 (Core 1)];
-            C -- Command Dispatch --> DN[Worker N (Core N-1)];
+            C -- Command Dispatch --> D1["Worker 1<br/>Core 0"];
+            C -- Command Dispatch --> D2["Worker 2<br/>Core 1"];
+            C -- Command Dispatch --> DN["Worker N<br/>Core N-1"];
         end
     end
 
     subgraph Kernel Space / Network
-        NetIn[Inbound Multicast Traffic] --> D1;
+        NetIn["Inbound Multicast Traffic"] --> D1;
         NetIn --> D2;
         NetIn --> DN;
 
-        D1 --> NetOut[Outbound Multicast Traffic];
+        D1 --> NetOut["Outbound Multicast Traffic"];
         D2 --> NetOut;
         DN --> NetOut;
     end

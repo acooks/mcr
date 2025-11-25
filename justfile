@@ -13,7 +13,7 @@ dev: fmt clippy build-release test-fast
     @echo "  sudo just test-performance       # Run performance tests"
 
 # Run code quality checks (fast, no coverage)
-check: fmt clippy lint-docs check-links build-release test-fast
+check: fmt clippy lint-docs check-links validate-mermaid build-release test-fast
     @echo "\n✅ Code quality checks passed!"
     @echo ""
     @echo "Additional test suites:"
@@ -80,6 +80,10 @@ check-links:
     @echo "Checking internal links in documentation..."
     @find . -name "*.md" -not -path "*/node_modules/*" -not -path "*/.git/*" -not -path "*/target/*" | \
         xargs -I {} npx markdown-link-check --config .markdown-link-check.json --quiet {}
+
+# Validate Mermaid diagrams in markdown files
+validate-mermaid:
+    @node scripts/validate_mermaid.js
 
 # Build the project
 build:
