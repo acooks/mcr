@@ -47,8 +47,10 @@ For detailed information on kernel tuning, environment variables for performance
 To run the main relay application, which will start the supervisor and its workers:
 
 ```bash
-sudo ./target/release/multicast_relay
+sudo ./target/release/multicast_relay supervisor
 ```
+
+The supervisor starts with default settings (all CPU cores as workers, nobody:daemon user/group). For additional options, see the **[MCR Configuration Guide](./CONFIGURATION.md)**.
 
 All forwarding rules and runtime operations are managed via the `control_client`.
 
@@ -59,28 +61,21 @@ Here are some common examples of how to use the `control_client` to manage the r
 **Add a 1-to-1 Forwarding Rule:**
 
 ```bash
-./target/release/control_client add-rule \
+./target/release/control_client add \
     --input-interface eth0 \
     --input-group 239.10.1.2 \
     --input-port 8001 \
-    --output-interface eth1 \
-    --output-group 239.20.3.4 \
-    --output-port 9002
+    --outputs 239.20.3.4:9002:eth1
 ```
 
 **Add a 1-to-2 Fan-Out Rule:**
 
 ```bash
-./target/release/control_client add-rule \
+./target/release/control_client add \
     --input-interface eth0 \
     --input-group 239.10.1.2 \
     --input-port 8001 \
-    --output-interface eth1 \
-    --output-group 239.30.1.1 \
-    --output-port 7001 \
-    --output-interface eth1 \
-    --output-group 239.30.1.2 \
-    --output-port 7002
+    --outputs 239.30.1.1:7001:eth1,239.30.1.2:7002:eth1
 ```
 
 **List Active Rules:**
@@ -88,6 +83,50 @@ Here are some common examples of how to use the `control_client` to manage the r
 ```bash
 ./target/release/control_client list
 ```
+
+**Remove a Rule:**
+
+```bash
+./target/release/control_client remove \
+    --rule-id <rule_id>
+```
+
+**Note:** Use `./target/release/control_client list` to see all rules and their IDs.
+
+**View Statistics:**
+
+```bash
+./target/release/control_client stats
+```
+
+**List Workers:**
+
+```bash
+./target/release/control_client list-workers
+```
+
+**Health Check:**
+
+```bash
+./target/release/control_client ping
+```
+
+**Manage Log Levels:**
+
+```bash
+# Get current log levels
+./target/release/control_client log-level get
+
+# Set global log level
+./target/release/control_client log-level set --global info
+
+# Set facility-specific log level
+./target/release/control_client log-level set --facility DataPlane --level debug
+```
+
+Available log levels (least to most verbose): `emergency`, `alert`, `critical`, `error`, `warning`, `notice`, `info`, `debug`
+
+For a complete command reference and advanced configuration options, see **[CONFIGURATION.md](./CONFIGURATION.md)**.
 
 ## Basic `traffic_generator` Example
 
@@ -101,6 +140,8 @@ The `traffic_generator` can be used to send multicast traffic for testing purpos
     --rate 100000 \
     --size 1200
 ```
+
+**Note:** The `--interface` parameter expects a source IP address (e.g., `10.0.0.1`), not an interface name like `eth0`.
 
 ## Running Tests
 

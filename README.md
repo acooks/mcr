@@ -1,9 +1,7 @@
 # MCR: A High-Performance Userspace Multicast Relay
 
-
 [![Build Status](https://github.com/acooks/mcr/actions/workflows/rust.yml/badge.svg)](https://github.com/acooks/mcr/actions/workflows/rust.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](./licenses.html)
-
 
 **MCR** is a specialized, high-performance multicast relay for Linux, designed to forward multicast traffic between network segments where conventional routing is impossible or inefficient.
 
@@ -43,18 +41,24 @@ This combination of technologies allows MCR to operate at speeds approaching lin
 
 ### 1. Prerequisites
 
+**Required:**
+
 - Linux kernel 5.10+ (for `io_uring`)
 - Rust toolchain (latest stable)
-- `libpcap-dev` and `libelf-dev` (for building dependencies)
-- `cargo-nextest` (for running the test suite)
 
 ```bash
 # On Debian/Ubuntu
 sudo apt-get update
-sudo apt-get install -y build-essential libpcap-dev libelf-dev
+sudo apt-get install -y build-essential
+```
 
-# Install the test runner
-cargo install cargo-nextest
+**Optional (Recommended):**
+
+- `cargo-nextest` - Faster, more robust test execution
+- `just` - Simplified build and test workflows
+
+```bash
+cargo install cargo-nextest just
 ```
 
 ### 2. Build

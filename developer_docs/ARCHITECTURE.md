@@ -44,25 +44,25 @@ The system is architected as a multi-process application to ensure robust privil
 ```mermaid
 graph TD
     subgraph User Space
-        A[User/Operator] --> B{control_client};
+        A["User/Operator"] --> B{"control_client"};
     end
 
     subgraph MCR Application
-        B -- JSON-RPC over Unix Socket --> C[Supervisor Process];
+        B -- JSON over Unix Socket --> C["Supervisor Process"];
 
         subgraph "Data Plane (Privileged)"
-            C -- Command Dispatch --> D1[Worker 1 (Core 0)];
-            C -- Command Dispatch --> D2[Worker 2 (Core 1)];
-            C -- Command Dispatch --> DN[Worker N (Core N-1)];
+            C -- Command Dispatch --> D1["Worker 1<br/>Core 0"];
+            C -- Command Dispatch --> D2["Worker 2<br/>Core 1"];
+            C -- Command Dispatch --> DN["Worker N<br/>Core N-1"];
         end
     end
 
     subgraph Kernel Space / Network
-        NetIn[Inbound Multicast Traffic] --> D1;
+        NetIn["Inbound Multicast Traffic"] --> D1;
         NetIn --> D2;
         NetIn --> DN;
 
-        D1 --> NetOut[Outbound Multicast Traffic];
+        D1 --> NetOut["Outbound Multicast Traffic"];
         D2 --> NetOut;
         DN --> NetOut;
     end
@@ -74,17 +74,35 @@ graph TD
 ```
 
 - **User/Operator:** Interacts with the system via the `control_client`.
-- **`control_client`:** A command-line tool that sends JSON-RPC commands to the supervisor.
+- **`control_client`:** A command-line tool that sends JSON commands to the supervisor over a Unix socket.
 - **Supervisor Process:** The main process that manages workers, handles configuration commands, and centralizes logging and statistics. It runs with privileges but does not handle high-speed packet forwarding.
 - **Worker Processes:** High-performance data plane processes, each pinned to a specific CPU core. They receive, process, and re-transmit all multicast traffic.
 
 ## 4. The Data Plane: A Unified, Single-Threaded Architecture
 
-The MCR data plane uses a single-threaded, unified event loop model to eliminate the complexity and performance issues of inter-thread communication. All data plane logic for a given CPU core runs within a single OS thread.
+### Current Default: Single-Threaded Unified Event Loop
+
+The MCR data plane uses a **single-threaded, unified event loop model** as the default architecture. This eliminates the complexity and performance issues of inter-thread communication. All data plane logic for a given CPU core runs within a single OS thread.
+
+**Implementation:** `run_unified_data_plane()` in `src/worker/data_plane_integrated.rs`
 
 - **Core Affinity:** The supervisor spawns one data plane worker process per designated CPU core, and this worker process is pinned to that core.
 
-- **Unified `io_uring` Instance:** Each worker thread uses a **single `io_uring` instance** to manage all asynchronous I/O operations for both ingress and egress. This provides a unified, highly efficient event queue.
+- **Unified `io_uring` Instance:** Each worker process uses a **single `io_uring` instance** to manage all asynchronous I/O operations for both ingress and egress. This provides a unified, highly efficient event queue.
+
+### Legacy Architecture: Two-Thread Model (Available but Not Default)
+
+The codebase also contains a legacy two-thread implementation that uses:
+
+- One ingress thread with AF_PACKET socket
+- One egress thread with UDP sockets
+- Cross-thread communication via `SegQueue`
+
+This model is still present in the codebase but is **not the default**. The single-threaded unified model is selected at compile time (see `src/worker/mod.rs:29`).
+
+**Implementation:** `run_data_plane()` in `src/worker/data_plane_integrated.rs`
+
+**Why Keep Both?** The legacy model is maintained for performance comparison and as a fallback during the transition period. It may be removed in a future release once the unified model is fully validated across all production scenarios.
 
 - **Event Loop Architecture:**
   1. **Ingress (`AF_PACKET`):** The worker submits multiple `Recv` operations to the `io_uring` for its `AF_PACKET` socket.
@@ -158,7 +176,7 @@ The control plane provides the mechanism for runtime configuration and monitorin
 
 - **Decoupled Statistics Aggregation:** To prevent statistical queries from blocking the control plane, a dedicated `StatsAggregator` task is used. Each core-pinned data plane thread proactively pushes its complete state and metrics to the aggregator on a regular interval. **This push includes a high-resolution timestamp captured only once per interval by each worker, ensuring minimal system call overhead.** The `StatsAggregator` maintains a cached, up-to-date, system-wide view of the application's state. The `ControlPlane` task serves `GetStats` and `ListRules` requests by querying this aggregator for the latest cached, system-wide state, ensuring the control plane remains highly responsive. The `GetStats` response will include these per-core timestamps, making any temporal skew transparent to the operator.
 
-- **Strict Protocol Versioning:** The control plane protocol will use a strict, fail-fast versioning scheme. A single, shared `PROTOCOL_VERSION` constant will be defined and compiled into both the server and client. The first message on any new connection must be a `VersionCheck` from the client. The server will compare the client's version to its own; if they do not match exactly, the server will respond with a `VersionMismatch` error and close the connection. Any change to the JSON protocol requires incrementing the shared `PROTOCOL_VERSION` constant.
+- **Strict Protocol Versioning (NOT IMPLEMENTED):** _Future work:_ The control plane protocol will use a strict, fail-fast versioning scheme. A single, shared `PROTOCOL_VERSION` constant will be defined and compiled into both the server and client. The first message on any new connection must be a `VersionCheck` from the client. The server will compare the client's version to its own; if they do not match exactly, the server will respond with a `VersionMismatch` error and close the connection. Any change to the JSON protocol requires incrementing the shared `PROTOCOL_VERSION` constant.
 
 - **Command Dispatch via Unix Sockets:** Communication from the Supervisor to the data plane worker processes uses a dedicated `UnixStream` socket pair for each worker.
   - The Supervisor serializes commands (e.g., `AddRule`) into a length-prefixed JSON payload and writes them to its end of the socket using its `tokio` runtime.
@@ -169,9 +187,9 @@ The control plane provides the mechanism for runtime configuration and monitorin
 
 - **Hotspot Management (Observe, Don't Act):** The initial design will not implement an automatic hotspot mitigation strategy. Instead, it will rely on a robust, **core-aware monitoring system** to make any potential single-core saturation observable to the operator. The statistics reporting will be enhanced to include per-core packet rates and CPU utilization metrics. This provides the necessary visibility to manage the known architectural limitation.
 
-- **Custom Observability via Control Plane:** The application will provide comprehensive observability through its control plane, compensating for the lack of visibility from standard networking tools like `netstat`. A `ListRules` command will expose the forwarding table, and a `GetStats` command will expose a detailed set of metrics with per-core, per-rule, per-buffer-pool, and per-destination granularity.
+- **Custom Observability via Control Plane:** The application provides comprehensive observability through its control plane, compensating for the lack of visibility from standard networking tools like `netstat`. A `ListRules` command exposes the forwarding table, and a `GetStats` command exposes metrics with per-rule granularity. _Note:_ Per-destination granularity (for fan-out scenarios) is not currently implemented; stats are aggregated at the rule level.
 
-- **On-Demand Packet Tracing:** The application will implement a low-impact, on-demand packet tracing capability. Tracing will be configurable on a per-rule basis via control plane commands (`EnableTrace`, `DisableTrace`, `GetTrace`) and disabled by default. Each data plane worker will maintain a pre-allocated, in-memory ring buffer to store key diagnostic events for packets matching an enabled rule. The `GetTrace` command will retrieve these events, providing a detailed, chronological log of a packet's lifecycle or the reason for its drop.
+- **On-Demand Packet Tracing (NOT IMPLEMENTED):** _Future work:_ The application will implement a low-impact, on-demand packet tracing capability. Tracing will be configurable on a per-rule basis via control plane commands (`EnableTrace`, `DisableTrace`, `GetTrace`) and disabled by default. Each data plane worker will maintain a pre-allocated, in-memory ring buffer to store key diagnostic events for packets matching an enabled rule. The `GetTrace` command will retrieve these events, providing a detailed, chronological log of a packet's lifecycle or the reason for its drop.
 
 ## 7. Logging Architecture
 
@@ -187,7 +205,7 @@ For a comprehensive guide to the logging system, including the high-performance 
 
 ## 9. Reliability and Resilience
 
-- **Supervisor Pattern for Resilience:** The application implements a supervisor pattern. The main application thread acts as the supervisor, responsible for the lifecycle of the data plane threads. It monitors its child threads for panics and will automatically restart a failed thread.
+- **Supervisor Pattern for Resilience:** The application implements a supervisor pattern. The main supervisor process is responsible for the lifecycle of the data plane worker processes. It monitors its child worker processes for crashes and will automatically restart a failed worker process using an exponential backoff strategy.
 
 - **Network State Reconciliation (Future Work):** A high-priority item on the roadmap is to implement idempotent network state reconciliation. The target design is for the supervisor to use a Netlink socket to listen for network state changes (e.g., interfaces going up or down). This would allow it to automatically pause, resume, or re-resolve forwarding rules as network conditions change. **This feature is not yet implemented.**
 
@@ -215,7 +233,24 @@ stateDiagram-v2
 
 ### Current Implementation vs. Target Architecture
 
-- **Current State:** The Supervisor, Control Plane, and Data Plane all currently run within a single supervisor process. While architecturally distinct, they are not yet separated into different processes with distinct privilege levels. The entire application requires `CAP_NET_RAW`.
-- **Target Architecture:** The goal is to separate these components into distinct processes. The Supervisor would retain `CAP_NET_RAW` to create sockets, while the Control Plane and Data Plane workers would run as completely unprivileged users. This would be achieved by the Supervisor passing the necessary socket file descriptors to the worker processes. This is a **high-priority future work item**.
+**Current Multi-Process Architecture:**
+
+The application uses a **multi-process architecture** where components run as separate OS processes:
+
+- **Supervisor Process**: Main tokio-based async process that spawns and monitors workers
+- **Control Plane Worker**: Separate process spawned by supervisor
+- **Data Plane Workers**: Separate processes, one per CPU core
+
+Each worker is spawned as a separate OS process with its own PID using `tokio::process::Command`.
+
+**Privilege Separation Status:**
+
+✅ **Control Plane Worker**: Successfully drops privileges to unprivileged user (`nobody:nobody` or configured user) immediately after startup. This worker handles runtime configuration and management without requiring elevated privileges.
+
+⚠️ **Data Plane Workers**: Currently **do NOT drop privileges** and run as root. This is a known limitation documented in the code (see `src/worker/mod.rs:283-307`). Data plane workers require `CAP_NET_RAW` to create `AF_PACKET` sockets, and the ambient capabilities workaround doesn't survive `setuid()`.
+
+**Target Architecture (Future Work):**
+
+The goal is to implement file descriptor passing so the Supervisor creates `AF_PACKET` sockets and passes them to data plane workers via `SCM_RIGHTS`. This would allow data plane workers to drop ALL privileges completely while still being able to use the pre-created sockets. This is a **high-priority future work item**.
 
 - **DDoS Amplification Risk (Trusted Network & QoS Mitigation):** The risk of DDoS amplification from external, malicious actors is considered mitigated by the operational requirement that the relay's ingress interfaces are connected only to physically secured, trusted network segments. The risk of accidental overload of a unicast destination due to misconfiguration is fully mitigated by the existing advanced QoS design, which allows for the classification and rate-limiting/prioritized dropping of high-bandwidth flows. No additional security-specific mechanisms are required for this threat vector.
