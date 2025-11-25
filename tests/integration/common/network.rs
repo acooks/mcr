@@ -4,7 +4,7 @@
 use anyhow::{bail, Context, Result};
 use nix::sched::{unshare, CloneFlags};
 use nix::unistd;
-use rtnetlink::{new_connection, Handle};
+use rtnetlink::{new_connection, Handle, LinkUnspec, LinkVeth};
 use std::net::Ipv4Addr;
 
 /// Network namespace guard - automatically cleaned up on drop
@@ -42,7 +42,11 @@ impl NetworkNamespace {
             .context("Loopback interface not found")?;
 
         // Bring it up
-        handle.link().set(lo.header.index).up().execute().await?;
+        handle
+            .link()
+            .set(LinkUnspec::new_with_index(lo.header.index).up().build())
+            .execute()
+            .await?;
 
         Ok(())
     }
@@ -72,8 +76,7 @@ impl VethPair {
         // Create veth pair
         handle
             .link()
-            .add()
-            .veth(veth_a.to_string(), veth_b.to_string())
+            .add(LinkVeth::new(veth_a, veth_b).build())
             .execute()
             .await
             .with_context(|| format!("Failed to create veth pair {} <-> {}", veth_a, veth_b))?;
@@ -146,8 +149,7 @@ impl VethPair {
 
         self.handle
             .link()
-            .set(link.header.index)
-            .up()
+            .set(LinkUnspec::new_with_index(link.header.index).up().build())
             .execute()
             .await
             .with_context(|| format!("Failed to bring up interface {}", interface))?;
