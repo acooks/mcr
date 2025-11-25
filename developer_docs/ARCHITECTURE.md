@@ -80,9 +80,7 @@ graph TD
 
 ## 4. The Data Plane: A Unified, Single-Threaded Architecture
 
-### Current Default: Single-Threaded Unified Event Loop
-
-The MCR data plane uses a **single-threaded, unified event loop model** as the default architecture. This eliminates the complexity and performance issues of inter-thread communication. All data plane logic for a given CPU core runs within a single OS thread.
+The MCR data plane uses a **single-threaded, unified event loop model**. This eliminates the complexity and performance issues of inter-thread communication. All data plane logic for a given CPU core runs within a single OS thread.
 
 **Implementation:** `run_unified_data_plane()` in `src/worker/data_plane_integrated.rs`
 
@@ -90,21 +88,7 @@ The MCR data plane uses a **single-threaded, unified event loop model** as the d
 
 - **Unified `io_uring` Instance:** Each worker process uses a **single `io_uring` instance** to manage all asynchronous I/O operations for both ingress and egress. This provides a unified, highly efficient event queue.
 
-### Legacy Architecture: Two-Thread Model (Available but Not Default)
-
-The codebase also contains a legacy two-thread implementation that uses:
-
-- One ingress thread with AF_PACKET socket
-- One egress thread with UDP sockets
-- Cross-thread communication via `SegQueue`
-
-This model is still present in the codebase but is **not the default**. The single-threaded unified model is selected at compile time (see `src/worker/mod.rs:29`).
-
-**Implementation:** `run_data_plane()` in `src/worker/data_plane_integrated.rs`
-
-**Why Keep Both?** The legacy model is maintained for performance comparison and as a fallback during the transition period. It may be removed in a future release once the unified model is fully validated across all production scenarios.
-
-- **Event Loop Architecture:**
+**Event Loop Architecture:**
   1. **Ingress (`AF_PACKET`):** The worker submits multiple `Recv` operations to the `io_uring` for its `AF_PACKET` socket.
   2. **Egress (`AF_INET`):** When a received packet is processed and ready to be forwarded, the worker submits one or more `Send` operations to the _same_ `io_uring` instance for the appropriate `AF_INET` egress sockets.
   3. **Unified Completion:** The worker makes a single blocking call (`submit_and_wait()`) that waits for _any_ type of event to complete—a packet being received, a packet having been sent, or a command arriving from the supervisor.
