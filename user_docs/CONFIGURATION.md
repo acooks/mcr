@@ -56,23 +56,42 @@ MCR_SOCKET_SNDBUF=8388608 sudo ./target/release/multicast_relay supervisor --num
 
 ## 3. `multicast_relay` Supervisor
 
-The main `multicast_relay` application is the supervisor. It has minimal command-line configuration, as all forwarding rules are managed dynamically at runtime.
-
-**Start the Supervisor:**
+The main `multicast_relay` application is the supervisor. Start it with the `supervisor` subcommand:
 
 ```bash
-sudo ./target/release/multicast_relay
+sudo ./target/release/multicast_relay supervisor [OPTIONS]
 ```
 
-**Optional Flags:**
+### Supervisor Options
 
-- `--num-workers <N>`: Override the number of worker processes to spawn. Default: number of detected CPU cores.
+| Option                        | Default                                 | Description                                             |
+| :---------------------------- | :-------------------------------------- | :------------------------------------------------------ |
+| `--num-workers <N>`           | Number of CPU cores                     | Override the number of worker processes to spawn.       |
+| `--user <USER>`               | `nobody`                                | User to run worker processes as (privilege separation). |
+| `--group <GROUP>`             | `daemon`                                | Group to run worker processes as.                       |
+| `--interface <IFACE>`         | `lo`                                    | Network interface for data plane workers (deprecated).  |
+| `--control-socket-path <PATH>`| `/tmp/multicast_relay_control.sock`     | Unix socket path for control_client connections.        |
+| `--relay-command-socket-path` | `/tmp/mcr_relay_commands.sock`          | Unix socket path for supervisor-to-worker commands.     |
+| `--prometheus-addr <ADDR>`    | None (disabled)                         | Address for Prometheus metrics export (e.g., `0.0.0.0:9090`). |
 
-**Example:**
+**Note:** The `--interface` parameter is deprecated and will be removed. Per the architecture design, interfaces should be specified per-rule via `control_client add --input-interface`, not globally.
+
+### Examples
 
 ```bash
-# Start with 4 workers instead of default (all cores)
-sudo ./target/release/multicast_relay --num-workers 4
+# Basic start with defaults
+sudo ./target/release/multicast_relay supervisor
+
+# Custom worker count and user
+sudo ./target/release/multicast_relay supervisor --num-workers 4 --user mcr --group mcr
+
+# Enable Prometheus metrics
+sudo ./target/release/multicast_relay supervisor --prometheus-addr 0.0.0.0:9090
+
+# Custom socket paths (useful for testing)
+sudo ./target/release/multicast_relay supervisor \
+    --control-socket-path /var/run/mcr_control.sock \
+    --relay-command-socket-path /var/run/mcr_relay.sock
 ```
 
 All forwarding rules are managed dynamically at runtime via the `control_client`.

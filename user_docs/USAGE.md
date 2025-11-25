@@ -47,8 +47,10 @@ For detailed information on kernel tuning, environment variables for performance
 To run the main relay application, which will start the supervisor and its workers:
 
 ```bash
-sudo ./target/release/multicast_relay
+sudo ./target/release/multicast_relay supervisor
 ```
+
+The supervisor starts with default settings (all CPU cores as workers, nobody:daemon user/group). For additional options, see the **[MCR Configuration Guide](./CONFIGURATION.md)**.
 
 All forwarding rules and runtime operations are managed via the `control_client`.
 
