@@ -800,17 +800,3 @@ fn get_interface_index(name: &str) -> Result<i32> {
         Ok(index as i32)
     }
 }
-
-#[allow(dead_code)]
-fn get_interface_ip(name: &str) -> Result<Ipv4Addr> {
-    for iface in pnet::datalink::interfaces() {
-        if iface.name == name {
-            for ipnet in iface.ips {
-                if let std::net::IpAddr::V4(ip) = ipnet.ip() {
-                    return Ok(ip);
-                }
-            }
-        }
-    }
-    Err(anyhow::anyhow!("no ip"))
-}

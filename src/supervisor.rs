@@ -1173,43 +1173,6 @@ async fn create_and_send_socketpair(supervisor_sock: &UnixStream) -> Result<Unix
 mod tests {
     use super::*;
 
-    // --- Test Helpers ---
-
-    #[allow(dead_code)]
-    #[allow(clippy::type_complexity)] // Test helper with intentionally complex return type
-    fn create_test_logger() -> (
-        Logger,
-        Arc<std::sync::atomic::AtomicU8>,
-        Arc<
-            std::sync::RwLock<
-                std::collections::HashMap<crate::logging::Facility, crate::logging::Severity>,
-            >,
-        >,
-    ) {
-        let ringbuffer = Arc::new(MPSCRingBuffer::new(64));
-        let global_min_level = Arc::new(std::sync::atomic::AtomicU8::new(
-            crate::logging::Severity::Info as u8,
-        ));
-        let facility_min_levels =
-            Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
-        let logger = Logger::from_mpsc(
-            ringbuffer,
-            Arc::clone(&global_min_level),
-            Arc::clone(&facility_min_levels),
-        );
-        (logger, global_min_level, facility_min_levels)
-    }
-
-    #[allow(dead_code)]
-    fn spawn_failing_worker() -> anyhow::Result<Child> {
-        let mut command = tokio::process::Command::new("sh");
-        command.arg("-c").arg("exit 1");
-        command
-            .spawn()
-            .map_err(anyhow::Error::from)
-            .context("Failed to spawn failing worker")
-    }
-
     // --- Unit Tests for handle_supervisor_command ---
 
     #[test]
@@ -1467,17 +1430,5 @@ mod tests {
             _ => panic!("Expected LogLevels response"),
         }
         assert_eq!(action, CommandAction::None);
-    }
-
-    // --- Existing Integration Tests ---
-
-    #[allow(dead_code)]
-    fn spawn_sleeping_worker() -> anyhow::Result<Child> {
-        let mut command = tokio::process::Command::new("sleep");
-        command.arg("30");
-        command
-            .spawn()
-            .map_err(anyhow::Error::from)
-            .context("Failed to spawn sleeping worker")
     }
 }
