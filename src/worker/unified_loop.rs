@@ -830,3 +830,168 @@ fn create_connected_udp_socket(source_ip: Ipv4Addr, dest_addr: SocketAddr) -> Re
     socket.connect(&dest_addr.into())?;
     Ok(socket.into())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ForwardingRule, OutputDestination};
+
+    fn create_test_rule(rule_id: &str, input_group: &str, input_port: u16) -> ForwardingRule {
+        ForwardingRule {
+            rule_id: rule_id.to_string(),
+            input_interface: "lo".to_string(),
+            input_group: input_group.parse().unwrap(),
+            input_port,
+            outputs: vec![OutputDestination {
+                group: "224.0.0.2".parse().unwrap(),
+                port: 5001,
+                interface: "lo".to_string(),
+                dtls_enabled: false,
+            }],
+            dtls_enabled: false,
+        }
+    }
+
+    fn create_test_rules_map() -> HashMap<(Ipv4Addr, u16), ForwardingRule> {
+        let mut rules = HashMap::new();
+
+        let rule1 = create_test_rule("rule-1", "224.0.0.1", 5000);
+        let rule2 = create_test_rule("rule-2", "224.0.0.2", 5001);
+        let rule3 = create_test_rule("rule-3", "224.0.0.3", 5002);
+
+        rules.insert((rule1.input_group, rule1.input_port), rule1);
+        rules.insert((rule2.input_group, rule2.input_port), rule2);
+        rules.insert((rule3.input_group, rule3.input_port), rule3);
+
+        rules
+    }
+
+    // Helper function that mimics the remove_rule logic for testing
+    fn remove_rule_from_map(
+        rules: &mut HashMap<(Ipv4Addr, u16), ForwardingRule>,
+        rule_id: &str,
+    ) -> Result<()> {
+        let key_to_remove = rules
+            .iter()
+            .find(|(_, rule)| rule.rule_id == rule_id)
+            .map(|(key, _)| *key);
+
+        match key_to_remove {
+            Some(key) => {
+                rules.remove(&key);
+                Ok(())
+            }
+            None => Err(anyhow::anyhow!("Rule not found: {}", rule_id)),
+        }
+    }
+
+    #[test]
+    fn test_remove_rule_success() {
+        let mut rules = create_test_rules_map();
+
+        assert_eq!(rules.len(), 3);
+        assert!(rules.iter().any(|(_, r)| r.rule_id == "rule-2"));
+
+        let result = remove_rule_from_map(&mut rules, "rule-2");
+
+        assert!(result.is_ok());
+        assert_eq!(rules.len(), 2);
+        assert!(!rules.iter().any(|(_, r)| r.rule_id == "rule-2"));
+        assert!(rules.iter().any(|(_, r)| r.rule_id == "rule-1"));
+        assert!(rules.iter().any(|(_, r)| r.rule_id == "rule-3"));
+    }
+
+    #[test]
+    fn test_remove_rule_not_found() {
+        let mut rules = create_test_rules_map();
+
+        assert_eq!(rules.len(), 3);
+
+        let result = remove_rule_from_map(&mut rules, "nonexistent-rule");
+
+        assert!(result.is_err());
+        assert_eq!(rules.len(), 3);
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("Rule not found"));
+        assert!(err_msg.contains("nonexistent-rule"));
+    }
+
+    #[test]
+    fn test_remove_all_rules() {
+        let mut rules = create_test_rules_map();
+
+        assert_eq!(rules.len(), 3);
+
+        assert!(remove_rule_from_map(&mut rules, "rule-1").is_ok());
+        assert_eq!(rules.len(), 2);
+
+        assert!(remove_rule_from_map(&mut rules, "rule-2").is_ok());
+        assert_eq!(rules.len(), 1);
+
+        assert!(remove_rule_from_map(&mut rules, "rule-3").is_ok());
+        assert_eq!(rules.len(), 0);
+    }
+
+    #[test]
+    fn test_remove_rule_from_empty_ruleset() {
+        let mut rules = HashMap::new();
+
+        assert_eq!(rules.len(), 0);
+
+        let result = remove_rule_from_map(&mut rules, "any-rule");
+
+        assert!(result.is_err());
+        assert_eq!(rules.len(), 0);
+    }
+
+    #[test]
+    fn test_remove_rule_idempotency() {
+        let mut rules = create_test_rules_map();
+
+        assert_eq!(rules.len(), 3);
+
+        let result1 = remove_rule_from_map(&mut rules, "rule-1");
+        assert!(result1.is_ok());
+        assert_eq!(rules.len(), 2);
+
+        let result2 = remove_rule_from_map(&mut rules, "rule-1");
+        assert!(result2.is_err());
+        assert_eq!(rules.len(), 2);
+    }
+
+    #[test]
+    fn test_add_and_remove_rule() {
+        let mut rules = create_test_rules_map();
+
+        let new_rule = create_test_rule("rule-4", "224.0.0.4", 5003);
+        let key = (new_rule.input_group, new_rule.input_port);
+
+        rules.insert(key, new_rule.clone());
+        assert_eq!(rules.len(), 4);
+        assert!(rules.contains_key(&key));
+
+        remove_rule_from_map(&mut rules, "rule-4").unwrap();
+        assert_eq!(rules.len(), 3);
+        assert!(!rules.contains_key(&key));
+    }
+
+    #[test]
+    fn test_remove_rule_with_duplicate_ports() {
+        let mut rules = HashMap::new();
+
+        // Two rules with same port but different groups
+        let rule1 = create_test_rule("rule-a", "224.0.0.1", 5000);
+        let rule2 = create_test_rule("rule-b", "224.0.0.2", 5000);
+
+        rules.insert((rule1.input_group, rule1.input_port), rule1);
+        rules.insert((rule2.input_group, rule2.input_port), rule2);
+
+        assert_eq!(rules.len(), 2);
+
+        // Remove by rule_id should work correctly
+        remove_rule_from_map(&mut rules, "rule-a").unwrap();
+        assert_eq!(rules.len(), 1);
+        assert!(rules.iter().any(|(_, r)| r.rule_id == "rule-b"));
+        assert!(!rules.iter().any(|(_, r)| r.rule_id == "rule-a"));
+    }
+}
