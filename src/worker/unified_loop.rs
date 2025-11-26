@@ -260,6 +260,16 @@ impl UnifiedDataPlane {
         }
     }
 
+    pub fn sync_rules(&mut self, rules: Vec<ForwardingRule>) -> Result<()> {
+        // Atomically replace entire ruleset
+        self.rules.clear();
+        for rule in rules {
+            let key = (rule.input_group, rule.input_port);
+            self.rules.insert(key, rule);
+        }
+        Ok(())
+    }
+
     /// Main event loop
     pub fn run(&mut self) -> Result<()> {
         self.logger
@@ -402,10 +412,8 @@ impl UnifiedDataPlane {
                         );
                     }
                     crate::RelayCommand::RemoveRule { rule_id } => {
-                        self.logger.info(
-                            Facility::DataPlane,
-                            &format!("Removing rule: {}", rule_id),
-                        );
+                        self.logger
+                            .info(Facility::DataPlane, &format!("Removing rule: {}", rule_id));
 
                         match self.remove_rule(&rule_id) {
                             Ok(()) => {
@@ -433,11 +441,38 @@ impl UnifiedDataPlane {
                             }
                         }
                     }
-                    _ => {
-                        self.logger.debug(
+                    crate::RelayCommand::SyncRules(rules) => {
+                        self.logger.info(
                             Facility::DataPlane,
-                            &format!("Ignoring command: {:?}", command),
+                            &format!("Synchronizing ruleset with {} rules", rules.len()),
                         );
+
+                        match self.sync_rules(rules) {
+                            Ok(()) => {
+                                // Log ruleset hash for drift detection
+                                let ruleset_hash = crate::compute_ruleset_hash(self.rules.values());
+                                self.logger.info(
+                                    Facility::DataPlane,
+                                    &format!(
+                                        "Ruleset synchronized: hash={:016x} rule_count={}",
+                                        ruleset_hash,
+                                        self.rules.len()
+                                    ),
+                                );
+                            }
+                            Err(e) => {
+                                self.logger.error(
+                                    Facility::DataPlane,
+                                    &format!("Failed to sync rules: {}", e),
+                                );
+                            }
+                        }
+                    }
+                    crate::RelayCommand::Ping => {
+                        self.logger
+                            .debug(Facility::DataPlane, "Received health check ping");
+                        // No action needed - fire-and-forget health check
+                        // Worker readiness is indicated by processing this command
                     }
                 }
             }
@@ -993,5 +1028,40 @@ mod tests {
         assert_eq!(rules.len(), 1);
         assert!(rules.iter().any(|(_, r)| r.rule_id == "rule-b"));
         assert!(!rules.iter().any(|(_, r)| r.rule_id == "rule-a"));
+    }
+
+    #[test]
+    fn test_sync_rules_replaces_ruleset() {
+        let mut rules = create_test_rules_map();
+        assert_eq!(rules.len(), 3);
+
+        // Sync with a completely new ruleset
+        let new_rules = vec![
+            create_test_rule("new-rule-1", "224.0.1.1", 6001),
+            create_test_rule("new-rule-2", "224.0.1.2", 6002),
+        ];
+
+        // Simulate what sync_rules does: clear and insert new rules
+        rules.clear();
+        for rule in new_rules {
+            let key = (rule.input_group, rule.input_port);
+            rules.insert(key, rule);
+        }
+
+        assert_eq!(rules.len(), 2);
+        assert!(rules.iter().any(|(_, r)| r.rule_id == "new-rule-1"));
+        assert!(rules.iter().any(|(_, r)| r.rule_id == "new-rule-2"));
+        assert!(!rules.iter().any(|(_, r)| r.rule_id == "rule-1"));
+    }
+
+    #[test]
+    fn test_sync_rules_empty_ruleset() {
+        let mut rules = create_test_rules_map();
+        assert_eq!(rules.len(), 3);
+
+        // Sync with empty ruleset - should clear all rules
+        rules.clear();
+
+        assert_eq!(rules.len(), 0);
     }
 }

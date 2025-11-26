@@ -195,6 +195,8 @@ pub enum RelayCommand {
     RemoveRule {
         rule_id: String,
     },
+    /// Synchronize the complete ruleset - used when workers start to ensure they have all existing rules
+    SyncRules(Vec<ForwardingRule>),
     Shutdown,
     /// Ping command for readiness check - workers should respond when fully initialized
     Ping,
@@ -205,6 +207,7 @@ impl RelayCommand {
         match self {
             RelayCommand::AddRule(rule) => Some(rule.rule_id.clone()),
             RelayCommand::RemoveRule { rule_id } => Some(rule_id.clone()),
+            RelayCommand::SyncRules(_) => None,
             RelayCommand::Shutdown => None,
             RelayCommand::Ping => None,
         }
