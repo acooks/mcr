@@ -890,10 +890,10 @@ This creates multiple failure modes where rules silently fail to reach workers.
 
 ---
 
-#### 8.2.6 Unused `req_stream` Field After GetWorkerRules Removal 🟢 MEDIUM
-**Location:** `src/supervisor.rs` (worker manager), `src/worker/control_plane.rs:62`
-**Status:** Compiler warning after GetWorkerRules removal
-**Impact:** Dead code, minor
+#### 8.2.6 Unused `req_stream` Field After GetWorkerRules Removal ✅ DONE
+**Location:** `src/supervisor.rs:48`
+**Status:** ✅ Warning suppressed with documentation
+**Impact:** Resolved - no compiler warnings
 
 **Context:**
 Section 4.3 documented GetWorkerRules as unimplemented. During drift detection work, GetWorkerRules was removed entirely because:
