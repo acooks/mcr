@@ -52,6 +52,7 @@ use crate::logging::{Facility, Logger};
 use crate::worker::buffer_pool::{BufferPool, BufferSize, ManagedBuffer};
 use crate::worker::packet_parser::parse_packet;
 use crate::ForwardingRule;
+use std::time::Instant;
 
 // User data ranges for different operation types
 const SHUTDOWN_USER_DATA: u64 = u64::MAX;
@@ -114,6 +115,17 @@ pub struct UnifiedStats {
     pub buffer_pool_exhaustion: u64, // Buffer pool exhaustion events
 }
 
+/// Per-flow counters for stats reporting
+#[derive(Debug, Clone, Default)]
+struct FlowCounters {
+    packets_relayed: u64,
+    bytes_relayed: u64,
+    // Snapshot values for rate calculation
+    last_packets: u64,
+    last_bytes: u64,
+    last_snapshot_time: Option<Instant>,
+}
+
 /// Unified single-threaded data plane loop
 pub struct UnifiedDataPlane {
     ring: IoUring,
@@ -126,6 +138,9 @@ pub struct UnifiedDataPlane {
 
     // Forwarding rules (keyed by input_group, input_port)
     rules: HashMap<(Ipv4Addr, u16), ForwardingRule>,
+
+    // Per-flow counters for stats reporting (keyed by input_group, input_port)
+    flow_counters: HashMap<(Ipv4Addr, u16), FlowCounters>,
 
     // Egress
     egress_sockets: HashMap<(String, SocketAddr), (OwnedFd, Ipv4Addr)>,
@@ -215,6 +230,7 @@ impl UnifiedDataPlane {
             in_flight_recvs: HashMap::new(),
             next_recv_user_data: RECV_BASE,
             rules: HashMap::new(),
+            flow_counters: HashMap::new(),
             egress_sockets: HashMap::new(),
             send_queue: Vec::with_capacity(config.send_batch_size),
             in_flight_sends: HashMap::new(),
@@ -268,6 +284,21 @@ impl UnifiedDataPlane {
             self.rules.insert(key, rule);
         }
         Ok(())
+    }
+
+    /// Get current flow stats (without rate calculation for now)
+    pub fn get_flow_stats(&self) -> Vec<crate::FlowStats> {
+        self.flow_counters
+            .iter()
+            .map(|(key, counters)| crate::FlowStats {
+                input_group: key.0,
+                input_port: key.1,
+                packets_relayed: counters.packets_relayed,
+                bytes_relayed: counters.bytes_relayed,
+                packets_per_second: 0.0, // TODO: Calculate from snapshots
+                bits_per_second: 0.0,     // TODO: Calculate from snapshots
+            })
+            .collect()
     }
 
     /// Main event loop
@@ -599,6 +630,17 @@ impl UnifiedDataPlane {
                         self.stats.send_errors
                     ),
                 );
+
+                // Log per-flow stats
+                for ((group, port), counters) in &self.flow_counters {
+                    self.logger.info(
+                        Facility::DataPlane,
+                        &format!(
+                            "[FLOW_STATS] {}:{} packets={} bytes={}",
+                            group, port, counters.packets_relayed, counters.bytes_relayed
+                        ),
+                    );
+                }
             }
         }
 
@@ -650,6 +692,13 @@ impl UnifiedDataPlane {
                 interface_name: output.interface.clone(),
             })
             .collect();
+
+        // Update per-flow counters
+        if self.config.track_stats && !targets.is_empty() {
+            let counter = self.flow_counters.entry(key).or_default();
+            counter.packets_relayed += 1;
+            counter.bytes_relayed += headers.payload_len as u64;
+        }
 
         Ok(targets)
     }
