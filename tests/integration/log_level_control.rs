@@ -20,11 +20,11 @@ mod tests {
 
     /// Spawns a supervisor process with a unique socket path
     async fn spawn_supervisor(socket_path: &PathBuf) -> Result<Child> {
-        let current_exe = std::env::current_exe().expect("Failed to get current executable path");
+        let binary_path = env!("CARGO_BIN_EXE_multicast_relay");
 
         cleanup_socket(socket_path);
 
-        let mut supervisor_cmd = Command::new(current_exe);
+        let mut supervisor_cmd = Command::new(binary_path);
         supervisor_cmd
             .arg("supervisor")
             .arg("--control-socket-path")
