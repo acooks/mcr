@@ -17,6 +17,34 @@ The architecture is designed around three core principles:
 2. **Dynamic Reconfiguration:** To allow for adding, removing, and monitoring forwarding flows at runtime without service interruption.
 3. **Testability:** To structure the code in a way that is modular and verifiable.
 
+### Implementation Status
+
+This document describes both **current implementation** and **target architecture**. Features marked with "(NOT IMPLEMENTED)" or "(PARTIALLY IMPLEMENTED)" represent the designed architecture that is not yet fully operational.
+
+**✅ Fully Implemented:**
+- Multi-process architecture with supervisor and worker processes
+- Unified io_uring-based data plane for packet forwarding
+- JSON-based control plane protocol (AddRule, RemoveRule, ListRules, ListWorkers)
+- Control plane worker privilege dropping
+- Fire-and-forget command delivery to workers
+- Hash-based ruleset drift detection (manual, via logs)
+
+**⚠️ Partially Implemented:**
+- Statistics aggregation infrastructure exists, but data plane workers don't push stats
+- Worker process monitoring and restart (but without rule resynchronization)
+- Observability via GetStats (returns empty/stale data without stats pushing)
+
+**❌ Not Yet Implemented:**
+- Rule hashing to specific CPU cores (all workers receive all rules)
+- Automatic rule resynchronization when workers restart
+- Proactive statistics pushing from data plane to control plane
+- Automated drift detection and recovery
+- Network state reconciliation via Netlink
+- Periodic health checks
+- Protocol versioning
+- On-demand packet tracing
+- Data plane worker privilege dropping (AF_PACKET FD passing)
+
 ## 2. Architectural Principles
 
 The current architecture is the result of a significant refactor guided by the following principles:
@@ -156,22 +184,47 @@ The control plane provides the mechanism for runtime configuration and monitorin
 
 ### Rule Assignment
 
-- **Rule-to-Core Assignment Strategy:** The application uses a hybrid strategy for assigning forwarding rules to data plane cores. By default, the supervisor assigns rules to cores using a consistent hash of the rule's stable identifiers (e.g., `input_group`, `input_port`). The control plane also supports a `MoveRule` command, allowing an operator to manually re-assign a specific rule to a different core to reactively mitigate hotspots. The supervisor's master rule list tracks the current core assignment for each rule.
+- **Rule-to-Core Assignment Strategy (NOT IMPLEMENTED):** _Future work:_ The application is designed to use a hybrid strategy for assigning forwarding rules to data plane cores using a consistent hash of the rule's stable identifiers (e.g., `input_group`, `input_port`). **Current implementation:** All rules are broadcast to all data plane workers. Each worker maintains a complete copy of the ruleset and processes packets for any matching rule. This simplifies implementation but reduces cache locality and limits scalability.
 
-- **Decoupled Statistics Aggregation:** To prevent statistical queries from blocking the control plane, a dedicated `StatsAggregator` task is used. Each core-pinned data plane thread proactively pushes its complete state and metrics to the aggregator on a regular interval. **This push includes a high-resolution timestamp captured only once per interval by each worker, ensuring minimal system call overhead.** The `StatsAggregator` maintains a cached, up-to-date, system-wide view of the application's state. The `ControlPlane` task serves `GetStats` and `ListRules` requests by querying this aggregator for the latest cached, system-wide state, ensuring the control plane remains highly responsive. The `GetStats` response will include these per-core timestamps, making any temporal skew transparent to the operator.
+- **Decoupled Statistics Aggregation (PARTIALLY IMPLEMENTED):** The infrastructure for statistics aggregation exists but is not fully wired up:
+  - **Implemented:** A dedicated `StatsAggregator` task (`stats_aggregator_task`) runs in the control plane worker and can receive statistics via a channel.
+  - **NOT IMPLEMENTED:** Data plane workers do not currently push their state and metrics to the aggregator. The `stats_tx` channel exists in data plane workers but is unused.
+  - **Current Behavior:** The `GetStats` command returns data only from the control plane's `shared_flows` HashMap, which is populated by the stats aggregator task. Since data plane workers don't push stats, this HashMap may be empty or stale.
+  - **ListRules works:** The `ListRules` command correctly returns the supervisor's authoritative `master_rules` state.
 
 - **Strict Protocol Versioning (NOT IMPLEMENTED):** _Future work:_ The control plane protocol will use a strict, fail-fast versioning scheme. A single, shared `PROTOCOL_VERSION` constant will be defined and compiled into both the server and client. The first message on any new connection must be a `VersionCheck` from the client. The server will compare the client's version to its own; if they do not match exactly, the server will respond with a `VersionMismatch` error and close the connection. Any change to the JSON protocol requires incrementing the shared `PROTOCOL_VERSION` constant.
 
-- **Command Dispatch via Unix Sockets:** Communication from the Supervisor to the data plane worker processes uses a dedicated `UnixStream` socket pair for each worker.
-  - The Supervisor serializes commands (e.g., `AddRule`) into a length-prefixed JSON payload and writes them to its end of the socket using its `tokio` runtime.
+- **Command Dispatch via Unix Sockets (Fire-and-Forget):** Communication from the Supervisor to the data plane worker processes uses a dedicated `UnixStream` socket pair for each worker.
+  - The Supervisor serializes commands (e.g., `AddRule`, `RemoveRule`) into a length-prefixed JSON payload and writes them to its end of the socket using its `tokio` runtime.
   - The worker's `io_uring` runtime polls its end of the socket. When data arrives, a command reader parses the length-prefixed JSON back into a command struct for processing.
   - This mechanism acts as a bridge between the supervisor's `tokio`-based control plane and the worker's `io_uring`-based data plane.
 
+  **Reliability Characteristics:**
+  - **Fire-and-Forget Delivery:** The supervisor broadcasts commands to all workers asynchronously. Send errors are **explicitly ignored** to prioritize supervisor responsiveness over guaranteed delivery.
+  - **No Acknowledgments:** Workers do not send acknowledgments when they receive or process commands.
+  - **No Retries:** Failed sends are not retried. If a worker's socket buffer is full or the worker is unresponsive, the command is silently lost.
+  - **Eventual Consistency:** The system is designed for eventual consistency. The supervisor's `master_rules` HashMap is the authoritative source of truth. Workers may temporarily have stale state due to lost broadcasts.
+  - **Drift Detection:** Hash-based drift detection enables manual detection of workers with stale rulesets by comparing hash values in log output. Each component (supervisor, workers) logs a hash of its ruleset when rules change.
+
 ## 6. Monitoring and Hotspot Strategy
 
-- **Hotspot Management (Observe, Don't Act):** The initial design will not implement an automatic hotspot mitigation strategy. Instead, it will rely on a robust, **core-aware monitoring system** to make any potential single-core saturation observable to the operator. The statistics reporting will be enhanced to include per-core packet rates and CPU utilization metrics. This provides the necessary visibility to manage the known architectural limitation.
+- **Hotspot Management (Observe, Don't Act):** The initial design will not implement an automatic hotspot mitigation strategy. Instead, it will rely on a robust, **core-aware monitoring system** to make any potential single-core saturation observable to the operator.
 
-- **Custom Observability via Control Plane:** The application provides comprehensive observability through its control plane, compensating for the lack of visibility from standard networking tools like `netstat`. A `ListRules` command exposes the forwarding table, and a `GetStats` command exposes metrics with per-rule granularity. _Note:_ Per-destination granularity (for fan-out scenarios) is not currently implemented; stats are aggregated at the rule level.
+  **Current Status (PARTIALLY IMPLEMENTED):**
+  - **Infrastructure exists:** Statistics aggregation task and data structures are in place.
+  - **NOT wired up:** Data plane workers do not currently push per-core packet rates and CPU utilization metrics to the aggregator (see Section 5 "Decoupled Statistics Aggregation").
+  - **Manual monitoring:** Operators can use standard tools (`top`, `htop`) to observe per-core CPU usage, but per-flow statistics are not available.
+
+- **Custom Observability via Control Plane (PARTIALLY FUNCTIONAL):** The application provides observability through its control plane, compensating for the lack of visibility from standard networking tools like `netstat`.
+
+  **What Works:**
+  - **ListRules:** Returns the complete forwarding table from the supervisor's authoritative `master_rules`. This is fully functional and reliable.
+  - **ListWorkers:** Returns information about all spawned worker processes (PID, type, core assignment).
+
+  **What Doesn't Work:**
+  - **GetStats:** Returns data from the control plane's `shared_flows` HashMap. Since data plane workers don't push stats (see Section 5), this may return empty or stale data.
+  - **Per-core metrics:** Not available until stats pushing is implemented.
+  - **Per-destination granularity:** Not implemented; stats (when available) are aggregated at the rule level.
 
 - **On-Demand Packet Tracing (NOT IMPLEMENTED):** _Future work:_ The application will implement a low-impact, on-demand packet tracing capability. Tracing will be configurable on a per-rule basis via control plane commands (`EnableTrace`, `DisableTrace`, `GetTrace`) and disabled by default. Each data plane worker will maintain a pre-allocated, in-memory ring buffer to store key diagnostic events for packets matching an enabled rule. The `GetTrace` command will retrieve these events, providing a detailed, chronological log of a packet's lifecycle or the reason for its drop.
 
@@ -189,11 +242,55 @@ For a comprehensive guide to the logging system, including the high-performance 
 
 ## 9. Reliability and Resilience
 
-- **Supervisor Pattern for Resilience:** The application implements a supervisor pattern. The main supervisor process is responsible for the lifecycle of the data plane worker processes. It monitors its child worker processes for crashes and will automatically restart a failed worker process using an exponential backoff strategy.
+- **Supervisor Pattern for Resilience (PARTIALLY IMPLEMENTED):** The application implements a supervisor pattern. The main supervisor process is responsible for the lifecycle of the data plane worker processes.
 
-- **Network State Reconciliation (Future Work):** A high-priority item on the roadmap is to implement idempotent network state reconciliation. The target design is for the supervisor to use a Netlink socket to listen for network state changes (e.g., interfaces going up or down). This would allow it to automatically pause, resume, or re-resolve forwarding rules as network conditions change. **This feature is not yet implemented.**
+  **Current Implementation:**
+  - **Worker Process Monitoring:** The supervisor monitors child worker processes for crashes.
+  - **Worker Restart:** The supervisor can restart failed worker processes.
+  - **Exponential Backoff:** _(Status Unknown - needs verification)_ The exponential backoff strategy for restart may not be fully implemented.
+
+  **Critical Limitation - No Rule Resynchronization:**
+  - When a worker process is restarted, it starts with an **empty ruleset**.
+  - The supervisor **does not** automatically send existing rules to newly started workers.
+  - **Impact:** A restarted worker will drop all traffic until new rules are explicitly added via the control plane, or the supervisor is restarted.
+  - **Workaround:** Manual intervention required - operators must re-add all rules, or restart the supervisor entirely.
+
+- **Worker Drift Detection (IMPLEMENTED):** Hash-based drift detection enables manual identification of workers with stale rulesets:
+  - Each component (supervisor, data plane workers, control plane) logs a hash of its ruleset when rules change.
+  - Operators can compare hashes in logs to detect when worker state diverges from supervisor's authoritative `master_rules`.
+  - **Manual process:** No automated comparison or recovery yet.
+
+- **Network State Reconciliation (NOT IMPLEMENTED):** _Future work:_ A high-priority item on the roadmap is to implement idempotent network state reconciliation. The target design is for the supervisor to use a Netlink socket to listen for network state changes (e.g., interfaces going up or down). This would allow it to automatically pause, resume, or re-resolve forwarding rules as network conditions change.
 
 ### Supervisor Lifecycle Management
+
+**Current Actual Behavior:**
+
+```mermaid
+stateDiagram-v2
+    [*] --> Initializing
+    Initializing --> Running: All workers spawned
+
+    state Running {
+        [*] --> MonitoringWorkers
+        MonitoringWorkers --> WorkerCrashed: Worker panic/exit
+        WorkerCrashed --> BackoffDelay: failure_count++
+        BackoffDelay --> RespawningWorker: After delay
+        RespawningWorker --> MonitoringWorkers: Worker restarted (EMPTY RULESET)
+        note right of MonitoringWorkers
+            CRITICAL LIMITATION:
+            Restarted workers do NOT
+            receive existing rules.
+            Traffic drops until manual
+            intervention.
+        end note
+    }
+
+    Running --> ShuttingDown: SIGTERM/SIGINT
+    ShuttingDown --> [*]: All workers stopped
+```
+
+**Target Behavior (NOT YET IMPLEMENTED):**
 
 ```mermaid
 stateDiagram-v2
@@ -206,7 +303,7 @@ stateDiagram-v2
         WorkerCrashed --> BackoffDelay: failure_count++
         BackoffDelay --> RespawningWorker: After delay
         RespawningWorker --> ResyncingRules: Worker restarted
-        ResyncingRules --> MonitoringWorkers: Rules sent
+        ResyncingRules --> MonitoringWorkers: Full ruleset sent
     }
 
     Running --> ShuttingDown: SIGTERM/SIGINT
