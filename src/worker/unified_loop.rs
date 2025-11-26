@@ -286,17 +286,51 @@ impl UnifiedDataPlane {
         Ok(())
     }
 
-    /// Get current flow stats (without rate calculation for now)
-    pub fn get_flow_stats(&self) -> Vec<crate::FlowStats> {
+    /// Get current flow stats with calculated rates
+    /// This method is mutable because it updates rate calculation snapshots
+    pub fn get_flow_stats(&mut self) -> Vec<crate::FlowStats> {
+        let now = Instant::now();
+
         self.flow_counters
-            .iter()
-            .map(|(key, counters)| crate::FlowStats {
-                input_group: key.0,
-                input_port: key.1,
-                packets_relayed: counters.packets_relayed,
-                bytes_relayed: counters.bytes_relayed,
-                packets_per_second: 0.0, // TODO: Calculate from snapshots
-                bits_per_second: 0.0,     // TODO: Calculate from snapshots
+            .iter_mut()
+            .map(|(key, counters)| {
+                // Calculate rates based on time since last snapshot
+                let (packets_per_second, bits_per_second) = if let Some(last_time) = counters.last_snapshot_time {
+                    let elapsed = now.duration_since(last_time).as_secs_f64();
+
+                    if elapsed > 0.0 {
+                        let packet_delta = counters.packets_relayed.saturating_sub(counters.last_packets);
+                        let byte_delta = counters.bytes_relayed.saturating_sub(counters.last_bytes);
+
+                        let pps = packet_delta as f64 / elapsed;
+                        let bps = (byte_delta * 8) as f64 / elapsed; // bits per second
+
+                        // Update snapshots for next calculation
+                        counters.last_packets = counters.packets_relayed;
+                        counters.last_bytes = counters.bytes_relayed;
+                        counters.last_snapshot_time = Some(now);
+
+                        (pps, bps)
+                    } else {
+                        // Too soon since last snapshot
+                        (0.0, 0.0)
+                    }
+                } else {
+                    // First snapshot - initialize
+                    counters.last_packets = counters.packets_relayed;
+                    counters.last_bytes = counters.bytes_relayed;
+                    counters.last_snapshot_time = Some(now);
+                    (0.0, 0.0)
+                };
+
+                crate::FlowStats {
+                    input_group: key.0,
+                    input_port: key.1,
+                    packets_relayed: counters.packets_relayed,
+                    bytes_relayed: counters.bytes_relayed,
+                    packets_per_second,
+                    bits_per_second,
+                }
             })
             .collect()
     }
@@ -631,13 +665,19 @@ impl UnifiedDataPlane {
                     ),
                 );
 
-                // Log per-flow stats
-                for ((group, port), counters) in &self.flow_counters {
+                // Log per-flow stats with rates
+                let flow_stats = self.get_flow_stats();
+                for stats in flow_stats {
                     self.logger.info(
                         Facility::DataPlane,
                         &format!(
-                            "[FLOW_STATS] {}:{} packets={} bytes={}",
-                            group, port, counters.packets_relayed, counters.bytes_relayed
+                            "[FLOW_STATS] {}:{} packets={} bytes={} pps={:.0} bps={:.0}",
+                            stats.input_group,
+                            stats.input_port,
+                            stats.packets_relayed,
+                            stats.bytes_relayed,
+                            stats.packets_per_second,
+                            stats.bits_per_second
                         ),
                     );
                 }
