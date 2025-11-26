@@ -234,7 +234,103 @@ Worker processes do not log directly to files. Instead, a simple and robust pipe
 
 For a comprehensive guide to the logging system, including the high-performance cross-process design for the data plane, API usage, and monitoring techniques, see the detailed **[Logging Design Document](../design/LOGGING_DESIGN.md)**.
 
-## 8. Memory Management
+## 8. Statistics Reporting Architecture
+
+### Design Principles for Data Plane Stats
+
+The statistics reporting system must respect critical fast path constraints to maintain high-performance packet forwarding:
+
+**Fast Path Constraints:**
+1. **Minimize System Calls:** The packet processing loop must avoid syscalls where possible. Even amortized periodic syscalls add measurable latency at high packet rates.
+2. **No Locks/Mutexes:** Data plane is single-threaded by design to eliminate synchronization overhead.
+3. **Never Block:** Data plane must continue processing packets without waiting for I/O operations.
+4. **No Dynamic Allocation:** Memory allocation in the fast path causes unpredictable latency.
+5. **Fire-and-Forget Only:** Data plane should push stats asynchronously, never respond to queries.
+
+**Architectural Decision:** Data plane workers **push** statistics periodically to the control plane/supervisor. They do NOT handle request-response IPC (no stats queries). This keeps the data plane event loop simple and focused solely on packet forwarding.
+
+### Current Implementation (PARTIALLY COMPLETE)
+
+**✅ Implemented:**
+- Per-flow counters tracked in data plane workers (`flow_counters: HashMap<(Ipv4Addr, u16), FlowCounters>`)
+- Rate calculation (packets_per_second, bits_per_second) using snapshot-based deltas
+- Periodic logging of stats to structured logs (`[FLOW_STATS]` marker)
+- Stats aggregator infrastructure exists in control plane worker (`stats_aggregator_task`)
+- Control plane has `shared_flows` HashMap ready to receive stats
+
+**❌ Not Implemented:**
+- IPC mechanism for data plane to push stats to control plane
+- Supervisor reading stats from workers and feeding to aggregator
+- GetStats returning real data (currently returns zeros)
+
+### Design Trade-Offs and Alternatives
+
+| Approach | Fast Path Impact | Complexity | Proven | Trade-Offs |
+|----------|-----------------|------------|--------|------------|
+| **Option 1: Unix Pipes** | Periodic `write()` syscall + JSON serialization | Low (reuse logging pattern) | ✅ Yes (logs) | Simple, kernel-managed, but syscall overhead |
+| **Option 2: Shared Memory Ring Buffer** | Atomic writes only (no syscalls) | High (shm_open, mmap, cleanup) | ❌ No (code exists, unused) | Zero-overhead writes, but complex and unproven |
+| **Option 3: Unix Domain Sockets** | Similar to pipes | Medium | Partial | Message boundaries, but more complex than pipes |
+| **Option 4: Logs Only** | None (already logging) | None | ✅ Yes | No new code, but GetStats API non-functional |
+
+### Selected Approach: Pipe-Based (Pragmatic Compromise)
+
+**Decision:** Use Unix pipes for stats reporting, mirroring the proven logging architecture.
+
+**Rationale:**
+- **Proven Pattern:** Pipes already work reliably for cross-process logging
+- **Kernel-Managed Buffering:** Aligns with Architectural Principle #2 (kernel-managed state)
+- **Fire-and-Forget:** Non-blocking writes preserve data plane responsiveness
+- **Minimal Complexity:** Reuses existing supervisor infrastructure for pipe reading
+- **Acceptable Overhead:** Periodic syscall is off the critical per-packet path
+
+**Performance Characteristics:**
+- Stats written during existing periodic check (same cadence as logging)
+- Write batched with rule hash logging (amortized overhead)
+- If pipe buffer full, write fails gracefully (drop stats update, continue processing)
+- Overhead: ~1 `write()` syscall per reporting interval per worker
+
+### Planned Implementation
+
+**Phase 1: Infrastructure (Current)**
+- ✅ Data plane tracks per-flow counters
+- ✅ Rate calculation implemented
+- ✅ Periodic logging working
+- ✅ Stats aggregator ready
+
+**Phase 2: Pipe-Based IPC (Planned)**
+1. **Supervisor:** Create stats pipe for each data plane worker (alongside log pipe)
+2. **Data Plane:** Periodically serialize `Vec<FlowStats>` to JSON and write to stats pipe
+   - Timing: During existing periodic check (same as logging)
+   - Non-blocking write via `fcntl(O_NONBLOCK)`
+   - On error: drop update, log warning, continue processing
+3. **Supervisor:** Async task reads from stats pipes (tokio)
+4. **Supervisor:** Deserialize and send to `stats_aggregator_task` via tokio mpsc channel
+5. **Control Plane:** Aggregator updates `shared_flows` HashMap
+6. **Control Plane:** GetStats returns current data from HashMap
+
+**Phase 3: Optimization (Future)**
+- Monitor pipe write overhead via metrics
+- If profiling shows significant impact, migrate to shared memory ring buffer
+- Maintain pipe-based as fallback for simplicity
+
+### Alternative: Shared Memory (Future Work)
+
+Shared memory ring buffers (`SharedSPSCRingBuffer`) exist in the codebase for potential future use. This approach would eliminate syscall overhead entirely but requires:
+- Proper cleanup on worker crashes (`shm_unlink`)
+- More complex error handling
+- Testing and validation in production workloads
+
+**Decision Criteria for Migration:** Only migrate to shared memory if profiling demonstrates that pipe write overhead is a measurable bottleneck in production traffic scenarios (>1% CPU or >100μs latency impact).
+
+### Fast Path Guarantee
+
+**Critical Constraint:** Stats writes must NEVER block packet processing. Implementation guarantees:
+- Non-blocking writes (O_NONBLOCK)
+- Failure handling: drop stats update, continue processing
+- No synchronous I/O in packet processing loop
+- Periodic stats writes only (not per-packet)
+
+## 9. Memory Management
 
 - **Core-Local Buffer Pools:** To avoid the performance penalty of dynamic memory allocation, the application uses a core-local buffer pool strategy. Each core-pinned data plane thread pre-allocates and manages its own independent set of fixed-size memory buffers. These buffers are organized into multiple pools based on common packet sizes (e.g., Small, Standard, Jumbo). Runtime "allocations" are fast, lock-free operations that acquire a buffer from the appropriate pool.
 
