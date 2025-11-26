@@ -675,10 +675,10 @@ This architectural choice prioritizes supervisor responsiveness over guaranteed 
 
 ---
 
-#### 8.2.1 Data Plane Workers RemoveRule Implementation 🟡 IMPLEMENTED - NEEDS TESTS
-**Location:** `src/worker/unified_loop.rs:246-261, 404-435`
-**Status:** ✅ Implemented (November 2025), ⚠️ needs thorough testing
-**Commit:** fc0a50f
+#### 8.2.1 Data Plane Workers RemoveRule Implementation ✅ COMPLETED
+**Location:** `src/worker/unified_loop.rs:246-261, 404-435, 834-997`
+**Status:** ✅ Implemented and tested (November 2025)
+**Commits:** fc0a50f (implementation), d80300e (tests)
 
 **Implementation:**
 - Added `remove_rule(&mut self, rule_id: &str)` method
@@ -692,19 +692,19 @@ This architectural choice prioritizes supervisor responsiveness over guaranteed 
 
 **Testing Status:**
 - ✅ Compiles successfully
-- ✅ All 131 unit tests pass
-- ⚠️ No specific test for RemoveRule functionality
-- ⚠️ Integration tests not yet run with RemoveRule
-- ⚠️ Need E2E test: add rule → remove rule → verify gone
+- ✅ All 138 unit tests pass (7 new tests for RemoveRule)
+- ✅ Unit tests cover all scenarios:
+  - test_remove_rule_success: Basic successful removal
+  - test_remove_rule_not_found: Error handling for non-existent rule
+  - test_remove_all_rules: Sequential removal of all rules
+  - test_remove_rule_from_empty_ruleset: Edge case with empty ruleset
+  - test_remove_rule_idempotency: Verify error on duplicate removal
+  - test_add_and_remove_rule: Add then remove workflow
+  - test_remove_rule_with_duplicate_ports: Same port, different groups
+- ✅ Integration test (test_add_and_remove_rule_e2e) passes
+- ✅ E2E test confirms: add rule → remove rule → verify gone
 
-**Remaining Work:**
-1. Add unit test for `remove_rule()` method
-2. Add integration test for RemoveRule command flow
-3. Verify hash logging works correctly after removal
-4. Test error handling (remove non-existent rule)
-5. Test with live supervisor-worker communication
-
-**Risk:** Medium - implemented but not battle-tested
+**Risk:** Low - implemented and thoroughly tested
 
 ---
 
@@ -1185,7 +1185,7 @@ Automatic detection and recovery from worker drift, without manual intervention.
 
 **Implementation Order:**
 1. ✅ Phase 1: Hash logging (COMPLETED)
-2. ⚠️ RemoveRule in data plane (8.2.1) - implemented, needs tests (commit fc0a50f)
+2. ✅ RemoveRule in data plane (8.2.1) - implemented and tested (commits fc0a50f, d80300e)
 3. 🔧 Implement stats reporting (8.2.3) - enables hash comparison
 4. 🔧 Implement ruleset sync on startup (8.2.4) - enables recovery
 5. 🔧 Implement periodic health checks (8.2.8) - detects dead workers
@@ -1235,10 +1235,10 @@ Automatic detection and recovery from worker drift, without manual intervention.
 **Goal:** Implement critical architectural improvements and automated recovery
 
 **Priority Track - Ruleset Synchronization (Section 8):**
-1. ⚠️ **PARTIALLY DONE** - RemoveRule implementation (8.2.1)
+1. ✅ **COMPLETED** - RemoveRule implementation (8.2.1)
    - ✅ Code implemented (commit fc0a50f)
-   - ⚠️ Needs thorough testing (unit + integration)
-   - 🔧 Add test coverage before considering complete
+   - ✅ Unit tests added (commit d80300e) - 7 tests, all pass
+   - ✅ Integration test passes (test_add_and_remove_rule_e2e)
 2. 🔧 Implement stats reporting from data plane (8.2.3) - enables monitoring
 3. 🔧 Implement ruleset sync on worker startup (8.2.4) - **CRITICAL** - enables recovery
 4. 🔧 Decide on broadcast reliability strategy (8.2.5) - **CRITICAL** - architectural decision needed
