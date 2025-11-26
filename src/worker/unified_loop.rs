@@ -243,6 +243,23 @@ impl UnifiedDataPlane {
         Ok(())
     }
 
+    pub fn remove_rule(&mut self, rule_id: &str) -> Result<()> {
+        // Find the rule by rule_id
+        let key_to_remove = self
+            .rules
+            .iter()
+            .find(|(_, rule)| rule.rule_id == rule_id)
+            .map(|(key, _)| *key);
+
+        match key_to_remove {
+            Some(key) => {
+                self.rules.remove(&key);
+                Ok(())
+            }
+            None => Err(anyhow::anyhow!("Rule not found: {}", rule_id)),
+        }
+    }
+
     /// Main event loop
     pub fn run(&mut self) -> Result<()> {
         self.logger
@@ -383,6 +400,38 @@ impl UnifiedDataPlane {
                                 self.rules.len()
                             ),
                         );
+                    }
+                    crate::RelayCommand::RemoveRule { rule_id } => {
+                        self.logger.info(
+                            Facility::DataPlane,
+                            &format!("Removing rule: {}", rule_id),
+                        );
+
+                        match self.remove_rule(&rule_id) {
+                            Ok(()) => {
+                                self.logger.info(
+                                    Facility::DataPlane,
+                                    &format!("Rule removed successfully: {}", rule_id),
+                                );
+
+                                // Log ruleset hash for drift detection
+                                let ruleset_hash = crate::compute_ruleset_hash(self.rules.values());
+                                self.logger.info(
+                                    Facility::DataPlane,
+                                    &format!(
+                                        "Ruleset updated: hash={:016x} rule_count={}",
+                                        ruleset_hash,
+                                        self.rules.len()
+                                    ),
+                                );
+                            }
+                            Err(e) => {
+                                self.logger.error(
+                                    Facility::DataPlane,
+                                    &format!("Failed to remove rule {}: {}", rule_id, e),
+                                );
+                            }
+                        }
                     }
                     _ => {
                         self.logger.debug(
