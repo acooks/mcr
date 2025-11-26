@@ -38,8 +38,11 @@ pub enum Command {
         control_socket_path: PathBuf,
 
         /// Network interface for data plane workers to listen on.
-        /// TODO: Remove this parameter. Per architecture (D21), interfaces should come from
-        /// ForwardingRule.input_interface, not as a global supervisor parameter.
+        /// This is required for PACKET_FANOUT_CPU: all workers must bind to the same interface
+        /// with a shared fanout_group_id, allowing the kernel to distribute packets to the
+        /// worker running on the CPU that received the packet (for optimal cache locality).
+        /// Note: ForwardingRule.input_interface serves a different purpose - it will be used
+        /// for rule filtering in multi-interface scenarios. See MULTI_INTERFACE_ARCHITECTURE.md.
         #[clap(long, default_value = "lo")]
         interface: String,
 
