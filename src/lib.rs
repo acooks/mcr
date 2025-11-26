@@ -212,6 +212,26 @@ fn default_rule_id() -> String {
     Uuid::new_v4().to_string()
 }
 
+/// Compute a deterministic hash of a ruleset for drift detection.
+/// Returns a hash of the sorted rule IDs to detect when worker rules don't match supervisor's master_rules.
+pub fn compute_ruleset_hash<'a, I>(rules: I) -> u64
+where
+    I: Iterator<Item = &'a ForwardingRule>,
+{
+    use std::collections::BTreeSet;
+    use std::hash::{Hash, Hasher};
+
+    // Collect and sort rule_ids for deterministic ordering
+    let rule_ids: BTreeSet<&str> = rules.map(|r| r.rule_id.as_str()).collect();
+
+    // Compute hash
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for rule_id in rule_ids {
+        rule_id.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

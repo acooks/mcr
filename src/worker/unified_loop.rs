@@ -372,6 +372,17 @@ impl UnifiedDataPlane {
                             ),
                         );
                         self.add_rule(rule)?;
+
+                        // Log ruleset hash for drift detection
+                        let ruleset_hash = crate::compute_ruleset_hash(self.rules.values());
+                        self.logger.info(
+                            Facility::DataPlane,
+                            &format!(
+                                "Ruleset updated: hash={:016x} rule_count={}",
+                                ruleset_hash,
+                                self.rules.len()
+                            ),
+                        );
                     }
                     _ => {
                         self.logger.debug(

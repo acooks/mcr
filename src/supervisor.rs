@@ -43,8 +43,7 @@ struct Worker {
     // Control plane workers have ONE command stream
     ingress_cmd_stream: Option<Arc<tokio::sync::Mutex<UnixStream>>>,
     egress_cmd_stream: Option<Arc<tokio::sync::Mutex<UnixStream>>>,
-    #[allow(dead_code)] // TODO: Will be used when GetWorkerRules is implemented
-    req_stream: Option<Arc<tokio::sync::Mutex<UnixStream>>>, // Request stream for control plane (Request::ListRules etc)
+    req_stream: Option<Arc<tokio::sync::Mutex<UnixStream>>>, // Request stream for control plane (Request::ListRules etc, used by GetWorkerRules)
     log_pipe: Option<std::os::unix::io::OwnedFd>, // Pipe for reading worker's stderr (JSON logs)
 }
 
@@ -198,14 +197,6 @@ pub fn handle_supervisor_command(
                     global,
                     facility_overrides,
                 },
-                CommandAction::None,
-            )
-        }
-
-        SupervisorCommand::GetWorkerRules { .. } => {
-            // This command requires async worker communication, not handled here
-            (
-                Response::Error("GetWorkerRules not supported in synchronous handler".to_string()),
                 CommandAction::None,
             )
         }
@@ -853,6 +844,30 @@ async fn handle_client(
         &global_min_level,
         &facility_min_levels,
     );
+
+    // Log ruleset hash for drift detection if rules changed
+    if matches!(action, CommandAction::BroadcastToDataPlane(_)) {
+        let ruleset_hash = {
+            let rules = master_rules.lock().unwrap();
+            crate::compute_ruleset_hash(rules.values())
+        };
+        let rule_count = master_rules.lock().unwrap().len();
+
+        // Get logger from worker_manager
+        let logger = {
+            let manager = worker_manager.lock().unwrap();
+            manager.logger.clone()
+        };
+
+        log_info!(
+            logger,
+            Facility::Supervisor,
+            &format!(
+                "Ruleset updated: hash={:016x} rule_count={}",
+                ruleset_hash, rule_count
+            )
+        );
+    }
 
     // Handle async actions BEFORE sending response for Ping
     let mut final_response = response;
