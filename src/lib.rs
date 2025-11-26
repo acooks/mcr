@@ -38,8 +38,11 @@ pub enum Command {
         control_socket_path: PathBuf,
 
         /// Network interface for data plane workers to listen on.
-        /// TODO: Remove this parameter. Per architecture (D21), interfaces should come from
-        /// ForwardingRule.input_interface, not as a global supervisor parameter.
+        /// This is required for PACKET_FANOUT_CPU: all workers must bind to the same interface
+        /// with a shared fanout_group_id, allowing the kernel to distribute packets to the
+        /// worker running on the CPU that received the packet (for optimal cache locality).
+        /// Note: ForwardingRule.input_interface serves a different purpose - it will be used
+        /// for rule filtering in multi-interface scenarios. See MULTI_INTERFACE_ARCHITECTURE.md.
         #[clap(long, default_value = "lo")]
         interface: String,
 
@@ -138,9 +141,6 @@ pub enum SupervisorCommand {
     ListRules,
     GetStats,
     ListWorkers,
-    GetWorkerRules {
-        worker_pid: u32,
-    },
     /// Health check - returns OK if supervisor is ready to process traffic
     Ping,
     /// Set the global minimum log level
@@ -195,6 +195,8 @@ pub enum RelayCommand {
     RemoveRule {
         rule_id: String,
     },
+    /// Synchronize the complete ruleset - used when workers start to ensure they have all existing rules
+    SyncRules(Vec<ForwardingRule>),
     Shutdown,
     /// Ping command for readiness check - workers should respond when fully initialized
     Ping,
@@ -205,6 +207,7 @@ impl RelayCommand {
         match self {
             RelayCommand::AddRule(rule) => Some(rule.rule_id.clone()),
             RelayCommand::RemoveRule { rule_id } => Some(rule_id.clone()),
+            RelayCommand::SyncRules(_) => None,
             RelayCommand::Shutdown => None,
             RelayCommand::Ping => None,
         }
@@ -213,6 +216,26 @@ impl RelayCommand {
 
 fn default_rule_id() -> String {
     Uuid::new_v4().to_string()
+}
+
+/// Compute a deterministic hash of a ruleset for drift detection.
+/// Returns a hash of the sorted rule IDs to detect when worker rules don't match supervisor's master_rules.
+pub fn compute_ruleset_hash<'a, I>(rules: I) -> u64
+where
+    I: Iterator<Item = &'a ForwardingRule>,
+{
+    use std::collections::BTreeSet;
+    use std::hash::{Hash, Hasher};
+
+    // Collect and sort rule_ids for deterministic ordering
+    let rule_ids: BTreeSet<&str> = rules.map(|r| r.rule_id.as_str()).collect();
+
+    // Compute hash
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for rule_id in rule_ids {
+        rule_id.hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 #[cfg(test)]

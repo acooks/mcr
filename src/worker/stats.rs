@@ -19,6 +19,14 @@ pub async fn stats_aggregator_task(
     while let Some((rule, stats)) = stats_rx.recv().await {
         let mut flows = shared_flows.lock().await;
         flows.insert(rule.rule_id.clone(), (rule, stats));
+
+        // Log ruleset hash for drift detection
+        let ruleset_hash = crate::compute_ruleset_hash(flows.values().map(|(r, _)| r));
+        eprintln!(
+            "[ControlPlane] Ruleset updated: hash={:016x} rule_count={}",
+            ruleset_hash,
+            flows.len()
+        );
     }
     Ok(())
 }

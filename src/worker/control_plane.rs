@@ -42,9 +42,6 @@ pub fn handle_worker_command(
         SupervisorCommand::ListWorkers => {
             Response::Error("ListWorkers command should be handled by the supervisor".to_string())
         }
-        SupervisorCommand::GetWorkerRules { .. } => Response::Error(
-            "GetWorkerRules command should be handled by the supervisor".to_string(),
-        ),
         SupervisorCommand::SetGlobalLogLevel { .. } => Response::Error(
             "SetGlobalLogLevel command should be handled by the supervisor".to_string(),
         ),
@@ -323,22 +320,6 @@ mod tests {
     fn test_handle_list_workers_returns_error() {
         let flows = HashMap::new();
         let response = handle_worker_command(SupervisorCommand::ListWorkers, &flows);
-
-        match response {
-            Response::Error(msg) => {
-                assert!(msg.contains("supervisor"));
-            }
-            _ => panic!("Expected Response::Error, got {:?}", response),
-        }
-    }
-
-    #[test]
-    fn test_handle_get_worker_rules_returns_error() {
-        let flows = HashMap::new();
-        let response = handle_worker_command(
-            SupervisorCommand::GetWorkerRules { worker_pid: 1234 },
-            &flows,
-        );
 
         match response {
             Response::Error(msg) => {

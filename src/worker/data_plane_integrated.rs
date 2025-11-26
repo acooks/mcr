@@ -6,8 +6,9 @@
 
 use crate::logging::{Facility, Logger};
 use crate::worker::{
-    buffer_pool::BufferPool, unified_loop::{UnifiedConfig, UnifiedDataPlane}, EgressChannelSet,
-    IngressChannelSet,
+    buffer_pool::BufferPool,
+    unified_loop::{UnifiedConfig, UnifiedDataPlane},
+    EgressChannelSet, IngressChannelSet,
 };
 use crate::DataPlaneConfig;
 use anyhow::Result;

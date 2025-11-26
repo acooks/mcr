@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 use tokio::process::{Child, Command};
 use tokio::time::{sleep, Duration};
@@ -24,6 +25,7 @@ use tokio_util::codec::{Framed, LengthDelimitedCodec};
 const INITIAL_BACKOFF_MS: u64 = 250;
 const MAX_BACKOFF_MS: u64 = 16000; // 16 seconds
 const SHUTDOWN_TIMEOUT_SECS: u64 = 10; // Timeout for graceful worker shutdown
+const PERIODIC_SYNC_INTERVAL_SECS: u64 = 300; // 5 minutes - periodic full ruleset sync to all workers
 
 // --- WorkerManager Types ---
 
@@ -43,8 +45,8 @@ struct Worker {
     // Control plane workers have ONE command stream
     ingress_cmd_stream: Option<Arc<tokio::sync::Mutex<UnixStream>>>,
     egress_cmd_stream: Option<Arc<tokio::sync::Mutex<UnixStream>>>,
-    #[allow(dead_code)] // TODO: Will be used when GetWorkerRules is implemented
-    req_stream: Option<Arc<tokio::sync::Mutex<UnixStream>>>, // Request stream for control plane (Request::ListRules etc)
+    #[allow(dead_code)] // Used for Request::ListRules debugging (see Section 8.2.6)
+    req_stream: Option<Arc<tokio::sync::Mutex<UnixStream>>>, // Request stream for control plane (Request::ListRules etc, used by GetWorkerRules)
     log_pipe: Option<std::os::unix::io::OwnedFd>, // Pipe for reading worker's stderr (JSON logs)
 }
 
@@ -198,14 +200,6 @@ pub fn handle_supervisor_command(
                     global,
                     facility_overrides,
                 },
-                CommandAction::None,
-            )
-        }
-
-        SupervisorCommand::GetWorkerRules { .. } => {
-            // This command requires async worker communication, not handled here
-            (
-                Response::Error("GetWorkerRules not supported in synchronous handler".to_string()),
                 CommandAction::None,
             )
         }
@@ -456,17 +450,16 @@ impl WorkerManager {
 
     /// Spawn a data plane worker for the given core
     async fn spawn_data_plane(&mut self, core_id: u32) -> Result<()> {
-        let (child, ingress_cmd_stream, egress_cmd_stream, log_pipe) =
-            spawn_data_plane_worker(
-                core_id,
-                self.uid,
-                self.gid,
-                self.interface.clone(),
-                self.relay_command_socket_path.clone(),
-                self.fanout_group_id,
-                &self.logger,
-            )
-            .await?;
+        let (child, ingress_cmd_stream, egress_cmd_stream, log_pipe) = spawn_data_plane_worker(
+            core_id,
+            self.uid,
+            self.gid,
+            self.interface.clone(),
+            self.relay_command_socket_path.clone(),
+            self.fanout_group_id,
+            &self.logger,
+        )
+        .await?;
 
         let pid = child.id().unwrap();
         let ingress_cmd_stream_arc = Arc::new(tokio::sync::Mutex::new(ingress_cmd_stream));
@@ -524,8 +517,8 @@ impl WorkerManager {
     }
 
     /// Check for exited workers and restart them with exponential backoff
-    /// Returns Some(pid) if a worker exited, None otherwise
-    async fn check_and_restart_worker(&mut self) -> Result<Option<u32>> {
+    /// Returns Some((pid, was_dataplane)) if a worker exited, None otherwise
+    async fn check_and_restart_worker(&mut self) -> Result<Option<(u32, bool)>> {
         // Check each worker to see if it has exited
         let mut exited_workers = Vec::new();
         for (pid, worker) in &mut self.workers {
@@ -573,6 +566,7 @@ impl WorkerManager {
                     *backoff = (*backoff * 2).min(MAX_BACKOFF_MS);
                 }
                 self.spawn_control_plane().await?;
+                Ok(Some((pid, false)))
             }
             WorkerType::DataPlane { core_id } => {
                 let backoff = self
@@ -602,10 +596,9 @@ impl WorkerManager {
                     *backoff = (*backoff * 2).min(MAX_BACKOFF_MS);
                 }
                 self.spawn_data_plane(core_id).await?;
+                Ok(Some((pid, true)))
             }
         }
-
-        Ok(Some(pid))
     }
 
     /// Initiate graceful shutdown of all workers with timeout
@@ -854,6 +847,30 @@ async fn handle_client(
         &facility_min_levels,
     );
 
+    // Log ruleset hash for drift detection if rules changed
+    if matches!(action, CommandAction::BroadcastToDataPlane(_)) {
+        let ruleset_hash = {
+            let rules = master_rules.lock().unwrap();
+            crate::compute_ruleset_hash(rules.values())
+        };
+        let rule_count = master_rules.lock().unwrap().len();
+
+        // Get logger from worker_manager
+        let logger = {
+            let manager = worker_manager.lock().unwrap();
+            manager.logger.clone()
+        };
+
+        log_info!(
+            logger,
+            Facility::Supervisor,
+            &format!(
+                "Ruleset updated: hash={:016x} rule_count={}",
+                ruleset_hash, rule_count
+            )
+        );
+    }
+
     // Handle async actions BEFORE sending response for Ping
     let mut final_response = response;
     match action {
@@ -1078,6 +1095,44 @@ pub async fn run(
         // Spawn all initial workers
         manager.spawn_all_initial_workers().await?;
 
+        // Send initial ruleset sync to all data plane workers
+        // This ensures workers start with the same ruleset as the supervisor
+        let rules_snapshot: Vec<ForwardingRule> = {
+            let rules = master_rules.lock().unwrap();
+            rules.values().cloned().collect()
+        };
+
+        if !rules_snapshot.is_empty() {
+            log_info!(
+                supervisor_logger,
+                Facility::Supervisor,
+                &format!(
+                    "Sending initial ruleset sync ({} rules) to all data plane workers",
+                    rules_snapshot.len()
+                )
+            );
+
+            let sync_cmd = RelayCommand::SyncRules(rules_snapshot);
+            let cmd_bytes = serde_json::to_vec(&sync_cmd)?;
+
+            // Get command streams and send SyncRules to all data plane workers
+            let stream_pairs = manager.get_all_dp_cmd_streams();
+            for (ingress_stream, egress_stream) in stream_pairs {
+                let mut ingress = ingress_stream.lock().await;
+                let mut egress = egress_stream.lock().await;
+
+                // Send to both ingress and egress workers (fire-and-forget)
+                let _ = ingress.write_all(&cmd_bytes).await;
+                let _ = egress.write_all(&cmd_bytes).await;
+            }
+        } else {
+            log_info!(
+                supervisor_logger,
+                Facility::Supervisor,
+                "No rules to sync on startup (empty ruleset)"
+            );
+        }
+
         Arc::new(Mutex::new(manager))
     };
 
@@ -1111,8 +1166,90 @@ pub async fn run(
 
             // Periodic worker health check (every 250ms)
             _ = tokio::time::sleep(Duration::from_millis(250)) => {
-                if let Err(e) = worker_manager.lock().unwrap().check_and_restart_worker().await {
-                    error!("Error checking/restarting worker: {}", e);
+                // Check for crashed workers and restart them
+                let restart_result = {
+                    let mut manager = worker_manager.lock().unwrap();
+                    manager.check_and_restart_worker().await
+                };
+
+                match restart_result {
+                    Ok(Some((_pid, was_dataplane))) if was_dataplane => {
+                        // A data plane worker was restarted - send SyncRules to ensure it has current ruleset
+                        let rules_snapshot: Vec<ForwardingRule> = {
+                            let rules = master_rules.lock().unwrap();
+                            rules.values().cloned().collect()
+                        };
+
+                        if !rules_snapshot.is_empty() {
+                            let sync_cmd = RelayCommand::SyncRules(rules_snapshot);
+                            if let Ok(cmd_bytes) = serde_json::to_vec(&sync_cmd) {
+                                // Send to all data plane workers (simpler than targeting just the new one)
+                                let stream_pairs = {
+                                    let manager = worker_manager.lock().unwrap();
+                                    manager.get_all_dp_cmd_streams()
+                                };
+
+                                for (ingress_stream, egress_stream) in stream_pairs {
+                                    let mut ingress = ingress_stream.lock().await;
+                                    let mut egress = egress_stream.lock().await;
+
+                                    // Fire-and-forget: ignore errors
+                                    let _ = ingress.write_all(&cmd_bytes).await;
+                                    let _ = egress.write_all(&cmd_bytes).await;
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!("Error checking/restarting worker: {}", e);
+                    }
+                    _ => {
+                        // No worker restarted or control plane worker restarted (no action needed)
+                    }
+                }
+            }
+
+            // Periodic ruleset sync (every 5 minutes)
+            // Part of Option C (Hybrid Approach) for fire-and-forget broadcast reliability
+            // Recovers from any missed broadcasts due to transient failures
+            _ = tokio::time::sleep(Duration::from_secs(PERIODIC_SYNC_INTERVAL_SECS)) => {
+                let rules_snapshot: Vec<ForwardingRule> = {
+                    let rules = master_rules.lock().unwrap();
+                    rules.values().cloned().collect()
+                };
+
+                if !rules_snapshot.is_empty() {
+                    log_info!(
+                        supervisor_logger,
+                        Facility::Supervisor,
+                        &format!(
+                            "Periodic ruleset sync: sending {} rules to all data plane workers",
+                            rules_snapshot.len()
+                        )
+                    );
+
+                    let sync_cmd = RelayCommand::SyncRules(rules_snapshot);
+                    if let Ok(cmd_bytes) = serde_json::to_vec(&sync_cmd) {
+                        let stream_pairs = {
+                            let manager = worker_manager.lock().unwrap();
+                            manager.get_all_dp_cmd_streams()
+                        };
+
+                        for (ingress_stream, egress_stream) in stream_pairs {
+                            let mut ingress = ingress_stream.lock().await;
+                            let mut egress = egress_stream.lock().await;
+
+                            // Fire-and-forget: ignore errors (recovery will happen on next periodic sync)
+                            let _ = ingress.write_all(&cmd_bytes).await;
+                            let _ = egress.write_all(&cmd_bytes).await;
+                        }
+                    }
+                } else {
+                    log_info!(
+                        supervisor_logger,
+                        Facility::Supervisor,
+                        "Periodic ruleset sync: no rules to sync (empty ruleset)"
+                    );
                 }
             }
         }
