@@ -675,43 +675,36 @@ This architectural choice prioritizes supervisor responsiveness over guaranteed 
 
 ---
 
-#### 8.2.1 Data Plane Workers Don't Handle RemoveRule 🔴 CRITICAL
-**Location:** `src/worker/unified_loop.rs:364-386`
-**Status:** Designed but not implemented
-**Impact:** Rules accumulate in workers, cannot be removed without restart
+#### 8.2.1 Data Plane Workers RemoveRule Implementation 🟡 IMPLEMENTED - NEEDS TESTS
+**Location:** `src/worker/unified_loop.rs:246-261, 404-435`
+**Status:** ✅ Implemented (November 2025), ⚠️ needs thorough testing
+**Commit:** fc0a50f
 
-**Current Implementation:**
-```rust
-// Only AddRule is handled:
-crate::RelayCommand::AddRule(rule) => {
-    self.add_rule(rule)?;
-}
+**Implementation:**
+- Added `remove_rule(&mut self, rule_id: &str)` method
+  - Searches HashMap by rule_id
+  - Removes rule keyed by (input_group, input_port)
+  - Returns error if not found
+- Added RemoveRule command handler in event loop
+  - Logs removal operation
+  - Updates ruleset hash for drift detection
+  - Logs errors for failed removals
 
-// No match arm for RemoveRule
-// No match arm for Shutdown in command handler
-```
+**Testing Status:**
+- ✅ Compiles successfully
+- ✅ All 131 unit tests pass
+- ⚠️ No specific test for RemoveRule functionality
+- ⚠️ Integration tests not yet run with RemoveRule
+- ⚠️ Need E2E test: add rule → remove rule → verify gone
 
-**Consequences:**
-- Rules cannot be removed from data plane workers
-- Old rules accumulate even after RemoveRule sent by supervisor
-- Drift guaranteed: supervisor has N rules, workers have N + (all deleted rules)
-- Only workaround: restart workers (drops packets)
+**Remaining Work:**
+1. Add unit test for `remove_rule()` method
+2. Add integration test for RemoveRule command flow
+3. Verify hash logging works correctly after removal
+4. Test error handling (remove non-existent rule)
+5. Test with live supervisor-worker communication
 
-**Evidence:**
-Data plane worker's rule storage is `HashMap<(Ipv4Addr, u16), ForwardingRule>` at line 128. AddRule inserts, but nothing ever removes.
-
-**Action:**
-1. Implement RemoveRule handler in unified_loop.rs
-2. Remove rule from `self.rules` HashMap
-3. Clean up any associated io_uring state (buffers, file descriptors)
-4. Add test for RemoveRule on data plane worker
-5. Verify hash updates correctly after removal
-
-**Estimated Effort:** 1-2 days
-**Risk:** Medium (must carefully clean up io_uring state)
-**Priority:** CRITICAL - Core functionality missing
-
-**Related:** Section 4.3 (GetWorkerRules) was removed because workers can't reliably report state
+**Risk:** Medium - implemented but not battle-tested
 
 ---
 
@@ -1192,7 +1185,7 @@ Automatic detection and recovery from worker drift, without manual intervention.
 
 **Implementation Order:**
 1. ✅ Phase 1: Hash logging (COMPLETED)
-2. 🔧 Implement RemoveRule in data plane (8.2.1) - CRITICAL
+2. ⚠️ RemoveRule in data plane (8.2.1) - implemented, needs tests (commit fc0a50f)
 3. 🔧 Implement stats reporting (8.2.3) - enables hash comparison
 4. 🔧 Implement ruleset sync on startup (8.2.4) - enables recovery
 5. 🔧 Implement periodic health checks (8.2.8) - detects dead workers
@@ -1242,7 +1235,10 @@ Automatic detection and recovery from worker drift, without manual intervention.
 **Goal:** Implement critical architectural improvements and automated recovery
 
 **Priority Track - Ruleset Synchronization (Section 8):**
-1. 🔧 Implement RemoveRule in data plane workers (8.2.1) - **CRITICAL** - blocks all sync work
+1. ⚠️ **PARTIALLY DONE** - RemoveRule implementation (8.2.1)
+   - ✅ Code implemented (commit fc0a50f)
+   - ⚠️ Needs thorough testing (unit + integration)
+   - 🔧 Add test coverage before considering complete
 2. 🔧 Implement stats reporting from data plane (8.2.3) - enables monitoring
 3. 🔧 Implement ruleset sync on worker startup (8.2.4) - **CRITICAL** - enables recovery
 4. 🔧 Decide on broadcast reliability strategy (8.2.5) - **CRITICAL** - architectural decision needed
@@ -1258,7 +1254,7 @@ Automatic detection and recovery from worker drift, without manual intervention.
 
 **Deliverables:**
 - Automated drift detection and recovery (Section 8.3)
-- RemoveRule working in data plane
+- ⚠️ RemoveRule implemented but needs test coverage
 - Stats reporting infrastructure complete
 - Proper privilege separation
 - Better scalability (rule hashing)
