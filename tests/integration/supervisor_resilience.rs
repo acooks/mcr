@@ -528,21 +528,13 @@ async fn test_supervisor_handles_concurrent_requests() -> Result<()> {
     client.add_rule(rule).await?;
     sleep(Duration::from_millis(200)).await;
 
-    // 3. Get a worker PID to target
-    let workers = client.list_workers().await?;
-    let dp_worker = workers
-        .iter()
-        .find(|w| w.worker_type == "DataPlane")
-        .ok_or_else(|| anyhow::anyhow!("No data plane worker found"))?;
-    let worker_pid = dp_worker.pid;
-
-    // 4. Spawn multiple concurrent requests
+    // 3. Spawn multiple concurrent requests to list rules
     let mut tasks = Vec::new();
     for i in 0..10 {
         let client = control_client::ControlClient::new(&socket_path);
         let task = tokio::spawn(async move {
             println!("[TEST] Starting concurrent request {}", i);
-            let result = client.get_worker_rules(worker_pid).await;
+            let result = client.list_rules().await;
             println!("[TEST] Finished concurrent request {}", i);
             result
         });

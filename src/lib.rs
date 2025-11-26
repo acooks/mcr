@@ -138,9 +138,6 @@ pub enum SupervisorCommand {
     ListRules,
     GetStats,
     ListWorkers,
-    GetWorkerRules {
-        worker_pid: u32,
-    },
     /// Health check - returns OK if supervisor is ready to process traffic
     Ping,
     /// Set the global minimum log level

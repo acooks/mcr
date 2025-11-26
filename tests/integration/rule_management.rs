@@ -83,14 +83,11 @@ impl ControlClient {
         }
     }
 
-    async fn get_worker_rules(&self, worker_pid: u32) -> Result<Vec<ForwardingRule>> {
-        match self
-            .send_command(SupervisorCommand::GetWorkerRules { worker_pid })
-            .await?
-        {
+    async fn list_rules(&self) -> Result<Vec<ForwardingRule>> {
+        match self.send_command(SupervisorCommand::ListRules).await? {
             Response::Rules(rules) => Ok(rules),
-            Response::Error(e) => anyhow::bail!("Failed to get worker rules: {}", e),
-            _ => anyhow::bail!("Unexpected response from supervisor for GetWorkerRules"),
+            Response::Error(e) => anyhow::bail!("Failed to list rules: {}", e),
+            _ => anyhow::bail!("Unexpected response from supervisor for ListRules"),
         }
     }
 }
@@ -142,29 +139,17 @@ async fn test_add_and_remove_rule_e2e() -> Result<()> {
     let (mut supervisor, socket_path) = start_supervisor().await?;
     let client = ControlClient::new(&socket_path);
 
-    // Wait for a data plane worker to be ready.
-    let dp_worker_pid = {
-        let mut pid = None;
-        for _ in 0..20 {
-            if let Ok(workers) = client.list_workers().await {
-                if let Some(dp) = workers.iter().find(|w| w.worker_type == "DataPlane") {
-                    pid = Some(dp.pid);
-                    break;
-                }
-            }
-            sleep(Duration::from_millis(100)).await;
-        }
-        pid.context("Data plane worker did not start in time")?
-    };
-    println!("[TEST] Data plane worker found with PID: {}", dp_worker_pid);
+    // Wait for supervisor to be ready (brief delay for socket setup).
+    sleep(Duration::from_millis(500)).await;
+    println!("[TEST] Supervisor started and ready.");
 
-    // 2. VERIFY INITIAL STATE: Ensure the worker has no rules.
-    let initial_rules = client.get_worker_rules(dp_worker_pid).await?;
+    // 2. VERIFY INITIAL STATE: Ensure the supervisor has no rules.
+    let initial_rules = client.list_rules().await?;
     assert!(
         initial_rules.is_empty(),
-        "Worker should have no rules initially"
+        "Supervisor should have no rules initially"
     );
-    println!("[TEST] Verified worker has 0 rules initially.");
+    println!("[TEST] Verified supervisor has 0 rules initially.");
 
     // 3. ADD RULE: Add a new forwarding rule via the supervisor.
     let rule = ForwardingRule {
@@ -181,18 +166,18 @@ async fn test_add_and_remove_rule_e2e() -> Result<()> {
     // Give a moment for the command to propagate.
     sleep(Duration::from_millis(200)).await;
 
-    // 4. VERIFY ADDITION: Query the worker directly to confirm it received the rule.
-    let rules_after_add = client.get_worker_rules(dp_worker_pid).await?;
+    // 4. VERIFY ADDITION: Query the supervisor to confirm the rule was added.
+    let rules_after_add = client.list_rules().await?;
     assert_eq!(
         rules_after_add.len(),
         1,
-        "Worker should have 1 rule after addition"
+        "Supervisor should have 1 rule after addition"
     );
     assert_eq!(
         rules_after_add[0].rule_id, rule.rule_id,
-        "Worker has the wrong rule"
+        "Supervisor has the wrong rule"
     );
-    println!("[TEST] Verified worker received the new rule.");
+    println!("[TEST] Verified supervisor has the new rule.");
 
     // 5. REMOVE RULE: Remove the rule via the supervisor.
     client.remove_rule(&rule.rule_id).await?;
@@ -204,13 +189,13 @@ async fn test_add_and_remove_rule_e2e() -> Result<()> {
     // Give a moment for the command to propagate.
     sleep(Duration::from_millis(200)).await;
 
-    // 6. VERIFY REMOVAL: Query the worker again to confirm the rule is gone.
-    let rules_after_remove = client.get_worker_rules(dp_worker_pid).await?;
+    // 6. VERIFY REMOVAL: Query the supervisor again to confirm the rule is gone.
+    let rules_after_remove = client.list_rules().await?;
     assert!(
         rules_after_remove.is_empty(),
-        "Worker should have no rules after removal"
+        "Supervisor should have no rules after removal"
     );
-    println!("[TEST] Verified worker removed the rule.");
+    println!("[TEST] Verified supervisor removed the rule.");
 
     // 7. CLEANUP
     supervisor.kill().await?;
