@@ -13,46 +13,12 @@ Generated from documentation review findings (November 2025)
 ## 1. Dead Code Removal (High Priority)
 
 ### 1.1 Legacy Two-Thread Data Plane Model ✅ COMPLETED
-**Location:** ~~`src/worker/data_plane_integrated.rs:24-176`~~ REMOVED
-**Status:** ✅ Deleted in commit cd4811c (1,814 total lines removed)
+**Status:** ✅ Commit cd4811c (1,814 lines removed)
 **Impact:** Eliminated code confusion, reduced maintenance burden
 
-**What was removed:**
-- `run_data_plane()` function (165 lines)
-- `src/worker/ingress.rs` module (802 lines)
-- `src/worker/egress.rs` module (772 lines)
-- Unused helper functions (75 lines)
-- **Total: 1,814 lines deleted**
-
-**Verification:**
-- ✅ All 149 tests pass (132 unit + 16 integration + 1 E2E)
-- ✅ Full packet forwarding confirmed (100/100 packets)
-- ✅ No compiler errors or warnings
-- ✅ Documentation updated to remove legacy references
-
----
-
 ### 1.2 Dead Code Marked with `#[allow(dead_code)]` ✅ COMPLETED
-**Status:** ✅ Completed in commits 62f717b and cd4811c
-
-**Removed:**
-- `command_reader.rs`: buffer_len(), pending_frame_len() (12 lines)
-- `ingress.rs`: get_interface_ip() duplicate (14 lines) - entire module deleted
-- `egress.rs`: buffer_pool field - entire module deleted
-- `supervisor.rs`: test helper functions (49 lines)
-
-**Kept:**
-- `ringbuffer.rs:483`: shm_id_for_facility() - used in tests
-- `supervisor.rs`: req_stream field - **NOT DEAD CODE**
-  - Marked `#[allow(dead_code)]` with TODO comment about GetWorkerRules
-  - Actually used: control_plane.rs:173 receives this FD for Request::ListRules
-  - FD passing was broken in cd4811c, fixed in 2159e2e
-  - Required for GetWorkerRules implementation (see 4.3)
-  - Keep the allow marker until GetWorkerRules is implemented
-
-**Result:** Dead code eliminated, all tests still pass
-
-**Important Note:** req_stream is NOT dead code - it's critical infrastructure for control plane communication. The allow marker is temporary until GetWorkerRules (4.3) is fully implemented.
+**Status:** ✅ Commits 62f717b, cd4811c, 93f2dd1 (test file cleanup: c687bb8)
+**Result:** Removed incorrect markers from test helper functions, kept legitimate cases
 
 ---
 
@@ -144,45 +110,9 @@ pub async fn start_network_monitor(
 ---
 
 ### 2.4 Global Interface Parameter ✅ RESOLVED
-**Location:** `src/lib.rs:40-47`
-**Status:** ✅ Architectural investigation completed (November 2025)
-**Resolution:** Parameter is REQUIRED and should NOT be removed
-
-**Original Misunderstanding:**
-The TODO comment suggested removing the global `--interface` parameter in favor of using ForwardingRule.input_interface. This was based on misunderstanding the architecture.
-
-**Correct Understanding (After Investigation):**
-```rust
-/// Network interface for data plane workers to listen on.
-/// This is required for PACKET_FANOUT_CPU: all workers must bind to the same interface
-/// with a shared fanout_group_id, allowing the kernel to distribute packets to the
-/// worker running on the CPU that received the packet (for optimal cache locality).
-/// Note: ForwardingRule.input_interface serves a different purpose - it will be used
-/// for rule filtering in multi-interface scenarios. See MULTI_INTERFACE_ARCHITECTURE.md.
-```
-
-**Key Findings:**
-1. **PACKET_FANOUT_CPU requires all workers to bind the SAME interface**
-   - All workers join a shared fanout group with fanout_group_id
-   - Kernel RSS/RPS distributes packets to CPUs
-   - PACKET_FANOUT_CPU delivers packets to the worker on that CPU
-   - This is essential for CPU cache locality (data stays hot in L1/L2/L3)
-
-2. **Two separate concerns:**
-   - Global interface parameter: WHERE workers listen (socket binding)
-   - ForwardingRule.input_interface: WHICH rules to process (future filtering)
-
-3. **Multi-interface scenarios:**
-   - Use interface groups with shared worker pools
-   - Or worker pool with io_uring multiplexing
-   - NOT one worker per interface × one worker per CPU (would be 1920 workers for 20×96)
-
-**Documentation Created:**
-- MULTI_INTERFACE_ARCHITECTURE.md: Multi-interface design patterns
-- RSS_CONFIGURATION.md: RSS/RPS configuration guide
-- ARCHITECTURE_EVALUATION.md: Critical architecture evaluation (verdict: 8/10)
-
-**Resolution:** Misleading TODO comment corrected in commit e27410d
+**Status:** ✅ Commit e27410d - Misleading TODO corrected
+**Resolution:** Parameter is REQUIRED for PACKET_FANOUT_CPU, must not be removed
+**Docs:** MULTI_INTERFACE_ARCHITECTURE.md, RSS_CONFIGURATION.md, ARCHITECTURE_EVALUATION.md
 
 ---
 
@@ -218,28 +148,9 @@ grep -r "64.*KB\|65536" src/
 ---
 
 ### 3.2 Real-Time Statistics Collection ✅ COMPLETED
-**Location:** `src/supervisor.rs:195-223`, `src/worker/unified_loop.rs:681`
-**Status:** ✅ Completed (November 2025)
-**Commits:** 81fad5e, d8b6de4, b1756bc
-
-**Implementation:**
-GetStats API now returns real-time aggregated statistics from all data plane workers:
-
-1. **Per-Flow Tracking:** Each data plane worker maintains `flow_counters` HashMap
-2. **Periodic Reporting:** Workers report stats every 10,000 packets via pipe (FD 4)
-3. **Multi-Worker Aggregation:** Supervisor sums counters and rates from all workers
-4. **Rate Calculation:** Automatic packets_per_second and bits_per_second computation
-
-**Deliverables:**
-- ✅ GetStats command returns live data (not placeholders)
-- ✅ Multi-worker aggregation by (input_group, input_port)
-- ✅ Integration test validates E2E stats flow
-- ✅ Documentation in CONFIGURATION.md section 4.4
-
-**Future Enhancement:**
-- Per-destination metrics (currently aggregated at rule level)
-
-**Related:** Section 8.2.3 (Stats Reporting via Pipe-Based IPC) - implementation details
+**Status:** ✅ Commits 81fad5e, d8b6de4, b1756bc
+**Implementation:** Pipe-based IPC (FD 4), reports every 10k packets, multi-worker aggregation
+**Docs:** CONFIGURATION.md section 4.4
 
 ---
 
@@ -333,35 +244,9 @@ Instead of querying potentially-stale worker state, the supervisor's `master_rul
 ## 5. Documentation Gaps
 
 ### 5.1 Kernel Version Requirements ✅ COMPLETED
-**Location:** README.md, CONFIGURATION.md
-**Status:** ✅ Completed (November 2025)
-
-**What was done:**
-1. ✅ Researched exact io_uring opcodes used (IORING_OP_RECV, IORING_OP_SEND, IORING_OP_READ)
-2. ✅ Documented minimum kernel version for each feature
-3. ✅ Added comprehensive kernel requirements section to CONFIGURATION.md
-4. ✅ Updated README.md with specific version requirements
-
-**Research findings:**
-- **IORING_OP_RECV/IORING_OP_SEND**: Linux 5.6+ (required for MCR)
-- **io_uring basic support**: Linux 5.1+
-- **PACKET_FANOUT_CPU**: Linux 3.1+ (required for multi-worker scaling)
-- **Minimum for MCR**: Linux 5.6
-- **Recommended**: Linux 5.10+ (LTS kernel with stable io_uring)
-
-**Documentation added:**
-- `README.md:46-59`: Updated prerequisites with kernel version breakdown
-- `user_docs/CONFIGURATION.md:10-127`: New comprehensive "Kernel Version Requirements" section
-  - Feature requirements table
-  - Kernel version compatibility checking
-  - Distribution compatibility matrix
-  - Kernel upgrade instructions
-  - Testing compatibility instructions
-
-**Sources:**
-- [io_uring Wikipedia](https://en.wikipedia.org/wiki/Io_uring)
-- [PACKET_FANOUT man page](https://man7.org/linux/man-pages/man7/packet.7.html)
-- [io_uring man page](https://man7.org/linux/man-pages/man7/io_uring.7.html)
+**Status:** ✅ Commit 245bb9b
+**Minimum:** Linux 5.6+ (io_uring socket ops), Recommended: 5.10+ LTS
+**Docs:** README.md, CONFIGURATION.md (comprehensive kernel requirements section)
 
 ---
 
@@ -382,31 +267,17 @@ Instead of querying potentially-stale worker state, the supervisor's `master_rul
 
 ---
 
-### 5.3 Rule ID Lifecycle Documentation 🔵 LOW
-**Location:** User documentation
-**Status:** Not explained
-
-**Content Needed:**
-- How rule IDs are generated (UUIDs)
-- Where to find rule IDs (`control_client list`)
-- Can users provide custom IDs? (need to verify)
-- ID persistence across restarts
-
-**Estimated Effort:** 2-3 hours
-**Risk:** None (documentation only)
+### 5.3 Rule ID Lifecycle Documentation ✅ COMPLETED
+**Status:** ✅ Commit d537f0d
+**Content:** Auto-generated UUIDs, custom IDs via --rule-id, in-memory only
+**Docs:** CONFIGURATION.md "Rule ID Lifecycle" section (85 lines)
 
 ---
 
 ## 6. Code Quality Issues
 
 ### 6.1 Event-Driven Mode Deadlock ✅ RESOLVED
-**Location:** ~~`src/worker/egress.rs:647`~~ REMOVED
-**Status:** ✅ Obsolete - egress.rs deleted as part of legacy code removal
-
-**Resolution:**
-The event-driven mode was part of the legacy two-thread architecture that has been completely removed. The unified data plane uses a different event model based on io_uring's native event handling, which doesn't have the same deadlock issues.
-
-This issue is resolved by architectural change rather than bug fix.
+**Status:** ✅ Obsolete - legacy two-thread architecture removed (commit cd4811c)
 
 ---
 
@@ -1219,8 +1090,8 @@ Automatic detection and recovery from worker drift, without manual intervention.
 5. ✅ **COMPLETED** Implement Phase 1 drift detection (8.1) - hash-based logging
 6. ✅ **COMPLETED** Document architectural gaps discovered (8.2)
 7. ✅ **COMPLETED** Resolve global interface parameter confusion (2.4) - architectural investigation + docs
-8. ⏳ **TODO** Document kernel version requirements (5.1)
-9. ⏳ **TODO** Document rule ID lifecycle (5.3)
+8. ✅ **COMPLETED** Document kernel version requirements (5.1) - commit 245bb9b
+9. ✅ **COMPLETED** Document rule ID lifecycle (5.3) - commit d537f0d
 10. ⏳ **TODO** Add test for hash logging (8.1)
 11. ⏳ **TODO** Document drift detection procedure (8.1)
 
