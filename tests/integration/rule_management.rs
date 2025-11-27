@@ -368,12 +368,18 @@ async fn test_get_stats_e2e() -> Result<()> {
             println!("[TEST] Traffic sent successfully.");
         }
         Ok(output) => {
-            println!("[TEST] Traffic generator failed: {}", String::from_utf8_lossy(&output.stderr));
+            println!(
+                "[TEST] Traffic generator failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
             // Cleanup happens automatically when supervisor is dropped
             return Ok(());
         }
         Err(e) => {
-            println!("[TEST] Could not run traffic generator: {}. Skipping traffic test.", e);
+            println!(
+                "[TEST] Could not run traffic generator: {}. Skipping traffic test.",
+                e
+            );
             // Cleanup happens automatically when supervisor is dropped
             return Ok(());
         }
@@ -393,9 +399,9 @@ async fn test_get_stats_e2e() -> Result<()> {
     );
 
     // Find the stats for our flow
-    let flow_stats = stats.iter().find(|s| {
-        s.input_group.to_string() == "239.1.1.1" && s.input_port == 5002
-    });
+    let flow_stats = stats
+        .iter()
+        .find(|s| s.input_group.to_string() == "239.1.1.1" && s.input_port == 5002);
 
     assert!(
         flow_stats.is_some(),
@@ -403,7 +409,8 @@ async fn test_get_stats_e2e() -> Result<()> {
     );
 
     let flow_stats = flow_stats.unwrap();
-    println!("[TEST] Flow stats: packets={}, bytes={}, pps={:.2}, bps={:.2}",
+    println!(
+        "[TEST] Flow stats: packets={}, bytes={}, pps={:.2}, bps={:.2}",
         flow_stats.packets_relayed,
         flow_stats.bytes_relayed,
         flow_stats.packets_per_second,
@@ -415,10 +422,7 @@ async fn test_get_stats_e2e() -> Result<()> {
         flow_stats.packets_relayed > 0,
         "packets_relayed should be > 0"
     );
-    assert!(
-        flow_stats.bytes_relayed > 0,
-        "bytes_relayed should be > 0"
-    );
+    assert!(flow_stats.bytes_relayed > 0, "bytes_relayed should be > 0");
 
     // Stats are reported every 10,000 packets, so we should see at least 10,000
     assert!(
@@ -462,7 +466,10 @@ async fn test_max_workers_spawning() -> Result<()> {
 
     // Determine the number of CPU cores (maximum workers)
     let num_cpus = num_cpus::get() as u32;
-    println!("[TEST] System has {} CPU cores, testing max worker creation", num_cpus);
+    println!(
+        "[TEST] System has {} CPU cores, testing max worker creation",
+        num_cpus
+    );
 
     // Start supervisor with maximum workers (all CPU cores)
     // TestSupervisor guard ensures automatic cleanup on any exit path
@@ -474,7 +481,10 @@ async fn test_max_workers_spawning() -> Result<()> {
         .context("Failed to start supervisor with max workers")?;
 
     let startup_duration = start_time.elapsed();
-    println!("[TEST] Supervisor started in {:?} with {} workers", startup_duration, num_cpus);
+    println!(
+        "[TEST] Supervisor started in {:?} with {} workers",
+        startup_duration, num_cpus
+    );
 
     // Wait for supervisor to fully initialize all workers
     sleep(Duration::from_secs(2)).await;
@@ -509,14 +519,20 @@ async fn test_max_workers_spawning() -> Result<()> {
     };
 
     client.add_rule(rule.clone()).await?;
-    println!("[TEST] Successfully added rule with {} workers active", num_cpus);
+    println!(
+        "[TEST] Successfully added rule with {} workers active",
+        num_cpus
+    );
 
     // Verify the rule was added
     let rules = client.list_rules().await?;
     assert_eq!(rules.len(), 1, "Should have 1 rule");
     assert_eq!(rules[0].rule_id, "test-max-workers");
 
-    println!("[TEST] Max workers test PASSED: {} workers spawned and operational", num_cpus);
+    println!(
+        "[TEST] Max workers test PASSED: {} workers spawned and operational",
+        num_cpus
+    );
 
     // Cleanup happens automatically when TestSupervisor is dropped
     Ok(())

@@ -147,9 +147,7 @@ pub fn handle_supervisor_command(
             }
 
             // Warn about loopback interface usage (allowed but not recommended)
-            if rule.input_interface == "lo"
-                || rule.outputs.iter().any(|o| o.interface == "lo")
-            {
+            if rule.input_interface == "lo" || rule.outputs.iter().any(|o| o.interface == "lo") {
                 eprintln!(
                     "[Supervisor] WARNING: Rule '{}' uses loopback interface. \
                     This can cause packet reflection artifacts where transmitted packets are \
@@ -532,7 +530,7 @@ impl WorkerManager {
                 ingress_cmd_stream: Some(cmd_stream_arc.clone()),
                 egress_cmd_stream: Some(cmd_stream_arc), // Same stream for CP
                 req_stream: Some(req_stream_arc),
-                log_pipe: None, // Control plane uses MPSC ring buffer
+                log_pipe: None,   // Control plane uses MPSC ring buffer
                 stats_pipe: None, // Control plane doesn't have stats pipe
             },
         );
@@ -545,16 +543,17 @@ impl WorkerManager {
 
     /// Spawn a data plane worker for the given core
     async fn spawn_data_plane(&mut self, core_id: u32) -> Result<()> {
-        let (child, ingress_cmd_stream, egress_cmd_stream, log_pipe, stats_pipe) = spawn_data_plane_worker(
-            core_id,
-            self.uid,
-            self.gid,
-            self.interface.clone(),
-            self.relay_command_socket_path.clone(),
-            self.fanout_group_id,
-            &self.logger,
-        )
-        .await?;
+        let (child, ingress_cmd_stream, egress_cmd_stream, log_pipe, stats_pipe) =
+            spawn_data_plane_worker(
+                core_id,
+                self.uid,
+                self.gid,
+                self.interface.clone(),
+                self.relay_command_socket_path.clone(),
+                self.fanout_group_id,
+                &self.logger,
+            )
+            .await?;
 
         let pid = child.id().unwrap();
         let ingress_cmd_stream_arc = Arc::new(tokio::sync::Mutex::new(ingress_cmd_stream));
@@ -1805,15 +1804,30 @@ mod tests {
                 let flow = &stats[0];
 
                 // Check aggregated counters (should be summed)
-                assert_eq!(flow.packets_relayed, 450, "Should sum packets from all workers: 100+200+150");
-                assert_eq!(flow.bytes_relayed, 45000, "Should sum bytes from all workers: 10000+20000+15000");
+                assert_eq!(
+                    flow.packets_relayed, 450,
+                    "Should sum packets from all workers: 100+200+150"
+                );
+                assert_eq!(
+                    flow.bytes_relayed, 45000,
+                    "Should sum bytes from all workers: 10000+20000+15000"
+                );
 
                 // Check aggregated rates (currently summed, not averaged)
-                assert_eq!(flow.packets_per_second, 225.0, "Should sum pps from all workers: 50+100+75");
-                assert_eq!(flow.bits_per_second, 18000.0, "Should sum bps from all workers: 4000+8000+6000");
+                assert_eq!(
+                    flow.packets_per_second, 225.0,
+                    "Should sum pps from all workers: 50+100+75"
+                );
+                assert_eq!(
+                    flow.bits_per_second, 18000.0,
+                    "Should sum bps from all workers: 4000+8000+6000"
+                );
 
                 // Check flow identification
-                assert_eq!(flow.input_group, "224.0.0.1".parse::<std::net::Ipv4Addr>().unwrap());
+                assert_eq!(
+                    flow.input_group,
+                    "224.0.0.1".parse::<std::net::Ipv4Addr>().unwrap()
+                );
                 assert_eq!(flow.input_port, 5000);
             }
             _ => panic!("Expected Response::Stats, got {:?}", response),
@@ -1885,8 +1899,14 @@ mod tests {
                 assert_eq!(stats.len(), 2, "Should have two distinct flows");
 
                 // Find Flow A and Flow B in the results
-                let flow_a = stats.iter().find(|s| s.input_port == 5000).expect("Should have Flow A");
-                let flow_b = stats.iter().find(|s| s.input_port == 5001).expect("Should have Flow B");
+                let flow_a = stats
+                    .iter()
+                    .find(|s| s.input_port == 5000)
+                    .expect("Should have Flow A");
+                let flow_b = stats
+                    .iter()
+                    .find(|s| s.input_port == 5001)
+                    .expect("Should have Flow B");
 
                 // Flow A: aggregated from both workers
                 assert_eq!(flow_a.packets_relayed, 300, "Flow A packets: 100+200");

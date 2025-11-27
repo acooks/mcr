@@ -231,8 +231,8 @@ impl UnifiedDataPlane {
         let stats_pipe = {
             #[cfg(not(feature = "testing"))]
             {
-                use std::os::fd::{BorrowedFd, FromRawFd};
                 use nix::fcntl::{fcntl, FcntlArg};
+                use std::os::fd::{BorrowedFd, FromRawFd};
                 // Check if FD 4 exists (data plane workers have it, control plane doesn't)
                 // SAFETY: Temporarily borrowing FD 4 to check if it's valid
                 let borrowed_fd = unsafe { BorrowedFd::borrow_raw(4) };
@@ -322,11 +322,15 @@ impl UnifiedDataPlane {
             .iter_mut()
             .map(|(key, counters)| {
                 // Calculate rates based on time since last snapshot
-                let (packets_per_second, bits_per_second) = if let Some(last_time) = counters.last_snapshot_time {
+                let (packets_per_second, bits_per_second) = if let Some(last_time) =
+                    counters.last_snapshot_time
+                {
                     let elapsed = now.duration_since(last_time).as_secs_f64();
 
                     if elapsed > 0.0 {
-                        let packet_delta = counters.packets_relayed.saturating_sub(counters.last_packets);
+                        let packet_delta = counters
+                            .packets_relayed
+                            .saturating_sub(counters.last_packets);
                         let byte_delta = counters.bytes_relayed.saturating_sub(counters.last_bytes);
 
                         let pps = packet_delta as f64 / elapsed;
