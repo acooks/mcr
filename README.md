@@ -43,13 +43,19 @@ This combination of technologies allows MCR to operate at speeds approaching lin
 
 **Required:**
 
-- Linux kernel 5.10+ (for `io_uring`)
+- **Linux kernel 5.6+** (minimum for `io_uring` socket operations)
+  - 5.6+: `IORING_OP_RECV`/`IORING_OP_SEND` support
+  - 3.1+: `PACKET_FANOUT_CPU` for multi-worker scaling
+  - **Recommended: 5.10+** (LTS kernel with stable io_uring)
 - Rust toolchain (latest stable)
 
 ```bash
 # On Debian/Ubuntu
 sudo apt-get update
 sudo apt-get install -y build-essential
+
+# Check your kernel version
+uname -r
 ```
 
 **Optional (Recommended):**

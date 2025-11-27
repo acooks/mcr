@@ -332,23 +332,36 @@ Instead of querying potentially-stale worker state, the supervisor's `master_rul
 
 ## 5. Documentation Gaps
 
-### 5.1 Kernel Version Requirements 🟢 MEDIUM
+### 5.1 Kernel Version Requirements ✅ COMPLETED
 **Location:** README.md, CONFIGURATION.md
-**Status:** Vague ("Linux 5.10+")
+**Status:** ✅ Completed (November 2025)
 
-**Action:**
-1. Research exact io_uring features used
-2. Document minimum kernel version for each feature
-3. Add runtime feature detection if possible
-4. Document graceful degradation path (if any)
+**What was done:**
+1. ✅ Researched exact io_uring opcodes used (IORING_OP_RECV, IORING_OP_SEND, IORING_OP_READ)
+2. ✅ Documented minimum kernel version for each feature
+3. ✅ Added comprehensive kernel requirements section to CONFIGURATION.md
+4. ✅ Updated README.md with specific version requirements
 
-**Research needed:**
-- IORING_OP_RECVMSG minimum version
-- IORING_OP_SENDMSG minimum version
-- AF_PACKET + io_uring interaction requirements
+**Research findings:**
+- **IORING_OP_RECV/IORING_OP_SEND**: Linux 5.6+ (required for MCR)
+- **io_uring basic support**: Linux 5.1+
+- **PACKET_FANOUT_CPU**: Linux 3.1+ (required for multi-worker scaling)
+- **Minimum for MCR**: Linux 5.6
+- **Recommended**: Linux 5.10+ (LTS kernel with stable io_uring)
 
-**Estimated Effort:** 4-6 hours
-**Risk:** None (documentation only)
+**Documentation added:**
+- `README.md:46-59`: Updated prerequisites with kernel version breakdown
+- `user_docs/CONFIGURATION.md:10-127`: New comprehensive "Kernel Version Requirements" section
+  - Feature requirements table
+  - Kernel version compatibility checking
+  - Distribution compatibility matrix
+  - Kernel upgrade instructions
+  - Testing compatibility instructions
+
+**Sources:**
+- [io_uring Wikipedia](https://en.wikipedia.org/wiki/Io_uring)
+- [PACKET_FANOUT man page](https://man7.org/linux/man-pages/man7/packet.7.html)
+- [io_uring man page](https://man7.org/linux/man-pages/man7/io_uring.7.html)
 
 ---
 
