@@ -13,46 +13,12 @@ Generated from documentation review findings (November 2025)
 ## 1. Dead Code Removal (High Priority)
 
 ### 1.1 Legacy Two-Thread Data Plane Model ✅ COMPLETED
-**Location:** ~~`src/worker/data_plane_integrated.rs:24-176`~~ REMOVED
-**Status:** ✅ Deleted in commit cd4811c (1,814 total lines removed)
+**Status:** ✅ Commit cd4811c (1,814 lines removed)
 **Impact:** Eliminated code confusion, reduced maintenance burden
 
-**What was removed:**
-- `run_data_plane()` function (165 lines)
-- `src/worker/ingress.rs` module (802 lines)
-- `src/worker/egress.rs` module (772 lines)
-- Unused helper functions (75 lines)
-- **Total: 1,814 lines deleted**
-
-**Verification:**
-- ✅ All 149 tests pass (132 unit + 16 integration + 1 E2E)
-- ✅ Full packet forwarding confirmed (100/100 packets)
-- ✅ No compiler errors or warnings
-- ✅ Documentation updated to remove legacy references
-
----
-
 ### 1.2 Dead Code Marked with `#[allow(dead_code)]` ✅ COMPLETED
-**Status:** ✅ Completed in commits 62f717b and cd4811c
-
-**Removed:**
-- `command_reader.rs`: buffer_len(), pending_frame_len() (12 lines)
-- `ingress.rs`: get_interface_ip() duplicate (14 lines) - entire module deleted
-- `egress.rs`: buffer_pool field - entire module deleted
-- `supervisor.rs`: test helper functions (49 lines)
-
-**Kept:**
-- `ringbuffer.rs:483`: shm_id_for_facility() - used in tests
-- `supervisor.rs`: req_stream field - **NOT DEAD CODE**
-  - Marked `#[allow(dead_code)]` with TODO comment about GetWorkerRules
-  - Actually used: control_plane.rs:173 receives this FD for Request::ListRules
-  - FD passing was broken in cd4811c, fixed in 2159e2e
-  - Required for GetWorkerRules implementation (see 4.3)
-  - Keep the allow marker until GetWorkerRules is implemented
-
-**Result:** Dead code eliminated, all tests still pass
-
-**Important Note:** req_stream is NOT dead code - it's critical infrastructure for control plane communication. The allow marker is temporary until GetWorkerRules (4.3) is fully implemented.
+**Status:** ✅ Commits 62f717b, cd4811c, 93f2dd1 (test file cleanup: c687bb8)
+**Result:** Removed incorrect markers from test helper functions, kept legitimate cases
 
 ---
 
@@ -144,45 +110,9 @@ pub async fn start_network_monitor(
 ---
 
 ### 2.4 Global Interface Parameter ✅ RESOLVED
-**Location:** `src/lib.rs:40-47`
-**Status:** ✅ Architectural investigation completed (November 2025)
-**Resolution:** Parameter is REQUIRED and should NOT be removed
-
-**Original Misunderstanding:**
-The TODO comment suggested removing the global `--interface` parameter in favor of using ForwardingRule.input_interface. This was based on misunderstanding the architecture.
-
-**Correct Understanding (After Investigation):**
-```rust
-/// Network interface for data plane workers to listen on.
-/// This is required for PACKET_FANOUT_CPU: all workers must bind to the same interface
-/// with a shared fanout_group_id, allowing the kernel to distribute packets to the
-/// worker running on the CPU that received the packet (for optimal cache locality).
-/// Note: ForwardingRule.input_interface serves a different purpose - it will be used
-/// for rule filtering in multi-interface scenarios. See MULTI_INTERFACE_ARCHITECTURE.md.
-```
-
-**Key Findings:**
-1. **PACKET_FANOUT_CPU requires all workers to bind the SAME interface**
-   - All workers join a shared fanout group with fanout_group_id
-   - Kernel RSS/RPS distributes packets to CPUs
-   - PACKET_FANOUT_CPU delivers packets to the worker on that CPU
-   - This is essential for CPU cache locality (data stays hot in L1/L2/L3)
-
-2. **Two separate concerns:**
-   - Global interface parameter: WHERE workers listen (socket binding)
-   - ForwardingRule.input_interface: WHICH rules to process (future filtering)
-
-3. **Multi-interface scenarios:**
-   - Use interface groups with shared worker pools
-   - Or worker pool with io_uring multiplexing
-   - NOT one worker per interface × one worker per CPU (would be 1920 workers for 20×96)
-
-**Documentation Created:**
-- MULTI_INTERFACE_ARCHITECTURE.md: Multi-interface design patterns
-- RSS_CONFIGURATION.md: RSS/RPS configuration guide
-- ARCHITECTURE_EVALUATION.md: Critical architecture evaluation (verdict: 8/10)
-
-**Resolution:** Misleading TODO comment corrected in commit e27410d
+**Status:** ✅ Commit e27410d - Misleading TODO corrected
+**Resolution:** Parameter is REQUIRED for PACKET_FANOUT_CPU, must not be removed
+**Docs:** MULTI_INTERFACE_ARCHITECTURE.md, RSS_CONFIGURATION.md, ARCHITECTURE_EVALUATION.md
 
 ---
 
@@ -217,24 +147,10 @@ grep -r "64.*KB\|65536" src/
 
 ---
 
-### 3.2 Real-Time Statistics Collection 🟢 MEDIUM
-**Location:** `src/supervisor.rs:158-159`
-**Status:** Placeholder implementation
-
-**Current:**
-```rust
-// TODO: In the future, query data plane workers for actual stats via worker communication
-// Currently returns configured rules with zero counters as a placeholder
-```
-
-**Action:**
-1. Implement `GetStats` command in worker control plane
-2. Add stats request/response to worker communication protocol
-3. Supervisor aggregates stats from all workers
-4. Add per-destination metrics (currently only per-rule)
-
-**Estimated Effort:** 2-3 days
-**Risk:** Low (additive feature, doesn't affect data path)
+### 3.2 Real-Time Statistics Collection ✅ COMPLETED
+**Status:** ✅ Commits 81fad5e, d8b6de4, b1756bc
+**Implementation:** Pipe-based IPC (FD 4), reports every 10k packets, multi-worker aggregation
+**Docs:** CONFIGURATION.md section 4.4
 
 ---
 
@@ -327,23 +243,10 @@ Instead of querying potentially-stale worker state, the supervisor's `master_rul
 
 ## 5. Documentation Gaps
 
-### 5.1 Kernel Version Requirements 🟢 MEDIUM
-**Location:** README.md, CONFIGURATION.md
-**Status:** Vague ("Linux 5.10+")
-
-**Action:**
-1. Research exact io_uring features used
-2. Document minimum kernel version for each feature
-3. Add runtime feature detection if possible
-4. Document graceful degradation path (if any)
-
-**Research needed:**
-- IORING_OP_RECVMSG minimum version
-- IORING_OP_SENDMSG minimum version
-- AF_PACKET + io_uring interaction requirements
-
-**Estimated Effort:** 4-6 hours
-**Risk:** None (documentation only)
+### 5.1 Kernel Version Requirements ✅ COMPLETED
+**Status:** ✅ Commit 245bb9b
+**Minimum:** Linux 5.6+ (io_uring socket ops), Recommended: 5.10+ LTS
+**Docs:** README.md, CONFIGURATION.md (comprehensive kernel requirements section)
 
 ---
 
@@ -364,31 +267,17 @@ Instead of querying potentially-stale worker state, the supervisor's `master_rul
 
 ---
 
-### 5.3 Rule ID Lifecycle Documentation 🔵 LOW
-**Location:** User documentation
-**Status:** Not explained
-
-**Content Needed:**
-- How rule IDs are generated (UUIDs)
-- Where to find rule IDs (`control_client list`)
-- Can users provide custom IDs? (need to verify)
-- ID persistence across restarts
-
-**Estimated Effort:** 2-3 hours
-**Risk:** None (documentation only)
+### 5.3 Rule ID Lifecycle Documentation ✅ COMPLETED
+**Status:** ✅ Commit d537f0d
+**Content:** Auto-generated UUIDs, custom IDs via --rule-id, in-memory only
+**Docs:** CONFIGURATION.md "Rule ID Lifecycle" section (85 lines)
 
 ---
 
 ## 6. Code Quality Issues
 
 ### 6.1 Event-Driven Mode Deadlock ✅ RESOLVED
-**Location:** ~~`src/worker/egress.rs:647`~~ REMOVED
-**Status:** ✅ Obsolete - egress.rs deleted as part of legacy code removal
-
-**Resolution:**
-The event-driven mode was part of the legacy two-thread architecture that has been completely removed. The unified data plane uses a different event model based on io_uring's native event handling, which doesn't have the same deadlock issues.
-
-This issue is resolved by architectural change rather than bug fix.
+**Status:** ✅ Obsolete - legacy two-thread architecture removed (commit cd4811c)
 
 ---
 
@@ -768,44 +657,50 @@ It's #2 - `shared_flows` is populated by `stats_aggregator_task` receiving (rule
 
 ---
 
-#### 8.2.3 Stats Reporting Incomplete 🟡 HIGH
-**Location:** `src/worker/stats.rs:15-32`, data plane workers
-**Status:** Infrastructure exists, not wired up
-**Impact:** Control plane's `shared_flows` never populated by real stats
+#### 8.2.3 Stats Reporting via Pipe-Based IPC ✅ COMPLETED
+**Location:** `src/worker/unified_loop.rs:681`, `src/supervisor.rs:195-223`
+**Status:** ✅ Completed (November 2025)
+**Commits:** 81fad5e (stats tracking), d8b6de4 (rate calculation), b1756bc (GetStats API)
 
-**Evidence:**
-```rust
-// src/worker/unified_loop.rs:128 (approximate)
-// DataPlaneWorker has:
-_stats_tx: mpsc::Sender<(ForwardingRule, FlowStats)>,
-//  ^^^^^ Underscore prefix = unused parameter
-```
+**Implementation:**
+The unified data plane uses a **pipe-based approach** (not channels) for stats reporting:
 
-**Current Reality:**
-- Control plane has `stats_aggregator_task` ready to receive stats
-- Data plane workers have `_stats_tx` channel but never send
-- `shared_flows` HashMap exists but remains empty (except in tests)
-- Hash logging in control plane (8.1) never triggers in production
+1. **Data Plane Tracking** (`src/worker/unified_loop.rs:681`)
+   - Per-flow counters tracked in `flow_counters: HashMap<(Ipv4Addr, u16), FlowCounters>`
+   - Reports every 10,000 packets processed (intentional threshold to minimize overhead)
+   - Calculates rates: `packets_per_second`, `bits_per_second`
+   - Serializes `Vec<FlowStats>` to JSON
+   - Writes to **FD 4** (stats pipe) in fire-and-forget mode
 
-**Consequences:**
-- GetStats returns empty list or stale data
-- Control plane's hash logging is dead code (no stats = no hash updates)
-- Cannot monitor per-flow packet/byte counters
-- Cannot detect stale rules via stats reporting
+2. **Supervisor Aggregation** (`src/supervisor.rs:195-223`)
+   - Reads stats from all worker pipes asynchronously
+   - Aggregates by `(input_group, input_port)` key
+   - Sums counters: `packets_relayed`, `bytes_relayed`
+   - Sums rates: `packets_per_second`, `bits_per_second`
+   - Stores in `worker_stats` HashMap
 
-**Action:**
-1. Remove underscore prefix from `stats_tx` in data plane worker
-2. Implement periodic stats reporting (every N seconds)
-3. Calculate packets_per_second and bits_per_second from counters
-4. Send (rule, stats) to control plane via stats_tx channel
-5. Verify hash logging in control plane triggers correctly
-6. Add test for stats flow: data plane → channel → control plane
+3. **GetStats API** (`src/supervisor.rs:195-223`)
+   - Returns aggregated stats from all workers
+   - Multi-worker support with automatic aggregation
+   - Interface validation to prevent self-loops
+   - Documented in `user_docs/CONFIGURATION.md`
 
-**Estimated Effort:** 2-3 days
-**Risk:** Low (additive feature)
-**Priority:** HIGH - Needed for observability and drift detection
+**Verification:**
+- ✅ All 145 unit tests pass (including 5 new stats aggregation tests)
+- ✅ Integration test `test_get_stats_e2e` validates E2E stats flow
+- ✅ Documentation complete (CONFIGURATION.md section 4.4)
+- ✅ 10,000-packet threshold documented (minimizes data plane overhead)
 
-**Related:** Section 3.2 (Real-time statistics collection)
+**Files Modified:**
+- `src/lib.rs` - Added FlowCounters, FlowStats types
+- `src/worker/unified_loop.rs:681` - Stats reporting every 10k packets
+- `src/supervisor.rs:195-223` - Multi-worker aggregation logic
+- `src/ipc.rs` - Added StatsReport message type
+- `user_docs/CONFIGURATION.md` - GetStats API documentation
+
+**Note:** The old `_stats_tx` channel reference is in the legacy two-thread data plane (`data_plane.rs`) which is marked for removal. The unified data plane uses FD 4 pipe-based IPC instead.
+
+**Related:** Section 3.2 (Real-time statistics collection) - COMPLETED
 
 ---
 
@@ -1195,8 +1090,8 @@ Automatic detection and recovery from worker drift, without manual intervention.
 5. ✅ **COMPLETED** Implement Phase 1 drift detection (8.1) - hash-based logging
 6. ✅ **COMPLETED** Document architectural gaps discovered (8.2)
 7. ✅ **COMPLETED** Resolve global interface parameter confusion (2.4) - architectural investigation + docs
-8. ⏳ **TODO** Document kernel version requirements (5.1)
-9. ⏳ **TODO** Document rule ID lifecycle (5.3)
+8. ✅ **COMPLETED** Document kernel version requirements (5.1) - commit 245bb9b
+9. ✅ **COMPLETED** Document rule ID lifecycle (5.3) - commit d537f0d
 10. ⏳ **TODO** Add test for hash logging (8.1)
 11. ⏳ **TODO** Document drift detection procedure (8.1)
 
@@ -1218,9 +1113,9 @@ Automatic detection and recovery from worker drift, without manual intervention.
    - ✅ Code implemented (commit fc0a50f)
    - ✅ Unit tests added (commit d80300e) - 7 tests, all pass
    - ✅ Integration test passes (test_add_and_remove_rule_e2e)
-2. 🔧 Implement stats reporting from data plane (8.2.3) - enables monitoring
-3. 🔧 Implement ruleset sync on worker startup (8.2.4) - **CRITICAL** - enables recovery
-4. 🔧 Decide on broadcast reliability strategy (8.2.5) - **CRITICAL** - architectural decision needed
+2. ✅ **COMPLETED** - Stats reporting from data plane (8.2.3) - pipe-based IPC (commits 81fad5e, d8b6de4, b1756bc)
+3. ✅ **COMPLETED** - Ruleset sync on worker startup (8.2.4) - SyncRules command
+4. ✅ **COMPLETED** - Broadcast reliability (8.2.5) - Periodic sync every 5 minutes
 5. 🔧 Implement periodic health checks (8.2.8) - detects dead workers
 6. 🔧 Clarify control plane purpose (8.2.9) - architectural decision needed
 7. 🔧 Implement automated drift recovery (8.2.10) - completes Phase 2 drift detection
@@ -1307,3 +1202,113 @@ Automatic detection and recovery from worker drift, without manual intervention.
 **Key insight:** Documentation was aspirational, describing intended design rather than actual implementation
 
 **Recommendation:** Prioritize Phase 1 (dead code removal) immediately. Phase 2 (architecture fixes) should be scheduled based on security requirements (FD passing) and scalability needs (rule hashing).
+
+---
+
+## Additional Findings from November 2025 Comprehensive Review
+
+### New TODOs Discovered in Implementation
+
+These items were found during a comprehensive grep of the codebase but are not yet tracked in the improvement plan:
+
+#### A. Benchmark Implementations 🔵 LOW
+**Location:** `tests/benchmarks/forwarding_rate.rs:49-151`
+**Status:** Skeleton exists, implementations are placeholders
+
+All three benchmark functions have `TODO` markers:
+- `benchmark_forwarding_throughput` - Line 49
+- `benchmark_forwarding_latency` - Line 75
+- `benchmark_control_plane_latency` - Line 100
+
+**Action needed:**
+1. Implement actual forwarding benchmark using traffic_generator
+2. Implement latency measurement with high-precision timing
+3. Implement control plane command latency benchmarks
+
+**Estimated effort:** 1 week
+**Priority:** LOW - Nice to have for performance validation
+
+---
+
+#### B. Integration Test Stubs 🟢 MEDIUM
+**Location:** `tests/integration/supervisor_resilience.rs`
+
+**Missing critical tests:**
+1. **Line 283:** `test_supervisor_resyncs_rules_on_restart()` - **CRITICAL**
+   - Tests rule resynchronization after worker restart
+   - Marked TODO: IMPLEMENT THIS - CRITICAL
+   - Required for validating resilience model (D18)
+
+2. **Line 471:** `test_supervisor_in_namespace()` - **MEDIUM**
+   - Network namespace isolation testing
+   - Marked TODO: IMPLEMENT THIS - MEDIUM PRIORITY
+   - Provides complete isolation from host system
+
+3. **Line 507:** Additional test ideas:
+   - `test_supervisor_graceful_shutdown`
+   - `test_supervisor_handles_worker_spawn_failure`
+   - `test_supervisor_rate_limits_restart_attempts`
+   - `test_supervisor_logs_worker_failures`
+
+**Note:** Line 328 mentions `test_supervisor_handles_concurrent_restart_storm` - this test needs to be rewritten to use actual `run()` function or properly mock supervisor.
+
+---
+
+#### C. Missing Test for Send Failures 🟢 MEDIUM
+**Location:** `src/supervisor/rule_dispatch.rs:288`
+
+```rust
+// TODO: Add test for handling send failures
+```
+
+**Action:** Add unit test verifying behavior when rule dispatch fails (channel full, worker dead, etc.)
+
+**Estimated effort:** 2-3 hours
+
+---
+
+#### D. Netlink Integration Test (Feature-Gated) 🟡 HIGH
+**Location:** `src/supervisor/network_monitor.rs:426`
+
+```rust
+// TODO: Add integration test with real Netlink socket (feature-gated)
+```
+
+**Context:** After implementing Netlink monitoring (Section 2.2), this test should verify:
+- Detecting interface up/down events
+- Testing with dummy interfaces (`ip link add dummy0 type dummy`)
+- Event propagation to supervisor
+
+**Blocked by:** Section 2.2 (Network State Reconciliation implementation)
+
+---
+
+### E. Clarification Needed: Interface Configuration
+
+The comprehensive review revealed potential confusion about interface configuration:
+
+**Found in multiple locations:**
+- CONFIGURATION.md line 117: Warning about loopback interface artifacts
+- ARCHITECTURE.md: Discussion of PACKET_FANOUT and interface binding
+- TODO comments suggesting global interface parameter removal
+
+**Resolution (from MULTI_INTERFACE_ARCHITECTURE.md):**
+- Global `--interface` parameter is **required** for PACKET_FANOUT_CPU
+- `ForwardingRule.input_interface` serves a different purpose (future multi-interface filtering)
+- This was documented in Section 2.4 as ✅ RESOLVED
+
+**No action needed** - already documented, but worth noting for future reference.
+
+---
+
+### Summary of New Findings
+
+| Item | Priority | Effort | Blocker |
+|------|----------|--------|---------|
+| A. Benchmark implementations | 🔵 LOW | 1 week | None |
+| B1. Rule resync test | 🔴 CRITICAL | 1 day | None |
+| B2. Namespace isolation test | 🟢 MEDIUM | 1 day | Root privileges |
+| C. Send failure test | 🟢 MEDIUM | 3 hrs | None |
+| D. Netlink integration test | 🟡 HIGH | 4 hrs | Section 2.2 |
+
+**Recommendation:** Add B1 (rule resync test) to Phase 2 as it's critical for validating the resilience model. The rest can be addressed in Phase 3 (Feature Completion) or Phase 4 (Polish).

@@ -283,7 +283,6 @@ impl McrInstance {
     }
 
     /// Get the log file path
-    #[allow(dead_code)]
     pub fn log_path(&self) -> &Path {
         &self.log_file
     }

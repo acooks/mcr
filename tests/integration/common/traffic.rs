@@ -13,7 +13,6 @@ use std::process::Command;
 /// * `count` - Number of packets to send
 /// * `size` - Optional packet size in bytes (default: 1400)
 /// * `rate` - Optional packet rate in packets/sec (default: 1000)
-#[allow(dead_code)]
 pub fn send_packets(source_ip: &str, dest_group: &str, dest_port: u16, count: u32) -> Result<()> {
     send_packets_with_options(source_ip, dest_group, dest_port, count, 1400, 1000)
 }

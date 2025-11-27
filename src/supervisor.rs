@@ -2010,7 +2010,7 @@ mod tests {
         let worker_stats = Mutex::new(HashMap::new());
 
         // Loopback should be allowed but warned
-        let (response, action) = handle_supervisor_command(
+        let (response, _action) = handle_supervisor_command(
             crate::SupervisorCommand::AddRule {
                 rule_id: "loopback-rule".to_string(),
                 input_interface: "eth0".to_string(),
