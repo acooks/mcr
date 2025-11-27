@@ -217,24 +217,29 @@ grep -r "64.*KB\|65536" src/
 
 ---
 
-### 3.2 Real-Time Statistics Collection 🟢 MEDIUM
-**Location:** `src/supervisor.rs:158-159`
-**Status:** Placeholder implementation
+### 3.2 Real-Time Statistics Collection ✅ COMPLETED
+**Location:** `src/supervisor.rs:195-223`, `src/worker/unified_loop.rs:681`
+**Status:** ✅ Completed (November 2025)
+**Commits:** 81fad5e, d8b6de4, b1756bc
 
-**Current:**
-```rust
-// TODO: In the future, query data plane workers for actual stats via worker communication
-// Currently returns configured rules with zero counters as a placeholder
-```
+**Implementation:**
+GetStats API now returns real-time aggregated statistics from all data plane workers:
 
-**Action:**
-1. Implement `GetStats` command in worker control plane
-2. Add stats request/response to worker communication protocol
-3. Supervisor aggregates stats from all workers
-4. Add per-destination metrics (currently only per-rule)
+1. **Per-Flow Tracking:** Each data plane worker maintains `flow_counters` HashMap
+2. **Periodic Reporting:** Workers report stats every 10,000 packets via pipe (FD 4)
+3. **Multi-Worker Aggregation:** Supervisor sums counters and rates from all workers
+4. **Rate Calculation:** Automatic packets_per_second and bits_per_second computation
 
-**Estimated Effort:** 2-3 days
-**Risk:** Low (additive feature, doesn't affect data path)
+**Deliverables:**
+- ✅ GetStats command returns live data (not placeholders)
+- ✅ Multi-worker aggregation by (input_group, input_port)
+- ✅ Integration test validates E2E stats flow
+- ✅ Documentation in CONFIGURATION.md section 4.4
+
+**Future Enhancement:**
+- Per-destination metrics (currently aggregated at rule level)
+
+**Related:** Section 8.2.3 (Stats Reporting via Pipe-Based IPC) - implementation details
 
 ---
 
@@ -768,44 +773,50 @@ It's #2 - `shared_flows` is populated by `stats_aggregator_task` receiving (rule
 
 ---
 
-#### 8.2.3 Stats Reporting Incomplete 🟡 HIGH
-**Location:** `src/worker/stats.rs:15-32`, data plane workers
-**Status:** Infrastructure exists, not wired up
-**Impact:** Control plane's `shared_flows` never populated by real stats
+#### 8.2.3 Stats Reporting via Pipe-Based IPC ✅ COMPLETED
+**Location:** `src/worker/unified_loop.rs:681`, `src/supervisor.rs:195-223`
+**Status:** ✅ Completed (November 2025)
+**Commits:** 81fad5e (stats tracking), d8b6de4 (rate calculation), b1756bc (GetStats API)
 
-**Evidence:**
-```rust
-// src/worker/unified_loop.rs:128 (approximate)
-// DataPlaneWorker has:
-_stats_tx: mpsc::Sender<(ForwardingRule, FlowStats)>,
-//  ^^^^^ Underscore prefix = unused parameter
-```
+**Implementation:**
+The unified data plane uses a **pipe-based approach** (not channels) for stats reporting:
 
-**Current Reality:**
-- Control plane has `stats_aggregator_task` ready to receive stats
-- Data plane workers have `_stats_tx` channel but never send
-- `shared_flows` HashMap exists but remains empty (except in tests)
-- Hash logging in control plane (8.1) never triggers in production
+1. **Data Plane Tracking** (`src/worker/unified_loop.rs:681`)
+   - Per-flow counters tracked in `flow_counters: HashMap<(Ipv4Addr, u16), FlowCounters>`
+   - Reports every 10,000 packets processed (intentional threshold to minimize overhead)
+   - Calculates rates: `packets_per_second`, `bits_per_second`
+   - Serializes `Vec<FlowStats>` to JSON
+   - Writes to **FD 4** (stats pipe) in fire-and-forget mode
 
-**Consequences:**
-- GetStats returns empty list or stale data
-- Control plane's hash logging is dead code (no stats = no hash updates)
-- Cannot monitor per-flow packet/byte counters
-- Cannot detect stale rules via stats reporting
+2. **Supervisor Aggregation** (`src/supervisor.rs:195-223`)
+   - Reads stats from all worker pipes asynchronously
+   - Aggregates by `(input_group, input_port)` key
+   - Sums counters: `packets_relayed`, `bytes_relayed`
+   - Sums rates: `packets_per_second`, `bits_per_second`
+   - Stores in `worker_stats` HashMap
 
-**Action:**
-1. Remove underscore prefix from `stats_tx` in data plane worker
-2. Implement periodic stats reporting (every N seconds)
-3. Calculate packets_per_second and bits_per_second from counters
-4. Send (rule, stats) to control plane via stats_tx channel
-5. Verify hash logging in control plane triggers correctly
-6. Add test for stats flow: data plane → channel → control plane
+3. **GetStats API** (`src/supervisor.rs:195-223`)
+   - Returns aggregated stats from all workers
+   - Multi-worker support with automatic aggregation
+   - Interface validation to prevent self-loops
+   - Documented in `user_docs/CONFIGURATION.md`
 
-**Estimated Effort:** 2-3 days
-**Risk:** Low (additive feature)
-**Priority:** HIGH - Needed for observability and drift detection
+**Verification:**
+- ✅ All 145 unit tests pass (including 5 new stats aggregation tests)
+- ✅ Integration test `test_get_stats_e2e` validates E2E stats flow
+- ✅ Documentation complete (CONFIGURATION.md section 4.4)
+- ✅ 10,000-packet threshold documented (minimizes data plane overhead)
 
-**Related:** Section 3.2 (Real-time statistics collection)
+**Files Modified:**
+- `src/lib.rs` - Added FlowCounters, FlowStats types
+- `src/worker/unified_loop.rs:681` - Stats reporting every 10k packets
+- `src/supervisor.rs:195-223` - Multi-worker aggregation logic
+- `src/ipc.rs` - Added StatsReport message type
+- `user_docs/CONFIGURATION.md` - GetStats API documentation
+
+**Note:** The old `_stats_tx` channel reference is in the legacy two-thread data plane (`data_plane.rs`) which is marked for removal. The unified data plane uses FD 4 pipe-based IPC instead.
+
+**Related:** Section 3.2 (Real-time statistics collection) - COMPLETED
 
 ---
 
@@ -1218,9 +1229,9 @@ Automatic detection and recovery from worker drift, without manual intervention.
    - ✅ Code implemented (commit fc0a50f)
    - ✅ Unit tests added (commit d80300e) - 7 tests, all pass
    - ✅ Integration test passes (test_add_and_remove_rule_e2e)
-2. 🔧 Implement stats reporting from data plane (8.2.3) - enables monitoring
-3. 🔧 Implement ruleset sync on worker startup (8.2.4) - **CRITICAL** - enables recovery
-4. 🔧 Decide on broadcast reliability strategy (8.2.5) - **CRITICAL** - architectural decision needed
+2. ✅ **COMPLETED** - Stats reporting from data plane (8.2.3) - pipe-based IPC (commits 81fad5e, d8b6de4, b1756bc)
+3. ✅ **COMPLETED** - Ruleset sync on worker startup (8.2.4) - SyncRules command
+4. ✅ **COMPLETED** - Broadcast reliability (8.2.5) - Periodic sync every 5 minutes
 5. 🔧 Implement periodic health checks (8.2.8) - detects dead workers
 6. 🔧 Clarify control plane purpose (8.2.9) - architectural decision needed
 7. 🔧 Implement automated drift recovery (8.2.10) - completes Phase 2 drift detection
@@ -1307,3 +1318,113 @@ Automatic detection and recovery from worker drift, without manual intervention.
 **Key insight:** Documentation was aspirational, describing intended design rather than actual implementation
 
 **Recommendation:** Prioritize Phase 1 (dead code removal) immediately. Phase 2 (architecture fixes) should be scheduled based on security requirements (FD passing) and scalability needs (rule hashing).
+
+---
+
+## Additional Findings from November 2025 Comprehensive Review
+
+### New TODOs Discovered in Implementation
+
+These items were found during a comprehensive grep of the codebase but are not yet tracked in the improvement plan:
+
+#### A. Benchmark Implementations 🔵 LOW
+**Location:** `tests/benchmarks/forwarding_rate.rs:49-151`
+**Status:** Skeleton exists, implementations are placeholders
+
+All three benchmark functions have `TODO` markers:
+- `benchmark_forwarding_throughput` - Line 49
+- `benchmark_forwarding_latency` - Line 75
+- `benchmark_control_plane_latency` - Line 100
+
+**Action needed:**
+1. Implement actual forwarding benchmark using traffic_generator
+2. Implement latency measurement with high-precision timing
+3. Implement control plane command latency benchmarks
+
+**Estimated effort:** 1 week
+**Priority:** LOW - Nice to have for performance validation
+
+---
+
+#### B. Integration Test Stubs 🟢 MEDIUM
+**Location:** `tests/integration/supervisor_resilience.rs`
+
+**Missing critical tests:**
+1. **Line 283:** `test_supervisor_resyncs_rules_on_restart()` - **CRITICAL**
+   - Tests rule resynchronization after worker restart
+   - Marked TODO: IMPLEMENT THIS - CRITICAL
+   - Required for validating resilience model (D18)
+
+2. **Line 471:** `test_supervisor_in_namespace()` - **MEDIUM**
+   - Network namespace isolation testing
+   - Marked TODO: IMPLEMENT THIS - MEDIUM PRIORITY
+   - Provides complete isolation from host system
+
+3. **Line 507:** Additional test ideas:
+   - `test_supervisor_graceful_shutdown`
+   - `test_supervisor_handles_worker_spawn_failure`
+   - `test_supervisor_rate_limits_restart_attempts`
+   - `test_supervisor_logs_worker_failures`
+
+**Note:** Line 328 mentions `test_supervisor_handles_concurrent_restart_storm` - this test needs to be rewritten to use actual `run()` function or properly mock supervisor.
+
+---
+
+#### C. Missing Test for Send Failures 🟢 MEDIUM
+**Location:** `src/supervisor/rule_dispatch.rs:288`
+
+```rust
+// TODO: Add test for handling send failures
+```
+
+**Action:** Add unit test verifying behavior when rule dispatch fails (channel full, worker dead, etc.)
+
+**Estimated effort:** 2-3 hours
+
+---
+
+#### D. Netlink Integration Test (Feature-Gated) 🟡 HIGH
+**Location:** `src/supervisor/network_monitor.rs:426`
+
+```rust
+// TODO: Add integration test with real Netlink socket (feature-gated)
+```
+
+**Context:** After implementing Netlink monitoring (Section 2.2), this test should verify:
+- Detecting interface up/down events
+- Testing with dummy interfaces (`ip link add dummy0 type dummy`)
+- Event propagation to supervisor
+
+**Blocked by:** Section 2.2 (Network State Reconciliation implementation)
+
+---
+
+### E. Clarification Needed: Interface Configuration
+
+The comprehensive review revealed potential confusion about interface configuration:
+
+**Found in multiple locations:**
+- CONFIGURATION.md line 117: Warning about loopback interface artifacts
+- ARCHITECTURE.md: Discussion of PACKET_FANOUT and interface binding
+- TODO comments suggesting global interface parameter removal
+
+**Resolution (from MULTI_INTERFACE_ARCHITECTURE.md):**
+- Global `--interface` parameter is **required** for PACKET_FANOUT_CPU
+- `ForwardingRule.input_interface` serves a different purpose (future multi-interface filtering)
+- This was documented in Section 2.4 as ✅ RESOLVED
+
+**No action needed** - already documented, but worth noting for future reference.
+
+---
+
+### Summary of New Findings
+
+| Item | Priority | Effort | Blocker |
+|------|----------|--------|---------|
+| A. Benchmark implementations | 🔵 LOW | 1 week | None |
+| B1. Rule resync test | 🔴 CRITICAL | 1 day | None |
+| B2. Namespace isolation test | 🟢 MEDIUM | 1 day | Root privileges |
+| C. Send failure test | 🟢 MEDIUM | 3 hrs | None |
+| D. Netlink integration test | 🟡 HIGH | 4 hrs | Section 2.2 |
+
+**Recommendation:** Add B1 (rule resync test) to Phase 2 as it's critical for validating the resilience model. The rest can be addressed in Phase 3 (Feature Completion) or Phase 4 (Polish).
