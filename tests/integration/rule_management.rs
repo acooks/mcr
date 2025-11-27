@@ -14,6 +14,7 @@ use tokio::net::UnixStream;
 use tokio::process::{Child, Command};
 use tokio::time::sleep;
 
+use crate::common::{NetworkNamespace, VethPair};
 use crate::tests::{cleanup_socket, unique_socket_path_with_prefix};
 
 // --- Test Harness: Automatic Cleanup Guard ---
@@ -298,7 +299,27 @@ async fn test_get_stats_e2e() -> Result<()> {
         return Ok(());
     }
 
-    // 1. SETUP: Start the supervisor and create a client.
+    // 1. SETUP: Enter isolated network namespace to avoid interference with other tests
+    let _ns = NetworkNamespace::enter()?;
+    _ns.enable_loopback().await?;
+    println!("[TEST] Entered isolated network namespace");
+
+    // 2. CREATE TEST INTERFACE: Set up veth pair for output interface
+    // We need a different interface from "lo" to satisfy self-loop validation
+    // Use unique interface names to avoid conflicts when running tests concurrently
+    use uuid::Uuid;
+    let iface_id = Uuid::new_v4().to_string().replace("-", "")[..8].to_string();
+    let veth_a = format!("tveth{}", iface_id);
+    let veth_b = format!("tvethp{}", iface_id);
+    let _veth = VethPair::create(&veth_a, &veth_b)
+        .await?
+        .set_addr(&veth_a, "10.99.99.1/24")
+        .await?
+        .up()
+        .await?;
+    println!("[TEST] Created test veth interface {} with IP 10.99.99.1/24", veth_a);
+
+    // 3. Start the supervisor and create a client
     // TestSupervisor guard ensures automatic cleanup on any exit path
     let supervisor = start_supervisor().await?;
     let client = ControlClient::new(supervisor.socket_path());
@@ -307,7 +328,7 @@ async fn test_get_stats_e2e() -> Result<()> {
     sleep(Duration::from_millis(500)).await;
     println!("[TEST] Supervisor started and ready.");
 
-    // 2. VERIFY INITIAL STATE: GetStats should return empty initially.
+    // 4. VERIFY INITIAL STATE: GetStats should return empty initially.
     let initial_stats = client.get_stats().await?;
     assert!(
         initial_stats.is_empty(),
@@ -315,11 +336,9 @@ async fn test_get_stats_e2e() -> Result<()> {
     );
     println!("[TEST] Verified supervisor has 0 stats initially.");
 
-    // 3. ADD RULE: Add a forwarding rule
-    // Note: We use different interfaces (lo for input, eth0 for output) to satisfy the
+    // 5. ADD RULE: Add a forwarding rule
+    // Note: We use different interfaces (lo for input, veth for output) to satisfy the
     // self-loop validation that prevents input and output on the same interface.
-    // The test will work even if eth0 doesn't physically exist, since we're only testing
-    // the GetStats API, not actual packet forwarding.
     let rule = ForwardingRule {
         rule_id: "test-stats-rule".to_string(),
         input_interface: "lo".to_string(),
@@ -328,7 +347,7 @@ async fn test_get_stats_e2e() -> Result<()> {
         outputs: vec![multicast_relay::OutputDestination {
             group: "239.2.2.2".parse()?,
             port: 6002,
-            interface: "eth0".to_string(), // Different from input interface to pass validation
+            interface: veth_a.clone(), // Different from input interface to pass validation
             dtls_enabled: false,
         }],
         dtls_enabled: false,
@@ -339,7 +358,7 @@ async fn test_get_stats_e2e() -> Result<()> {
     // Give a moment for the command to propagate
     sleep(Duration::from_millis(300)).await;
 
-    // 4. SEND TRAFFIC: Send 15,000 packets to trigger stats reporting (threshold is 10,000)
+    // 6. SEND TRAFFIC: Send 15,000 packets to trigger stats reporting (threshold is 10,000)
     println!("[TEST] Sending 15,000 test packets to trigger stats reporting...");
 
     // Build path to traffic_generator binary
@@ -388,11 +407,11 @@ async fn test_get_stats_e2e() -> Result<()> {
     // Give workers time to process and report stats
     sleep(Duration::from_millis(500)).await;
 
-    // 5. GET STATS: Query stats via the API
+    // 7. GET STATS: Query stats via the API
     let stats = client.get_stats().await?;
     println!("[TEST] GetStats returned {} flow(s).", stats.len());
 
-    // 6. VALIDATE RESPONSE: Check that stats were reported
+    // 8. VALIDATE RESPONSE: Check that stats were reported
     assert!(
         !stats.is_empty(),
         "Stats should be reported after sending 15,000 packets"
