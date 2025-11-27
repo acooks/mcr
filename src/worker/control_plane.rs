@@ -177,6 +177,13 @@ pub async fn control_plane_task<S: AsyncRead + AsyncWrite + Unpin>(
                         let bytes = serde_json::to_vec(&response).unwrap();
                         framed.send(bytes.into()).await.unwrap();
                     }
+                    crate::ipc::Request::GetStats => {
+                        let flows = shared_flows.lock().await;
+                        let stats = flows.values().map(|(_, s)| s.clone()).collect();
+                        let response = crate::ipc::Response::Stats(stats);
+                        let bytes = serde_json::to_vec(&response).unwrap();
+                        framed.send(bytes.into()).await.unwrap();
+                    }
                 }
             }
         }

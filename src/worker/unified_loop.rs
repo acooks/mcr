@@ -52,6 +52,7 @@ use crate::logging::{Facility, Logger};
 use crate::worker::buffer_pool::{BufferPool, BufferSize, ManagedBuffer};
 use crate::worker::packet_parser::parse_packet;
 use crate::ForwardingRule;
+use std::time::Instant;
 
 // User data ranges for different operation types
 const SHUTDOWN_USER_DATA: u64 = u64::MAX;
@@ -114,6 +115,17 @@ pub struct UnifiedStats {
     pub buffer_pool_exhaustion: u64, // Buffer pool exhaustion events
 }
 
+/// Per-flow counters for stats reporting
+#[derive(Debug, Clone, Default)]
+struct FlowCounters {
+    packets_relayed: u64,
+    bytes_relayed: u64,
+    // Snapshot values for rate calculation
+    last_packets: u64,
+    last_bytes: u64,
+    last_snapshot_time: Option<Instant>,
+}
+
 /// Unified single-threaded data plane loop
 pub struct UnifiedDataPlane {
     ring: IoUring,
@@ -126,6 +138,9 @@ pub struct UnifiedDataPlane {
 
     // Forwarding rules (keyed by input_group, input_port)
     rules: HashMap<(Ipv4Addr, u16), ForwardingRule>,
+
+    // Per-flow counters for stats reporting (keyed by input_group, input_port)
+    flow_counters: HashMap<(Ipv4Addr, u16), FlowCounters>,
 
     // Egress
     egress_sockets: HashMap<(String, SocketAddr), (OwnedFd, Ipv4Addr)>,
@@ -146,6 +161,9 @@ pub struct UnifiedDataPlane {
     config: UnifiedConfig,
     stats: UnifiedStats,
     logger: Logger,
+
+    // Stats pipe for reporting to supervisor (FD 4)
+    stats_pipe: Option<std::fs::File>,
 }
 
 impl UnifiedDataPlane {
@@ -208,6 +226,29 @@ impl UnifiedDataPlane {
         // Set non-blocking
         recv_socket.set_nonblocking(true)?;
 
+        // Open stats pipe (FD 4) for writing stats to supervisor
+        // Only available for data plane workers (not in testing mode)
+        let stats_pipe = {
+            #[cfg(not(feature = "testing"))]
+            {
+                use std::os::fd::{BorrowedFd, FromRawFd};
+                use nix::fcntl::{fcntl, FcntlArg};
+                // Check if FD 4 exists (data plane workers have it, control plane doesn't)
+                // SAFETY: Temporarily borrowing FD 4 to check if it's valid
+                let borrowed_fd = unsafe { BorrowedFd::borrow_raw(4) };
+                match fcntl(borrowed_fd, FcntlArg::F_GETFD) {
+                    Ok(_) => {
+                        // FD 4 exists, open it as a File
+                        // SAFETY: FD 4 is valid (we just checked), and supervisor gave us ownership
+                        Some(unsafe { std::fs::File::from_raw_fd(4) })
+                    }
+                    Err(_) => None, // FD 4 doesn't exist (control plane worker)
+                }
+            }
+            #[cfg(feature = "testing")]
+            None
+        };
+
         let mut unified = Self {
             ring: IoUring::new(config.queue_depth)?,
             recv_socket,
@@ -215,6 +256,7 @@ impl UnifiedDataPlane {
             in_flight_recvs: HashMap::new(),
             next_recv_user_data: RECV_BASE,
             rules: HashMap::new(),
+            flow_counters: HashMap::new(),
             egress_sockets: HashMap::new(),
             send_queue: Vec::with_capacity(config.send_batch_size),
             in_flight_sends: HashMap::new(),
@@ -227,6 +269,7 @@ impl UnifiedDataPlane {
             config,
             stats: UnifiedStats::default(),
             logger,
+            stats_pipe,
         };
 
         // Submit initial command read
@@ -268,6 +311,55 @@ impl UnifiedDataPlane {
             self.rules.insert(key, rule);
         }
         Ok(())
+    }
+
+    /// Get current flow stats with calculated rates
+    /// This method is mutable because it updates rate calculation snapshots
+    pub fn get_flow_stats(&mut self) -> Vec<crate::FlowStats> {
+        let now = Instant::now();
+
+        self.flow_counters
+            .iter_mut()
+            .map(|(key, counters)| {
+                // Calculate rates based on time since last snapshot
+                let (packets_per_second, bits_per_second) = if let Some(last_time) = counters.last_snapshot_time {
+                    let elapsed = now.duration_since(last_time).as_secs_f64();
+
+                    if elapsed > 0.0 {
+                        let packet_delta = counters.packets_relayed.saturating_sub(counters.last_packets);
+                        let byte_delta = counters.bytes_relayed.saturating_sub(counters.last_bytes);
+
+                        let pps = packet_delta as f64 / elapsed;
+                        let bps = (byte_delta * 8) as f64 / elapsed; // bits per second
+
+                        // Update snapshots for next calculation
+                        counters.last_packets = counters.packets_relayed;
+                        counters.last_bytes = counters.bytes_relayed;
+                        counters.last_snapshot_time = Some(now);
+
+                        (pps, bps)
+                    } else {
+                        // Too soon since last snapshot
+                        (0.0, 0.0)
+                    }
+                } else {
+                    // First snapshot - initialize
+                    counters.last_packets = counters.packets_relayed;
+                    counters.last_bytes = counters.bytes_relayed;
+                    counters.last_snapshot_time = Some(now);
+                    (0.0, 0.0)
+                };
+
+                crate::FlowStats {
+                    input_group: key.0,
+                    input_port: key.1,
+                    packets_relayed: counters.packets_relayed,
+                    bytes_relayed: counters.bytes_relayed,
+                    packets_per_second,
+                    bits_per_second,
+                }
+            })
+            .collect()
     }
 
     /// Main event loop
@@ -599,6 +691,34 @@ impl UnifiedDataPlane {
                         self.stats.send_errors
                     ),
                 );
+
+                // Log per-flow stats with rates
+                let flow_stats = self.get_flow_stats();
+                for stats in &flow_stats {
+                    self.logger.info(
+                        Facility::DataPlane,
+                        &format!(
+                            "[FLOW_STATS] {}:{} packets={} bytes={} pps={:.0} bps={:.0}",
+                            stats.input_group,
+                            stats.input_port,
+                            stats.packets_relayed,
+                            stats.bytes_relayed,
+                            stats.packets_per_second,
+                            stats.bits_per_second
+                        ),
+                    );
+                }
+
+                // Write stats to pipe for supervisor (non-blocking, fire-and-forget)
+                if let Some(ref mut pipe) = self.stats_pipe {
+                    if let Ok(json) = serde_json::to_vec(&flow_stats) {
+                        use std::io::Write;
+                        // Write with newline delimiter for line-based reading
+                        let _ = writeln!(pipe, "{}", String::from_utf8_lossy(&json));
+                        // Flush is okay here since it's periodic (not per-packet)
+                        let _ = pipe.flush();
+                    }
+                }
             }
         }
 
@@ -650,6 +770,13 @@ impl UnifiedDataPlane {
                 interface_name: output.interface.clone(),
             })
             .collect();
+
+        // Update per-flow counters
+        if self.config.track_stats && !targets.is_empty() {
+            let counter = self.flow_counters.entry(key).or_default();
+            counter.packets_relayed += 1;
+            counter.bytes_relayed += headers.payload_len as u64;
+        }
 
         Ok(targets)
     }
