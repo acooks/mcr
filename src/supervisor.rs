@@ -48,6 +48,7 @@ struct Worker {
     #[allow(dead_code)] // Used for Request::ListRules debugging (see Section 8.2.6)
     req_stream: Option<Arc<tokio::sync::Mutex<UnixStream>>>, // Request stream for control plane (Request::ListRules etc, used by GetWorkerRules)
     log_pipe: Option<std::os::unix::io::OwnedFd>, // Pipe for reading worker's stderr (JSON logs)
+    stats_pipe: Option<std::os::unix::io::OwnedFd>, // Pipe for reading worker's stats (JSON)
 }
 
 /// Centralized manager for all worker lifecycle operations
@@ -65,6 +66,7 @@ struct WorkerManager {
     // Worker state
     workers: HashMap<u32, Worker>,       // keyed by PID
     backoff_counters: HashMap<u32, u64>, // keyed by core_id (0 for CP, 1+ for DP)
+    worker_stats: Arc<Mutex<HashMap<u32, Vec<crate::FlowStats>>>>, // Stats from data plane workers (keyed by PID)
 }
 
 /// Action that may need to be taken after handling a supervisor command
@@ -87,6 +89,7 @@ pub enum CommandAction {
 /// * `worker_map` - Map of active workers (pid -> WorkerInfo)
 /// * `global_min_level` - Global minimum log level
 /// * `facility_min_levels` - Per-facility log level overrides
+/// * `worker_stats` - Latest stats from all data plane workers (keyed by PID)
 ///
 /// # Returns
 /// A tuple of (Response to send to client, Action to take)
@@ -98,6 +101,7 @@ pub fn handle_supervisor_command(
     facility_min_levels: &std::sync::RwLock<
         HashMap<crate::logging::Facility, crate::logging::Severity>,
     >,
+    worker_stats: &Mutex<HashMap<u32, Vec<crate::FlowStats>>>,
 ) -> (crate::Response, CommandAction) {
     use crate::{Response, SupervisorCommand};
     use std::sync::atomic::Ordering;
@@ -124,6 +128,39 @@ pub fn handle_supervisor_command(
                 outputs,
                 dtls_enabled,
             };
+
+            // Validate interface configuration to prevent packet loops and reflection
+            for output in &rule.outputs {
+                // Reject self-loops: input and output on same interface creates packet feedback loops
+                if rule.input_interface == output.interface {
+                    return (
+                        Response::Error(format!(
+                            "Rule rejected: input_interface '{}' and output_interface '{}' cannot be the same. \
+                            This creates packet loops where transmitted packets are received again by the same interface, \
+                            causing exponential packet multiplication and invalid statistics. \
+                            Use different interfaces (e.g., eth0 → eth1) for proper forwarding.",
+                            rule.input_interface, output.interface
+                        )),
+                        CommandAction::None,
+                    );
+                }
+            }
+
+            // Warn about loopback interface usage (allowed but not recommended)
+            if rule.input_interface == "lo"
+                || rule.outputs.iter().any(|o| o.interface == "lo")
+            {
+                eprintln!(
+                    "[Supervisor] WARNING: Rule '{}' uses loopback interface. \
+                    This can cause packet reflection artifacts where transmitted packets are \
+                    received again by AF_PACKET sockets, leading to inflated statistics and \
+                    unexpected behavior. Loopback is suitable for local testing only. \
+                    For production use, configure rules with real network interfaces (e.g., eth0, eth1) \
+                    or use veth pairs for virtual topologies.",
+                    rule.rule_id
+                );
+            }
+
             master_rules
                 .lock()
                 .unwrap()
@@ -155,22 +192,34 @@ pub fn handle_supervisor_command(
         }
 
         SupervisorCommand::GetStats => {
-            // Return FlowStats for each configured rule
-            // TODO: In the future, query data plane workers for actual stats via worker communication
-            // Currently returns configured rules with zero counters as a placeholder
-            let stats: Vec<crate::FlowStats> = master_rules
-                .lock()
-                .unwrap()
-                .values()
-                .map(|rule| crate::FlowStats {
-                    input_group: rule.input_group,
-                    input_port: rule.input_port,
-                    packets_relayed: 0,
-                    bytes_relayed: 0,
-                    packets_per_second: 0.0,
-                    bits_per_second: 0.0,
-                })
-                .collect();
+            // Aggregate stats from all data plane workers
+            // Multiple workers may report stats for the same flow (same input_group:port)
+            // We aggregate by summing counters and averaging rates
+            use std::collections::HashMap as StdHashMap;
+
+            let worker_stats_locked = worker_stats.lock().unwrap();
+            let mut aggregated: StdHashMap<(std::net::Ipv4Addr, u16), crate::FlowStats> =
+                StdHashMap::new();
+
+            // Aggregate stats from all workers
+            for stats_vec in worker_stats_locked.values() {
+                for stat in stats_vec {
+                    let key = (stat.input_group, stat.input_port);
+                    aggregated
+                        .entry(key)
+                        .and_modify(|existing| {
+                            // Sum counters
+                            existing.packets_relayed += stat.packets_relayed;
+                            existing.bytes_relayed += stat.bytes_relayed;
+                            // Average rates (simple average across workers)
+                            existing.packets_per_second += stat.packets_per_second;
+                            existing.bits_per_second += stat.bits_per_second;
+                        })
+                        .or_insert_with(|| stat.clone());
+                }
+            }
+
+            let stats: Vec<crate::FlowStats> = aggregated.into_values().collect();
             (Response::Stats(stats), CommandAction::None)
         }
 
@@ -283,7 +332,8 @@ pub async fn spawn_data_plane_worker(
     Child,
     UnixStream,
     UnixStream,
-    Option<std::os::unix::io::OwnedFd>,
+    Option<std::os::unix::io::OwnedFd>, // log_pipe
+    Option<std::os::unix::io::OwnedFd>, // stats_pipe
 )> {
     logger.info(
         Facility::Supervisor,
@@ -301,6 +351,18 @@ pub async fn spawn_data_plane_worker(
     };
     #[cfg(feature = "testing")]
     let (_log_read_fd, _log_write_fd): (Option<RawFd>, Option<RawFd>) = (None, None);
+
+    // Create pipe for worker stats (JSON stats reporting)
+    #[cfg(not(feature = "testing"))]
+    let (stats_read_fd, stats_write_fd) = {
+        use nix::unistd::pipe;
+        use std::os::unix::io::IntoRawFd;
+        let (read_fd, write_fd) = pipe()?;
+        // Convert to raw FDs to prevent auto-close when OwnedFd goes out of scope
+        (Some(read_fd.into_raw_fd()), Some(write_fd.into_raw_fd()))
+    };
+    #[cfg(feature = "testing")]
+    let (_stats_read_fd, _stats_write_fd): (Option<RawFd>, Option<RawFd>) = (None, None);
 
     // Create the supervisor-worker communication socket pair
     // This will be passed as FD 3 to the worker
@@ -353,6 +415,23 @@ pub async fn spawn_data_plane_worker(
                 }
             }
 
+            // Set up stats pipe as FD 4
+            #[cfg(not(feature = "testing"))]
+            if let Some(write_fd) = stats_write_fd {
+                if libc::dup2(write_fd, 4) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::close(write_fd) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                // Also close read end in child (not needed)
+                if let Some(read_fd) = stats_read_fd {
+                    if libc::close(read_fd) == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+            }
+
             Ok(())
         });
     }
@@ -372,6 +451,19 @@ pub async fn spawn_data_plane_worker(
     #[cfg(feature = "testing")]
     let log_pipe = None;
 
+    // Close stats write end in parent (child has it via FD 4)
+    // Keep read end open - we'll use it to read worker stats
+    #[cfg(not(feature = "testing"))]
+    if let Some(write_fd) = stats_write_fd {
+        nix::unistd::close(write_fd).ok();
+    }
+
+    // Convert stats read end to OwnedFd (it's still open, we didn't close it)
+    #[cfg(not(feature = "testing"))]
+    let stats_pipe = stats_read_fd.map(|fd| unsafe { std::os::unix::io::OwnedFd::from_raw_fd(fd) });
+    #[cfg(feature = "testing")]
+    let stats_pipe = None;
+
     // Send TWO command sockets to the child process (one for ingress, one for egress)
     let ingress_cmd_supervisor_stream = create_and_send_socketpair(&supervisor_sock).await?;
     let egress_cmd_supervisor_stream = create_and_send_socketpair(&supervisor_sock).await?;
@@ -381,6 +473,7 @@ pub async fn spawn_data_plane_worker(
         ingress_cmd_supervisor_stream,
         egress_cmd_supervisor_stream,
         log_pipe,
+        stats_pipe,
     ))
 }
 
@@ -410,6 +503,7 @@ impl WorkerManager {
             fanout_group_id,
             workers: HashMap::new(),
             backoff_counters: HashMap::new(),
+            worker_stats: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -439,6 +533,7 @@ impl WorkerManager {
                 egress_cmd_stream: Some(cmd_stream_arc), // Same stream for CP
                 req_stream: Some(req_stream_arc),
                 log_pipe: None, // Control plane uses MPSC ring buffer
+                stats_pipe: None, // Control plane doesn't have stats pipe
             },
         );
 
@@ -450,7 +545,7 @@ impl WorkerManager {
 
     /// Spawn a data plane worker for the given core
     async fn spawn_data_plane(&mut self, core_id: u32) -> Result<()> {
-        let (child, ingress_cmd_stream, egress_cmd_stream, log_pipe) = spawn_data_plane_worker(
+        let (child, ingress_cmd_stream, egress_cmd_stream, log_pipe, stats_pipe) = spawn_data_plane_worker(
             core_id,
             self.uid,
             self.gid,
@@ -476,6 +571,7 @@ impl WorkerManager {
                 egress_cmd_stream: Some(egress_cmd_stream_arc),
                 req_stream: None, // Data plane workers don't use req_stream
                 log_pipe,
+                stats_pipe,
             },
         );
 
@@ -487,6 +583,12 @@ impl WorkerManager {
         #[cfg(not(feature = "testing"))]
         if let Some(pipe_fd) = self.workers.get(&pid).and_then(|w| w.log_pipe.as_ref()) {
             self.spawn_log_consumer(pid, pipe_fd)?;
+        }
+
+        // Spawn stats consumer task for this worker
+        #[cfg(not(feature = "testing"))]
+        if let Some(pipe_fd) = self.workers.get(&pid).and_then(|w| w.stats_pipe.as_ref()) {
+            self.spawn_stats_consumer(pid, pipe_fd)?;
         }
 
         Ok(())
@@ -800,6 +902,53 @@ impl WorkerManager {
 
         Ok(())
     }
+
+    /// Spawn async task to consume JSON stats from worker's stats pipe (FD 4)
+    #[cfg(not(feature = "testing"))]
+    fn spawn_stats_consumer(
+        &self,
+        worker_pid: u32,
+        pipe_fd: &std::os::unix::io::OwnedFd,
+    ) -> Result<()> {
+        use std::os::unix::io::{FromRawFd, IntoRawFd};
+        use tokio::io::{AsyncBufReadExt, BufReader};
+
+        // Duplicate the FD so we can convert to tokio File
+        let dup_fd_owned = nix::unistd::dup(pipe_fd)?;
+        let dup_fd = dup_fd_owned.into_raw_fd(); // Transfer ownership out of OwnedFd
+
+        // Convert to tokio async file
+        let std_file = unsafe { std::fs::File::from_raw_fd(dup_fd) };
+        let tokio_file = tokio::fs::File::from_std(std_file);
+        let reader = BufReader::new(tokio_file);
+        let mut lines = reader.lines();
+
+        // Clone Arc for async task
+        let worker_stats = self.worker_stats.clone();
+
+        tokio::spawn(async move {
+            while let Ok(Some(line)) = lines.next_line().await {
+                // Parse JSON stats from worker
+                match serde_json::from_str::<Vec<crate::FlowStats>>(&line) {
+                    Ok(stats) => {
+                        // Store latest stats for this worker
+                        worker_stats.lock().unwrap().insert(worker_pid, stats);
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "[Supervisor] Failed to parse stats from worker {}: {}",
+                            worker_pid, e
+                        );
+                    }
+                }
+            }
+            eprintln!("[Supervisor] Worker {} stats stream closed", worker_pid);
+            // Remove stats for this worker when stream closes
+            worker_stats.lock().unwrap().remove(&worker_pid);
+        });
+
+        Ok(())
+    }
 }
 
 // --- Client Handling ---
@@ -824,10 +973,10 @@ async fn handle_client(
 
     let command: SupervisorCommand = serde_json::from_slice(&buffer)?;
 
-    // Get worker info from WorkerManager (locked access)
-    let worker_info = {
+    // Get worker info and stats from WorkerManager (locked access)
+    let (worker_info, worker_stats_arc) = {
         let manager = worker_manager.lock().unwrap();
-        manager.get_worker_info()
+        (manager.get_worker_info(), manager.worker_stats.clone())
     };
 
     // Create a temporary HashMap for handle_supervisor_command (to keep it pure)
@@ -845,6 +994,7 @@ async fn handle_client(
         &worker_map_temp,
         &global_min_level,
         &facility_min_levels,
+        &worker_stats_arc,
     );
 
     // Log ruleset hash for drift detection if rules changed
@@ -1321,12 +1471,15 @@ mod tests {
             std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
         let facility_min_levels = std::sync::RwLock::new(HashMap::new());
 
+        let worker_stats = Mutex::new(HashMap::new());
+
         let (response, action) = handle_supervisor_command(
             crate::SupervisorCommand::ListWorkers,
             &master_rules,
             &worker_map,
             &global_min_level,
             &facility_min_levels,
+            &worker_stats,
         );
 
         assert!(matches!(response, crate::Response::Workers(workers) if workers.len() == 1));
@@ -1341,6 +1494,8 @@ mod tests {
             std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
         let facility_min_levels = std::sync::RwLock::new(HashMap::new());
 
+        let worker_stats = Mutex::new(HashMap::new());
+
         let (response, action) = handle_supervisor_command(
             crate::SupervisorCommand::AddRule {
                 rule_id: "test-rule".to_string(),
@@ -1354,6 +1509,7 @@ mod tests {
             &worker_map,
             &global_min_level,
             &facility_min_levels,
+            &worker_stats,
         );
 
         assert!(matches!(response, crate::Response::Success(_)));
@@ -1380,6 +1536,8 @@ mod tests {
             std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
         let facility_min_levels = std::sync::RwLock::new(HashMap::new());
 
+        let worker_stats = Mutex::new(HashMap::new());
+
         let (response, action) = handle_supervisor_command(
             crate::SupervisorCommand::RemoveRule {
                 rule_id: "test-rule".to_string(),
@@ -1388,6 +1546,7 @@ mod tests {
             &worker_map,
             &global_min_level,
             &facility_min_levels,
+            &worker_stats,
         );
 
         assert!(matches!(response, crate::Response::Success(_)));
@@ -1402,6 +1561,7 @@ mod tests {
         let global_min_level =
             std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
         let facility_min_levels = std::sync::RwLock::new(HashMap::new());
+        let worker_stats = Mutex::new(HashMap::new());
 
         let (response, action) = handle_supervisor_command(
             crate::SupervisorCommand::RemoveRule {
@@ -1411,6 +1571,7 @@ mod tests {
             &worker_map,
             &global_min_level,
             &facility_min_levels,
+            &worker_stats,
         );
 
         assert!(matches!(response, crate::Response::Error(_)));
@@ -1436,12 +1597,15 @@ mod tests {
             std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
         let facility_min_levels = std::sync::RwLock::new(HashMap::new());
 
+        let worker_stats = Mutex::new(HashMap::new());
+
         let (response, action) = handle_supervisor_command(
             crate::SupervisorCommand::ListRules,
             &master_rules,
             &worker_map,
             &global_min_level,
             &facility_min_levels,
+            &worker_stats,
         );
 
         assert!(matches!(response, crate::Response::Rules(rules) if rules.len() == 1));
@@ -1456,12 +1620,15 @@ mod tests {
             std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
         let facility_min_levels = std::sync::RwLock::new(HashMap::new());
 
+        let worker_stats = Mutex::new(HashMap::new());
+
         let (response, action) = handle_supervisor_command(
             crate::SupervisorCommand::GetStats,
             &master_rules,
             &worker_map,
             &global_min_level,
             &facility_min_levels,
+            &worker_stats,
         );
 
         assert!(matches!(response, crate::Response::Stats(_)));
@@ -1478,6 +1645,8 @@ mod tests {
             std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
         let facility_min_levels = std::sync::RwLock::new(HashMap::new());
 
+        let worker_stats = Mutex::new(HashMap::new());
+
         let (response, action) = handle_supervisor_command(
             crate::SupervisorCommand::SetGlobalLogLevel {
                 level: crate::logging::Severity::Debug,
@@ -1486,6 +1655,7 @@ mod tests {
             &worker_map,
             &global_min_level,
             &facility_min_levels,
+            &worker_stats,
         );
 
         assert!(matches!(response, crate::Response::Success(_)));
@@ -1504,6 +1674,8 @@ mod tests {
             std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
         let facility_min_levels = std::sync::RwLock::new(HashMap::new());
 
+        let worker_stats = Mutex::new(HashMap::new());
+
         let (response, action) = handle_supervisor_command(
             crate::SupervisorCommand::SetFacilityLogLevel {
                 facility: crate::logging::Facility::Ingress,
@@ -1513,6 +1685,7 @@ mod tests {
             &worker_map,
             &global_min_level,
             &facility_min_levels,
+            &worker_stats,
         );
 
         assert!(matches!(response, crate::Response::Success(_)));
@@ -1538,12 +1711,15 @@ mod tests {
             crate::logging::Severity::Debug,
         );
 
+        let worker_stats = Mutex::new(HashMap::new());
+
         let (response, action) = handle_supervisor_command(
             crate::SupervisorCommand::GetLogLevels,
             &master_rules,
             &worker_map,
             &global_min_level,
             &facility_min_levels,
+            &worker_stats,
         );
 
         match response {
@@ -1560,5 +1736,308 @@ mod tests {
             _ => panic!("Expected LogLevels response"),
         }
         assert_eq!(action, CommandAction::None);
+    }
+
+    #[test]
+    fn test_handle_get_stats_multi_worker_aggregation() {
+        let master_rules = Mutex::new(HashMap::new());
+        let worker_map = Mutex::new(HashMap::new());
+        let global_min_level =
+            std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
+        let facility_min_levels = std::sync::RwLock::new(HashMap::new());
+
+        // Simulate stats from 3 data plane workers reporting for the same flow
+        let mut worker_stats_map = HashMap::new();
+
+        // Worker 1: 100 packets, 10000 bytes, 50 pps, 4000 bps
+        worker_stats_map.insert(
+            1001,
+            vec![crate::FlowStats {
+                input_group: "224.0.0.1".parse().unwrap(),
+                input_port: 5000,
+                packets_relayed: 100,
+                bytes_relayed: 10000,
+                packets_per_second: 50.0,
+                bits_per_second: 4000.0,
+            }],
+        );
+
+        // Worker 2: 200 packets, 20000 bytes, 100 pps, 8000 bps
+        worker_stats_map.insert(
+            1002,
+            vec![crate::FlowStats {
+                input_group: "224.0.0.1".parse().unwrap(),
+                input_port: 5000,
+                packets_relayed: 200,
+                bytes_relayed: 20000,
+                packets_per_second: 100.0,
+                bits_per_second: 8000.0,
+            }],
+        );
+
+        // Worker 3: 150 packets, 15000 bytes, 75 pps, 6000 bps
+        worker_stats_map.insert(
+            1003,
+            vec![crate::FlowStats {
+                input_group: "224.0.0.1".parse().unwrap(),
+                input_port: 5000,
+                packets_relayed: 150,
+                bytes_relayed: 15000,
+                packets_per_second: 75.0,
+                bits_per_second: 6000.0,
+            }],
+        );
+
+        let worker_stats = Mutex::new(worker_stats_map);
+
+        let (response, action) = handle_supervisor_command(
+            crate::SupervisorCommand::GetStats,
+            &master_rules,
+            &worker_map,
+            &global_min_level,
+            &facility_min_levels,
+            &worker_stats,
+        );
+
+        match response {
+            crate::Response::Stats(stats) => {
+                assert_eq!(stats.len(), 1, "Should have one aggregated flow");
+                let flow = &stats[0];
+
+                // Check aggregated counters (should be summed)
+                assert_eq!(flow.packets_relayed, 450, "Should sum packets from all workers: 100+200+150");
+                assert_eq!(flow.bytes_relayed, 45000, "Should sum bytes from all workers: 10000+20000+15000");
+
+                // Check aggregated rates (currently summed, not averaged)
+                assert_eq!(flow.packets_per_second, 225.0, "Should sum pps from all workers: 50+100+75");
+                assert_eq!(flow.bits_per_second, 18000.0, "Should sum bps from all workers: 4000+8000+6000");
+
+                // Check flow identification
+                assert_eq!(flow.input_group, "224.0.0.1".parse::<std::net::Ipv4Addr>().unwrap());
+                assert_eq!(flow.input_port, 5000);
+            }
+            _ => panic!("Expected Response::Stats, got {:?}", response),
+        }
+
+        assert_eq!(action, CommandAction::None);
+    }
+
+    #[test]
+    fn test_handle_get_stats_multiple_flows() {
+        let master_rules = Mutex::new(HashMap::new());
+        let worker_map = Mutex::new(HashMap::new());
+        let global_min_level =
+            std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
+        let facility_min_levels = std::sync::RwLock::new(HashMap::new());
+
+        // Simulate 2 workers with different flows
+        let mut worker_stats_map = HashMap::new();
+
+        // Worker 1: Flow A (224.0.0.1:5000) and Flow B (224.0.0.2:5001)
+        worker_stats_map.insert(
+            2001,
+            vec![
+                crate::FlowStats {
+                    input_group: "224.0.0.1".parse().unwrap(),
+                    input_port: 5000,
+                    packets_relayed: 100,
+                    bytes_relayed: 10000,
+                    packets_per_second: 10.0,
+                    bits_per_second: 8000.0,
+                },
+                crate::FlowStats {
+                    input_group: "224.0.0.2".parse().unwrap(),
+                    input_port: 5001,
+                    packets_relayed: 50,
+                    bytes_relayed: 5000,
+                    packets_per_second: 5.0,
+                    bits_per_second: 4000.0,
+                },
+            ],
+        );
+
+        // Worker 2: Only Flow A (224.0.0.1:5000)
+        worker_stats_map.insert(
+            2002,
+            vec![crate::FlowStats {
+                input_group: "224.0.0.1".parse().unwrap(),
+                input_port: 5000,
+                packets_relayed: 200,
+                bytes_relayed: 20000,
+                packets_per_second: 20.0,
+                bits_per_second: 16000.0,
+            }],
+        );
+
+        let worker_stats = Mutex::new(worker_stats_map);
+
+        let (response, action) = handle_supervisor_command(
+            crate::SupervisorCommand::GetStats,
+            &master_rules,
+            &worker_map,
+            &global_min_level,
+            &facility_min_levels,
+            &worker_stats,
+        );
+
+        match response {
+            crate::Response::Stats(stats) => {
+                assert_eq!(stats.len(), 2, "Should have two distinct flows");
+
+                // Find Flow A and Flow B in the results
+                let flow_a = stats.iter().find(|s| s.input_port == 5000).expect("Should have Flow A");
+                let flow_b = stats.iter().find(|s| s.input_port == 5001).expect("Should have Flow B");
+
+                // Flow A: aggregated from both workers
+                assert_eq!(flow_a.packets_relayed, 300, "Flow A packets: 100+200");
+                assert_eq!(flow_a.bytes_relayed, 30000, "Flow A bytes: 10000+20000");
+                assert_eq!(flow_a.packets_per_second, 30.0, "Flow A pps: 10+20");
+
+                // Flow B: only from worker 1
+                assert_eq!(flow_b.packets_relayed, 50, "Flow B packets: 50");
+                assert_eq!(flow_b.bytes_relayed, 5000, "Flow B bytes: 5000");
+                assert_eq!(flow_b.packets_per_second, 5.0, "Flow B pps: 5.0");
+            }
+            _ => panic!("Expected Response::Stats, got {:?}", response),
+        }
+
+        assert_eq!(action, CommandAction::None);
+    }
+
+    #[test]
+    fn test_reject_self_loop_same_interface() {
+        let master_rules = Mutex::new(HashMap::new());
+        let worker_map = Mutex::new(HashMap::new());
+        let global_min_level =
+            std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
+        let facility_min_levels = std::sync::RwLock::new(HashMap::new());
+        let worker_stats = Mutex::new(HashMap::new());
+
+        // Attempt to create a self-loop: eth0 -> eth0
+        let (response, action) = handle_supervisor_command(
+            crate::SupervisorCommand::AddRule {
+                rule_id: "bad-loop".to_string(),
+                input_interface: "eth0".to_string(),
+                input_group: "239.1.1.1".parse().unwrap(),
+                input_port: 5000,
+                outputs: vec![crate::OutputDestination {
+                    group: "239.2.2.2".parse().unwrap(),
+                    port: 5001,
+                    interface: "eth0".to_string(), // Same as input!
+                    dtls_enabled: false,
+                }],
+                dtls_enabled: false,
+            },
+            &master_rules,
+            &worker_map,
+            &global_min_level,
+            &facility_min_levels,
+            &worker_stats,
+        );
+
+        // Should reject with error
+        match response {
+            crate::Response::Error(msg) => {
+                assert!(msg.contains("cannot be the same"));
+                assert!(msg.contains("packet loops"));
+            }
+            _ => panic!("Expected Error response, got {:?}", response),
+        }
+
+        assert_eq!(action, CommandAction::None);
+
+        // Verify rule was not added
+        assert_eq!(master_rules.lock().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_accept_valid_different_interfaces() {
+        let master_rules = Mutex::new(HashMap::new());
+        let worker_map = Mutex::new(HashMap::new());
+        let global_min_level =
+            std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
+        let facility_min_levels = std::sync::RwLock::new(HashMap::new());
+        let worker_stats = Mutex::new(HashMap::new());
+
+        // Valid rule: eth0 -> eth1 (different interfaces)
+        let (response, action) = handle_supervisor_command(
+            crate::SupervisorCommand::AddRule {
+                rule_id: "valid-rule".to_string(),
+                input_interface: "eth0".to_string(),
+                input_group: "239.1.1.1".parse().unwrap(),
+                input_port: 5000,
+                outputs: vec![crate::OutputDestination {
+                    group: "239.2.2.2".parse().unwrap(),
+                    port: 5001,
+                    interface: "eth1".to_string(), // Different from input
+                    dtls_enabled: false,
+                }],
+                dtls_enabled: false,
+            },
+            &master_rules,
+            &worker_map,
+            &global_min_level,
+            &facility_min_levels,
+            &worker_stats,
+        );
+
+        // Should succeed
+        match response {
+            crate::Response::Success(msg) => {
+                assert!(msg.contains("valid-rule"));
+                assert!(msg.contains("added"));
+            }
+            _ => panic!("Expected Success response, got {:?}", response),
+        }
+
+        // Should broadcast to data plane
+        match action {
+            CommandAction::BroadcastToDataPlane(_) => {}
+            _ => panic!("Expected BroadcastToDataPlane action, got {:?}", action),
+        }
+
+        // Verify rule was added
+        assert_eq!(master_rules.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_loopback_allowed_with_warning() {
+        let master_rules = Mutex::new(HashMap::new());
+        let worker_map = Mutex::new(HashMap::new());
+        let global_min_level =
+            std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
+        let facility_min_levels = std::sync::RwLock::new(HashMap::new());
+        let worker_stats = Mutex::new(HashMap::new());
+
+        // Loopback should be allowed but warned
+        let (response, action) = handle_supervisor_command(
+            crate::SupervisorCommand::AddRule {
+                rule_id: "loopback-rule".to_string(),
+                input_interface: "eth0".to_string(),
+                input_group: "239.1.1.1".parse().unwrap(),
+                input_port: 5000,
+                outputs: vec![crate::OutputDestination {
+                    group: "239.2.2.2".parse().unwrap(),
+                    port: 5001,
+                    interface: "lo".to_string(), // Loopback output
+                    dtls_enabled: false,
+                }],
+                dtls_enabled: false,
+            },
+            &master_rules,
+            &worker_map,
+            &global_min_level,
+            &facility_min_levels,
+            &worker_stats,
+        );
+
+        // Should succeed (loopback allowed, just warned)
+        match response {
+            crate::Response::Success(_) => {}
+            _ => panic!("Expected Success response for loopback, got {:?}", response),
+        }
+
+        // Rule should be added despite loopback warning
+        assert_eq!(master_rules.lock().unwrap().len(), 1);
     }
 }

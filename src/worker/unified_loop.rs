@@ -161,6 +161,9 @@ pub struct UnifiedDataPlane {
     config: UnifiedConfig,
     stats: UnifiedStats,
     logger: Logger,
+
+    // Stats pipe for reporting to supervisor (FD 4)
+    stats_pipe: Option<std::fs::File>,
 }
 
 impl UnifiedDataPlane {
@@ -223,6 +226,29 @@ impl UnifiedDataPlane {
         // Set non-blocking
         recv_socket.set_nonblocking(true)?;
 
+        // Open stats pipe (FD 4) for writing stats to supervisor
+        // Only available for data plane workers (not in testing mode)
+        let stats_pipe = {
+            #[cfg(not(feature = "testing"))]
+            {
+                use std::os::fd::{BorrowedFd, FromRawFd};
+                use nix::fcntl::{fcntl, FcntlArg};
+                // Check if FD 4 exists (data plane workers have it, control plane doesn't)
+                // SAFETY: Temporarily borrowing FD 4 to check if it's valid
+                let borrowed_fd = unsafe { BorrowedFd::borrow_raw(4) };
+                match fcntl(borrowed_fd, FcntlArg::F_GETFD) {
+                    Ok(_) => {
+                        // FD 4 exists, open it as a File
+                        // SAFETY: FD 4 is valid (we just checked), and supervisor gave us ownership
+                        Some(unsafe { std::fs::File::from_raw_fd(4) })
+                    }
+                    Err(_) => None, // FD 4 doesn't exist (control plane worker)
+                }
+            }
+            #[cfg(feature = "testing")]
+            None
+        };
+
         let mut unified = Self {
             ring: IoUring::new(config.queue_depth)?,
             recv_socket,
@@ -243,6 +269,7 @@ impl UnifiedDataPlane {
             config,
             stats: UnifiedStats::default(),
             logger,
+            stats_pipe,
         };
 
         // Submit initial command read
@@ -667,7 +694,7 @@ impl UnifiedDataPlane {
 
                 // Log per-flow stats with rates
                 let flow_stats = self.get_flow_stats();
-                for stats in flow_stats {
+                for stats in &flow_stats {
                     self.logger.info(
                         Facility::DataPlane,
                         &format!(
@@ -680,6 +707,17 @@ impl UnifiedDataPlane {
                             stats.bits_per_second
                         ),
                     );
+                }
+
+                // Write stats to pipe for supervisor (non-blocking, fire-and-forget)
+                if let Some(ref mut pipe) = self.stats_pipe {
+                    if let Ok(json) = serde_json::to_vec(&flow_stats) {
+                        use std::io::Write;
+                        // Write with newline delimiter for line-based reading
+                        let _ = writeln!(pipe, "{}", String::from_utf8_lossy(&json));
+                        // Flush is okay here since it's periodic (not per-packet)
+                        let _ = pipe.flush();
+                    }
                 }
             }
         }

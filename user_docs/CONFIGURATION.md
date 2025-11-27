@@ -114,6 +114,12 @@ Adds a new rule to forward an input stream to one or more outputs.
     --outputs <group>:<port>:<interface>[,<group>:<port>:<interface>...]
 ```
 
+**⚠️ Interface Configuration Warnings:**
+
+- **Self-loops are rejected**: If `input-interface` and an output `interface` are the same, the rule will be rejected. This prevents packet feedback loops where transmitted packets are immediately received again, causing exponential packet multiplication and invalid statistics.
+
+- **Loopback interface (`lo`) not recommended**: While allowed, using the loopback interface can cause packet reflection artifacts in testing. AF_PACKET sockets on loopback may receive their own transmitted packets, leading to inflated statistics. Use veth pairs or real network interfaces (eth0, eth1) for accurate testing and production use.
+
 **Arguments:**
 
 | Argument            | Description                                                                                     |
@@ -161,10 +167,65 @@ Displays all currently active forwarding rules.
 
 ### 4.4. Get Statistics
 
-Retrieves and displays performance statistics from the data plane.
+Retrieves and displays aggregated performance statistics from all data plane workers.
 
 ```bash
 ./target/release/control_client stats
+```
+
+#### Output Format
+
+The `stats` command returns JSON with performance metrics for each active flow:
+
+```json
+{
+  "Stats": [
+    {
+      "input_group": "239.1.1.1",
+      "input_port": 5000,
+      "packets_relayed": 30000,
+      "bytes_relayed": 30720000,
+      "packets_per_second": 2903.5920589974367,
+      "bits_per_second": 23786226.147307
+    }
+  ]
+}
+```
+
+#### Field Descriptions
+
+| Field                | Type   | Description                                                                 |
+| :------------------- | :----- | :-------------------------------------------------------------------------- |
+| `input_group`        | String | The multicast group IP address for this flow.                               |
+| `input_port`         | Number | The UDP port for this flow.                                                 |
+| `packets_relayed`    | Number | Total number of packets forwarded (aggregated across all workers).          |
+| `bytes_relayed`      | Number | Total number of bytes forwarded (aggregated across all workers).            |
+| `packets_per_second` | Number | Current packet rate (aggregated across all workers).                        |
+| `bits_per_second`    | Number | Current throughput in bits per second (aggregated across all workers).      |
+
+#### Multi-Worker Aggregation
+
+When running with multiple data plane workers (`--num-workers`), the supervisor automatically aggregates statistics from all workers:
+
+- **Counters** (`packets_relayed`, `bytes_relayed`): Summed across all workers
+- **Rates** (`packets_per_second`, `bits_per_second`): Summed across all workers
+
+**Example:** If Worker 1 reports 10,000 packets at 1000 pps and Worker 2 reports 20,000 packets at 2000 pps for the same flow, the aggregated stats will show 30,000 packets at 3000 pps.
+
+#### Reporting Frequency
+
+Statistics are reported from data plane workers every 10,000 packets processed. This threshold is intentional to minimize overhead on the high-performance data plane. As a result, `packets_relayed` values will typically be multiples of 10,000.
+
+For flows with lower traffic rates, stats may not appear immediately until the 10,000-packet threshold is reached on at least one worker.
+
+#### Empty Stats
+
+If no traffic has been processed, or if no flows have reached the 10,000-packet reporting threshold, the command returns an empty array:
+
+```json
+{
+  "Stats": []
+}
 ```
 
 ### 4.5. Manage Log Levels
