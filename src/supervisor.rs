@@ -383,6 +383,21 @@ pub async fn spawn_data_plane_worker(
         .arg("--fanout-group-id")
         .arg(fanout_group_id.to_string());
 
+    // Pass stats pipe FD via environment variable (secure FD passing)
+    // Clear close-on-exec flag so the FD is inherited
+    #[cfg(not(feature = "testing"))]
+    if let Some(write_fd) = stats_write_fd {
+        command.env("MCR_STATS_PIPE_FD", write_fd.to_string());
+        // Clear FD_CLOEXEC flag to allow FD to be inherited across exec
+        use nix::fcntl::{fcntl, FcntlArg, FdFlag};
+        use std::os::fd::BorrowedFd;
+        let borrowed_fd = unsafe { BorrowedFd::borrow_raw(write_fd) };
+        let flags = fcntl(borrowed_fd, FcntlArg::F_GETFD)?;
+        let mut fd_flags = FdFlag::from_bits_truncate(flags);
+        fd_flags.remove(FdFlag::FD_CLOEXEC);
+        fcntl(borrowed_fd, FcntlArg::F_SETFD(fd_flags))?;
+    }
+
     // Ensure worker_sock becomes FD 3 in the child, and redirect stderr to pipe
     unsafe {
         command.pre_exec(move || {
@@ -413,20 +428,11 @@ pub async fn spawn_data_plane_worker(
                 }
             }
 
-            // Set up stats pipe as FD 4
+            // Close stats read end in child (not needed)
             #[cfg(not(feature = "testing"))]
-            if let Some(write_fd) = stats_write_fd {
-                if libc::dup2(write_fd, 4) == -1 {
+            if let Some(read_fd) = stats_read_fd {
+                if libc::close(read_fd) == -1 {
                     return Err(std::io::Error::last_os_error());
-                }
-                if libc::close(write_fd) == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                // Also close read end in child (not needed)
-                if let Some(read_fd) = stats_read_fd {
-                    if libc::close(read_fd) == -1 {
-                        return Err(std::io::Error::last_os_error());
-                    }
                 }
             }
 

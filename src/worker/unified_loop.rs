@@ -226,23 +226,33 @@ impl UnifiedDataPlane {
         // Set non-blocking
         recv_socket.set_nonblocking(true)?;
 
-        // Open stats pipe (FD 4) for writing stats to supervisor
+        // Open stats pipe for writing stats to supervisor
         // Only available for data plane workers (not in testing mode)
+        // FD is passed via MCR_STATS_PIPE_FD environment variable for security
         let stats_pipe = {
             #[cfg(not(feature = "testing"))]
             {
                 use nix::fcntl::{fcntl, FcntlArg};
                 use std::os::fd::{BorrowedFd, FromRawFd};
-                // Check if FD 4 exists (data plane workers have it, control plane doesn't)
-                // SAFETY: Temporarily borrowing FD 4 to check if it's valid
-                let borrowed_fd = unsafe { BorrowedFd::borrow_raw(4) };
-                match fcntl(borrowed_fd, FcntlArg::F_GETFD) {
-                    Ok(_) => {
-                        // FD 4 exists, open it as a File
-                        // SAFETY: FD 4 is valid (we just checked), and supervisor gave us ownership
-                        Some(unsafe { std::fs::File::from_raw_fd(4) })
+
+                // Read stats pipe FD from environment variable (secure FD passing)
+                if let Ok(fd_str) = std::env::var("MCR_STATS_PIPE_FD") {
+                    if let Ok(stats_fd) = fd_str.parse::<i32>() {
+                        // Validate FD exists before using it
+                        let borrowed_fd = unsafe { BorrowedFd::borrow_raw(stats_fd) };
+                        match fcntl(borrowed_fd, FcntlArg::F_GETFD) {
+                            Ok(_) => {
+                                // FD is valid, open it as a File
+                                // SAFETY: FD is valid (we just checked), and supervisor gave us ownership
+                                Some(unsafe { std::fs::File::from_raw_fd(stats_fd) })
+                            }
+                            Err(_) => None, // FD is invalid
+                        }
+                    } else {
+                        None // Failed to parse FD number
                     }
-                    Err(_) => None, // FD 4 doesn't exist (control plane worker)
+                } else {
+                    None // No stats pipe FD provided (control plane worker or testing)
                 }
             }
             #[cfg(feature = "testing")]
