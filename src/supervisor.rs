@@ -288,7 +288,8 @@ pub async fn spawn_control_plane_worker(
         .arg("--gid")
         .arg(gid.to_string())
         .arg("--relay-command-socket-path")
-        .arg(relay_command_socket_path);
+        .arg(relay_command_socket_path)
+        .process_group(0); // Put worker in its own process group to prevent SIGTERM propagation
 
     if let Some(addr) = prometheus_addr {
         command.arg("--prometheus-addr").arg(addr.to_string());
@@ -381,7 +382,8 @@ pub async fn spawn_data_plane_worker(
         .arg("--input-interface-name")
         .arg(interface)
         .arg("--fanout-group-id")
-        .arg(fanout_group_id.to_string());
+        .arg(fanout_group_id.to_string())
+        .process_group(0); // Put worker in its own process group to prevent SIGTERM propagation
 
     // Pass stats pipe FD via environment variable (secure FD passing)
     // Clear close-on-exec flag so the FD is inherited
@@ -716,6 +718,9 @@ impl WorkerManager {
             "Graceful shutdown initiated, signaling workers"
         );
 
+        // Collect join handles for shutdown command sends
+        let mut shutdown_tasks = Vec::new();
+
         // Signal all workers to shut down by sending explicit Shutdown command
         for worker in self.workers.values() {
             let cmd_bytes = serde_json::to_vec(&RelayCommand::Shutdown).unwrap();
@@ -726,7 +731,7 @@ impl WorkerManager {
                 let worker_type_desc = format!("{:?}", worker.worker_type);
                 let cmd_bytes_clone = cmd_bytes.clone();
 
-                tokio::spawn(async move {
+                let task = tokio::spawn(async move {
                     let mut stream = stream_mutex.lock().await;
                     let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
                     if let Err(e) = framed.send(cmd_bytes_clone.into()).await {
@@ -736,6 +741,7 @@ impl WorkerManager {
                         );
                     }
                 });
+                shutdown_tasks.push(task);
             }
 
             // Send to egress stream if present (for data plane workers, this is a separate stream)
@@ -744,7 +750,7 @@ impl WorkerManager {
                 let worker_type_desc = format!("{:?}", worker.worker_type);
                 let cmd_bytes_clone = cmd_bytes.clone();
 
-                tokio::spawn(async move {
+                let task = tokio::spawn(async move {
                     let mut stream = stream_mutex.lock().await;
                     let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
                     if let Err(e) = framed.send(cmd_bytes_clone.into()).await {
@@ -754,8 +760,29 @@ impl WorkerManager {
                         );
                     }
                 });
+                shutdown_tasks.push(task);
             }
         }
+
+        // Wait for all shutdown commands to be sent (with 1 second timeout)
+        let send_timeout = Duration::from_secs(1);
+        match tokio::time::timeout(send_timeout, futures::future::join_all(shutdown_tasks)).await {
+            Ok(_) => {
+                eprintln!("[Supervisor] All shutdown commands sent successfully");
+            }
+            Err(_) => {
+                eprintln!("[Supervisor] Warning: Timeout sending shutdown commands");
+            }
+        }
+
+        // Grace period: Give workers time to process shutdown and print final stats
+        // This allows workers to cleanly exit their event loops and call print_final_stats()
+        let grace_period = Duration::from_millis(500);
+        eprintln!(
+            "[Supervisor] Waiting {:?} grace period for workers to process shutdown",
+            grace_period
+        );
+        tokio::time::sleep(grace_period).await;
 
         // Wait for all workers to exit with timeout
         let num_workers = self.workers.len();

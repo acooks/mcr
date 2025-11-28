@@ -57,13 +57,7 @@ ip netns add "$NETNS"
 source "$SCRIPT_DIR/common.sh"
 
 # Set up cleanup trap
-cleanup_namespace() {
-    echo "[INFO] Running cleanup"
-    sudo ip netns pids "$NETNS" 2>/dev/null | xargs -r sudo kill 2>/dev/null || true
-    sudo ip netns del "$NETNS" 2>/dev/null || true
-    echo "[INFO] Cleanup complete"
-}
-trap cleanup_namespace EXIT
+trap 'graceful_cleanup_namespace "$NETNS" mcr1_PID mcr2_PID' EXIT
 
 log_section 'Network Namespace Setup'
 

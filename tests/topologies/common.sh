@@ -114,6 +114,39 @@ start_mcr() {
     # Clean up any existing sockets
     rm -f "$control_socket"
 
+    # Wait for interface to be ready (critical for network namespace timing)
+    local timeout=5
+    local elapsed=0
+    if [ -n "$netns" ]; then
+        while ! sudo ip netns exec "$netns" ip link show "$interface" >/dev/null 2>&1; do
+            if [ $elapsed -ge $timeout ]; then
+                log_error "Timeout waiting for interface $interface in namespace $netns"
+                return 1
+            fi
+            sleep 0.1
+            elapsed=$((elapsed + 1))
+        done
+        # Ensure interface is UP
+        while ! sudo ip netns exec "$netns" ip link show "$interface" | grep -q 'state UP'; do
+            if [ $elapsed -ge $((timeout * 2)) ]; then
+                log_error "Timeout waiting for interface $interface to be UP in namespace $netns"
+                return 1
+            fi
+            sleep 0.1
+            elapsed=$((elapsed + 1))
+        done
+        log_info "Interface $interface is ready (state UP)"
+    else
+        while ! ip link show "$interface" >/dev/null 2>&1; do
+            if [ $elapsed -ge $timeout ]; then
+                log_error "Timeout waiting for interface $interface"
+                return 1
+            fi
+            sleep 0.1
+            elapsed=$((elapsed + 1))
+        done
+    fi
+
     # If namespace specified, run in that namespace
     # Note: sudo is required for ip netns exec, and the redirection must be inside the sudo context
     if [ -n "$netns" ]; then
@@ -245,21 +278,52 @@ extract_stat() {
 
     # For ingress stats, prefer FINAL stats for accuracy
     if [[ "$stat_type" == "STATS:Ingress" ]]; then
-        # Try to get FINAL stats first
+        # Try to get FINAL stats first (old format)
         local final_value=$(grep "\[STATS:Ingress FINAL\]" "$log_file" | tail -1 | grep -oP "$field=\K[0-9]+" || echo "")
         if [ -n "$final_value" ]; then
             echo "$final_value"
             return
         fi
+
+        # Try new unified stats format [STATS]
+        if [[ "$field" == "matched" || "$field" == "buf_exhaust" || "$field" == "rx" || "$field" == "not_matched" ]]; then
+            # Use word boundary \b to ensure exact field match (e.g., "matched" not "not_matched")
+            final_value=$(grep "\[STATS\]" "$log_file" | tail -1 | grep -oP "\b$field=\K[0-9]+" || echo "")
+            if [ -n "$final_value" ]; then
+                echo "$final_value"
+                return
+            fi
+        fi
     fi
 
-    # Fall back to last periodic stat
+    # For egress stats
+    if [[ "$stat_type" == "STATS:Egress" ]]; then
+        # Try to get FINAL stats first (old format)
+        local final_value=$(grep "\[STATS:Egress FINAL\]" "$log_file" | tail -1 | grep -oP "$field=\K[0-9]+" || echo "")
+        if [ -n "$final_value" ]; then
+            echo "$final_value"
+            return
+        fi
+
+        # Try new unified stats format [STATS] with "sent" or "tx" field
+        if [[ "$field" == "sent" ]]; then
+            # New format uses "tx" instead of "sent" - use word boundary
+            final_value=$(grep "\[STATS\]" "$log_file" | tail -1 | grep -oP "\btx=\K[0-9]+" || echo "")
+            if [ -n "$final_value" ]; then
+                echo "$final_value"
+                return
+            fi
+        fi
+    fi
+
+    # Fall back to last periodic stat (old format)
     # Use tail -100000 to handle high-volume trace logs that bury stats
     # With TRACE logging enabled, logs can exceed 300k lines, so stats may be 50k+ lines from end
+    # Use word boundary to ensure exact field match
     tail -100000 "$log_file" | \
         grep "\[$stat_type\]" | \
         tail -1 | \
-        grep -oP "$field=\K[0-9]+" || echo "0"
+        grep -oP "\b$field=\K[0-9]+" || echo "0"
 }
 
 # Validate stats meet expectations
@@ -302,6 +366,38 @@ stop_log_monitor() {
 }
 
 # --- Cleanup ---
+
+# Graceful cleanup for network namespace with proper supervisor shutdown
+# Usage: graceful_cleanup_namespace <netns_name> <supervisor_pid_var_names...>
+# Example: graceful_cleanup_namespace "$NETNS" mcr1_PID mcr2_PID mcr3_PID
+graceful_cleanup_namespace() {
+    local netns="$1"
+    shift  # Remove first arg, rest are PID variable names
+
+    log_info "Running graceful cleanup"
+
+    # Send SIGTERM to supervisor processes only (for graceful shutdown)
+    # Workers are in their own process groups and will be shutdown via command
+    for pid_var in "$@"; do
+        local pid="${!pid_var}"
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            log_info "Sending SIGTERM to supervisor PID $pid ($pid_var)"
+            sudo kill -TERM "$pid" 2>/dev/null || true
+        fi
+    done
+
+    # Wait for graceful shutdown (includes 500ms grace period + worker exit time)
+    log_info "Waiting for graceful shutdown..."
+    sleep 2
+
+    # Force-kill any remaining processes in namespace
+    log_info "Force-killing any remaining processes"
+    sudo ip netns pids "$netns" 2>/dev/null | xargs -r sudo kill -9 2>/dev/null || true
+
+    # Remove namespace
+    sudo ip netns del "$netns" 2>/dev/null || true
+    log_info "Cleanup complete"
+}
 
 # Kill all MCR processes
 cleanup_mcr_processes() {
