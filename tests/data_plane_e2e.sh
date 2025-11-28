@@ -24,21 +24,26 @@ TRAFFIC_GENERATOR_BINARY="target/release/traffic_generator"
 # Use unique paths to avoid conflicts between concurrent test runs
 TEST_ID="$$"
 NS_NAME="mcr_e2e_${TEST_ID}"
-VETH_HOST="vh${TEST_ID}"
-VETH_NS="vn${TEST_ID}"
+# Create TWO veth pairs to avoid same-interface restriction
+VETH_IN_HOST="vhin${TEST_ID}"   # Host-side of ingress veth
+VETH_IN_NS="vnin${TEST_ID}"     # Namespace-side of ingress veth (MCR receives here)
+VETH_OUT_HOST="vhout${TEST_ID}" # Host-side of egress veth
+VETH_OUT_NS="vnout${TEST_ID}"   # Namespace-side of egress veth (MCR sends here)
 SUPERVISOR_SOCKET=$(mktemp -u --tmpdir mcr_supervisor_XXXXXX.sock)
 LISTENER_OUTPUT_FILE="/tmp/mcr_e2e_listener_${TEST_ID}.txt"
 
 # Network configuration
-IP_HOST="192.168.100.1/24"
-IP_NS="192.168.100.2/24"
-IP_NS_ADDR="192.168.100.2"  # Without CIDR for traffic generator
+IP_IN_HOST="192.168.100.1/24"
+IP_IN_NS="192.168.100.2/24"
+IP_IN_NS_ADDR="192.168.100.2"  # Without CIDR for traffic generator
+IP_OUT_HOST="192.168.101.1/24"
+IP_OUT_NS="192.168.101.2/24"
 
 # Test parameters
-INPUT_INTERFACE="$VETH_NS"
+INPUT_INTERFACE="$VETH_IN_NS"
 INPUT_GROUP="239.1.1.1"
 INPUT_PORT="5001"
-OUTPUT_INTERFACE="$VETH_NS"
+OUTPUT_INTERFACE="$VETH_OUT_NS"
 OUTPUT_GROUP="239.10.10.10"
 OUTPUT_PORT="6001"
 PACKET_COUNT=100
@@ -77,22 +82,36 @@ echo ""
 # --- Setup Network Namespace ---
 echo "--- Setting up network namespace ($NS_NAME) ---"
 sudo ip netns add "$NS_NAME"
-sudo ip link add "$VETH_HOST" type veth peer name "$VETH_NS"
-sudo ip link set "$VETH_NS" netns "$NS_NAME"
 
-sudo ip addr add "$IP_HOST" dev "$VETH_HOST"
-sudo ip link set "$VETH_HOST" up
+# Create ingress veth pair (for receiving traffic from generator)
+sudo ip link add "$VETH_IN_HOST" type veth peer name "$VETH_IN_NS"
+sudo ip link set "$VETH_IN_NS" netns "$NS_NAME"
+sudo ip addr add "$IP_IN_HOST" dev "$VETH_IN_HOST"
+sudo ip link set "$VETH_IN_HOST" up
 
-sudo ip netns exec "$NS_NAME" ip addr add "$IP_NS" dev "$VETH_NS"
-sudo ip netns exec "$NS_NAME" ip link set "$VETH_NS" up
+sudo ip netns exec "$NS_NAME" ip addr add "$IP_IN_NS" dev "$VETH_IN_NS"
+sudo ip netns exec "$NS_NAME" ip link set "$VETH_IN_NS" up
+
+# Create egress veth pair (for sending relayed traffic to listener)
+sudo ip link add "$VETH_OUT_HOST" type veth peer name "$VETH_OUT_NS"
+sudo ip link set "$VETH_OUT_NS" netns "$NS_NAME"
+sudo ip addr add "$IP_OUT_HOST" dev "$VETH_OUT_HOST"
+sudo ip link set "$VETH_OUT_HOST" up
+
+sudo ip netns exec "$NS_NAME" ip addr add "$IP_OUT_NS" dev "$VETH_OUT_NS"
+sudo ip netns exec "$NS_NAME" ip link set "$VETH_OUT_NS" up
+
+# Enable loopback
 sudo ip netns exec "$NS_NAME" ip link set lo up
 
-# Add multicast route for the traffic generator
-# The traffic generator uses UDP sockets which require kernel routing
+# Add multicast routes for the traffic generator and listener
+# The traffic generator and listener use UDP sockets which require kernel routing
 # The relay itself works at Layer 2 and doesn't need routes
-sudo ip netns exec "$NS_NAME" ip route add 224.0.0.0/4 dev "$VETH_NS"
+sudo ip netns exec "$NS_NAME" ip route add 224.0.0.0/4 dev "$VETH_IN_NS"
 
-echo "Network namespace created successfully"
+echo "Network namespace created successfully with dual veth pairs"
+echo "  Ingress:  $VETH_IN_NS ($IP_IN_NS)"
+echo "  Egress:   $VETH_OUT_NS ($IP_OUT_NS)"
 echo ""
 
 # --- Start Supervisor ---
@@ -134,8 +153,9 @@ echo ""
 # --- Start UDP Listener ---
 echo "--- Starting UDP listener (socat) in namespace ---"
 # Redirect socat's stdout to file (avoids permission issues with OPEN)
+# Listener binds to OUTPUT interface to receive relayed traffic
 sudo ip netns exec "$NS_NAME" \
-    socat -u UDP4-RECV:${OUTPUT_PORT},ip-add-membership="${OUTPUT_GROUP}:${INPUT_INTERFACE}" \
+    socat -u UDP4-RECV:${OUTPUT_PORT},ip-add-membership="${OUTPUT_GROUP}:${OUTPUT_INTERFACE}" \
     STDOUT > "$LISTENER_OUTPUT_FILE" &
 LISTENER_PID=$!
 sleep 1 # Give the listener time to bind
@@ -153,7 +173,7 @@ echo ""
 # --- Send Initial Burst ---
 echo "--- Sending packets to be relayed ---"
 sudo ip netns exec "$NS_NAME" "$TRAFFIC_GENERATOR_BINARY" \
-    --interface "$IP_NS_ADDR" \
+    --interface "$IP_IN_NS_ADDR" \
     --group "$INPUT_GROUP" \
     --port "$INPUT_PORT" \
     --count "$PACKET_COUNT" \
