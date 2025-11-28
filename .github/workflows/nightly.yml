@@ -1,0 +1,163 @@
+name: Nightly Comprehensive Tests
+
+on:
+  schedule:
+    # Run at 2 AM UTC every night
+    - cron: '0 2 * * *'
+  workflow_dispatch:  # Allow manual trigger
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  topology-tests:
+    name: Topology Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        test:
+          - baseline_50k
+          - baseline_100k
+          - chain_3hop
+          - tree_fanout
+      fail-fast: false  # Continue testing other topologies even if one fails
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Build release binaries
+      run: |
+        cargo build --release --bins
+
+    - name: Run topology test - ${{ matrix.test }}
+      run: |
+        sudo bash tests/topologies/${{ matrix.test }}.sh
+
+    - name: Extract performance metrics
+      if: always()
+      run: |
+        echo "=== Topology Test: ${{ matrix.test }} ===" > metrics-${{ matrix.test }}.txt
+        echo "Timestamp: $(date -u)" >> metrics-${{ matrix.test }}.txt
+        echo "Commit: ${{ github.sha }}" >> metrics-${{ matrix.test }}.txt
+        echo "Branch: ${{ github.ref_name }}" >> metrics-${{ matrix.test }}.txt
+        echo "" >> metrics-${{ matrix.test }}.txt
+
+        # Extract key metrics from logs
+        echo "=== Performance Metrics ===" >> metrics-${{ matrix.test }}.txt
+        grep -E "pps|Gbps|packets sent|packets received|SUCCESS|FAILED" /tmp/*.log 2>/dev/null >> metrics-${{ matrix.test }}.txt || echo "No metrics found" >> metrics-${{ matrix.test }}.txt
+
+        echo "" >> metrics-${{ matrix.test }}.txt
+        echo "=== Test Outcome ===" >> metrics-${{ matrix.test }}.txt
+        if grep -q "SUCCESS" /tmp/*.log 2>/dev/null; then
+          echo "✅ Test passed" >> metrics-${{ matrix.test }}.txt
+        else
+          echo "❌ Test failed or incomplete" >> metrics-${{ matrix.test }}.txt
+        fi
+
+        cat metrics-${{ matrix.test }}.txt
+
+    - name: Upload test results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: topology-metrics-${{ matrix.test }}
+        path: |
+          metrics-${{ matrix.test }}.txt
+          /tmp/mcr_*.log
+          /tmp/test_*.log
+
+  baseline-analysis:
+    name: Analyze Performance Baselines
+    needs: topology-tests
+    runs-on: ubuntu-latest
+    if: always()
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Download all topology metrics
+      uses: actions/download-artifact@v4
+      with:
+        path: all-metrics
+
+    - name: Aggregate and analyze metrics
+      run: |
+        echo "=== Nightly Test Summary ===" > nightly-summary.txt
+        echo "Date: $(date -u)" >> nightly-summary.txt
+        echo "Commit: ${{ github.sha }}" >> nightly-summary.txt
+        echo "" >> nightly-summary.txt
+
+        # Aggregate all test results
+        for dir in all-metrics/topology-metrics-*/; do
+          if [ -d "$dir" ]; then
+            echo "=== $(basename $dir) ===" >> nightly-summary.txt
+            cat "$dir"/metrics-*.txt >> nightly-summary.txt
+            echo "" >> nightly-summary.txt
+          fi
+        done
+
+        cat nightly-summary.txt
+
+    - name: Upload aggregated results
+      uses: actions/upload-artifact@v4
+      with:
+        name: nightly-test-summary
+        path: nightly-summary.txt
+
+    - name: Check for failures
+      run: |
+        if grep -q "❌ Test failed" all-metrics/*/metrics-*.txt 2>/dev/null; then
+          echo "::error::One or more topology tests failed"
+          exit 1
+        fi
+
+  integration-stress:
+    name: Integration Stress Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Build integration test binaries
+      run: |
+        cargo build --release --bins
+        cargo test --test integration --no-run --release
+
+    - name: Run integration test suite (full run)
+      run: |
+        TEST_BINARY=$(find target/release/deps -name 'integration-*' -type f -executable ! -name '*.d' | head -1)
+        if [ -z "$TEST_BINARY" ]; then
+          echo "ERROR: Integration test binary not found"
+          exit 1
+        fi
+
+        echo "Running full integration test suite..."
+        sudo -E "$TEST_BINARY" --test-threads=1 2>&1 | tee integration-results.txt
+
+    - name: Check integration test results
+      if: always()
+      run: |
+        if grep -q "test result: ok" integration-results.txt; then
+          echo "✅ All integration tests passed"
+        else
+          echo "::error::Integration tests failed"
+          exit 1
+        fi
+
+    - name: Upload integration test results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: integration-stress-results
+        path: integration-results.txt
