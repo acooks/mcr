@@ -111,6 +111,16 @@ log_info 'Traffic generation complete'
 log_info 'Waiting for pipeline to flush...'
 sleep 3
 
+# Trigger graceful shutdown to get FINAL stats before validation
+log_info 'Triggering graceful shutdown for FINAL stats...'
+if [ -n "$mcr1_PID" ] && sudo kill -0 "$mcr1_PID" 2>/dev/null; then
+    sudo kill -TERM "$mcr1_PID" 2>/dev/null || true
+fi
+if [ -n "$mcr2_PID" ] && sudo kill -0 "$mcr2_PID" 2>/dev/null; then
+    sudo kill -TERM "$mcr2_PID" 2>/dev/null || true
+fi
+sleep 2  # Wait for FINAL stats to be written
+
 # Print final stats
 print_final_stats \
     'MCR-1:/tmp/mcr1.log' \

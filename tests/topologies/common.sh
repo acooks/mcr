@@ -249,8 +249,9 @@ get_stats() {
         return 1
     fi
 
-    # Get last ingress and egress stats lines
-    tail -50 "$log_file" | grep -E "\[STATS:(Ingress|Egress)\]" | tail -2 || true
+    # Get FINAL stats lines (graceful shutdown stats)
+    # Format: [STATS:Ingress FINAL] and [STATS:Egress FINAL]
+    tail -50 "$log_file" | grep -E "\[STATS:(Ingress|Egress) FINAL\]" | tail -2 || true
 }
 
 # Print final stats for all MCR instances
