@@ -458,24 +458,23 @@ async fn test_get_stats_e2e() -> Result<()> {
 /// **Stress Test: Maximum Worker Creation**
 ///
 /// This test verifies that the supervisor can reliably spawn the maximum number of workers
-/// (one per CPU core) without resource exhaustion or EAGAIN errors.
+/// (one per CPU core) and handle resource exhaustion gracefully through automatic restarts.
 ///
-/// **Why this test is separate:**
-/// - Spawning many workers (e.g., 20 on a 20-core system) can cause resource exhaustion
+/// **Expected behavior:**
+/// - Some workers may hit EAGAIN errors during initialization (normal for high worker counts)
+/// - The supervisor automatically detects failures and restarts workers with exponential backoff
+/// - All workers eventually start successfully, demonstrating supervisor resilience
+///
+/// **Why this test takes longer:**
+/// - Spawning many workers (e.g., 20 on a 20-core system) is resource-intensive
 /// - Other tests should use a small number of workers (2) for fast, reliable execution
-/// - This test is marked `#[ignore]` so it doesn't run in normal test suites
+/// - This test runs sequentially with all integration tests (--test-threads=1) to avoid contention
 ///
-/// **How to run this test:**
-/// ```bash
-/// sudo -E cargo test --test integration test_max_workers_spawning --release -- --ignored --nocapture
-/// ```
-///
-/// **Known issues:**
-/// - May fail with "EAGAIN: Try again" on systems with many cores and limited resources
-/// - Requires sufficient file descriptors (ulimit -n should be high enough)
+/// **Requirements:**
+/// - Sufficient file descriptors (ulimit -n should be high enough)
 /// - May be slow to start up due to io_uring initialization for each worker
+/// - Runs sequentially with other integration tests (--test-threads=1) to avoid resource contention
 #[tokio::test]
-#[ignore] // Run explicitly with --ignored flag
 async fn test_max_workers_spawning() -> Result<()> {
     // Check for root privileges
     if unsafe { libc::getuid() } != 0 {
