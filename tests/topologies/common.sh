@@ -399,7 +399,39 @@ graceful_cleanup_namespace() {
     log_info "Cleanup complete"
 }
 
-# Kill all MCR processes
+# Graceful cleanup for unshare contexts (ephemeral namespaces)
+# Usage: graceful_cleanup_unshare <supervisor_pid_var_names...>
+# Example: graceful_cleanup_unshare mcr1_PID mcr2_PID mcr3_PID
+graceful_cleanup_unshare() {
+    log_info "Running graceful cleanup"
+
+    # Send SIGTERM to supervisor processes only (for graceful shutdown)
+    # Workers are in their own process groups and will be shutdown via command
+    for pid_var in "$@"; do
+        local pid="${!pid_var}"
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            log_info "Sending SIGTERM to supervisor PID $pid ($pid_var)"
+            kill -TERM "$pid" 2>/dev/null || true
+        fi
+    done
+
+    # Wait for graceful shutdown (includes 500ms grace period + worker exit time)
+    log_info "Waiting for graceful shutdown..."
+    sleep 2
+
+    # Force-kill any remaining MCR processes
+    log_info "Force-killing any remaining processes"
+    killall -q -9 multicast_relay 2>/dev/null || true
+    killall -q -9 traffic_generator 2>/dev/null || true
+
+    # Clean up socket files
+    rm -f /tmp/mcr*.sock
+    rm -f /tmp/mcr*_relay.sock
+
+    log_info "Cleanup complete"
+}
+
+# Kill all MCR processes (legacy - prefer graceful_cleanup_unshare)
 cleanup_mcr_processes() {
     log_info "Cleaning up MCR processes"
     killall -q multicast_relay || true
@@ -413,7 +445,7 @@ cleanup_sockets() {
     rm -f /tmp/mcr*_relay.sock
 }
 
-# Full cleanup (call from trap)
+# Full cleanup (call from trap) - legacy, prefer graceful_cleanup_unshare
 cleanup_all() {
     log_info "Running cleanup"
     cleanup_mcr_processes

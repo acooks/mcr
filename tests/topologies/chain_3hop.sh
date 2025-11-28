@@ -51,7 +51,7 @@ set -euo pipefail
 source $SCRIPT_DIR/common.sh
 
 # Set up cleanup trap
-trap cleanup_all EXIT
+trap 'graceful_cleanup_unshare mcr1_PID mcr2_PID mcr3_PID' EXIT
 
 log_section 'Network Namespace Setup'
 
