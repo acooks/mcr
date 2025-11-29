@@ -22,9 +22,10 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$PROJECT_ROOT"
 
 # Test parameters - conservative for 100% success
-PACKET_SIZE=1400
-PACKET_COUNT=100000   # 100k packets total
-SEND_RATE=100000       # 100k pps - well within single-core capacity
+# Allow override via environment variables for packet rate sweep testing
+PACKET_SIZE=${PACKET_SIZE:-1400}
+PACKET_COUNT=${PACKET_COUNT:-100000}   # 100k packets total
+SEND_RATE=${SEND_RATE:-100000}         # 100k pps - well within single-core capacity
 
 # Namespace name
 NETNS="mcr_baseline_test"
@@ -78,7 +79,7 @@ log_section 'Starting MCR Instances'
 # MCR-1 listens on veth-mcr0 (ingress from br0), sends on veth-mcr1a (egress to br1)
 # MCR-2 listens on veth-mcr1b (ingress from br1)
 start_mcr mcr1 veth-mcr0 /tmp/mcr1.sock /tmp/mcr1.log 0 "$NETNS"
-start_mcr mcr2 veth-mcr1b /tmp/mcr2.sock /tmp/mcr2.log 1 "$NETNS"
+start_mcr mcr2 veth-mcr1b /tmp/mcr2.sock /tmp/mcr2.log 2 "$NETNS"
 
 # Wait for instances to be ready
 wait_for_sockets /tmp/mcr1.sock /tmp/mcr2.sock
@@ -112,11 +113,32 @@ log_info 'Waiting for pipeline to flush...'
 sleep 3
 
 # Trigger graceful shutdown to get FINAL stats before validation
+# IMPORTANT: Kill MCR-1 (sender) first and wait for it to drain its egress queue.
+# Then kill MCR-2 (receiver) so it can receive all packets MCR-1 is flushing.
 log_info 'Triggering graceful shutdown for FINAL stats...'
+
+# Step 1: Kill MCR-1 first (the sender)
 if [ -n "$mcr1_PID" ] && sudo kill -0 "$mcr1_PID" 2>/dev/null; then
+    log_info "Sending SIGTERM to MCR-1 (PID $mcr1_PID) to drain egress queue..."
     sudo kill -TERM "$mcr1_PID" 2>/dev/null || true
 fi
+
+# Step 2: Wait for MCR-1 to fully exit (drains its send queue)
+log_info 'Waiting for MCR-1 to drain and exit...'
+for i in $(seq 1 30); do
+    if [ -n "$mcr1_PID" ] && ! sudo kill -0 "$mcr1_PID" 2>/dev/null; then
+        log_info "MCR-1 exited after ${i}00ms"
+        break
+    fi
+    sleep 0.1
+done
+
+# Step 3: Give bridge time to forward any remaining packets to MCR-2
+sleep 1
+
+# Step 4: Now kill MCR-2 (the receiver)
 if [ -n "$mcr2_PID" ] && sudo kill -0 "$mcr2_PID" 2>/dev/null; then
+    log_info "Sending SIGTERM to MCR-2 (PID $mcr2_PID)..."
     sudo kill -TERM "$mcr2_PID" 2>/dev/null || true
 fi
 sleep 2  # Wait for FINAL stats to be written

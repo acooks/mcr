@@ -83,7 +83,6 @@ setup_bridge_topology() {
     sudo ip netns exec "$netns" ip addr add "$gen_ip" dev "$gen_veth"
     sudo ip netns exec "$netns" ip link set "$gen_veth" up
     sudo ip netns exec "$netns" ip link set "$gen_veth_peer" up
-
     # Create veth pair for MCR
     sudo ip netns exec "$netns" ip link add "$mcr_veth" type veth peer name "$mcr_veth_peer"
     sudo ip netns exec "$netns" ip addr add "$mcr_ip" dev "$mcr_veth"
@@ -94,7 +93,51 @@ setup_bridge_topology() {
     sudo ip netns exec "$netns" ip link set "$gen_veth_peer" master "$bridge"
     sudo ip netns exec "$netns" ip link set "$mcr_veth_peer" master "$bridge"
 
+    # Wait for bridge ports to reach forwarding state
+    wait_for_bridge_forwarding "$netns" "$bridge" "$gen_veth_peer" "$mcr_veth_peer"
+
     log_info "Bridge topology created: Generator($gen_veth:$gen_ip) <-> Bridge($bridge) <-> MCR($mcr_veth:$mcr_ip)"
+}
+
+# Wait for bridge ports to reach forwarding state
+# STP can delay ports through listening/learning states (30+ seconds by default)
+# This function waits until all specified ports are forwarding, or times out
+# Usage: wait_for_bridge_forwarding <netns> <bridge> <port1> [port2] ...
+wait_for_bridge_forwarding() {
+    local netns="$1"
+    local bridge="$2"
+    shift 2
+    local ports=("$@")
+
+    local timeout=10
+    local start=$(date +%s)
+
+    log_info "Waiting for bridge $bridge ports to reach forwarding state..."
+
+    for port in "${ports[@]}"; do
+        while true; do
+            # Get port state from bridge link output
+            # State can be: disabled, blocking, listening, learning, forwarding
+            local state=$(sudo ip netns exec "$netns" bridge link show dev "$port" 2>/dev/null | grep -oP 'state \K\w+' || echo "unknown")
+
+            if [ "$state" = "forwarding" ]; then
+                log_info "Bridge port $port is forwarding"
+                break
+            fi
+
+            if [ "$(($(date +%s) - start))" -gt "$timeout" ]; then
+                log_error "Timeout waiting for bridge port $port to reach forwarding state (current: $state)"
+                log_error "Bridge may have STP enabled with long forward delay"
+                # Show bridge STP status for debugging
+                sudo ip netns exec "$netns" bridge link show dev "$port" >&2 || true
+                return 1
+            fi
+
+            sleep 0.1
+        done
+    done
+
+    log_info "All bridge ports are forwarding"
 }
 
 # --- MCR Instance Management ---
@@ -148,9 +191,9 @@ start_mcr() {
     fi
 
     # If namespace specified, run in that namespace
-    # Note: sudo is required for ip netns exec, and the redirection must be inside the sudo context
+    # Note: sudo -E is required to preserve environment variables like MCR_STATS_INTERVAL_MS
     if [ -n "$netns" ]; then
-        sudo ip netns exec "$netns" taskset -c "$core_id" "$RELAY_BINARY" supervisor \
+        sudo -E ip netns exec "$netns" taskset -c "$core_id" "$RELAY_BINARY" supervisor \
             --control-socket-path "$control_socket" \
             --interface "$interface" \
             --num-workers 1 \
