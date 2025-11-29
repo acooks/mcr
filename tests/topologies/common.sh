@@ -390,6 +390,26 @@ validate_stat() {
     fi
 }
 
+# Validate a statistic is at most a maximum value
+# Usage: validate_stat_max <log_file> <stat_type> <field> <max_value> <description>
+validate_stat_max() {
+    local log_file="$1"
+    local stat_type="$2"
+    local field="$3"
+    local max_value="$4"
+    local description="$5"
+
+    local actual=$(extract_stat "$log_file" "$stat_type" "$field")
+
+    if [ "$actual" -le "$max_value" ]; then
+        log_info "✅ $description: $actual (<= $max_value)"
+        return 0
+    else
+        log_error "❌ $description: $actual (expected <= $max_value)"
+        return 1
+    fi
+}
+
 # --- Monitoring ---
 
 # Start log monitoring in background
