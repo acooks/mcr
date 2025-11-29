@@ -109,11 +109,11 @@ impl Default for UnifiedConfig {
             .unwrap_or(0);
 
         Self {
-            queue_depth: 1024,    // Increased from 128 for high throughput (300k+ pps)
-            num_recv_buffers,     // Configurable via MCR_NUM_RECV_BUFFERS (default: 32)
-            send_batch_size: 64,  // Increased from 32 to reduce syscall overhead
+            queue_depth: 1024,   // Increased from 128 for high throughput (300k+ pps)
+            num_recv_buffers,    // Configurable via MCR_NUM_RECV_BUFFERS (default: 32)
+            send_batch_size: 64, // Increased from 32 to reduce syscall overhead
             track_stats: true,
-            stats_interval_ms,    // Configurable via MCR_STATS_INTERVAL_MS (default: 0 = packet-count)
+            stats_interval_ms, // Configurable via MCR_STATS_INTERVAL_MS (default: 0 = packet-count)
         }
     }
 }
@@ -779,9 +779,7 @@ impl UnifiedDataPlane {
 
             if should_log_stats {
                 // Include elapsed_ms for time-series analysis
-                let elapsed_ms = Instant::now()
-                    .duration_since(self.start_time)
-                    .as_millis();
+                let elapsed_ms = Instant::now().duration_since(self.start_time).as_millis();
 
                 self.logger.info(
                     Facility::DataPlane,

@@ -47,7 +47,9 @@ struct Worker {
     egress_cmd_stream: Option<Arc<tokio::sync::Mutex<UnixStream>>>,
     #[allow(dead_code)] // Used for Request::ListRules debugging (see Section 8.2.6)
     req_stream: Option<Arc<tokio::sync::Mutex<UnixStream>>>, // Request stream for control plane (Request::ListRules etc, used by GetWorkerRules)
+    #[allow(dead_code)] // Reserved for future log aggregation feature
     log_pipe: Option<std::os::unix::io::OwnedFd>, // Pipe for reading worker's stderr (JSON logs)
+    #[allow(dead_code)] // Reserved for future stats aggregation feature
     stats_pipe: Option<std::os::unix::io::OwnedFd>, // Pipe for reading worker's stats (JSON)
 }
 

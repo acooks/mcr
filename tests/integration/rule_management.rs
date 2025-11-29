@@ -317,7 +317,10 @@ async fn test_get_stats_e2e() -> Result<()> {
         .await?
         .up()
         .await?;
-    println!("[TEST] Created test veth interface {} with IP 10.99.99.1/24", veth_a);
+    println!(
+        "[TEST] Created test veth interface {} with IP 10.99.99.1/24",
+        veth_a
+    );
 
     // 3. Start the supervisor and create a client
     // TestSupervisor guard ensures automatic cleanup on any exit path
