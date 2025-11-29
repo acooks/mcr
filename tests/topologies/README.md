@@ -345,6 +345,7 @@ These topology tests provide end-to-end coverage for:
 - ✅ **Stats reporting** - Counters, rates, aggregation
 - ✅ **Multi-instance coordination** - Process isolation
 - ✅ **Head-end replication** - 1:N amplification
+- ✅ **High fanout scenarios** - 1:50 replication (VecDeque send queue)
 
 **Not covered** (blocked by architectural debt):
 
