@@ -31,23 +31,6 @@ Consolidated November 2025. Completed items archived.
 
 ---
 
-### 2. Test Verification Discipline
-
-**Status:** Process failure identified
-
-**Problem:** Multiple commits claimed "all tests pass" without verification.
-
-**Recommended Process:**
-
-1. Pre-commit hook: Run `cargo test --lib` before commit
-2. CI/CD requirement: All tests must pass before merge
-3. Test run evidence: Paste test output in commit messages
-4. Never claim "all tests pass" without verification
-
-**Effort:** 1 day (CI setup + documentation)
-
----
-
 ## High Priority (🟡)
 
 ### 3. Network State Reconciliation
@@ -87,18 +70,17 @@ Consolidated November 2025. Completed items archived.
 ### 5. Buffer Size Limitation
 
 **Location:** Buffer pool implementation
-**Status:** Performance regression from design
+**Status:** Superseded by PACKET_MMAP plan
 
-- **Current:** 9KB jumbo buffers
-- **Designed:** 64KB buffers (multi-packet batching)
+- **Current:** Receive uses 2KB buffers (Small), Jumbo (9KB) allocated but unused
+- **Original design:** 64KB buffers for multi-packet batching
 
-**Action:**
+**Resolution:** The 64KB buffer design was for PACKET_MMAP ring buffers, not the current
+per-packet recv() architecture. Revisit buffer pool design when implementing PACKET_MMAP
+(see `docs/PACKET_MMAP_IMPLEMENTATION_PLAN.md`).
 
-1. Investigate why 9KB was chosen over 64KB
-2. Test memory usage with 64KB buffers
-3. Benchmark throughput: 9KB vs 64KB
-
-**Effort:** 2-3 days
+**Current workaround:** Standard 1500 MTU packets work fine with 2KB buffers. Jumbo frame
+support would require using Jumbo buffers for receive, or detecting interface MTU.
 
 ---
 
@@ -274,3 +256,4 @@ The following were completed in November 2025:
 - GetWorkerRules command removal (architectural decision)
 - Log level control integration tests (fixed: env!("CARGO_BIN_EXE_multicast_relay"))
 - Periodic health checks (every 250ms with auto-restart + SyncRules)
+- Test verification discipline: pre-commit hook (`scripts/pre-commit`, `just setup-hooks`), CI already enforces

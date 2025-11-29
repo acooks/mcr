@@ -1,0 +1,39 @@
+#!/bin/bash
+#
+# Pre-commit hook: Runs fast quality checks before allowing commit.
+#
+# Install with: just setup-hooks
+# Or manually: cp scripts/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+#
+# To bypass (use sparingly): git commit --no-verify
+#
+
+set -e
+
+echo "=== Pre-commit checks ==="
+
+# Check formatting
+echo "Checking formatting..."
+if ! cargo fmt --all -- --check 2>/dev/null; then
+    echo "ERROR: Code formatting issues found."
+    echo "Run 'cargo fmt' to fix."
+    exit 1
+fi
+
+# Run clippy
+echo "Running clippy..."
+if ! cargo clippy --all-targets --features integration_test -- -D warnings 2>/dev/null; then
+    echo "ERROR: Clippy found issues."
+    echo "Fix the warnings and try again."
+    exit 1
+fi
+
+# Run unit tests
+echo "Running unit tests..."
+if ! cargo test --lib --features integration_test 2>/dev/null; then
+    echo "ERROR: Unit tests failed."
+    echo "Fix the failing tests and try again."
+    exit 1
+fi
+
+echo "=== All pre-commit checks passed ==="
