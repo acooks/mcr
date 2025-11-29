@@ -3,6 +3,7 @@
 Consolidated November 2025. Completed items archived.
 
 ## Priority Legend
+
 - 🔴 **CRITICAL** - Core functionality or correctness issues
 - 🟡 **HIGH** - Significant impact on maintainability or performance
 - 🟢 **MEDIUM** - Quality improvements, technical debt reduction
@@ -13,11 +14,13 @@ Consolidated November 2025. Completed items archived.
 ## Critical Priority (🔴)
 
 ### 1. Privilege Separation (AF_PACKET FD Passing)
+
 **Location:** `src/worker/mod.rs:275-289`
 **Status:** Design incomplete, using workaround
 **Security Impact:** Workers run with more privileges than necessary
 
 **Proper Solution:**
+
 1. Supervisor (running as root) creates AF_PACKET socket
 2. Passes FD to worker via Unix domain socket + SCM_RIGHTS
 3. Worker receives FD and drops to unprivileged user
@@ -29,11 +32,13 @@ Consolidated November 2025. Completed items archived.
 ---
 
 ### 2. Test Verification Discipline
+
 **Status:** Process failure identified
 
 **Problem:** Multiple commits claimed "all tests pass" without verification.
 
 **Recommended Process:**
+
 1. Pre-commit hook: Run `cargo test --lib` before commit
 2. CI/CD requirement: All tests must pass before merge
 3. Test run evidence: Paste test output in commit messages
@@ -46,10 +51,12 @@ Consolidated November 2025. Completed items archived.
 ## High Priority (🟡)
 
 ### 3. Network State Reconciliation
+
 **Location:** `src/supervisor/network_monitor.rs:86-190`
 **Status:** Stubbed out
 
 **Implementation Plan:**
+
 1. Use `netlink-sys` or `rtnetlink` crate
 2. Subscribe to RTNLGRP_LINK events
 3. Detect interface up/down, address changes
@@ -60,6 +67,7 @@ Consolidated November 2025. Completed items archived.
 ---
 
 ### 4. Rule Hashing and Worker Distribution
+
 **Location:** `src/supervisor.rs:987-988`
 **Status:** Architecture documented but not implemented
 
@@ -67,6 +75,7 @@ Consolidated November 2025. Completed items archived.
 **Intended:** Rules hashed by (input_group, input_port) to specific cores
 
 **Implementation:**
+
 1. Implement: `rule_hash(group, port) % num_workers`
 2. Supervisor sends each rule only to its assigned worker
 3. Add tests for hash distribution fairness
@@ -76,6 +85,7 @@ Consolidated November 2025. Completed items archived.
 ---
 
 ### 5. Buffer Size Limitation
+
 **Location:** Buffer pool implementation
 **Status:** Performance regression from design
 
@@ -83,6 +93,7 @@ Consolidated November 2025. Completed items archived.
 - **Designed:** 64KB buffers (multi-packet batching)
 
 **Action:**
+
 1. Investigate why 9KB was chosen over 64KB
 2. Test memory usage with 64KB buffers
 3. Benchmark throughput: 9KB vs 64KB
@@ -92,10 +103,12 @@ Consolidated November 2025. Completed items archived.
 ---
 
 ### 6. Control Plane Architecture Clarity
+
 **Location:** `src/worker/control_plane.rs`
 **Status:** Dual role not well-defined
 
 **Question:** What is control plane's role?
+
 - **Option A:** Stats aggregator only (rename to stats_worker)
 - **Option B:** Authoritative state holder
 - **Option C:** Remove entirely (supervisor handles stats)
@@ -105,9 +118,11 @@ Consolidated November 2025. Completed items archived.
 ---
 
 ### 7. Automated Drift Recovery (Phase 2)
+
 **Status:** Phase 1 (detection) complete, Phase 2 (recovery) not designed
 
 **What's Needed:**
+
 1. Workers periodically report ruleset hash to supervisor
 2. Supervisor compares worker hash to master_rules hash
 3. Recovery: Send full ruleset sync or restart worker
@@ -119,9 +134,11 @@ Consolidated November 2025. Completed items archived.
 ## Medium Priority (🟢)
 
 ### 8. Protocol Versioning
+
 **Status:** Designed but not implemented
 
 **Action:**
+
 1. Add `PROTOCOL_VERSION` constant
 2. Implement `VersionCheck` command
 3. Server validates version on first message
@@ -131,9 +148,11 @@ Consolidated November 2025. Completed items archived.
 ---
 
 ### 9. Test Coverage Gaps
+
 **Locations:** Various test files
 
 **Known gaps:**
+
 - `src/supervisor/rule_dispatch.rs:288` - test for handling send failures
 - `src/supervisor/network_monitor.rs:426` - integration test with real Netlink
 
@@ -142,6 +161,7 @@ Consolidated November 2025. Completed items archived.
 ---
 
 ### 10. Inconsistent Logging Approaches
+
 **Location:** Multiple files
 
 - Supervisor: Uses proper logging system
@@ -155,18 +175,22 @@ Consolidated November 2025. Completed items archived.
 ---
 
 ### 11. Node.js Dependencies in Git History
+
 **Status:** Cleaned up, but history still contains bloat (6,044 files)
 
 **Options:**
+
 - **Option A:** Document issue, leave history as-is (recommended)
 - **Option B:** Rewrite history with `git filter-repo` (breaks existing clones)
 
 ---
 
 ### 12. Integration Test Stubs
+
 **Location:** `tests/integration/supervisor_resilience.rs`
 
 **Missing critical tests:**
+
 - `test_supervisor_resyncs_rules_on_restart()` - **Line 283** (CRITICAL)
 - `test_supervisor_in_namespace()` - **Line 471** (needs root)
 
@@ -177,6 +201,7 @@ Consolidated November 2025. Completed items archived.
 ## Low Priority (🔵)
 
 ### 13. On-Demand Packet Tracing
+
 **Status:** Designed but not implemented
 
 **Feature:** EnableTrace/DisableTrace/GetTrace commands, per-rule tracing
@@ -186,9 +211,11 @@ Consolidated November 2025. Completed items archived.
 ---
 
 ### 14. Troubleshooting Guide
+
 **Location:** `user_docs/TROUBLESHOOTING.md` (doesn't exist)
 
 **Content Needed:**
+
 - Common errors and solutions
 - Permission issues
 - Buffer exhaustion symptoms
@@ -199,6 +226,7 @@ Consolidated November 2025. Completed items archived.
 ---
 
 ### 15. Benchmark Implementations
+
 **Location:** `tests/benchmarks/forwarding_rate.rs:49-151`
 **Status:** Skeleton exists, implementations are placeholders
 
@@ -209,16 +237,19 @@ Consolidated November 2025. Completed items archived.
 ## Implementation Roadmap
 
 ### Near-term (1-2 weeks)
+
 1. Rule resync integration test (#12) - 1 day
 2. Control plane architecture decision (#6) - 2-3 days
 
 ### Medium-term (3-4 weeks)
+
 1. AF_PACKET FD passing (#1) - CRITICAL SECURITY
 2. Rule hashing to workers (#4)
 3. Network state reconciliation (#3)
 4. Buffer size investigation (#5)
 
 ### Long-term
+
 1. Automated drift recovery (#7)
 2. Protocol versioning (#8)
 3. Complete test coverage (#9)
@@ -229,6 +260,7 @@ Consolidated November 2025. Completed items archived.
 ## Completed Items (Archived)
 
 The following were completed in November 2025:
+
 - Legacy two-thread data plane removal (1,814 lines deleted)
 - Dead code cleanup
 - Global interface parameter documentation

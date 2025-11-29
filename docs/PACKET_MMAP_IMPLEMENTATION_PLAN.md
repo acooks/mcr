@@ -15,13 +15,14 @@ for zero-copy packet receive. This eliminates the socket buffer bottleneck entir
 
 ## Current Architecture
 
-```
+```text
 NIC → Kernel Driver → Socket Buffer → recv() syscall → User Buffer → MCR Processing
                            ↑
                     (bottleneck: 212KB-16MB)
 ```
 
 **Problems with current approach:**
+
 - Packets are copied from kernel to userspace via recv()
 - Socket buffer size limits burst tolerance
 - Each packet requires a syscall (even with io_uring batching)
@@ -29,13 +30,14 @@ NIC → Kernel Driver → Socket Buffer → recv() syscall → User Buffer → M
 
 ## Target Architecture
 
-```
+```text
 NIC → Kernel Driver → PACKET_MMAP Ring Buffer (shared memory) → MCR Processing
                               ↑
                     (configurable: 64MB+, zero-copy)
 ```
 
 **Benefits:**
+
 - Zero-copy: kernel writes directly to mmap'd ring buffer
 - No socket buffer involved
 - Configurable ring size (not limited by rmem_max)
@@ -49,6 +51,7 @@ NIC → Kernel Driver → PACKET_MMAP Ring Buffer (shared memory) → MCR Proces
 **File: `src/worker/packet_ring.rs` (new)**
 
 1. **Define ring buffer structures:**
+
    ```rust
    pub struct PacketRing {
        fd: RawFd,
@@ -62,6 +65,7 @@ NIC → Kernel Driver → PACKET_MMAP Ring Buffer (shared memory) → MCR Proces
    ```
 
 2. **Implement ring setup:**
+
    ```rust
    impl PacketRing {
        pub fn new(interface: &str, block_size: usize, block_nr: usize) -> Result<Self> {
@@ -103,6 +107,7 @@ NIC → Kernel Driver → PACKET_MMAP Ring Buffer (shared memory) → MCR Proces
    ```
 
 3. **Implement packet iteration:**
+
    ```rust
    impl PacketRing {
        /// Poll for available packets, returns iterator over packet data
@@ -140,6 +145,7 @@ NIC → Kernel Driver → PACKET_MMAP Ring Buffer (shared memory) → MCR Proces
 **File: `src/worker/unified_loop.rs` (modify)**
 
 1. **Replace socket-based receive with ring-based:**
+
    ```rust
    pub struct UnifiedDataPlane {
        // Remove: recv_socket: Socket,
@@ -151,6 +157,7 @@ NIC → Kernel Driver → PACKET_MMAP Ring Buffer (shared memory) → MCR Proces
    ```
 
 2. **Modify event loop:**
+
    ```rust
    fn run_event_loop(&mut self) {
        loop {
@@ -171,6 +178,7 @@ NIC → Kernel Driver → PACKET_MMAP Ring Buffer (shared memory) → MCR Proces
    ```
 
 3. **Hybrid polling strategy:**
+
    ```rust
    fn wait_for_events(&mut self) {
        // Option A: Use io_uring IORING_OP_POLL_ADD on packet ring fd
@@ -184,6 +192,7 @@ NIC → Kernel Driver → PACKET_MMAP Ring Buffer (shared memory) → MCR Proces
 **File: `src/lib.rs` (modify)**
 
 1. **Add CLI options:**
+
    ```rust
    #[clap(long, default_value = "64")]
    ring_block_count: usize,
@@ -193,6 +202,7 @@ NIC → Kernel Driver → PACKET_MMAP Ring Buffer (shared memory) → MCR Proces
    ```
 
 2. **Add environment variable overrides:**
+
    ```rust
    // MCR_RING_BLOCK_COUNT=128
    // MCR_RING_BLOCK_SIZE=2097152
@@ -206,6 +216,7 @@ NIC → Kernel Driver → PACKET_MMAP Ring Buffer (shared memory) → MCR Proces
    - Kernel distributes packets across worker rings
 
 2. **Test multi-worker scenario:**
+
    ```bash
    ./multicast_relay supervisor --num-workers 4 --interface eth0
    ```

@@ -3,6 +3,7 @@
 ## Purpose
 
 This document addresses the architectural confusion around interface handling and worker scaling. It explains:
+
 - How the current single-interface architecture works
 - How to handle multiple interfaces
 - Scaling trade-offs for different deployment scenarios
@@ -12,7 +13,7 @@ This document addresses the architectural confusion around interface handling an
 
 ### Architecture Overview
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────┐
 │                        eth0 (NIC)                            │
 │          Kernel RSS/RPS distributes to CPUs                  │
@@ -50,6 +51,7 @@ This document addresses the architectural confusion around interface handling an
 ### Key Implementation Details
 
 **Code locations:**
+
 - `src/supervisor.rs:1063-1078` - Generates shared fanout_group_id for all workers
 - `src/supervisor.rs:318-319` - Passes same `--interface` to all workers
 - `src/worker/unified_loop.rs:192` - Configures `PACKET_FANOUT_CPU`
@@ -74,9 +76,9 @@ setsockopt(fd, SOL_PACKET, PACKET_FANOUT, &fanout_arg, ...);
 
 **Challenge:** Do we need 2×48 = 96 workers?
 
-**Solution: Interface-Specific Fanout Groups**
+Solution: Interface-Specific Fanout Groups
 
-```
+```text
 ┌──────────┐                    ┌──────────┐
 │   eth0   │                    │   eth1   │
 └────┬─────┘                    └────┬─────┘
@@ -96,11 +98,13 @@ setsockopt(fd, SOL_PACKET, PACKET_FANOUT, &fanout_arg, ...);
 ```
 
 **Scaling:**
+
 - Workers per interface: `num_cpus`
 - Total workers: `num_interfaces × num_cpus`
 - Memory per worker: `rules_for_this_interface × rule_size`
 
 **Trade-offs:**
+
 - ✅ CPU cache locality maintained
 - ✅ Workers only store relevant rules
 - ❌ More processes (2×N)
@@ -112,9 +116,9 @@ setsockopt(fd, SOL_PACKET, PACKET_FANOUT, &fanout_arg, ...);
 
 **Challenge:** Do we need 20 workers contending for 1 CPU?
 
-**Solution: Single Worker Pool with Interface Multiplexing**
+Solution: Single Worker Pool with Interface Multiplexing
 
-```
+```text
 ┌──────┐ ┌──────┐ ┌──────┐        ┌──────┐
 │ eth0 │ │ eth1 │ │ eth2 │  ...   │eth19 │
 └───┬──┘ └───┬──┘ └───┬──┘        └───┬──┘
@@ -135,11 +139,13 @@ setsockopt(fd, SOL_PACKET, PACKET_FANOUT, &fanout_arg, ...);
 ```
 
 **Scaling:**
+
 - Workers: 1 (or small fixed number)
 - Memory per worker: `all_rules × rule_size`
 - No fanout needed
 
 **Trade-offs:**
+
 - ✅ Minimal process overhead
 - ✅ Simple configuration
 - ✅ Good for low-throughput interfaces
@@ -152,11 +158,11 @@ setsockopt(fd, SOL_PACKET, PACKET_FANOUT, &fanout_arg, ...);
 
 **Challenge:** 20×96 = 1920 workers is too many!
 
-**Solution: Hybrid Architecture**
+Solution: Hybrid Architecture
 
 #### Option A: Interface Groups with Shared Workers
 
-```
+```text
 Interface Groups:
 - Group 0: eth0-eth4   → Workers 0-23  (24 CPUs)
 - Group 1: eth5-eth9   → Workers 24-47 (24 CPUs)
@@ -169,7 +175,7 @@ Uses io_uring to multiplex across interfaces efficiently
 
 #### Option B: Dynamic Worker Allocation
 
-```
+```text
 Start with minimal workers (1 per interface)
 Monitor load per interface
 Spawn additional workers for hot interfaces using PACKET_FANOUT
@@ -178,7 +184,7 @@ Scale down workers for idle interfaces
 
 #### Option C: CPU Pool with Rule Hashing
 
-```
+```text
 All workers listen on all interfaces (expensive!)
 Rules hashed to specific workers
 Workers only process packets for their assigned rules
@@ -199,7 +205,7 @@ Reduces per-worker memory despite all sockets open
 | 20 | 96 | Hybrid Groups | 96 | 2000 rules | 192 MB |
 | 20 | 96 | Full Fanout | 1920 | 500 rules | 960 MB |
 
-*Assumptions: 1KB per rule, 1MB process overhead*
+Assumptions: 1KB per rule, 1MB process overhead
 
 ### Performance Characteristics
 
@@ -214,7 +220,7 @@ Reduces per-worker memory despite all sockets open
 
 Current: **All workers have all rules**
 
-```
+```text
 ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐
 │Worker 0 │  │Worker 1 │  │Worker 2 │  │Worker 3 │
 │         │  │         │  │         │  │         │
@@ -229,7 +235,7 @@ Memory: 4 × (4 rules) = 16 rule copies
 
 Future: **Rules hashed to specific workers**
 
-```
+```text
 ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐
 │Worker 0 │  │Worker 1 │  │Worker 2 │  │Worker 3 │
 │         │  │         │  │         │  │         │
@@ -260,6 +266,7 @@ pub struct ForwardingRule {
 ```
 
 **Current behavior:**
+
 - Field exists in struct ✅
 - Sent in AddRule commands ✅
 - Stored in worker's rule table ✅
@@ -267,6 +274,7 @@ pub struct ForwardingRule {
 - Workers bind to global `--interface` parameter instead
 
 **Why it's ignored:**
+
 - All workers listen on same interface (PACKET_FANOUT architecture)
 - Using per-rule interface would require dynamic socket creation
 - Current design: static socket at worker startup
@@ -292,6 +300,7 @@ fn process_packet(&mut self, pkt: &Packet) -> Result<()> {
 ```
 
 **Deployment:**
+
 - Supervisor spawns worker groups per interface
 - Each worker group has different `--interface` parameter
 - Workers filter rules to only process their interface
@@ -318,11 +327,13 @@ fn add_rule(&mut self, rule: ForwardingRule) -> Result<()> {
 ```
 
 **Benefits:**
+
 - Truly dynamic multi-interface support
 - Single worker can handle arbitrary interfaces
 - Scales down automatically (close unused sockets)
 
 **Challenges:**
+
 - PACKET_FANOUT more complex (different fanout groups per interface)
 - io_uring needs to handle multiple sockets
 - Socket creation in hot path (AddRule) adds latency
@@ -330,21 +341,25 @@ fn add_rule(&mut self, rule: ForwardingRule) -> Result<()> {
 ## Recommended Approach by Use Case
 
 ### Use Case 1: Single Interface, High Throughput
+
 **Scenario:** 100 Gbps on eth0, 48 CPU cores, 1000 rules
 
 **Recommendation:** **Current Architecture** (PACKET_FANOUT_CPU)
+
 - Workers: 48 (one per CPU)
 - Configuration: `--interface eth0 --num-workers 48`
 - All workers have all 1000 rules
 - Memory: ~48 MB (negligible for server)
 - Throughput: Excellent (full CPU parallelism)
 
-**No changes needed**
+No changes needed.
 
 ### Use Case 2: Few Interfaces, High Throughput Each
+
 **Scenario:** 4× 25Gbps interfaces, 96 CPU cores, 500 rules per interface
 
 **Recommendation:** **Interface-Specific Fanout Groups**
+
 - Worker groups: 4 (one per interface)
 - Workers per group: 24 (96 CPUs / 4 interfaces)
 - Total workers: 96
@@ -357,9 +372,11 @@ fn add_rule(&mut self, rule: ForwardingRule) -> Result<()> {
 **Implementation:** Supervisor spawns worker groups
 
 ### Use Case 3: Many Interfaces, Low Throughput Each
+
 **Scenario:** 20 VLANs, 1 Gbps total, 4 CPU cores, 100 rules per interface
 
 **Recommendation:** **Worker Pool with Interface Multiplexing**
+
 - Workers: 4 (normal CPU count)
 - Each worker handles all 20 interfaces via io_uring
 - No PACKET_FANOUT (handled sequentially)
@@ -369,11 +386,13 @@ fn add_rule(&mut self, rule: ForwardingRule) -> Result<()> {
 **Implementation:** Requires io_uring multi-socket support
 
 ### Use Case 4: Many Interfaces, High Throughput
+
 **Scenario:** 20× 10Gbps interfaces, 96 CPU cores, 10,000 rules total
 
 **Recommendation:** **Hybrid Approach**
 
 **Phase 1:** Interface Groups (simple)
+
 - 4 worker groups, each handles 5 interfaces
 - 24 workers per group
 - Each worker listens to its 5 interfaces
@@ -381,11 +400,13 @@ fn add_rule(&mut self, rule: ForwardingRule) -> Result<()> {
 - Configuration: `--interface-group 0:eth0,eth1,eth2,eth3,eth4 --num-workers 24`
 
 **Phase 2:** Add rule hashing (optimization)
+
 - Hash rules to specific workers within group
 - Reduces memory: 2500 rules per worker instead of 10,000
 - Memory savings: 60% reduction
 
 **Phase 3:** Dynamic scaling (advanced)
+
 - Monitor per-interface load
 - Spawn additional workers for hot interfaces
 - Requires load balancing logic in supervisor
@@ -393,6 +414,7 @@ fn add_rule(&mut self, rule: ForwardingRule) -> Result<()> {
 ## Implementation Roadmap
 
 ### Phase 0: Current State ✅
+
 - Single interface, PACKET_FANOUT_CPU
 - Global `--interface` parameter
 - All workers have all rules
@@ -401,24 +423,28 @@ fn add_rule(&mut self, rule: ForwardingRule) -> Result<()> {
 ### Phase 1: Multi-Interface Support (6-8 weeks)
 
 #### 1.1: Interface Groups (2 weeks)
+
 - [ ] Supervisor spawns worker groups per interface
 - [ ] Each group gets unique fanout_group_id
 - [ ] Workers filter rules by their interface
 - [ ] Update tests for multi-interface scenarios
 
 #### 1.2: Rule-to-Worker Hashing (2 weeks)
+
 - [ ] Implement consistent hash: `hash(input_group, input_port) % num_workers`
 - [ ] Supervisor sends rules only to assigned workers
 - [ ] Workers maintain subset of rules
 - [ ] Add rule distribution metrics
 
 #### 1.3: io_uring Multi-Socket Support (2-3 weeks)
+
 - [ ] Workers handle multiple AF_PACKET sockets
 - [ ] Single io_uring for all sockets
 - [ ] Dynamic socket creation on AddRule
 - [ ] Socket cleanup on RemoveRule
 
 #### 1.4: Configuration Model (1 week)
+
 - [ ] Remove global `--interface` parameter
 - [ ] Add `--interface-groups` configuration
 - [ ] Auto-detect interface topology
@@ -427,11 +453,13 @@ fn add_rule(&mut self, rule: ForwardingRule) -> Result<()> {
 ### Phase 2: Dynamic Scaling (4-6 weeks)
 
 #### 2.1: Load Monitoring
+
 - [ ] Per-interface packet rate metrics
 - [ ] Per-worker CPU utilization
 - [ ] Interface hotspot detection
 
 #### 2.2: Elastic Worker Pools
+
 - [ ] Spawn additional workers for hot interfaces
 - [ ] PACKET_FANOUT reconfiguration
 - [ ] Graceful worker termination
@@ -440,11 +468,13 @@ fn add_rule(&mut self, rule: ForwardingRule) -> Result<()> {
 ### Phase 3: Advanced Optimizations (Future)
 
 #### 3.1: NUMA Awareness
+
 - [ ] Bind interfaces to specific NUMA nodes
 - [ ] Pin workers to same NUMA node as NIC
 - [ ] Reduce cross-node memory access
 
 #### 3.2: XDP Integration
+
 - [ ] eBPF program for early packet filtering
 - [ ] Bypass kernel stack for known flows
 - [ ] Integrate with AF_XDP sockets
@@ -460,6 +490,7 @@ multicast_relay supervisor \
 ```
 
 Internally:
+
 - Spawns 48 workers
 - All listen on eth0
 - All join fanout_group_id (derived from supervisor PID)
@@ -476,6 +507,7 @@ multicast_relay supervisor \
 ```
 
 Internally:
+
 - Spawns 4 groups of 24 workers each (96 total)
 - Group 0: workers 0-23 listen on eth0, fanout_group_id=1000
 - Group 1: workers 24-47 listen on eth1, fanout_group_id=1001
@@ -494,6 +526,7 @@ multicast_relay supervisor \
 ```
 
 Internally:
+
 - Starts with 4 workers (1 per interface)
 - Monitors packet rate per interface
 - If eth0 exceeds 100k pps, spawns more workers up to 24
@@ -503,6 +536,7 @@ Internally:
 ## Clarifying the TODO Comment
 
 ### Original Comment (src/lib.rs:41-42)
+
 ```rust
 /// TODO: Remove this parameter. Per architecture (D21), interfaces should come from
 /// ForwardingRule.input_interface, not as a global supervisor parameter.
@@ -517,7 +551,7 @@ Internally:
 
 ### Current Reality
 
-```
+```text
 Global --interface parameter:
 ├─ Used for: AF_PACKET socket binding ✅
 ├─ Enables: PACKET_FANOUT_CPU architecture ✅
