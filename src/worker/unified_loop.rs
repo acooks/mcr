@@ -181,6 +181,51 @@ impl UnifiedDataPlane {
         let recv_socket = Socket::new(Domain::PACKET, Type::RAW, Some(Protocol::from(0x0003)))
             .context("Failed to create AF_PACKET socket")?;
 
+        // Set large receive buffer to prevent drops during traffic bursts.
+        // Default system buffer (~212KB) can only hold ~150 packets at 1400 bytes each.
+        // At 100k pps, that's only 1.5ms of buffering - not enough for io_uring latency.
+        // We request 16MB which gives ~11k packets / ~110ms of burst tolerance.
+        // Note: Actual size may be limited by net.core.rmem_max sysctl.
+        const RECV_BUFFER_SIZE: i32 = 16 * 1024 * 1024; // 16MB
+        unsafe {
+            let ret = libc::setsockopt(
+                recv_socket.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_RCVBUF,
+                &RECV_BUFFER_SIZE as *const _ as *const _,
+                std::mem::size_of::<i32>() as libc::socklen_t,
+            );
+            if ret < 0 {
+                // Log warning but don't fail - system may have lower limits
+                logger.warning(
+                    Facility::DataPlane,
+                    &format!(
+                        "Failed to set SO_RCVBUF to {}MB, using system default",
+                        RECV_BUFFER_SIZE / 1024 / 1024
+                    ),
+                );
+            } else {
+                // Read back actual size (kernel may have adjusted it)
+                let mut actual_size: i32 = 0;
+                let mut len: libc::socklen_t = std::mem::size_of::<i32>() as libc::socklen_t;
+                libc::getsockopt(
+                    recv_socket.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_RCVBUF,
+                    &mut actual_size as *mut _ as *mut _,
+                    &mut len,
+                );
+                logger.info(
+                    Facility::DataPlane,
+                    &format!(
+                        "AF_PACKET SO_RCVBUF set to {}KB (requested {}MB)",
+                        actual_size / 1024,
+                        RECV_BUFFER_SIZE / 1024 / 1024
+                    ),
+                );
+            }
+        }
+
         // Get interface index
         let iface_index = get_interface_index(interface_name)?;
 
