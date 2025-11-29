@@ -188,45 +188,42 @@ Every MCR instance forwards to every other MCR instance
 
 ## Baseline Performance Tests
 
-These tests validate forwarding efficiency at specific packet rates. Useful for
-regression testing and performance profiling.
+These tests validate forwarding efficiency at specific packet rates. All baseline
+tests use a unified parameterized script (`baseline_test.sh`).
 
-### baseline_50k.sh
+### baseline_test.sh (Unified Script)
 
 **Status:** ✅ Implemented
 
-Validates 100% packet forwarding at 50k pps (conservative baseline).
+Parameterized baseline test supporting any rate/packet count combination.
 
 ```bash
-sudo tests/topologies/baseline_50k.sh
+# Quick test at 100k pps (default)
+sudo tests/topologies/baseline_test.sh
+
+# Custom parameters
+sudo tests/topologies/baseline_test.sh --rate 150000 --packets 1000000
+
+# With profiling (requires perf)
+sudo tests/topologies/baseline_test.sh --rate 100000 --packets 6000000 --profiling
 ```
 
 ### baseline_100k.sh
 
 **Status:** ✅ Implemented
 
-Validates 100% packet forwarding at 100k pps.
+Validates 100% packet forwarding at 100k pps (100k packets, ~1 second).
 
 ```bash
 sudo tests/topologies/baseline_100k.sh
-```
-
-### baseline_100k_60s.sh
-
-**Status:** ✅ Implemented
-
-60-second profiling test at 100k pps (6M packets). Designed for performance
-analysis with external profilers (perf, flamegraph).
-
-```bash
-sudo tests/topologies/baseline_100k_60s.sh
 ```
 
 ### baseline_150k_60s.sh
 
 **Status:** ✅ Implemented
 
-60-second profiling test at 150k pps (9M packets). Higher stress variant.
+60-second sustained performance test at 150k pps (9M packets). Validates that
+performance is sustainable under load. Runs in CI nightly.
 
 ```bash
 sudo tests/topologies/baseline_150k_60s.sh

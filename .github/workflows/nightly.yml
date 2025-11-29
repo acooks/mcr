@@ -17,10 +17,10 @@ jobs:
     strategy:
       matrix:
         test:
-          - baseline_50k
           - baseline_100k
           - chain_3hop
           - tree_fanout
+          - high_fanout_50
       fail-fast: false  # Continue testing other topologies even if one fails
 
     steps:
@@ -161,3 +161,43 @@ jobs:
       with:
         name: integration-stress-results
         path: integration-results.txt
+
+  sustained-performance:
+    name: Sustained Performance Test (60s)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Build release binaries
+      run: |
+        cargo build --release --bins
+
+    - name: Run sustained 150k pps test (60 seconds)
+      run: |
+        # Run without profiling (perf not available in CI)
+        sudo bash tests/topologies/baseline_test.sh --rate 150000 --packets 9000000
+
+    - name: Extract sustained performance metrics
+      if: always()
+      run: |
+        echo "=== Sustained Performance Test (150k pps, 60s) ===" > sustained-metrics.txt
+        echo "Timestamp: $(date -u)" >> sustained-metrics.txt
+        echo "Commit: ${{ github.sha }}" >> sustained-metrics.txt
+        echo "" >> sustained-metrics.txt
+        grep -E "FINAL|matched|sent|buf_exhaust" /tmp/mcr*.log 2>/dev/null >> sustained-metrics.txt || echo "No metrics found"
+        cat sustained-metrics.txt
+
+    - name: Upload sustained performance results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: sustained-perf-results
+        path: |
+          sustained-metrics.txt
+          /tmp/mcr*.log
