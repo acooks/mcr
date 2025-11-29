@@ -79,7 +79,7 @@ sudo tests/topologies/chain_3hop.sh
 
 ### 2. Tree (1:N Fanout) - `tree_fanout.sh`
 
-**Status:** 🔜 Planned
+**Status:** ✅ Implemented
 
 **Topology:**
 
@@ -102,26 +102,61 @@ Traffic Gen → MCR-1 ┼→ MCR-3
 sudo tests/topologies/tree_fanout.sh
 ```
 
-### 3. Tree (N:1 Convergence) - `tree_converge.sh`
+### 3. High Fanout (1:50) - `high_fanout_50.sh`
 
-**Status:** 🔜 Planned
+**Status:** ✅ Implemented
 
 **Topology:**
 
 ```text
-Traffic Gen 1 → MCR-1 ┐
-Traffic Gen 2 → MCR-2 ┼→ MCR-4 (convergence)
-Traffic Gen 3 → MCR-3 ┘
+Traffic Gen → MCR → 50 outputs (loopback)
 ```
 
 **Tests:**
 
-- Multiple sources to single destination
-- Ingress demultiplexing
-- Per-rule isolation
-- Fair queueing under contention
+- High fanout ratio (1 input → 50 outputs)
+- VecDeque-based send queue performance under amplification
+- Buffer pool performance with 50x traffic multiplication
+- Egress queue management with many destinations
 
-### 4. Diamond (Multipath) - `diamond.sh`
+**Usage:**
+
+```bash
+sudo tests/topologies/high_fanout_50.sh
+```
+
+**Expected Outcome:**
+
+- Matched packets ≈ 10,000 (input)
+- TX packets ≈ 500,000 (50x amplification)
+- Zero buffer exhaustion at 10k pps input rate
+
+### 4. Tree (N:1 Convergence) - `tree_converge.sh`
+
+**Status:** ✅ Implemented
+
+**Topology:**
+
+```text
+Traffic Gen 1 (239.1.1.1) ─┐
+Traffic Gen 2 (239.1.1.2) ─┼→ MCR ─→ Sink
+Traffic Gen 3 (239.1.1.3) ─┘
+```
+
+**Tests:**
+
+- Multiple independent rules on same interface
+- Per-rule packet counting (isolation)
+- Fair handling of concurrent streams
+- No cross-talk between rules
+
+**Usage:**
+
+```bash
+sudo tests/topologies/tree_converge.sh
+```
+
+### 5. Diamond (Multipath) - `diamond.sh`
 
 **Status:** 🔜 Planned
 
@@ -140,7 +175,7 @@ Traffic Gen → MCR-1      → MCR-4
 - Timing/ordering consistency
 - Independent path failures
 
-### 5. Full Mesh - `mesh.sh`
+### 6. Full Mesh - `mesh.sh`
 
 **Status:** 🔜 Planned
 
@@ -157,6 +192,124 @@ Every MCR instance forwards to every other MCR instance
 - Rule management complexity
 - Resource utilization
 
+### 7. Multi-Worker Mode - `multi_worker.sh`
+
+**Status:** ✅ Implemented
+
+**Topology:**
+
+```text
+Traffic Generator → MCR (2 workers with PACKET_FANOUT) → Sink
+```
+
+**Tests:**
+
+- PACKET_FANOUT kernel packet distribution
+- Multiple workers processing traffic concurrently
+- Combined stats validation
+- No packet duplication
+
+**Usage:**
+
+```bash
+sudo tests/topologies/multi_worker.sh
+```
+
+### 8. Fault Tolerance - `fault_tolerance.sh`
+
+**Status:** ✅ Implemented
+
+**Tests:**
+
+- Graceful shutdown during active traffic
+- SIGTERM signal handling
+- Multiple SIGTERM resilience
+- Final stats persistence on shutdown
+- No zombie processes or resource leaks
+
+**Usage:**
+
+```bash
+sudo tests/topologies/fault_tolerance.sh
+```
+
+### 9. Edge Cases - `edge_cases.sh`
+
+**Status:** ✅ Implemented
+
+**Tests:**
+
+- Minimum packet size (64 bytes)
+- Maximum MTU packet size (1472 bytes)
+- Buffer pool under high load stress
+- Minimum valid UDP packet handling
+
+**Usage:**
+
+```bash
+sudo tests/topologies/edge_cases.sh
+```
+
+### 10. Dynamic Rule Changes - `dynamic_rules.sh`
+
+**Status:** ✅ Implemented
+
+**Tests:**
+
+- Traffic before rule exists (not_matched counter)
+- Adding rules during active traffic
+- Multiple concurrent rules
+- Rule listing and visibility
+
+**Usage:**
+
+```bash
+sudo tests/topologies/dynamic_rules.sh
+```
+
+## Baseline Performance Tests
+
+These tests validate forwarding efficiency at specific packet rates. All baseline
+tests use a unified parameterized script (`baseline_test.sh`).
+
+### baseline_test.sh (Unified Script)
+
+**Status:** ✅ Implemented
+
+Parameterized baseline test supporting any rate/packet count combination.
+
+```bash
+# Quick test at 100k pps (default)
+sudo tests/topologies/baseline_test.sh
+
+# Custom parameters
+sudo tests/topologies/baseline_test.sh --rate 150000 --packets 1000000
+
+# With profiling (requires perf)
+sudo tests/topologies/baseline_test.sh --rate 100000 --packets 6000000 --profiling
+```
+
+### baseline_100k.sh
+
+**Status:** ✅ Implemented
+
+Validates 100% packet forwarding at 100k pps (100k packets, ~1 second).
+
+```bash
+sudo tests/topologies/baseline_100k.sh
+```
+
+### baseline_150k_60s.sh
+
+**Status:** ✅ Implemented
+
+60-second sustained performance test at 150k pps (9M packets). Validates that
+performance is sustainable under load. Runs in CI nightly.
+
+```bash
+sudo tests/topologies/baseline_150k_60s.sh
+```
+
 ## Common Functions Library
 
 The `common.sh` library provides reusable functions for all topology tests:
@@ -168,7 +321,7 @@ The `common.sh` library provides reusable functions for all topology tests:
 
 ### MCR Management
 
-- `start_mcr <name> <iface> <socket> [logfile]` - Start MCR instance
+- `start_mcr <name> <iface> <socket> [logfile] [core_id]` - Start MCR instance
 - `wait_for_sockets <sock1> [sock2] ...` - Wait for control sockets
 - `add_rule <socket> <in_if> <in_grp> <in_port> <out_spec>` - Configure rule
 
@@ -181,7 +334,7 @@ The `common.sh` library provides reusable functions for all topology tests:
 ### Monitoring & Cleanup
 
 - `start_log_monitor <name> <logfile>` - Monitor logs in background
-- `cleanup_all()` - Clean up processes and sockets
+- `graceful_cleanup_unshare <pid_var1> [pid_var2] ...` - Gracefully terminate MCR instances
 
 ## Running Tests
 
@@ -270,6 +423,12 @@ These topology tests provide end-to-end coverage for:
 - ✅ **Stats reporting** - Counters, rates, aggregation
 - ✅ **Multi-instance coordination** - Process isolation
 - ✅ **Head-end replication** - 1:N amplification
+- ✅ **High fanout scenarios** - 1:50 replication (VecDeque send queue)
+- ✅ **Multi-worker mode** - PACKET_FANOUT kernel distribution
+- ✅ **N:1 convergence** - Multiple sources to single destination
+- ✅ **Fault tolerance** - Graceful shutdown, signal handling
+- ✅ **Edge cases** - Min/max packet sizes, buffer stress
+- ✅ **Dynamic rules** - Runtime rule addition and concurrent rules
 
 **Not covered** (blocked by architectural debt):
 
@@ -280,8 +439,8 @@ These topology tests provide end-to-end coverage for:
 ## Future Enhancements
 
 - [ ] Coverage measurement integration
-- [ ] Performance benchmarking mode
+- [x] Performance benchmarking mode (baseline_*_60s.sh tests)
 - [ ] Fault injection (link down, process kill)
-- [ ] Long-duration stress tests
-- [ ] CI/CD integration (GitHub Actions)
+- [x] Long-duration stress tests (60-second profiling tests)
+- [x] CI/CD integration (GitHub Actions workflows added)
 - [ ] Rust-based test harness (as alternative to bash)

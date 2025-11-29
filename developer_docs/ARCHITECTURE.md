@@ -22,6 +22,7 @@ The architecture is designed around three core principles:
 This document describes both **current implementation** and **target architecture**. Features marked with "(NOT IMPLEMENTED)" or "(PARTIALLY IMPLEMENTED)" represent the designed architecture that is not yet fully operational.
 
 **✅ Fully Implemented:**
+
 - Multi-process architecture with supervisor and worker processes
 - Unified io_uring-based data plane for packet forwarding
 - JSON-based control plane protocol (AddRule, RemoveRule, ListRules, ListWorkers)
@@ -30,11 +31,13 @@ This document describes both **current implementation** and **target architectur
 - Hash-based ruleset drift detection (manual, via logs)
 
 **⚠️ Partially Implemented:**
+
 - Statistics aggregation infrastructure exists, but data plane workers don't push stats
 - Worker process monitoring and restart (but without rule resynchronization)
 - Observability via GetStats (returns empty/stale data without stats pushing)
 
 **❌ Not Yet Implemented:**
+
 - Rule hashing to specific CPU cores (all workers receive all rules)
 - Automatic rule resynchronization when workers restart
 - Proactive statistics pushing from data plane to control plane
@@ -64,6 +67,29 @@ Minimize data copying in the fast path. The architecture prefers passing metadat
 ### 4. Fail-Fast Error Handling
 
 Worker threads are designed as isolated, restartable processes. They prefer to panic on unrecoverable errors rather than continuing in a potentially corrupt state. The Supervisor process is responsible for monitoring workers and restarting them if they fail.
+
+### 5. Why PACKET_FANOUT_CPU
+
+The per-CPU worker model with `PACKET_FANOUT_CPU` was chosen over alternatives for these reasons:
+
+- **Cache locality:** Packets processed on the same CPU where they arrived stay hot in L1/L2 cache (1-10ns access vs 60ns+ for RAM or cross-CPU coherency).
+- **No synchronization:** Each worker is independent with its own ruleset copy. No locks, no contention, no cache-line ping-pong.
+- **True parallelism:** N CPUs = N× throughput (typically 40-45× speedup on 48 cores).
+- **Fault isolation:** Worker crash affects only that CPU's traffic; supervisor restarts it.
+
+**Trade-offs accepted:**
+
+- Memory overhead: Each worker has full ruleset copy (mitigated by planned rule sharding).
+- RSS/RPS dependency: Requires NIC or kernel packet steering configuration.
+
+**Alternatives considered but rejected:**
+
+- Single worker with io_uring: Simpler but bottlenecked at ~1 Gbps.
+- Thread pool with shared queue: Loses cache locality, adds lock contention.
+- XDP/eBPF: Higher performance but limits flexibility and debuggability.
+- DPDK: Maximum performance but requires dedicated CPUs and kernel bypass.
+
+For the 10-40 Gbps target, PACKET_FANOUT_CPU provides the best balance of performance, simplicity, and maintainability.
 
 ## 3. High-Level Design
 
@@ -117,6 +143,7 @@ The MCR data plane uses a **single-threaded, unified event loop model**. This el
 - **Unified `io_uring` Instance:** Each worker process uses a **single `io_uring` instance** to manage all asynchronous I/O operations for both ingress and egress. This provides a unified, highly efficient event queue.
 
 **Event Loop Architecture:**
+
   1. **Ingress (`AF_PACKET`):** The worker submits multiple `Recv` operations to the `io_uring` for its `AF_PACKET` socket.
   2. **Egress (`AF_INET`):** When a received packet is processed and ready to be forwarded, the worker submits one or more `Send` operations to the _same_ `io_uring` instance for the appropriate `AF_INET` egress sockets.
   3. **Unified Completion:** The worker makes a single blocking call (`submit_and_wait()`) that waits for _any_ type of event to complete—a packet being received, a packet having been sent, or a command arriving from the supervisor.
@@ -241,6 +268,7 @@ For a comprehensive guide to the logging system, including the high-performance 
 The statistics reporting system must respect critical fast path constraints to maintain high-performance packet forwarding:
 
 **Fast Path Constraints:**
+
 1. **Minimize System Calls:** The packet processing loop must avoid syscalls where possible. Even amortized periodic syscalls add measurable latency at high packet rates.
 2. **No Locks/Mutexes:** Data plane is single-threaded by design to eliminate synchronization overhead.
 3. **Never Block:** Data plane must continue processing packets without waiting for I/O operations.
@@ -252,6 +280,7 @@ The statistics reporting system must respect critical fast path constraints to m
 ### Current Implementation (PARTIALLY COMPLETE)
 
 **✅ Implemented:**
+
 - Per-flow counters tracked in data plane workers (`flow_counters: HashMap<(Ipv4Addr, u16), FlowCounters>`)
 - Rate calculation (packets_per_second, bits_per_second) using snapshot-based deltas
 - Periodic logging of stats to structured logs (`[FLOW_STATS]` marker)
@@ -259,6 +288,7 @@ The statistics reporting system must respect critical fast path constraints to m
 - Control plane has `shared_flows` HashMap ready to receive stats
 
 **❌ Not Implemented:**
+
 - IPC mechanism for data plane to push stats to control plane
 - Supervisor reading stats from workers and feeding to aggregator
 - GetStats returning real data (currently returns zeros)
@@ -277,6 +307,7 @@ The statistics reporting system must respect critical fast path constraints to m
 **Decision:** Use Unix pipes for stats reporting, mirroring the proven logging architecture.
 
 **Rationale:**
+
 - **Proven Pattern:** Pipes already work reliably for cross-process logging
 - **Kernel-Managed Buffering:** Aligns with Architectural Principle #2 (kernel-managed state)
 - **Fire-and-Forget:** Non-blocking writes preserve data plane responsiveness
@@ -284,6 +315,7 @@ The statistics reporting system must respect critical fast path constraints to m
 - **Acceptable Overhead:** Periodic syscall is off the critical per-packet path
 
 **Performance Characteristics:**
+
 - Stats written during existing periodic check (same cadence as logging)
 - Write batched with rule hash logging (amortized overhead)
 - If pipe buffer full, write fails gracefully (drop stats update, continue processing)
@@ -291,13 +323,15 @@ The statistics reporting system must respect critical fast path constraints to m
 
 ### Planned Implementation
 
-**Phase 1: Infrastructure (Current)**
+#### Phase 1: Infrastructure (Current)
+
 - ✅ Data plane tracks per-flow counters
 - ✅ Rate calculation implemented
 - ✅ Periodic logging working
 - ✅ Stats aggregator ready
 
-**Phase 2: Pipe-Based IPC (Planned)**
+#### Phase 2: Pipe-Based IPC (Planned)
+
 1. **Supervisor:** Create stats pipe for each data plane worker (alongside log pipe)
 2. **Data Plane:** Periodically serialize `Vec<FlowStats>` to JSON and write to stats pipe
    - Timing: During existing periodic check (same as logging)
@@ -308,7 +342,8 @@ The statistics reporting system must respect critical fast path constraints to m
 5. **Control Plane:** Aggregator updates `shared_flows` HashMap
 6. **Control Plane:** GetStats returns current data from HashMap
 
-**Phase 3: Optimization (Future)**
+#### Phase 3: Optimization (Future)
+
 - Monitor pipe write overhead via metrics
 - If profiling shows significant impact, migrate to shared memory ring buffer
 - Maintain pipe-based as fallback for simplicity
@@ -316,6 +351,7 @@ The statistics reporting system must respect critical fast path constraints to m
 ### Alternative: Shared Memory (Future Work)
 
 Shared memory ring buffers (`SharedSPSCRingBuffer`) exist in the codebase for potential future use. This approach would eliminate syscall overhead entirely but requires:
+
 - Proper cleanup on worker crashes (`shm_unlink`)
 - More complex error handling
 - Testing and validation in production workloads
@@ -325,6 +361,7 @@ Shared memory ring buffers (`SharedSPSCRingBuffer`) exist in the codebase for po
 ### Fast Path Guarantee
 
 **Critical Constraint:** Stats writes must NEVER block packet processing. Implementation guarantees:
+
 - Non-blocking writes (O_NONBLOCK)
 - Failure handling: drop stats update, continue processing
 - No synchronous I/O in packet processing loop

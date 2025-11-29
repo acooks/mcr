@@ -47,7 +47,9 @@ struct Worker {
     egress_cmd_stream: Option<Arc<tokio::sync::Mutex<UnixStream>>>,
     #[allow(dead_code)] // Used for Request::ListRules debugging (see Section 8.2.6)
     req_stream: Option<Arc<tokio::sync::Mutex<UnixStream>>>, // Request stream for control plane (Request::ListRules etc, used by GetWorkerRules)
+    #[allow(dead_code)] // Reserved for future log aggregation feature
     log_pipe: Option<std::os::unix::io::OwnedFd>, // Pipe for reading worker's stderr (JSON logs)
+    #[allow(dead_code)] // Reserved for future stats aggregation feature
     stats_pipe: Option<std::os::unix::io::OwnedFd>, // Pipe for reading worker's stats (JSON)
 }
 
@@ -147,9 +149,7 @@ pub fn handle_supervisor_command(
             }
 
             // Warn about loopback interface usage (allowed but not recommended)
-            if rule.input_interface == "lo"
-                || rule.outputs.iter().any(|o| o.interface == "lo")
-            {
+            if rule.input_interface == "lo" || rule.outputs.iter().any(|o| o.interface == "lo") {
                 eprintln!(
                     "[Supervisor] WARNING: Rule '{}' uses loopback interface. \
                     This can cause packet reflection artifacts where transmitted packets are \
@@ -290,7 +290,8 @@ pub async fn spawn_control_plane_worker(
         .arg("--gid")
         .arg(gid.to_string())
         .arg("--relay-command-socket-path")
-        .arg(relay_command_socket_path);
+        .arg(relay_command_socket_path)
+        .process_group(0); // Put worker in its own process group to prevent SIGTERM propagation
 
     if let Some(addr) = prometheus_addr {
         command.arg("--prometheus-addr").arg(addr.to_string());
@@ -383,7 +384,23 @@ pub async fn spawn_data_plane_worker(
         .arg("--input-interface-name")
         .arg(interface)
         .arg("--fanout-group-id")
-        .arg(fanout_group_id.to_string());
+        .arg(fanout_group_id.to_string())
+        .process_group(0); // Put worker in its own process group to prevent SIGTERM propagation
+
+    // Pass stats pipe FD via environment variable (secure FD passing)
+    // Clear close-on-exec flag so the FD is inherited
+    #[cfg(not(feature = "testing"))]
+    if let Some(write_fd) = stats_write_fd {
+        command.env("MCR_STATS_PIPE_FD", write_fd.to_string());
+        // Clear FD_CLOEXEC flag to allow FD to be inherited across exec
+        use nix::fcntl::{fcntl, FcntlArg, FdFlag};
+        use std::os::fd::BorrowedFd;
+        let borrowed_fd = unsafe { BorrowedFd::borrow_raw(write_fd) };
+        let flags = fcntl(borrowed_fd, FcntlArg::F_GETFD)?;
+        let mut fd_flags = FdFlag::from_bits_truncate(flags);
+        fd_flags.remove(FdFlag::FD_CLOEXEC);
+        fcntl(borrowed_fd, FcntlArg::F_SETFD(fd_flags))?;
+    }
 
     // Ensure worker_sock becomes FD 3 in the child, and redirect stderr to pipe
     unsafe {
@@ -415,20 +432,11 @@ pub async fn spawn_data_plane_worker(
                 }
             }
 
-            // Set up stats pipe as FD 4
+            // Close stats read end in child (not needed)
             #[cfg(not(feature = "testing"))]
-            if let Some(write_fd) = stats_write_fd {
-                if libc::dup2(write_fd, 4) == -1 {
+            if let Some(read_fd) = stats_read_fd {
+                if libc::close(read_fd) == -1 {
                     return Err(std::io::Error::last_os_error());
-                }
-                if libc::close(write_fd) == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                // Also close read end in child (not needed)
-                if let Some(read_fd) = stats_read_fd {
-                    if libc::close(read_fd) == -1 {
-                        return Err(std::io::Error::last_os_error());
-                    }
                 }
             }
 
@@ -532,7 +540,7 @@ impl WorkerManager {
                 ingress_cmd_stream: Some(cmd_stream_arc.clone()),
                 egress_cmd_stream: Some(cmd_stream_arc), // Same stream for CP
                 req_stream: Some(req_stream_arc),
-                log_pipe: None, // Control plane uses MPSC ring buffer
+                log_pipe: None,   // Control plane uses MPSC ring buffer
                 stats_pipe: None, // Control plane doesn't have stats pipe
             },
         );
@@ -545,16 +553,17 @@ impl WorkerManager {
 
     /// Spawn a data plane worker for the given core
     async fn spawn_data_plane(&mut self, core_id: u32) -> Result<()> {
-        let (child, ingress_cmd_stream, egress_cmd_stream, log_pipe, stats_pipe) = spawn_data_plane_worker(
-            core_id,
-            self.uid,
-            self.gid,
-            self.interface.clone(),
-            self.relay_command_socket_path.clone(),
-            self.fanout_group_id,
-            &self.logger,
-        )
-        .await?;
+        let (child, ingress_cmd_stream, egress_cmd_stream, log_pipe, stats_pipe) =
+            spawn_data_plane_worker(
+                core_id,
+                self.uid,
+                self.gid,
+                self.interface.clone(),
+                self.relay_command_socket_path.clone(),
+                self.fanout_group_id,
+                &self.logger,
+            )
+            .await?;
 
         let pid = child.id().unwrap();
         let ingress_cmd_stream_arc = Arc::new(tokio::sync::Mutex::new(ingress_cmd_stream));
@@ -711,6 +720,9 @@ impl WorkerManager {
             "Graceful shutdown initiated, signaling workers"
         );
 
+        // Collect join handles for shutdown command sends
+        let mut shutdown_tasks = Vec::new();
+
         // Signal all workers to shut down by sending explicit Shutdown command
         for worker in self.workers.values() {
             let cmd_bytes = serde_json::to_vec(&RelayCommand::Shutdown).unwrap();
@@ -721,7 +733,7 @@ impl WorkerManager {
                 let worker_type_desc = format!("{:?}", worker.worker_type);
                 let cmd_bytes_clone = cmd_bytes.clone();
 
-                tokio::spawn(async move {
+                let task = tokio::spawn(async move {
                     let mut stream = stream_mutex.lock().await;
                     let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
                     if let Err(e) = framed.send(cmd_bytes_clone.into()).await {
@@ -731,6 +743,7 @@ impl WorkerManager {
                         );
                     }
                 });
+                shutdown_tasks.push(task);
             }
 
             // Send to egress stream if present (for data plane workers, this is a separate stream)
@@ -739,7 +752,7 @@ impl WorkerManager {
                 let worker_type_desc = format!("{:?}", worker.worker_type);
                 let cmd_bytes_clone = cmd_bytes.clone();
 
-                tokio::spawn(async move {
+                let task = tokio::spawn(async move {
                     let mut stream = stream_mutex.lock().await;
                     let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
                     if let Err(e) = framed.send(cmd_bytes_clone.into()).await {
@@ -749,8 +762,29 @@ impl WorkerManager {
                         );
                     }
                 });
+                shutdown_tasks.push(task);
             }
         }
+
+        // Wait for all shutdown commands to be sent (with 1 second timeout)
+        let send_timeout = Duration::from_secs(1);
+        match tokio::time::timeout(send_timeout, futures::future::join_all(shutdown_tasks)).await {
+            Ok(_) => {
+                eprintln!("[Supervisor] All shutdown commands sent successfully");
+            }
+            Err(_) => {
+                eprintln!("[Supervisor] Warning: Timeout sending shutdown commands");
+            }
+        }
+
+        // Grace period: Give workers time to process shutdown and print final stats
+        // This allows workers to cleanly exit their event loops and call print_final_stats()
+        let grace_period = Duration::from_millis(500);
+        eprintln!(
+            "[Supervisor] Waiting {:?} grace period for workers to process shutdown",
+            grace_period
+        );
+        tokio::time::sleep(grace_period).await;
 
         // Wait for all workers to exit with timeout
         let num_workers = self.workers.len();
@@ -1805,15 +1839,30 @@ mod tests {
                 let flow = &stats[0];
 
                 // Check aggregated counters (should be summed)
-                assert_eq!(flow.packets_relayed, 450, "Should sum packets from all workers: 100+200+150");
-                assert_eq!(flow.bytes_relayed, 45000, "Should sum bytes from all workers: 10000+20000+15000");
+                assert_eq!(
+                    flow.packets_relayed, 450,
+                    "Should sum packets from all workers: 100+200+150"
+                );
+                assert_eq!(
+                    flow.bytes_relayed, 45000,
+                    "Should sum bytes from all workers: 10000+20000+15000"
+                );
 
                 // Check aggregated rates (currently summed, not averaged)
-                assert_eq!(flow.packets_per_second, 225.0, "Should sum pps from all workers: 50+100+75");
-                assert_eq!(flow.bits_per_second, 18000.0, "Should sum bps from all workers: 4000+8000+6000");
+                assert_eq!(
+                    flow.packets_per_second, 225.0,
+                    "Should sum pps from all workers: 50+100+75"
+                );
+                assert_eq!(
+                    flow.bits_per_second, 18000.0,
+                    "Should sum bps from all workers: 4000+8000+6000"
+                );
 
                 // Check flow identification
-                assert_eq!(flow.input_group, "224.0.0.1".parse::<std::net::Ipv4Addr>().unwrap());
+                assert_eq!(
+                    flow.input_group,
+                    "224.0.0.1".parse::<std::net::Ipv4Addr>().unwrap()
+                );
                 assert_eq!(flow.input_port, 5000);
             }
             _ => panic!("Expected Response::Stats, got {:?}", response),
@@ -1885,8 +1934,14 @@ mod tests {
                 assert_eq!(stats.len(), 2, "Should have two distinct flows");
 
                 // Find Flow A and Flow B in the results
-                let flow_a = stats.iter().find(|s| s.input_port == 5000).expect("Should have Flow A");
-                let flow_b = stats.iter().find(|s| s.input_port == 5001).expect("Should have Flow B");
+                let flow_a = stats
+                    .iter()
+                    .find(|s| s.input_port == 5000)
+                    .expect("Should have Flow A");
+                let flow_b = stats
+                    .iter()
+                    .find(|s| s.input_port == 5001)
+                    .expect("Should have Flow B");
 
                 // Flow A: aggregated from both workers
                 assert_eq!(flow_a.packets_relayed, 300, "Flow A packets: 100+200");

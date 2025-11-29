@@ -3,6 +3,7 @@
 ## Overview
 
 The multicast relay's PACKET_FANOUT_CPU architecture depends on the kernel distributing packets to the correct CPUs. This document explains:
+
 - How RSS (hardware) and RPS (software) work
 - How to configure them for optimal worker placement
 - How to verify the configuration
@@ -10,7 +11,7 @@ The multicast relay's PACKET_FANOUT_CPU architecture depends on the kernel distr
 
 ## The Stack: NIC → RSS/RPS → CPU → PACKET_FANOUT → Worker
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────┐
 │                  Physical NIC (eth0)                         │
 │                                                              │
@@ -46,29 +47,34 @@ The multicast relay's PACKET_FANOUT_CPU architecture depends on the kernel distr
 ### RSS (Receive-Side Scaling) - Hardware
 
 **What it is:**
+
 - NIC feature that distributes packets to multiple hardware RX queues
 - Each queue has dedicated DMA ring buffer
 - NIC computes hash and chooses queue
 - Zero CPU overhead for distribution
 
 **Pros:**
+
 - ✅ Lowest latency (hardware acceleration)
 - ✅ No CPU overhead for packet steering
 - ✅ Works at line rate for high-speed NICs
 - ✅ Better cache locality (fewer bounces)
 
 **Cons:**
+
 - ❌ Requires NIC support (not all NICs have it)
 - ❌ Limited number of queues (typically 2-128)
 - ❌ Configuration via ethtool (interface-specific)
 
 **Check if your NIC supports RSS:**
+
 ```bash
 ethtool -l eth0
 ```
 
 Expected output for RSS-capable NIC:
-```
+
+```text
 Channel parameters for eth0:
 Pre-set maximums:
 RX:             16      # Maximum RSS queues
@@ -85,22 +91,26 @@ Combined:       4
 ### RPS (Receive Packet Steering) - Software
 
 **What it is:**
+
 - Kernel software that emulates RSS
 - For NICs without hardware RSS support
 - Packet distribution happens in softirq
 - Configurable per-interface via sysfs
 
 **Pros:**
+
 - ✅ Works on any NIC (even without RSS)
 - ✅ More flexible configuration
 - ✅ Can handle unlimited CPUs
 
 **Cons:**
+
 - ❌ CPU overhead for packet steering
 - ❌ Higher latency than hardware RSS
 - ❌ Packets may bounce between CPUs
 
 **When to use RPS:**
+
 - NIC doesn't support RSS
 - Need more queues than NIC supports
 - Virtual NICs (often don't have RSS)
@@ -150,6 +160,7 @@ sudo ethtool -N eth0 rx-flow-hash udp4 sdfn
 ```
 
 **Why this matters:**
+
 - Multicast flows have same destination IP/port
 - Need source IP/port for distribution
 - Default may only use destination → all packets to one queue!
@@ -193,8 +204,10 @@ sudo systemctl start irqbalance
 ```
 
 **Bitmask format:**
+
 - Binary → Hex: CPU0=1, CPU1=2, CPU2=4, CPU3=8, etc.
 - For CPU lists, use `/proc/irq/N/smp_affinity_list`:
+
   ```bash
   echo 0 > /proc/irq/137/smp_affinity_list  # CPU 0
   echo 1 > /proc/irq/138/smp_affinity_list  # CPU 1
@@ -240,7 +253,7 @@ echo 131072 > /proc/sys/net/core/rps_sock_flow_entries
 
 ## RFS (Receive Flow Steering)
 
-**Advanced: Steers packets to the CPU where the application socket is located**
+Advanced: Steers packets to the CPU where the application socket is located.
 
 ```bash
 # Enable RFS globally
@@ -253,6 +266,7 @@ echo 2048 > /sys/class/net/eth0/queues/rx-1/rps_flow_cnt
 ```
 
 **How RFS helps:**
+
 - Kernel tracks which CPU a socket is on
 - Tries to deliver packets to that CPU
 - Improves cache locality if worker moves CPUs
@@ -356,7 +370,8 @@ watch -n 1 'ethtool -S eth0 | grep rx_queue'
 ```
 
 Expected output (packets distributed across queues):
-```
+
+```text
      rx_queue_0_packets: 1234567
      rx_queue_1_packets: 1245678
      rx_queue_2_packets: 1256789
@@ -373,7 +388,8 @@ watch -n 1 'grep "NET_RX" /proc/softirqs'
 ```
 
 Expected output (NET_RX work distributed):
-```
+
+```text
              CPU0       CPU1       CPU2       CPU3
 NET_RX:    1234567    1245678    1256789    1267890
 ```
@@ -408,6 +424,7 @@ Expected: Each worker pinned to different CPU
 ### Issue 1: All Packets Go to Queue 0
 
 **Symptom:**
+
 ```bash
 ethtool -S eth0 | grep rx_queue
      rx_queue_0_packets: 999999999
@@ -418,6 +435,7 @@ ethtool -S eth0 | grep rx_queue
 **Cause:** RSS hash not configured for multicast flows
 
 **Solution:**
+
 ```bash
 # Configure UDP hash to include source IP/port
 sudo ethtool -N eth0 rx-flow-hash udp4 sdfn
@@ -428,11 +446,13 @@ sudo ethtool -N eth0 rx-flow-hash udp4 sdfn
 **Symptom:** Some workers process 10x more packets than others
 
 **Possible causes:**
+
 1. **Few multicast sources** - If only 1-2 sources, RSS may hash them to same queue
 2. **IRQ affinity wrong** - IRQs not pinned to correct CPUs
 3. **Worker CPU affinity wrong** - Workers not pinned to CPUs matching RSS queues
 
 **Diagnosis:**
+
 ```bash
 # Check if traffic is balanced at NIC level
 ethtool -S eth0 | grep rx_queue_.*_packets
@@ -448,6 +468,7 @@ pgrep -f "multicast_relay worker" | xargs -I {} taskset -cp {}
 **Cause:** All softirqs handled on CPU 0 (default without RSS/RPS)
 
 **Solution:**
+
 ```bash
 # Enable RPS for software distribution
 echo f > /sys/class/net/eth0/queues/rx-0/rps_cpus  # CPUs 0-3
@@ -460,6 +481,7 @@ echo f > /sys/class/net/eth0/queues/rx-0/rps_cpus  # CPUs 0-3
 **Cause:** `irqbalance` daemon moving IRQs automatically
 
 **Solution:**
+
 ```bash
 # Disable irqbalance for manual control
 sudo systemctl stop irqbalance
@@ -499,6 +521,7 @@ sudo ethtool -C eth0 rx-usecs 50 tx-usecs 50
 ```
 
 **Trade-off:**
+
 - Lower values = lower latency, more CPU overhead (more interrupts)
 - Higher values = higher latency, less CPU overhead (fewer interrupts)
 
@@ -523,11 +546,13 @@ grep . /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
 The multicast relay supervisor should:
 
 1. **Detect CPU topology**
+
    ```rust
    let num_cpus = num_cpus::get();
    ```
 
 2. **Configure RSS/RPS** before starting workers
+
    ```rust
    Command::new("./setup-rss.sh")
        .arg(&interface)
@@ -536,6 +561,7 @@ The multicast relay supervisor should:
    ```
 
 3. **Pin workers to CPUs**
+
    ```rust
    // Already done in spawn_data_plane_worker()
    unsafe {
@@ -546,6 +572,7 @@ The multicast relay supervisor should:
    ```
 
 4. **Use consistent fanout_group_id**
+
    ```rust
    // Already done: all workers share same fanout group
    let fanout_group_id = (std::process::id() & 0xFFFF) as u16;
@@ -556,6 +583,7 @@ The multicast relay supervisor should:
 Workers should:
 
 1. **Verify CPU affinity on startup**
+
    ```rust
    let cpu = unsafe {
        libc::sched_getcpu()
@@ -564,12 +592,14 @@ Workers should:
    ```
 
 2. **Configure PACKET_FANOUT_CPU** (already implemented)
+
    ```rust
    let fanout_arg: u32 = (fanout_group_id as u32) | (libc::PACKET_FANOUT_CPU << 16);
    setsockopt(fd, SOL_PACKET, PACKET_FANOUT, &fanout_arg, ...);
    ```
 
 3. **Report imbalance** if detected
+
    ```rust
    if packets_this_worker < (total_packets / num_workers * 0.5) {
        logger.warn(Facility::DataPlane, "Worker underutilized - check RSS config");

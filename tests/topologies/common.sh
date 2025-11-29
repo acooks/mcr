@@ -83,7 +83,6 @@ setup_bridge_topology() {
     sudo ip netns exec "$netns" ip addr add "$gen_ip" dev "$gen_veth"
     sudo ip netns exec "$netns" ip link set "$gen_veth" up
     sudo ip netns exec "$netns" ip link set "$gen_veth_peer" up
-
     # Create veth pair for MCR
     sudo ip netns exec "$netns" ip link add "$mcr_veth" type veth peer name "$mcr_veth_peer"
     sudo ip netns exec "$netns" ip addr add "$mcr_ip" dev "$mcr_veth"
@@ -94,7 +93,51 @@ setup_bridge_topology() {
     sudo ip netns exec "$netns" ip link set "$gen_veth_peer" master "$bridge"
     sudo ip netns exec "$netns" ip link set "$mcr_veth_peer" master "$bridge"
 
+    # Wait for bridge ports to reach forwarding state
+    wait_for_bridge_forwarding "$netns" "$bridge" "$gen_veth_peer" "$mcr_veth_peer"
+
     log_info "Bridge topology created: Generator($gen_veth:$gen_ip) <-> Bridge($bridge) <-> MCR($mcr_veth:$mcr_ip)"
+}
+
+# Wait for bridge ports to reach forwarding state
+# STP can delay ports through listening/learning states (30+ seconds by default)
+# This function waits until all specified ports are forwarding, or times out
+# Usage: wait_for_bridge_forwarding <netns> <bridge> <port1> [port2] ...
+wait_for_bridge_forwarding() {
+    local netns="$1"
+    local bridge="$2"
+    shift 2
+    local ports=("$@")
+
+    local timeout=10
+    local start=$(date +%s)
+
+    log_info "Waiting for bridge $bridge ports to reach forwarding state..."
+
+    for port in "${ports[@]}"; do
+        while true; do
+            # Get port state from bridge link output
+            # State can be: disabled, blocking, listening, learning, forwarding
+            local state=$(sudo ip netns exec "$netns" bridge link show dev "$port" 2>/dev/null | grep -oP 'state \K\w+' || echo "unknown")
+
+            if [ "$state" = "forwarding" ]; then
+                log_info "Bridge port $port is forwarding"
+                break
+            fi
+
+            if [ "$(($(date +%s) - start))" -gt "$timeout" ]; then
+                log_error "Timeout waiting for bridge port $port to reach forwarding state (current: $state)"
+                log_error "Bridge may have STP enabled with long forward delay"
+                # Show bridge STP status for debugging
+                sudo ip netns exec "$netns" bridge link show dev "$port" >&2 || true
+                return 1
+            fi
+
+            sleep 0.1
+        done
+    done
+
+    log_info "All bridge ports are forwarding"
 }
 
 # --- MCR Instance Management ---
@@ -114,10 +157,43 @@ start_mcr() {
     # Clean up any existing sockets
     rm -f "$control_socket"
 
-    # If namespace specified, run in that namespace
-    # Note: sudo is required for ip netns exec, and the redirection must be inside the sudo context
+    # Wait for interface to be ready (critical for network namespace timing)
+    local timeout=5
+    local elapsed=0
     if [ -n "$netns" ]; then
-        sudo ip netns exec "$netns" taskset -c "$core_id" "$RELAY_BINARY" supervisor \
+        while ! sudo ip netns exec "$netns" ip link show "$interface" >/dev/null 2>&1; do
+            if [ $elapsed -ge $timeout ]; then
+                log_error "Timeout waiting for interface $interface in namespace $netns"
+                return 1
+            fi
+            sleep 0.1
+            elapsed=$((elapsed + 1))
+        done
+        # Ensure interface is UP
+        while ! sudo ip netns exec "$netns" ip link show "$interface" | grep -q 'state UP'; do
+            if [ $elapsed -ge $((timeout * 2)) ]; then
+                log_error "Timeout waiting for interface $interface to be UP in namespace $netns"
+                return 1
+            fi
+            sleep 0.1
+            elapsed=$((elapsed + 1))
+        done
+        log_info "Interface $interface is ready (state UP)"
+    else
+        while ! ip link show "$interface" >/dev/null 2>&1; do
+            if [ $elapsed -ge $timeout ]; then
+                log_error "Timeout waiting for interface $interface"
+                return 1
+            fi
+            sleep 0.1
+            elapsed=$((elapsed + 1))
+        done
+    fi
+
+    # If namespace specified, run in that namespace
+    # Note: sudo -E is required to preserve environment variables like MCR_STATS_INTERVAL_MS
+    if [ -n "$netns" ]; then
+        sudo -E ip netns exec "$netns" taskset -c "$core_id" "$RELAY_BINARY" supervisor \
             --control-socket-path "$control_socket" \
             --interface "$interface" \
             --num-workers 1 \
@@ -216,8 +292,9 @@ get_stats() {
         return 1
     fi
 
-    # Get last ingress and egress stats lines
-    tail -50 "$log_file" | grep -E "\[STATS:(Ingress|Egress)\]" | tail -2 || true
+    # Get FINAL stats lines (graceful shutdown stats)
+    # Format: [STATS:Ingress FINAL] and [STATS:Egress FINAL]
+    tail -50 "$log_file" | grep -E "\[STATS:(Ingress|Egress) FINAL\]" | tail -2 || true
 }
 
 # Print final stats for all MCR instances
@@ -245,21 +322,52 @@ extract_stat() {
 
     # For ingress stats, prefer FINAL stats for accuracy
     if [[ "$stat_type" == "STATS:Ingress" ]]; then
-        # Try to get FINAL stats first
+        # Try to get FINAL stats first (old format)
         local final_value=$(grep "\[STATS:Ingress FINAL\]" "$log_file" | tail -1 | grep -oP "$field=\K[0-9]+" || echo "")
         if [ -n "$final_value" ]; then
             echo "$final_value"
             return
         fi
+
+        # Try new unified stats format [STATS]
+        if [[ "$field" == "matched" || "$field" == "buf_exhaust" || "$field" == "rx" || "$field" == "not_matched" ]]; then
+            # Use word boundary \b to ensure exact field match (e.g., "matched" not "not_matched")
+            final_value=$(grep "\[STATS\]" "$log_file" | tail -1 | grep -oP "\b$field=\K[0-9]+" || echo "")
+            if [ -n "$final_value" ]; then
+                echo "$final_value"
+                return
+            fi
+        fi
     fi
 
-    # Fall back to last periodic stat
+    # For egress stats
+    if [[ "$stat_type" == "STATS:Egress" ]]; then
+        # Try to get FINAL stats first (old format)
+        local final_value=$(grep "\[STATS:Egress FINAL\]" "$log_file" | tail -1 | grep -oP "$field=\K[0-9]+" || echo "")
+        if [ -n "$final_value" ]; then
+            echo "$final_value"
+            return
+        fi
+
+        # Try new unified stats format [STATS] with "sent" or "tx" field
+        if [[ "$field" == "sent" ]]; then
+            # New format uses "tx" instead of "sent" - use word boundary
+            final_value=$(grep "\[STATS\]" "$log_file" | tail -1 | grep -oP "\btx=\K[0-9]+" || echo "")
+            if [ -n "$final_value" ]; then
+                echo "$final_value"
+                return
+            fi
+        fi
+    fi
+
+    # Fall back to last periodic stat (old format)
     # Use tail -100000 to handle high-volume trace logs that bury stats
     # With TRACE logging enabled, logs can exceed 300k lines, so stats may be 50k+ lines from end
+    # Use word boundary to ensure exact field match
     tail -100000 "$log_file" | \
         grep "\[$stat_type\]" | \
         tail -1 | \
-        grep -oP "$field=\K[0-9]+" || echo "0"
+        grep -oP "\b$field=\K[0-9]+" || echo "0"
 }
 
 # Validate stats meet expectations
@@ -278,6 +386,26 @@ validate_stat() {
         return 0
     else
         log_error "❌ $description: $actual (expected >= $min_value)"
+        return 1
+    fi
+}
+
+# Validate a statistic is at most a maximum value
+# Usage: validate_stat_max <log_file> <stat_type> <field> <max_value> <description>
+validate_stat_max() {
+    local log_file="$1"
+    local stat_type="$2"
+    local field="$3"
+    local max_value="$4"
+    local description="$5"
+
+    local actual=$(extract_stat "$log_file" "$stat_type" "$field")
+
+    if [ "$actual" -le "$max_value" ]; then
+        log_info "✅ $description: $actual (<= $max_value)"
+        return 0
+    else
+        log_error "❌ $description: $actual (expected <= $max_value)"
         return 1
     fi
 }
@@ -303,23 +431,67 @@ stop_log_monitor() {
 
 # --- Cleanup ---
 
-# Kill all MCR processes
-cleanup_mcr_processes() {
-    log_info "Cleaning up MCR processes"
-    killall -q multicast_relay || true
-    killall -q traffic_generator || true
+# Graceful cleanup for network namespace with proper supervisor shutdown
+# Usage: graceful_cleanup_namespace <netns_name> <supervisor_pid_var_names...>
+# Example: graceful_cleanup_namespace "$NETNS" mcr1_PID mcr2_PID mcr3_PID
+graceful_cleanup_namespace() {
+    local netns="$1"
+    shift  # Remove first arg, rest are PID variable names
+
+    log_info "Running graceful cleanup"
+
+    # Send SIGTERM to supervisor processes only (for graceful shutdown)
+    # Workers are in their own process groups and will be shutdown via command
+    for pid_var in "$@"; do
+        local pid="${!pid_var}"
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            log_info "Sending SIGTERM to supervisor PID $pid ($pid_var)"
+            sudo kill -TERM "$pid" 2>/dev/null || true
+        fi
+    done
+
+    # Wait for graceful shutdown (includes 500ms grace period + worker exit time)
+    log_info "Waiting for graceful shutdown..."
+    sleep 2
+
+    # Force-kill any remaining processes in namespace
+    log_info "Force-killing any remaining processes"
+    sudo ip netns pids "$netns" 2>/dev/null | xargs -r sudo kill -9 2>/dev/null || true
+
+    # Remove namespace
+    sudo ip netns del "$netns" 2>/dev/null || true
+    log_info "Cleanup complete"
 }
 
-# Remove socket files
-cleanup_sockets() {
-    log_info "Cleaning up socket files"
+# Graceful cleanup for unshare contexts (ephemeral namespaces)
+# Usage: graceful_cleanup_unshare <supervisor_pid_var_names...>
+# Example: graceful_cleanup_unshare mcr1_PID mcr2_PID mcr3_PID
+graceful_cleanup_unshare() {
+    log_info "Running graceful cleanup"
+
+    # Send SIGTERM to supervisor processes only (for graceful shutdown)
+    # Workers are in their own process groups and will be shutdown via command
+    for pid_var in "$@"; do
+        local pid="${!pid_var}"
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            log_info "Sending SIGTERM to supervisor PID $pid ($pid_var)"
+            kill -TERM "$pid" 2>/dev/null || true
+        fi
+    done
+
+    # Wait for graceful shutdown (includes 500ms grace period + worker exit time)
+    log_info "Waiting for graceful shutdown..."
+    sleep 2
+
+    # Force-kill any remaining MCR processes
+    log_info "Force-killing any remaining processes"
+    killall -q -9 multicast_relay 2>/dev/null || true
+    killall -q -9 traffic_generator 2>/dev/null || true
+
+    # Clean up socket files
     rm -f /tmp/mcr*.sock
     rm -f /tmp/mcr*_relay.sock
+
+    log_info "Cleanup complete"
 }
 
-# Full cleanup (call from trap)
-cleanup_all() {
-    log_info "Running cleanup"
-    cleanup_mcr_processes
-    cleanup_sockets
-}

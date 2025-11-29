@@ -62,6 +62,7 @@ MCR uses `PACKET_FANOUT_CPU` to distribute incoming packets across multiple work
 - **Configuration**: Set via `--num-workers` flag on supervisor
 
 **How it works:**
+
 1. NIC delivers packet to CPU via RSS/RPS
 2. Kernel's `PACKET_FANOUT_CPU` delivers packet to worker bound to that CPU
 3. Worker processes packet with hot CPU cache
@@ -294,6 +295,7 @@ Use the `list` command to see all active rules and their IDs:
 ```
 
 **Example output:**
+
 ```json
 {
   "Rules": [
@@ -317,6 +319,7 @@ Use the `list` command to see all active rules and their IDs:
 - You must re-add rules after a restart (or use a configuration management tool)
 
 **Implications:**
+
 - Auto-generated UUIDs will be **different** after a restart
 - If you use custom rule IDs, you can re-create rules with the same IDs
 - For production deployments, consider using custom IDs in your automation scripts
@@ -338,6 +341,7 @@ Use the `list` command to see all active rules and their IDs:
    - Consider prefixing by function: `prod-`, `test-`, etc.
 
 **Example with custom ID:**
+
 ```bash
 # Add with custom ID
 control_client add --rule-id my-stream \

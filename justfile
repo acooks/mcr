@@ -9,7 +9,7 @@ dev: fmt clippy build-release test-fast
     @echo "\n✅ Development cycle complete!"
     @echo ""
     @echo "Next steps:"
-    @echo "  sudo -E just test-privileged     # Run privileged tests"
+    @echo "  sudo -E just test-integration    # Run integration tests"
     @echo "  sudo just test-performance       # Run performance tests"
 
 # Run code quality checks (fast, no coverage)
@@ -18,7 +18,7 @@ check: fmt clippy lint-docs check-links validate-mermaid build-release test-fast
     @echo ""
     @echo "Additional test suites:"
     @echo "  just test-all                    # All unprivileged tests"
-    @echo "  sudo -E just test-privileged     # Privileged Rust tests"
+    @echo "  sudo -E just test-integration    # Integration tests (requires root)"
     @echo "  sudo just test-performance       # Performance validation"
     @echo ""
     @echo "For full CI pipeline: just check-full"
@@ -199,30 +199,31 @@ test-unit:
     @echo "--- Running Unit Tests ---"
     cargo test --lib --features integration_test
 
-# Tier 2 (Part A): Run unprivileged Rust integration tests (as regular user).
-test-integration-light:
-    @echo "--- Running Integration Tests (non-privileged) ---"
-    cargo nextest run --profile default --test integration
-
-# Tier 2 (Part B): Run privileged Rust integration tests (requires root).
+# Tier 2: Run integration tests (requires root for network namespace isolation).
 # Note: This builds as the current user first, then runs with elevated privileges.
-test-integration-privileged:
+# Integration tests create network namespaces and veth pairs, requiring CAP_NET_ADMIN.
+test-integration:
     #!/usr/bin/env bash
     set -euo pipefail
-    echo "--- Running Privileged Integration Tests (requires root) ---"
+    echo "--- Running Integration Tests (requires root) ---"
     echo "Building release binaries and test binaries as current user..."
     cargo build --release --bins
-    cargo test --test integration --no-run
+    cargo test --test integration --no-run --release
 
     # Find the integration test binary
-    TEST_BINARY=$(find target/debug/deps -name 'integration-*' -type f -executable ! -name '*.d' | head -1)
+    TEST_BINARY=$(find target/release/deps -name 'integration-*' -type f -executable ! -name '*.d' | head -1)
     if [ -z "$TEST_BINARY" ]; then
         echo "ERROR: Integration test binary not found"
         exit 1
     fi
 
-    echo "Running privileged tests with sudo..."
-    sudo -E "$TEST_BINARY" privileged:: --test-threads=1 --nocapture
+    echo "Running integration tests with sudo (network namespaces require root)..."
+    sudo -E "$TEST_BINARY" --test-threads=1 --nocapture
+
+# Alias for backward compatibility
+test-integration-privileged: test-integration
+
+# Note: test-integration-light removed - all integration tests require root for network namespaces
 
 # Tier 3: Run a representative E2E Bash script test (requires root).
 test-e2e-bash:
@@ -230,15 +231,15 @@ test-e2e-bash:
     @if [ "$$EUID" -ne 0 ]; then echo "ERROR: Requires root (sudo just test-e2e-bash)"; exit 1; fi
     bash tests/data_plane_e2e.sh
 
-# Meta-Target: Run the complete test suite.
+# Meta-Target: Run the complete unprivileged test suite.
 # This is the primary command for contributors to validate changes before a PR.
-test-all: build-test test-unit test-integration-light
+test-all: build-test test-unit
     @echo "\n✅ Unprivileged test suite complete."
-    @echo "To run privileged tests, execute: sudo -E just test-integration-privileged"
+    @echo "To run integration tests (requires root), execute: sudo -E just test-integration"
 
 # Meta-Target: Run all fast, unprivileged tests.
 # This is useful for a quick feedback loop during development.
-test-quick: test-unit test-integration-light
+test-quick: test-unit
 
 # --- Performance Testing (New) ---
 
@@ -264,6 +265,7 @@ test-perf-quick: build-release
 
 # --- Fast Development Workflow (New) ---
 
-# Fast tests (unit + unprivileged integration)
-test-fast: test-unit test-integration-light
+# Fast tests (unit tests only - integration tests require root)
+test-fast: test-unit
     @echo "\n✅ Fast tests passed!"
+    @echo "To run integration tests (requires root), execute: sudo -E just test-integration"

@@ -60,7 +60,7 @@ export MCR_BUFFER_POOL_STANDARD=2000  # 4x default
 export MCR_BUFFER_POOL_JUMBO=800      # 4x default
 
 # Set up cleanup trap
-trap cleanup_all EXIT
+trap 'graceful_cleanup_unshare mcr1_PID mcr2_PID mcr3_PID mcr4_PID' EXIT
 
 log_section 'Network Namespace Setup'
 

@@ -1,0 +1,95 @@
+name: Performance Tests
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  quick-perf:
+    name: Quick Performance Validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Build release binaries
+      run: |
+        cargo build --release --bins
+
+    - name: Run quick performance test (100 packets)
+      run: |
+        sudo -E bash tests/data_plane_e2e.sh
+
+    - name: Extract performance metrics
+      if: always()
+      run: |
+        echo "=== Performance Metrics ===" > perf-summary.txt
+        echo "Timestamp: $(date -u)" >> perf-summary.txt
+        echo "Commit: ${{ github.sha }}" >> perf-summary.txt
+        grep -E "pps|Gbps|packets sent|SUCCESS" /tmp/*.log 2>/dev/null >> perf-summary.txt || echo "No metrics found"
+        cat perf-summary.txt
+
+    - name: Upload performance results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: quick-perf-results
+        path: |
+          perf-summary.txt
+          /tmp/mcr_*.log
+
+  full-perf:
+    name: Full Performance Suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: quick-perf
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Build release binaries
+      run: |
+        bash scripts/build_all.sh
+
+    - name: Setup kernel tuning
+      run: |
+        sudo bash scripts/setup_kernel_tuning.sh
+
+    - name: Run full performance test suite
+      run: |
+        sudo bash tests/data_plane_pipeline_veth.sh
+
+    - name: Extract detailed metrics
+      if: always()
+      run: |
+        echo "=== Full Performance Test Results ===" > full-perf-metrics.txt
+        echo "Timestamp: $(date -u)" >> full-perf-metrics.txt
+        echo "Commit: ${{ github.sha }}" >> full-perf-metrics.txt
+        echo "" >> full-perf-metrics.txt
+        grep -E "pps|Gbps|throughput|latency" /tmp/*.log 2>/dev/null >> full-perf-metrics.txt || echo "No detailed metrics found"
+        cat full-perf-metrics.txt
+
+    - name: Upload full performance results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: full-perf-results
+        path: |
+          full-perf-metrics.txt
+          /tmp/mcr_*.log
+          /tmp/perf_*.log

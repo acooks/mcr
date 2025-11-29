@@ -43,7 +43,7 @@
 use anyhow::{Context, Result};
 use io_uring::{opcode, types, IoUring};
 use socket2::{Domain, Protocol, Socket, Type};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::sync::Arc;
@@ -88,15 +88,32 @@ pub struct UnifiedConfig {
     pub send_batch_size: usize,
     /// Track statistics
     pub track_stats: bool,
+    /// Stats reporting interval in milliseconds (0 = disabled, uses packet-count instead)
+    pub stats_interval_ms: u64,
 }
 
 impl Default for UnifiedConfig {
     fn default() -> Self {
+        // Get num_recv_buffers from environment, default to 32 (original value)
+        // Investigation showed increasing to 64 or 128 caused worse performance
+        let num_recv_buffers = std::env::var("MCR_NUM_RECV_BUFFERS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(32);
+
+        // Get stats interval from environment, default to 0 (packet-count based)
+        // Set MCR_STATS_INTERVAL_MS=10 for 10ms time-based reporting
+        let stats_interval_ms = std::env::var("MCR_STATS_INTERVAL_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+
         Self {
-            queue_depth: 1024,    // Increased from 128 for high throughput (300k+ pps)
-            num_recv_buffers: 32, // Reduced from 64 to avoid buffer pool exhaustion
-            send_batch_size: 64,  // Increased from 32 to reduce syscall overhead
+            queue_depth: 1024,   // Increased from 128 for high throughput (300k+ pps)
+            num_recv_buffers,    // Configurable via MCR_NUM_RECV_BUFFERS (default: 32)
+            send_batch_size: 64, // Increased from 32 to reduce syscall overhead
             track_stats: true,
+            stats_interval_ms, // Configurable via MCR_STATS_INTERVAL_MS (default: 0 = packet-count)
         }
     }
 }
@@ -144,7 +161,7 @@ pub struct UnifiedDataPlane {
 
     // Egress
     egress_sockets: HashMap<(String, SocketAddr), (OwnedFd, Ipv4Addr)>,
-    send_queue: Vec<SendWorkItem>,
+    send_queue: VecDeque<SendWorkItem>,
     in_flight_sends: HashMap<u64, Arc<[u8]>>,
     next_send_user_data: u64,
 
@@ -161,6 +178,8 @@ pub struct UnifiedDataPlane {
     config: UnifiedConfig,
     stats: UnifiedStats,
     logger: Logger,
+    start_time: Instant,
+    last_stats_time: Instant,
 
     // Stats pipe for reporting to supervisor (FD 4)
     stats_pipe: Option<std::fs::File>,
@@ -180,6 +199,51 @@ impl UnifiedDataPlane {
         // Create AF_PACKET socket for receiving
         let recv_socket = Socket::new(Domain::PACKET, Type::RAW, Some(Protocol::from(0x0003)))
             .context("Failed to create AF_PACKET socket")?;
+
+        // Set large receive buffer to prevent drops during traffic bursts.
+        // Default system buffer (~212KB) can only hold ~150 packets at 1400 bytes each.
+        // At 100k pps, that's only 1.5ms of buffering - not enough for io_uring latency.
+        // We request 16MB which gives ~11k packets / ~110ms of burst tolerance.
+        // Note: Actual size may be limited by net.core.rmem_max sysctl.
+        const RECV_BUFFER_SIZE: i32 = 16 * 1024 * 1024; // 16MB
+        unsafe {
+            let ret = libc::setsockopt(
+                recv_socket.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_RCVBUF,
+                &RECV_BUFFER_SIZE as *const _ as *const _,
+                std::mem::size_of::<i32>() as libc::socklen_t,
+            );
+            if ret < 0 {
+                // Log warning but don't fail - system may have lower limits
+                logger.warning(
+                    Facility::DataPlane,
+                    &format!(
+                        "Failed to set SO_RCVBUF to {}MB, using system default",
+                        RECV_BUFFER_SIZE / 1024 / 1024
+                    ),
+                );
+            } else {
+                // Read back actual size (kernel may have adjusted it)
+                let mut actual_size: i32 = 0;
+                let mut len: libc::socklen_t = std::mem::size_of::<i32>() as libc::socklen_t;
+                libc::getsockopt(
+                    recv_socket.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_RCVBUF,
+                    &mut actual_size as *mut _ as *mut _,
+                    &mut len,
+                );
+                logger.info(
+                    Facility::DataPlane,
+                    &format!(
+                        "AF_PACKET SO_RCVBUF set to {}KB (requested {}MB)",
+                        actual_size / 1024,
+                        RECV_BUFFER_SIZE / 1024 / 1024
+                    ),
+                );
+            }
+        }
 
         // Get interface index
         let iface_index = get_interface_index(interface_name)?;
@@ -226,23 +290,33 @@ impl UnifiedDataPlane {
         // Set non-blocking
         recv_socket.set_nonblocking(true)?;
 
-        // Open stats pipe (FD 4) for writing stats to supervisor
+        // Open stats pipe for writing stats to supervisor
         // Only available for data plane workers (not in testing mode)
+        // FD is passed via MCR_STATS_PIPE_FD environment variable for security
         let stats_pipe = {
             #[cfg(not(feature = "testing"))]
             {
-                use std::os::fd::{BorrowedFd, FromRawFd};
                 use nix::fcntl::{fcntl, FcntlArg};
-                // Check if FD 4 exists (data plane workers have it, control plane doesn't)
-                // SAFETY: Temporarily borrowing FD 4 to check if it's valid
-                let borrowed_fd = unsafe { BorrowedFd::borrow_raw(4) };
-                match fcntl(borrowed_fd, FcntlArg::F_GETFD) {
-                    Ok(_) => {
-                        // FD 4 exists, open it as a File
-                        // SAFETY: FD 4 is valid (we just checked), and supervisor gave us ownership
-                        Some(unsafe { std::fs::File::from_raw_fd(4) })
+                use std::os::fd::{BorrowedFd, FromRawFd};
+
+                // Read stats pipe FD from environment variable (secure FD passing)
+                if let Ok(fd_str) = std::env::var("MCR_STATS_PIPE_FD") {
+                    if let Ok(stats_fd) = fd_str.parse::<i32>() {
+                        // Validate FD exists before using it
+                        let borrowed_fd = unsafe { BorrowedFd::borrow_raw(stats_fd) };
+                        match fcntl(borrowed_fd, FcntlArg::F_GETFD) {
+                            Ok(_) => {
+                                // FD is valid, open it as a File
+                                // SAFETY: FD is valid (we just checked), and supervisor gave us ownership
+                                Some(unsafe { std::fs::File::from_raw_fd(stats_fd) })
+                            }
+                            Err(_) => None, // FD is invalid
+                        }
+                    } else {
+                        None // Failed to parse FD number
                     }
-                    Err(_) => None, // FD 4 doesn't exist (control plane worker)
+                } else {
+                    None // No stats pipe FD provided (control plane worker or testing)
                 }
             }
             #[cfg(feature = "testing")]
@@ -258,7 +332,7 @@ impl UnifiedDataPlane {
             rules: HashMap::new(),
             flow_counters: HashMap::new(),
             egress_sockets: HashMap::new(),
-            send_queue: Vec::with_capacity(config.send_batch_size),
+            send_queue: VecDeque::with_capacity(config.send_batch_size),
             in_flight_sends: HashMap::new(),
             next_send_user_data: SEND_BASE,
             buffer_pool,
@@ -269,6 +343,8 @@ impl UnifiedDataPlane {
             config,
             stats: UnifiedStats::default(),
             logger,
+            start_time: Instant::now(),
+            last_stats_time: Instant::now(),
             stats_pipe,
         };
 
@@ -322,11 +398,15 @@ impl UnifiedDataPlane {
             .iter_mut()
             .map(|(key, counters)| {
                 // Calculate rates based on time since last snapshot
-                let (packets_per_second, bits_per_second) = if let Some(last_time) = counters.last_snapshot_time {
+                let (packets_per_second, bits_per_second) = if let Some(last_time) =
+                    counters.last_snapshot_time
+                {
                     let elapsed = now.duration_since(last_time).as_secs_f64();
 
                     if elapsed > 0.0 {
-                        let packet_delta = counters.packets_relayed.saturating_sub(counters.last_packets);
+                        let packet_delta = counters
+                            .packets_relayed
+                            .saturating_sub(counters.last_packets);
                         let byte_delta = counters.bytes_relayed.saturating_sub(counters.last_bytes);
 
                         let pps = packet_delta as f64 / elapsed;
@@ -408,9 +488,13 @@ impl UnifiedDataPlane {
             // Replenish receive buffers after processing completions
             self.submit_recv_buffers()?;
 
-            // Submit any pending sends
-            if !self.send_queue.is_empty() {
-                self.submit_send_batch()?;
+            // Submit pending sends - keep submitting batches until queue is empty or SQ is full
+            while !self.send_queue.is_empty() {
+                let submitted = self.submit_send_batch()?;
+                if submitted == 0 {
+                    // SQ is full, need to wait for completions
+                    break;
+                }
             }
 
             // CRITICAL: Submit all queued work AND wait for at least one completion
@@ -637,7 +721,7 @@ impl UnifiedDataPlane {
 
             // Queue send operation for each target (Arc clone is cheap - just refcount increment)
             for target in targets {
-                self.send_queue.push(SendWorkItem {
+                self.send_queue.push_back(SendWorkItem {
                     payload: Arc::clone(&payload),
                     dest_addr: target.dest_addr,
                     interface_name: target.interface_name,
@@ -677,18 +761,38 @@ impl UnifiedDataPlane {
                 self.stats.bytes_sent += result as u64;
             }
 
-            // Periodic stats
-            if self.stats.packets_sent.is_multiple_of(10000) {
+            // Periodic stats - check if we should log
+            let should_log_stats = if self.config.stats_interval_ms > 0 {
+                // Time-based reporting
+                let now = Instant::now();
+                let elapsed_ms = now.duration_since(self.last_stats_time).as_millis() as u64;
+                if elapsed_ms >= self.config.stats_interval_ms {
+                    self.last_stats_time = now;
+                    true
+                } else {
+                    false
+                }
+            } else {
+                // Packet-count based reporting (legacy behavior)
+                self.stats.packets_sent.is_multiple_of(10000)
+            };
+
+            if should_log_stats {
+                // Include elapsed_ms for time-series analysis
+                let elapsed_ms = Instant::now().duration_since(self.start_time).as_millis();
+
                 self.logger.info(
                     Facility::DataPlane,
                     &format!(
-                        "[STATS] rx={} tx={} matched={} not_matched={} rx_err={} tx_err={}",
+                        "[STATS] t_ms={} rx={} tx={} matched={} not_matched={} rx_err={} tx_err={} buf_exhaust={}",
+                        elapsed_ms,
                         self.stats.packets_received,
                         self.stats.packets_sent,
                         self.stats.rules_matched,
                         self.stats.rules_not_matched,
                         self.stats.recv_errors,
-                        self.stats.send_errors
+                        self.stats.send_errors,
+                        self.stats.buffer_pool_exhaustion
                     ),
                 );
 
@@ -848,11 +952,16 @@ impl UnifiedDataPlane {
     }
 
     /// Submit a batch of send operations
-    fn submit_send_batch(&mut self) -> Result<()> {
+    /// Returns the number of items submitted (0 if SQ is full or queue is empty)
+    fn submit_send_batch(&mut self) -> Result<usize> {
         // Check available space in submission queue
         let sq = self.ring.submission();
         let sq_available = sq.capacity() - sq.len();
         drop(sq); // Release borrow before loop
+
+        if sq_available == 0 {
+            return Ok(0);
+        }
 
         // Limit batch size to available space
         let batch_size = self
@@ -862,7 +971,7 @@ impl UnifiedDataPlane {
             .min(sq_available);
 
         for _ in 0..batch_size {
-            let item = self.send_queue.remove(0);
+            let item = self.send_queue.pop_front().unwrap();
 
             // Get or create egress socket
             let key = (item.interface_name.clone(), item.dest_addr);
@@ -895,8 +1004,10 @@ impl UnifiedDataPlane {
             self.in_flight_sends.insert(user_data, item.payload);
         }
 
-        self.ring.submit()?;
-        Ok(())
+        if batch_size > 0 {
+            self.ring.submit()?;
+        }
+        Ok(batch_size)
     }
 
     fn submit_command_read(&mut self) -> Result<()> {

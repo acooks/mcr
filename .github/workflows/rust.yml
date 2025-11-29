@@ -4,9 +4,9 @@ permissions:
 
 on:
   push:
-    branches: [ "master" ]
+    branches: [ "main" ]
   pull_request:
-    branches: [ "master" ]
+    branches: [ "main" ]
   workflow_dispatch:
 
 env:
@@ -59,8 +59,24 @@ jobs:
     - name: Build project
       run: cargo build --all-targets --features integration_test
 
-    - name: Run tests (excluding privileged tests)
-      run: 'cargo test --all-targets --features integration_test -- --nocapture --skip privileged::'
+    - name: Run unit tests
+      run: cargo test --lib --features integration_test
+
+    - name: Build integration test binary
+      run: |
+        cargo build --release --bins
+        cargo test --test integration --no-run --release
+
+    - name: Run integration tests (requires network namespaces)
+      timeout-minutes: 6
+      run: |
+        TEST_BINARY=$(find target/release/deps -name 'integration-*' -type f -executable ! -name '*.d' | head -1)
+        if [ -z "$TEST_BINARY" ]; then
+          echo "ERROR: Integration test binary not found"
+          exit 1
+        fi
+        echo "Running integration tests with sudo (network namespaces require CAP_NET_ADMIN)..."
+        sudo -E "$TEST_BINARY" --test-threads=1 --nocapture
 
     - name: Install cargo-audit
       run: cargo install cargo-audit
