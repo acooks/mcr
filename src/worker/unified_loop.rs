@@ -88,15 +88,32 @@ pub struct UnifiedConfig {
     pub send_batch_size: usize,
     /// Track statistics
     pub track_stats: bool,
+    /// Stats reporting interval in milliseconds (0 = disabled, uses packet-count instead)
+    pub stats_interval_ms: u64,
 }
 
 impl Default for UnifiedConfig {
     fn default() -> Self {
+        // Get num_recv_buffers from environment, default to 32 (original value)
+        // Investigation showed increasing to 64 or 128 caused worse performance
+        let num_recv_buffers = std::env::var("MCR_NUM_RECV_BUFFERS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(32);
+
+        // Get stats interval from environment, default to 0 (packet-count based)
+        // Set MCR_STATS_INTERVAL_MS=10 for 10ms time-based reporting
+        let stats_interval_ms = std::env::var("MCR_STATS_INTERVAL_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+
         Self {
             queue_depth: 1024,    // Increased from 128 for high throughput (300k+ pps)
-            num_recv_buffers: 32, // Reduced from 64 to avoid buffer pool exhaustion
+            num_recv_buffers,     // Configurable via MCR_NUM_RECV_BUFFERS (default: 32)
             send_batch_size: 64,  // Increased from 32 to reduce syscall overhead
             track_stats: true,
+            stats_interval_ms,    // Configurable via MCR_STATS_INTERVAL_MS (default: 0 = packet-count)
         }
     }
 }
@@ -161,6 +178,8 @@ pub struct UnifiedDataPlane {
     config: UnifiedConfig,
     stats: UnifiedStats,
     logger: Logger,
+    start_time: Instant,
+    last_stats_time: Instant,
 
     // Stats pipe for reporting to supervisor (FD 4)
     stats_pipe: Option<std::fs::File>,
@@ -324,6 +343,8 @@ impl UnifiedDataPlane {
             config,
             stats: UnifiedStats::default(),
             logger,
+            start_time: Instant::now(),
+            last_stats_time: Instant::now(),
             stats_pipe,
         };
 
@@ -736,18 +757,40 @@ impl UnifiedDataPlane {
                 self.stats.bytes_sent += result as u64;
             }
 
-            // Periodic stats
-            if self.stats.packets_sent.is_multiple_of(10000) {
+            // Periodic stats - check if we should log
+            let should_log_stats = if self.config.stats_interval_ms > 0 {
+                // Time-based reporting
+                let now = Instant::now();
+                let elapsed_ms = now.duration_since(self.last_stats_time).as_millis() as u64;
+                if elapsed_ms >= self.config.stats_interval_ms {
+                    self.last_stats_time = now;
+                    true
+                } else {
+                    false
+                }
+            } else {
+                // Packet-count based reporting (legacy behavior)
+                self.stats.packets_sent.is_multiple_of(10000)
+            };
+
+            if should_log_stats {
+                // Include elapsed_ms for time-series analysis
+                let elapsed_ms = Instant::now()
+                    .duration_since(self.start_time)
+                    .as_millis();
+
                 self.logger.info(
                     Facility::DataPlane,
                     &format!(
-                        "[STATS] rx={} tx={} matched={} not_matched={} rx_err={} tx_err={}",
+                        "[STATS] t_ms={} rx={} tx={} matched={} not_matched={} rx_err={} tx_err={} buf_exhaust={}",
+                        elapsed_ms,
                         self.stats.packets_received,
                         self.stats.packets_sent,
                         self.stats.rules_matched,
                         self.stats.rules_not_matched,
                         self.stats.recv_errors,
-                        self.stats.send_errors
+                        self.stats.send_errors,
+                        self.stats.buffer_pool_exhaustion
                     ),
                 );
 
