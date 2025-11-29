@@ -248,6 +248,13 @@ build-release:
     @echo "--- Building Release Binaries ---"
     @bash scripts/build_all.sh
 
+# Install git hooks for development
+setup-hooks:
+    @echo "--- Installing Git Hooks ---"
+    @cp scripts/pre-commit .git/hooks/pre-commit
+    @chmod +x .git/hooks/pre-commit
+    @echo "Pre-commit hook installed!"
+
 # Setup kernel tuning for performance testing
 setup-kernel:
     @echo "--- Setting Up Kernel Tuning ---"

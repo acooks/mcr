@@ -31,23 +31,6 @@ Consolidated November 2025. Completed items archived.
 
 ---
 
-### 2. Test Verification Discipline
-
-**Status:** Process failure identified
-
-**Problem:** Multiple commits claimed "all tests pass" without verification.
-
-**Recommended Process:**
-
-1. Pre-commit hook: Run `cargo test --lib` before commit
-2. CI/CD requirement: All tests must pass before merge
-3. Test run evidence: Paste test output in commit messages
-4. Never claim "all tests pass" without verification
-
-**Effort:** 1 day (CI setup + documentation)
-
----
-
 ## High Priority (🟡)
 
 ### 3. Network State Reconciliation
@@ -274,3 +257,4 @@ The following were completed in November 2025:
 - GetWorkerRules command removal (architectural decision)
 - Log level control integration tests (fixed: env!("CARGO_BIN_EXE_multicast_relay"))
 - Periodic health checks (every 250ms with auto-restart + SyncRules)
+- Test verification discipline: pre-commit hook (`scripts/pre-commit`, `just setup-hooks`), CI already enforces
