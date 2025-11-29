@@ -70,18 +70,17 @@ Consolidated November 2025. Completed items archived.
 ### 5. Buffer Size Limitation
 
 **Location:** Buffer pool implementation
-**Status:** Performance regression from design
+**Status:** Superseded by PACKET_MMAP plan
 
-- **Current:** 9KB jumbo buffers
-- **Designed:** 64KB buffers (multi-packet batching)
+- **Current:** Receive uses 2KB buffers (Small), Jumbo (9KB) allocated but unused
+- **Original design:** 64KB buffers for multi-packet batching
 
-**Action:**
+**Resolution:** The 64KB buffer design was for PACKET_MMAP ring buffers, not the current
+per-packet recv() architecture. Revisit buffer pool design when implementing PACKET_MMAP
+(see `docs/PACKET_MMAP_IMPLEMENTATION_PLAN.md`).
 
-1. Investigate why 9KB was chosen over 64KB
-2. Test memory usage with 64KB buffers
-3. Benchmark throughput: 9KB vs 64KB
-
-**Effort:** 2-3 days
+**Current workaround:** Standard 1500 MTU packets work fine with 2KB buffers. Jumbo frame
+support would require using Jumbo buffers for receive, or detecting interface MTU.
 
 ---
 
