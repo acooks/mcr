@@ -133,22 +133,28 @@ sudo tests/topologies/high_fanout_50.sh
 
 ### 4. Tree (N:1 Convergence) - `tree_converge.sh`
 
-**Status:** 🔜 Planned
+**Status:** ✅ Implemented
 
 **Topology:**
 
 ```text
-Traffic Gen 1 → MCR-1 ┐
-Traffic Gen 2 → MCR-2 ┼→ MCR-4 (convergence)
-Traffic Gen 3 → MCR-3 ┘
+Traffic Gen 1 (239.1.1.1) ─┐
+Traffic Gen 2 (239.1.1.2) ─┼→ MCR ─→ Sink
+Traffic Gen 3 (239.1.1.3) ─┘
 ```
 
 **Tests:**
 
-- Multiple sources to single destination
-- Ingress demultiplexing
-- Per-rule isolation
-- Fair queueing under contention
+- Multiple independent rules on same interface
+- Per-rule packet counting (isolation)
+- Fair handling of concurrent streams
+- No cross-talk between rules
+
+**Usage:**
+
+```bash
+sudo tests/topologies/tree_converge.sh
+```
 
 ### 5. Diamond (Multipath) - `diamond.sh`
 
@@ -185,6 +191,81 @@ Every MCR instance forwards to every other MCR instance
 - Cross-talk isolation
 - Rule management complexity
 - Resource utilization
+
+### 7. Multi-Worker Mode - `multi_worker.sh`
+
+**Status:** ✅ Implemented
+
+**Topology:**
+
+```text
+Traffic Generator → MCR (2 workers with PACKET_FANOUT) → Sink
+```
+
+**Tests:**
+
+- PACKET_FANOUT kernel packet distribution
+- Multiple workers processing traffic concurrently
+- Combined stats validation
+- No packet duplication
+
+**Usage:**
+
+```bash
+sudo tests/topologies/multi_worker.sh
+```
+
+### 8. Fault Tolerance - `fault_tolerance.sh`
+
+**Status:** ✅ Implemented
+
+**Tests:**
+
+- Graceful shutdown during active traffic
+- SIGTERM signal handling
+- Multiple SIGTERM resilience
+- Final stats persistence on shutdown
+- No zombie processes or resource leaks
+
+**Usage:**
+
+```bash
+sudo tests/topologies/fault_tolerance.sh
+```
+
+### 9. Edge Cases - `edge_cases.sh`
+
+**Status:** ✅ Implemented
+
+**Tests:**
+
+- Minimum packet size (64 bytes)
+- Maximum MTU packet size (1472 bytes)
+- Buffer pool under high load stress
+- Minimum valid UDP packet handling
+
+**Usage:**
+
+```bash
+sudo tests/topologies/edge_cases.sh
+```
+
+### 10. Dynamic Rule Changes - `dynamic_rules.sh`
+
+**Status:** ✅ Implemented
+
+**Tests:**
+
+- Traffic before rule exists (not_matched counter)
+- Adding rules during active traffic
+- Multiple concurrent rules
+- Rule listing and visibility
+
+**Usage:**
+
+```bash
+sudo tests/topologies/dynamic_rules.sh
+```
 
 ## Baseline Performance Tests
 
@@ -343,6 +424,11 @@ These topology tests provide end-to-end coverage for:
 - ✅ **Multi-instance coordination** - Process isolation
 - ✅ **Head-end replication** - 1:N amplification
 - ✅ **High fanout scenarios** - 1:50 replication (VecDeque send queue)
+- ✅ **Multi-worker mode** - PACKET_FANOUT kernel distribution
+- ✅ **N:1 convergence** - Multiple sources to single destination
+- ✅ **Fault tolerance** - Graceful shutdown, signal handling
+- ✅ **Edge cases** - Min/max packet sizes, buffer stress
+- ✅ **Dynamic rules** - Runtime rule addition and concurrent rules
 
 **Not covered** (blocked by architectural debt):
 

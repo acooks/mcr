@@ -21,6 +21,11 @@ jobs:
           - chain_3hop
           - tree_fanout
           - high_fanout_50
+          - tree_converge
+          - multi_worker
+          - fault_tolerance
+          - edge_cases
+          - dynamic_rules
       fail-fast: false  # Continue testing other topologies even if one fails
 
     steps:
