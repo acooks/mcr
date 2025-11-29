@@ -356,8 +356,8 @@ These topology tests provide end-to-end coverage for:
 ## Future Enhancements
 
 - [ ] Coverage measurement integration
-- [ ] Performance benchmarking mode
+- [x] Performance benchmarking mode (baseline_*_60s.sh tests)
 - [ ] Fault injection (link down, process kill)
-- [ ] Long-duration stress tests
-- [ ] CI/CD integration (GitHub Actions)
+- [x] Long-duration stress tests (60-second profiling tests)
+- [x] CI/CD integration (GitHub Actions workflows added)
 - [ ] Rust-based test harness (as alternative to bash)
