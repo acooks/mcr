@@ -79,7 +79,7 @@ sudo tests/topologies/chain_3hop.sh
 
 ### 2. Tree (1:N Fanout) - `tree_fanout.sh`
 
-**Status:** 🔜 Planned
+**Status:** ✅ Implemented
 
 **Topology:**
 
