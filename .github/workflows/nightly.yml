@@ -1,4 +1,6 @@
 name: Nightly Comprehensive Tests
+permissions:
+  contents: read
 
 on:
   schedule:
