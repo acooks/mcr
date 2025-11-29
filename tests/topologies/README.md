@@ -243,7 +243,7 @@ The `common.sh` library provides reusable functions for all topology tests:
 
 ### MCR Management
 
-- `start_mcr <name> <iface> <socket> [logfile]` - Start MCR instance
+- `start_mcr <name> <iface> <socket> [logfile] [core_id]` - Start MCR instance
 - `wait_for_sockets <sock1> [sock2] ...` - Wait for control sockets
 - `add_rule <socket> <in_if> <in_grp> <in_port> <out_spec>` - Configure rule
 
