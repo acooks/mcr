@@ -67,6 +67,16 @@ echo "--- Cleaning up stale shared memory files ---"
 sudo rm -f /dev/shm/mcr_*
 echo ""
 
+# --- Check Dependencies ---
+echo "--- Checking dependencies ---"
+if ! command -v socat &> /dev/null; then
+    echo "ERROR: socat is required but not installed."
+    echo "Install with: sudo apt-get install socat"
+    exit 1
+fi
+echo "✓ Found: socat"
+echo ""
+
 # --- Check Binaries ---
 echo "--- Checking release binaries ---"
 for binary in "$RELAY_BINARY" "$CONTROL_CLIENT_BINARY" "$TRAFFIC_GENERATOR_BINARY"; do
