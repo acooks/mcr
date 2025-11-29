@@ -495,23 +495,3 @@ graceful_cleanup_unshare() {
     log_info "Cleanup complete"
 }
 
-# Kill all MCR processes (legacy - prefer graceful_cleanup_unshare)
-cleanup_mcr_processes() {
-    log_info "Cleaning up MCR processes"
-    killall -q multicast_relay || true
-    killall -q traffic_generator || true
-}
-
-# Remove socket files
-cleanup_sockets() {
-    log_info "Cleaning up socket files"
-    rm -f /tmp/mcr*.sock
-    rm -f /tmp/mcr*_relay.sock
-}
-
-# Full cleanup (call from trap) - legacy, prefer graceful_cleanup_unshare
-cleanup_all() {
-    log_info "Running cleanup"
-    cleanup_mcr_processes
-    cleanup_sockets
-}

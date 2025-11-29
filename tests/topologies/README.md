@@ -256,7 +256,7 @@ The `common.sh` library provides reusable functions for all topology tests:
 ### Monitoring & Cleanup
 
 - `start_log_monitor <name> <logfile>` - Monitor logs in background
-- `cleanup_all()` - Clean up processes and sockets
+- `graceful_cleanup_unshare <pid_var1> [pid_var2] ...` - Gracefully terminate MCR instances
 
 ## Running Tests
 
