@@ -102,7 +102,36 @@ Traffic Gen → MCR-1 ┼→ MCR-3
 sudo tests/topologies/tree_fanout.sh
 ```
 
-### 3. Tree (N:1 Convergence) - `tree_converge.sh`
+### 3. High Fanout (1:50) - `high_fanout_50.sh`
+
+**Status:** ✅ Implemented
+
+**Topology:**
+
+```text
+Traffic Gen → MCR → 50 outputs (loopback)
+```
+
+**Tests:**
+
+- High fanout ratio (1 input → 50 outputs)
+- VecDeque-based send queue performance under amplification
+- Buffer pool performance with 50x traffic multiplication
+- Egress queue management with many destinations
+
+**Usage:**
+
+```bash
+sudo tests/topologies/high_fanout_50.sh
+```
+
+**Expected Outcome:**
+
+- Matched packets ≈ 10,000 (input)
+- TX packets ≈ 500,000 (50x amplification)
+- Zero buffer exhaustion at 10k pps input rate
+
+### 4. Tree (N:1 Convergence) - `tree_converge.sh`
 
 **Status:** 🔜 Planned
 
@@ -121,7 +150,7 @@ Traffic Gen 3 → MCR-3 ┘
 - Per-rule isolation
 - Fair queueing under contention
 
-### 4. Diamond (Multipath) - `diamond.sh`
+### 5. Diamond (Multipath) - `diamond.sh`
 
 **Status:** 🔜 Planned
 
@@ -140,7 +169,7 @@ Traffic Gen → MCR-1      → MCR-4
 - Timing/ordering consistency
 - Independent path failures
 
-### 5. Full Mesh - `mesh.sh`
+### 6. Full Mesh - `mesh.sh`
 
 **Status:** 🔜 Planned
 
@@ -156,6 +185,52 @@ Every MCR instance forwards to every other MCR instance
 - Cross-talk isolation
 - Rule management complexity
 - Resource utilization
+
+## Baseline Performance Tests
+
+These tests validate forwarding efficiency at specific packet rates. Useful for
+regression testing and performance profiling.
+
+### baseline_50k.sh
+
+**Status:** ✅ Implemented
+
+Validates 100% packet forwarding at 50k pps (conservative baseline).
+
+```bash
+sudo tests/topologies/baseline_50k.sh
+```
+
+### baseline_100k.sh
+
+**Status:** ✅ Implemented
+
+Validates 100% packet forwarding at 100k pps.
+
+```bash
+sudo tests/topologies/baseline_100k.sh
+```
+
+### baseline_100k_60s.sh
+
+**Status:** ✅ Implemented
+
+60-second profiling test at 100k pps (6M packets). Designed for performance
+analysis with external profilers (perf, flamegraph).
+
+```bash
+sudo tests/topologies/baseline_100k_60s.sh
+```
+
+### baseline_150k_60s.sh
+
+**Status:** ✅ Implemented
+
+60-second profiling test at 150k pps (9M packets). Higher stress variant.
+
+```bash
+sudo tests/topologies/baseline_150k_60s.sh
+```
 
 ## Common Functions Library
 
