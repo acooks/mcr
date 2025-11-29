@@ -47,7 +47,12 @@ async fn main() -> anyhow::Result<()> {
     let dest_addr = SocketAddrV4::new(args.group, args.port);
 
     let sender_std_socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
-    sender_std_socket.set_multicast_if_v4(&args.interface)?;
+
+    // Only set multicast interface if destination is a multicast address (224.0.0.0/4)
+    if args.group.is_multicast() {
+        sender_std_socket.set_multicast_if_v4(&args.interface)?;
+    }
+
     sender_std_socket.bind(&SocketAddrV4::new(args.interface, 0).into())?;
     sender_std_socket.set_nonblocking(true)?;
     let sender_socket = UdpSocket::from_std(sender_std_socket.into())?;
