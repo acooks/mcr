@@ -43,7 +43,7 @@
 use anyhow::{Context, Result};
 use io_uring::{opcode, types, IoUring};
 use socket2::{Domain, Protocol, Socket, Type};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::sync::Arc;
@@ -161,7 +161,7 @@ pub struct UnifiedDataPlane {
 
     // Egress
     egress_sockets: HashMap<(String, SocketAddr), (OwnedFd, Ipv4Addr)>,
-    send_queue: Vec<SendWorkItem>,
+    send_queue: VecDeque<SendWorkItem>,
     in_flight_sends: HashMap<u64, Arc<[u8]>>,
     next_send_user_data: u64,
 
@@ -332,7 +332,7 @@ impl UnifiedDataPlane {
             rules: HashMap::new(),
             flow_counters: HashMap::new(),
             egress_sockets: HashMap::new(),
-            send_queue: Vec::with_capacity(config.send_batch_size),
+            send_queue: VecDeque::with_capacity(config.send_batch_size),
             in_flight_sends: HashMap::new(),
             next_send_user_data: SEND_BASE,
             buffer_pool,
@@ -488,9 +488,13 @@ impl UnifiedDataPlane {
             // Replenish receive buffers after processing completions
             self.submit_recv_buffers()?;
 
-            // Submit any pending sends
-            if !self.send_queue.is_empty() {
-                self.submit_send_batch()?;
+            // Submit pending sends - keep submitting batches until queue is empty or SQ is full
+            while !self.send_queue.is_empty() {
+                let submitted = self.submit_send_batch()?;
+                if submitted == 0 {
+                    // SQ is full, need to wait for completions
+                    break;
+                }
             }
 
             // CRITICAL: Submit all queued work AND wait for at least one completion
@@ -717,7 +721,7 @@ impl UnifiedDataPlane {
 
             // Queue send operation for each target (Arc clone is cheap - just refcount increment)
             for target in targets {
-                self.send_queue.push(SendWorkItem {
+                self.send_queue.push_back(SendWorkItem {
                     payload: Arc::clone(&payload),
                     dest_addr: target.dest_addr,
                     interface_name: target.interface_name,
@@ -950,11 +954,16 @@ impl UnifiedDataPlane {
     }
 
     /// Submit a batch of send operations
-    fn submit_send_batch(&mut self) -> Result<()> {
+    /// Returns the number of items submitted (0 if SQ is full or queue is empty)
+    fn submit_send_batch(&mut self) -> Result<usize> {
         // Check available space in submission queue
         let sq = self.ring.submission();
         let sq_available = sq.capacity() - sq.len();
         drop(sq); // Release borrow before loop
+
+        if sq_available == 0 {
+            return Ok(0);
+        }
 
         // Limit batch size to available space
         let batch_size = self
@@ -964,7 +973,7 @@ impl UnifiedDataPlane {
             .min(sq_available);
 
         for _ in 0..batch_size {
-            let item = self.send_queue.remove(0);
+            let item = self.send_queue.pop_front().unwrap();
 
             // Get or create egress socket
             let key = (item.interface_name.clone(), item.dest_addr);
@@ -997,8 +1006,10 @@ impl UnifiedDataPlane {
             self.in_flight_sends.insert(user_data, item.payload);
         }
 
-        self.ring.submit()?;
-        Ok(())
+        if batch_size > 0 {
+            self.ring.submit()?;
+        }
+        Ok(batch_size)
     }
 
     fn submit_command_read(&mut self) -> Result<()> {
