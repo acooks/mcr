@@ -20,6 +20,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$PROJECT_ROOT"
 
+# Source common functions early (for ensure_binaries_built)
+source "$SCRIPT_DIR/common.sh"
+
 # Test parameters
 PACKET_SIZE=1400
 PACKET_COUNT=10000
@@ -33,10 +36,8 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-# --- Build binaries ---
-echo "=== Building Release Binaries ==="
-cargo build --release
-echo ""
+# --- Build binaries (if needed) ---
+ensure_binaries_built
 
 # --- Run test in isolated network namespace ---
 echo "=== Starting 1:${FANOUT} Fanout Test in Isolated Network Namespace ==="

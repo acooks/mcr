@@ -19,6 +19,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$PROJECT_ROOT"
 
+# Source common functions early (for ensure_binaries_built)
+source "$SCRIPT_DIR/common.sh"
+
 # Namespace name
 NETNS="mcr_edge_test"
 
@@ -29,13 +32,8 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-# --- Build binaries ---
-echo "=== Building Release Binaries ==="
-cargo build --release
-echo ""
-
-# Source common functions
-source "$SCRIPT_DIR/common.sh"
+# --- Build binaries (if needed) ---
+ensure_binaries_built
 
 # --- Create named network namespace ---
 echo "=== Edge Case Tests ==="

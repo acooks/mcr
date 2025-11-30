@@ -30,6 +30,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$PROJECT_ROOT"
 
+# Source common functions early (for ensure_binaries_built)
+source "$SCRIPT_DIR/common.sh"
+
 # Default test parameters (can be overridden by env vars or CLI args)
 DEFAULT_PACKET_SIZE=1400
 DEFAULT_PACKET_COUNT=100000
@@ -88,10 +91,8 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-# --- Build binaries ---
-echo "=== Building Release Binaries ==="
-cargo build --release
-echo ""
+# --- Build binaries (if needed) ---
+ensure_binaries_built
 
 # --- Create named network namespace ---
 echo "=== Baseline Performance Test ==="
@@ -106,9 +107,6 @@ ip netns del "$NETNS" 2>/dev/null || true
 
 # Create new namespace
 ip netns add "$NETNS"
-
-# Source common functions
-source "$SCRIPT_DIR/common.sh"
 
 # Set up cleanup trap
 trap 'graceful_cleanup_namespace "$NETNS" mcr1_PID mcr2_PID' EXIT

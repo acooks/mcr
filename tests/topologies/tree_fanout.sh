@@ -24,6 +24,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$PROJECT_ROOT"
 
+# Source common functions early (for ensure_binaries_built)
+source "$SCRIPT_DIR/common.sh"
+
 # Test parameters
 PACKET_SIZE=1400
 PACKET_COUNT=500000   # Can handle more with proper CPU isolation
@@ -36,10 +39,8 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-# --- Build binaries ---
-echo "=== Building Release Binaries ==="
-cargo build --release
-echo ""
+# --- Build binaries (if needed) ---
+ensure_binaries_built
 
 # --- Run test in isolated network namespace ---
 echo "=== Starting Test in Isolated Network Namespace ==="

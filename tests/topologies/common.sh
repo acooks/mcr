@@ -9,6 +9,39 @@ RELAY_BINARY="${RELAY_BINARY:-target/release/multicast_relay}"
 CONTROL_CLIENT_BINARY="${CONTROL_CLIENT_BINARY:-target/release/control_client}"
 TRAFFIC_GENERATOR_BINARY="${TRAFFIC_GENERATOR_BINARY:-target/release/traffic_generator}"
 
+# --- Build Utilities ---
+
+# Ensure required binaries are built
+# Checks if pre-built binaries exist; if not, attempts to build with cargo.
+# This allows CI to pre-build binaries and skip redundant builds when running
+# scripts with sudo (where cargo may not be in PATH).
+#
+# Usage: ensure_binaries_built
+ensure_binaries_built() {
+    local need_build=false
+
+    # Check if all required binaries exist and are executable
+    for binary in "$RELAY_BINARY" "$CONTROL_CLIENT_BINARY" "$TRAFFIC_GENERATOR_BINARY"; do
+        if [ ! -x "$binary" ]; then
+            need_build=true
+            break
+        fi
+    done
+
+    if [ "$need_build" = true ]; then
+        echo "=== Building Release Binaries ==="
+        if ! command -v cargo &> /dev/null; then
+            echo "ERROR: cargo not found and pre-built binaries not available"
+            echo "Either install Rust/cargo or pre-build with: cargo build --release --bins"
+            exit 1
+        fi
+        cargo build --release
+        echo ""
+    else
+        echo "=== Using Pre-built Binaries ==="
+    fi
+}
+
 # Default test parameters
 DEFAULT_PACKET_SIZE=1400      # Leaves room for headers (UDP 8 + IP 20 + Ethernet 14)
 DEFAULT_PACKET_COUNT=1000000  # 1M packets for quick tests
