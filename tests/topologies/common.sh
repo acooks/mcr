@@ -47,6 +47,12 @@ DEFAULT_PACKET_SIZE=1400      # Leaves room for headers (UDP 8 + IP 20 + Etherne
 DEFAULT_PACKET_COUNT=1000000  # 1M packets for quick tests
 DEFAULT_SEND_RATE=500000      # 500k pps target
 
+# Timeout constants (in seconds) - can be overridden before sourcing
+TIMEOUT_INTERFACE_READY="${TIMEOUT_INTERFACE_READY:-5}"    # Wait for interface UP state
+TIMEOUT_BRIDGE_FORWARD="${TIMEOUT_BRIDGE_FORWARD:-10}"     # Wait for bridge STP forwarding
+TIMEOUT_SOCKET_READY="${TIMEOUT_SOCKET_READY:-15}"         # Wait for control socket creation
+TIMEOUT_GRACEFUL_SHUTDOWN="${TIMEOUT_GRACEFUL_SHUTDOWN:-2}" # Wait for graceful SIGTERM exit
+
 # --- Logging Utilities ---
 log_info() {
     echo "[INFO] $*" >&2
@@ -142,7 +148,7 @@ wait_for_bridge_forwarding() {
     shift 2
     local ports=("$@")
 
-    local timeout=10
+    local timeout=$TIMEOUT_BRIDGE_FORWARD
     local start=$(date +%s)
 
     log_info "Waiting for bridge $bridge ports to reach forwarding state..."
@@ -191,7 +197,7 @@ start_mcr() {
     rm -f "$control_socket"
 
     # Wait for interface to be ready (critical for network namespace timing)
-    local timeout=5
+    local timeout=$TIMEOUT_INTERFACE_READY
     local elapsed=0
     if [ -n "$netns" ]; then
         while ! sudo ip netns exec "$netns" ip link show "$interface" >/dev/null 2>&1; do
@@ -250,7 +256,7 @@ start_mcr() {
 # Usage: wait_for_sockets <socket1> [socket2] [socket3] ...
 wait_for_sockets() {
     log_info "Waiting for MCR instances to start..."
-    local timeout=15
+    local timeout=$TIMEOUT_SOCKET_READY
     local start=$(date +%s)
 
     for socket in "$@"; do
@@ -485,7 +491,7 @@ graceful_cleanup_namespace() {
 
     # Wait for graceful shutdown (includes 500ms grace period + worker exit time)
     log_info "Waiting for graceful shutdown..."
-    sleep 2
+    sleep "$TIMEOUT_GRACEFUL_SHUTDOWN"
 
     # Force-kill any remaining processes in namespace
     log_info "Force-killing any remaining processes"
@@ -514,7 +520,7 @@ graceful_cleanup_unshare() {
 
     # Wait for graceful shutdown (includes 500ms grace period + worker exit time)
     log_info "Waiting for graceful shutdown..."
-    sleep 2
+    sleep "$TIMEOUT_GRACEFUL_SHUTDOWN"
 
     # Force-kill any remaining MCR processes
     log_info "Force-killing any remaining processes"
