@@ -94,15 +94,10 @@ sleep 2
 kill -TERM "$MCR_PID" 2>/dev/null || true
 sleep 2
 
-# Validate
-MATCHED=$(extract_stat /tmp/mcr_edge1.log 'STATS:Ingress' 'matched')
-log_info "Matched: $MATCHED packets"
-
-if [ "$MATCHED" -ge 9000 ]; then
-    log_info "Test 1 (Min Packet Size): PASSED - $MATCHED packets processed"
+# Validate: expect 90% of 10000 packets matched
+if validate_stat_percent /tmp/mcr_edge1.log 'STATS:Ingress' 'matched' 10000 90 "Test 1 (Min Packet Size)"; then
     TEST1_PASSED=0
 else
-    log_error "Test 1 (Min Packet Size): FAILED - only $MATCHED packets matched"
     TEST1_PASSED=1
 fi
 
@@ -142,15 +137,10 @@ sleep 2
 kill -TERM "$MCR_PID" 2>/dev/null || true
 sleep 2
 
-# Validate
-MATCHED=$(extract_stat /tmp/mcr_edge2.log 'STATS:Ingress' 'matched')
-log_info "Matched: $MATCHED packets"
-
-if [ "$MATCHED" -ge 9000 ]; then
-    log_info "Test 2 (Max Packet Size): PASSED - $MATCHED packets processed"
+# Validate: expect 90% of 10000 packets matched
+if validate_stat_percent /tmp/mcr_edge2.log 'STATS:Ingress' 'matched' 10000 90 "Test 2 (Max Packet Size)"; then
     TEST2_PASSED=0
 else
-    log_error "Test 2 (Max Packet Size): FAILED - only $MATCHED packets matched"
     TEST2_PASSED=1
 fi
 
@@ -190,25 +180,14 @@ sleep 3
 kill -TERM "$MCR_PID" 2>/dev/null || true
 sleep 2
 
-# Check buffer exhaustion AND packet matching
-MATCHED=$(extract_stat /tmp/mcr_edge3.log 'STATS:Ingress' 'matched')
-BUF_EXHAUST=$(extract_stat /tmp/mcr_edge3.log 'STATS:Ingress' 'buf_exhaust')
-log_info "Matched: $MATCHED, Buffer exhaustion: $BUF_EXHAUST"
-
-# Require at least 80% packet matching at high rates (realistic for 150k pps stress)
-MIN_MATCHED=$((100000 * 80 / 100))
-# Allow up to 5% buffer exhaustion at high rates
-MAX_EXHAUST=$((100000 * 5 / 100))
-
+# Validate: expect 80% of 100000 packets matched (realistic for 150k pps stress)
+# and buffer exhaustion <= 5%
 TEST3_PASSED=0
-if [ "$MATCHED" -lt "$MIN_MATCHED" ]; then
-    log_error "Test 3 (Buffer Pool): FAILED - only $MATCHED packets matched (expected >= $MIN_MATCHED)"
+if ! validate_stat_percent /tmp/mcr_edge3.log 'STATS:Ingress' 'matched' 100000 80 "Test 3 packet matching"; then
     TEST3_PASSED=1
-elif [ "$BUF_EXHAUST" -gt "$MAX_EXHAUST" ]; then
-    log_error "Test 3 (Buffer Pool): FAILED - exhaustion $BUF_EXHAUST > $MAX_EXHAUST (5%)"
+fi
+if ! validate_stat_max /tmp/mcr_edge3.log 'STATS:Ingress' 'buf_exhaust' 5000 "Test 3 buffer exhaustion (<=5%)"; then
     TEST3_PASSED=1
-else
-    log_info "Test 3 (Buffer Pool): PASSED - matched $MATCHED (>=$MIN_MATCHED), exhaustion $BUF_EXHAUST (<=$MAX_EXHAUST)"
 fi
 
 #############################################
@@ -248,15 +227,10 @@ sleep 2
 kill -TERM "$MCR_PID" 2>/dev/null || true
 sleep 2
 
-# Validate - these should still be processed
-MATCHED=$(extract_stat /tmp/mcr_edge4.log 'STATS:Ingress' 'matched')
-log_info "Matched: $MATCHED packets"
-
-if [ "$MATCHED" -ge 4500 ]; then
-    log_info "Test 4 (Min Valid UDP): PASSED - $MATCHED packets processed"
+# Validate: expect 90% of 5000 packets matched
+if validate_stat_percent /tmp/mcr_edge4.log 'STATS:Ingress' 'matched' 5000 90 "Test 4 (Min Valid UDP)"; then
     TEST4_PASSED=0
 else
-    log_error "Test 4 (Min Valid UDP): FAILED - only $MATCHED packets matched"
     TEST4_PASSED=1
 fi
 
