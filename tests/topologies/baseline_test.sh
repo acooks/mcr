@@ -231,39 +231,21 @@ else
     EXPECTED_RATIO=80
 fi
 
-MIN_MATCHED=$((PACKET_COUNT * EXPECTED_RATIO / 100))
 MAX_BUFFER_EXHAUSTION=$((PACKET_COUNT / 100))  # Allow 1% buffer exhaustion
 
-# Validate MCR-1: Check matched packets
-validate_stat /tmp/mcr1.log 'STATS:Ingress' 'matched' "$MIN_MATCHED" "MCR-1 ingress matched (>=${EXPECTED_RATIO}%)" || VALIDATION_PASSED=1
+# Validate MCR-1: Check matched packets (percentage based on rate)
+validate_stat_percent /tmp/mcr1.log 'STATS:Ingress' 'matched' "$PACKET_COUNT" "$EXPECTED_RATIO" "MCR-1 ingress matched" || VALIDATION_PASSED=1
 
-# Egress should match ingress (1:1 forwarding)
+# Egress should match ingress (1:1 forwarding, allow 5% variance)
 MCR1_INGRESS=$(extract_stat /tmp/mcr1.log 'STATS:Ingress' 'matched')
 MCR1_EGRESS=$(extract_stat /tmp/mcr1.log 'STATS:Egress' 'sent')
-log_info "MCR-1: ingress matched=$MCR1_INGRESS, egress sent=$MCR1_EGRESS"
-
-# Allow 5% variance between ingress and egress
-EGRESS_MIN=$((MCR1_INGRESS * 95 / 100))
-EGRESS_MAX=$((MCR1_INGRESS * 105 / 100))
-if [ "$MCR1_EGRESS" -lt "$EGRESS_MIN" ] || [ "$MCR1_EGRESS" -gt "$EGRESS_MAX" ]; then
-    log_error "Egress/ingress mismatch: expected $MCR1_INGRESS +/- 5%, got $MCR1_EGRESS"
-    VALIDATION_PASSED=1
-else
-    log_info "Egress matches ingress: $MCR1_EGRESS ~ $MCR1_INGRESS"
-fi
+validate_values_match "$MCR1_EGRESS" "$MCR1_INGRESS" 5 "MCR-1 egress matches ingress" || VALIDATION_PASSED=1
 
 # MCR-2 should receive what MCR-1 sent
-validate_stat /tmp/mcr2.log 'STATS:Ingress' 'matched' "$MIN_MATCHED" "MCR-2 ingress matched (>=${EXPECTED_RATIO}%)" || VALIDATION_PASSED=1
+validate_stat_percent /tmp/mcr2.log 'STATS:Ingress' 'matched' "$PACKET_COUNT" "$EXPECTED_RATIO" "MCR-2 ingress matched" || VALIDATION_PASSED=1
 
-# Check buffer exhaustion on MCR-1 (should be minimal)
-BUFFER_EXHAUSTION=$(extract_stat /tmp/mcr1.log 'STATS:Ingress' 'buf_exhaust')
-log_info "MCR-1 buffer exhaustion: $BUFFER_EXHAUSTION packets"
-if [ "$BUFFER_EXHAUSTION" -gt "$MAX_BUFFER_EXHAUSTION" ]; then
-    log_error "Unexpected buffer exhaustion at ${SEND_RATE} pps: $BUFFER_EXHAUSTION packets (>1%)"
-    VALIDATION_PASSED=1
-else
-    log_info "Buffer exhaustion acceptable: $BUFFER_EXHAUSTION packets (<1%)"
-fi
+# Check buffer exhaustion on MCR-1 (should be <1%)
+validate_stat_max /tmp/mcr1.log 'STATS:Ingress' 'buf_exhaust' "$MAX_BUFFER_EXHAUSTION" "MCR-1 buffer exhaustion (<1%)" || VALIDATION_PASSED=1
 
 log_section 'Test Complete'
 
