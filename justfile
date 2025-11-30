@@ -168,22 +168,24 @@ coverage:
     cargo llvm-cov --lib --html --output-dir target/coverage
     echo "Coverage report: target/coverage/html/index.html"
 
-# Generate full coverage report (unit + integration tests, requires root)
-# This provides the most accurate coverage by including integration tests
+# Generate full coverage report (unit + integration + topology tests, requires root)
+# This provides the most accurate coverage by including all test types
 coverage-full:
     #!/usr/bin/env bash
     set -euo pipefail
-    echo "=== Full Coverage Report (unit + integration tests) ==="
+    echo "=== Full Coverage Report (unit + integration + topology tests) ==="
     echo ""
 
     # Fix any permission issues from previous runs
-    if [ -d target/llvm-cov-target ]; then
-        sudo chown -R "$(whoami):$(whoami)" target/ 2>/dev/null || true
-    fi
+    sudo chown -R "$(whoami):$(whoami)" target/ 2>/dev/null || true
 
     # Set up instrumentation environment
-    eval "$(cargo llvm-cov show-env --export-prefix)"
+    # shellcheck disable=SC1090
+    source <(cargo llvm-cov show-env --export-prefix)
     cargo llvm-cov clean --workspace 2>/dev/null || true
+
+    echo "LLVM_PROFILE_FILE=$LLVM_PROFILE_FILE"
+    echo ""
 
     echo "Step 1: Building instrumented binaries..."
     cargo build --release --all-targets
@@ -202,7 +204,20 @@ coverage-full:
     sudo -E LLVM_PROFILE_FILE="$LLVM_PROFILE_FILE" "$TEST_BINARY" --test-threads=1
 
     echo ""
-    echo "Step 4: Generating coverage report..."
+    echo "Step 4: Running topology tests (requires sudo)..."
+    # Run a subset of topology tests to get coverage of the actual relay binary
+    for test in tests/topologies/baseline_test.sh tests/topologies/edge_cases.sh tests/topologies/dynamic_rules.sh; do
+        if [ -f "$test" ]; then
+            echo "  Running $(basename "$test")..."
+            sudo -E LLVM_PROFILE_FILE="$LLVM_PROFILE_FILE" bash "$test" || echo "  Warning: $test had failures"
+        fi
+    done
+
+    # Fix ownership of profile files created by root
+    sudo chown -R "$(whoami):$(whoami)" target/*.profraw 2>/dev/null || true
+
+    echo ""
+    echo "Step 5: Generating coverage report..."
     cargo llvm-cov report --release --html --output-dir target/coverage-full
 
     echo ""
