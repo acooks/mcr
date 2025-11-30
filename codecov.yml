@@ -1,0 +1,37 @@
+# Codecov Configuration
+# https://docs.codecov.com/docs/codecov-yaml
+
+coverage:
+  # Coverage status checks
+  status:
+    # Project-level coverage (overall)
+    project:
+      default:
+        # Don't fail PR if coverage drops by less than 2%
+        threshold: 2%
+        # Only check files that were changed
+        only_changed_files: false
+
+    # Patch-level coverage (new code in PR)
+    patch:
+      default:
+        # Require 50% coverage on new code
+        target: 50%
+        # Don't fail if slightly under
+        threshold: 5%
+
+# Ignore these paths in coverage reports
+ignore:
+  - "src/main.rs"           # Entry point, minimal logic
+  - "experiments/**"         # Experimental code
+  - "tests/**"              # Test code itself
+  - "benches/**"            # Benchmarks
+
+# Comment settings for PRs
+comment:
+  # Post coverage report as PR comment
+  layout: "header, diff, flags, files"
+  # Only comment if coverage changes
+  behavior: default
+  # Don't require CI to pass before commenting
+  require_changes: false

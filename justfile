@@ -161,11 +161,12 @@ test-topology TEST:
     @sudo tests/topologies/{{TEST}}.sh
 
 # Generate test coverage report
-# Note: Tests run sequentially (--test-threads=1) due to supervisor test socket contention
+# Uses cargo-llvm-cov for accurate LLVM-based coverage measurement
 coverage:
     #!/usr/bin/env bash
     set -euxo pipefail
-    cargo tarpaulin --out html --output-dir target/tarpaulin --features integration_test --exclude-files src/main.rs "experiments/*" -- --test-threads=1
+    cargo llvm-cov --lib --html --output-dir target/coverage
+    echo "Coverage report: target/coverage/html/index.html"
 
 
 # Check unsafe code usage
