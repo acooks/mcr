@@ -527,6 +527,27 @@ validate_values_match() {
     fi
 }
 
+# Validate a raw value is at least a percentage of an expected value
+# Use for calculated values (like deltas) that aren't extracted from logs
+# Usage: validate_min_percent <actual> <expected> <percent> <description>
+# Example: validate_min_percent $delta 10000 80 "Delta packet count"
+validate_min_percent() {
+    local actual="$1"
+    local expected="$2"
+    local percent="$3"
+    local description="$4"
+
+    local min_value=$((expected * percent / 100))
+
+    if [ "$actual" -ge "$min_value" ]; then
+        log_info "✅ $description: $actual (>= ${percent}% of $expected)"
+        return 0
+    else
+        log_error "❌ $description: $actual (expected >= ${percent}% of $expected = $min_value)"
+        return 1
+    fi
+}
+
 # --- Monitoring ---
 
 # Start log monitoring in background

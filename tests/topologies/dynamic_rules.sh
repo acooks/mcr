@@ -141,13 +141,10 @@ NEW_MATCHED=$((AFTER_MATCHED - BEFORE_MATCHED))
 
 log_info "After adding rule: matched=$NEW_MATCHED new packets"
 
-# Should match most of the new packets
-MIN_EXPECTED=$((PACKETS_PER_PHASE * 80 / 100))
-if [ "$NEW_MATCHED" -ge "$MIN_EXPECTED" ]; then
-    log_info "Test 2 (Add Rule): PASSED - $NEW_MATCHED packets matched after adding rule"
+# Should match most of the new packets (80% threshold)
+if validate_min_percent "$NEW_MATCHED" "$PACKETS_PER_PHASE" 80 "Test 2 (Add Rule)"; then
     TEST2_PASSED=0
 else
-    log_error "Test 2 (Add Rule): FAILED - only $NEW_MATCHED packets matched (expected >= $MIN_EXPECTED)"
     TEST2_PASSED=1
 fi
 
@@ -195,14 +192,11 @@ NEW_MATCHED=$((AFTER_MATCHED - BEFORE_MATCHED))
 
 log_info "After concurrent traffic: matched=$NEW_MATCHED new packets"
 
-# Should match most packets from both streams
+# Should match most packets from both streams (80% threshold)
 TOTAL_SENT=$((PACKETS_PER_PHASE * 2))
-MIN_EXPECTED=$((TOTAL_SENT * 80 / 100))  # 80% threshold, consistent with other tests
-if [ "$NEW_MATCHED" -ge "$MIN_EXPECTED" ]; then
-    log_info "Test 3 (Multiple Rules): PASSED - $NEW_MATCHED packets matched"
+if validate_min_percent "$NEW_MATCHED" "$TOTAL_SENT" 80 "Test 3 (Multiple Rules)"; then
     TEST3_PASSED=0
 else
-    log_error "Test 3 (Multiple Rules): FAILED - only $NEW_MATCHED packets matched (expected >= $MIN_EXPECTED)"
     TEST3_PASSED=1
 fi
 
