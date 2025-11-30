@@ -29,8 +29,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$PROJECT_ROOT"
-
-# Source common functions early (for ensure_binaries_built)
 source "$SCRIPT_DIR/common.sh"
 
 # Default test parameters (can be overridden by env vars or CLI args)
@@ -81,20 +79,7 @@ SEND_RATE=${CLI_RATE:-${SEND_RATE:-$DEFAULT_SEND_RATE}}
 # Calculate test duration for display
 TEST_DURATION_S=$((PACKET_COUNT / SEND_RATE))
 
-# Namespace name
-NETNS="mcr_baseline_test"
-
-# --- Check for root ---
-if [ "$EUID" -ne 0 ]; then
-    echo "ERROR: This test requires root privileges for network namespace isolation"
-    echo "Please run with: sudo $0"
-    exit 1
-fi
-
-# --- Build binaries (if needed) ---
-ensure_binaries_built
-
-# --- Create named network namespace ---
+# Print custom header before init_test (which will skip default header)
 echo "=== Baseline Performance Test ==="
 echo "Rate: ${SEND_RATE} pps"
 echo "Packets: ${PACKET_COUNT} (${TEST_DURATION_S}s at target rate)"
@@ -102,19 +87,9 @@ echo "Profiling: ${PROFILING_ENABLED}"
 echo "Topology: Bridge + dual veth pairs (eliminates AF_PACKET duplication)"
 echo ""
 
-# Clean up any existing namespace
-ip netns del "$NETNS" 2>/dev/null || true
-
-# Create new namespace
-ip netns add "$NETNS"
-
-# Set up cleanup trap
-trap 'graceful_cleanup_namespace "$NETNS" mcr1_PID mcr2_PID' EXIT
-
-log_section 'Network Namespace Setup'
-
-# Enable loopback in namespace
-sudo ip netns exec "$NETNS" ip link set lo up
+# Initialize test (root check, binary build, namespace, cleanup trap, loopback)
+# Empty title to skip default header (we printed custom one above)
+init_test "" mcr1_PID mcr2_PID
 
 # Create bridge topology for hop 1: Traffic Generator -> MCR-1 ingress
 # This eliminates AF_PACKET duplication by using separate veth pairs for generator and MCR

@@ -9,6 +9,74 @@ RELAY_BINARY="${RELAY_BINARY:-target/release/multicast_relay}"
 CONTROL_CLIENT_BINARY="${CONTROL_CLIENT_BINARY:-target/release/control_client}"
 TRAFFIC_GENERATOR_BINARY="${TRAFFIC_GENERATOR_BINARY:-target/release/traffic_generator}"
 
+# --- Test Initialization ---
+
+# Initialize test environment with network namespace
+# Handles: root check, binary build, namespace creation, cleanup trap, loopback
+#
+# Usage: init_test <test_title> [pid_var_names...]
+#
+# Arguments:
+#   test_title    - Display name for the test (e.g., "Edge Case Tests")
+#   pid_var_names - Optional: variable names holding PIDs for graceful cleanup
+#                   (e.g., mcr1_PID mcr2_PID)
+#
+# Sets:
+#   NETNS - The namespace name (derived from script filename)
+#
+# Example:
+#   init_test "Baseline Performance Test" mcr1_PID mcr2_PID
+#   setup_bridge_topology "$NETNS" br0 veth-gen veth-mcr 10.0.0.1/24 10.0.0.2/24
+#
+init_test() {
+    local test_title="$1"
+    shift
+    local pid_vars=("$@")  # Remaining args are PID variable names for cleanup
+
+    # Derive namespace from calling script's filename
+    # e.g., edge_cases.sh -> mcr_edge_cases
+    local script_basename
+    script_basename=$(basename "${BASH_SOURCE[1]}" .sh)
+    NETNS="mcr_${script_basename}"
+    export NETNS
+
+    # Check for root privileges
+    if [ "$EUID" -ne 0 ]; then
+        echo "ERROR: This test requires root privileges for network namespace isolation"
+        echo "Please run with: sudo $0"
+        exit 1
+    fi
+
+    # Build binaries if needed
+    ensure_binaries_built
+
+    # Print test header (skip if empty - caller will print custom header)
+    if [ -n "$test_title" ]; then
+        echo "=== $test_title ==="
+        echo ""
+    fi
+
+    # Clean up any existing namespace
+    ip netns del "$NETNS" 2>/dev/null || true
+
+    # Create new namespace
+    ip netns add "$NETNS"
+
+    # Set up cleanup trap with optional PID variables
+    if [ ${#pid_vars[@]} -gt 0 ]; then
+        # shellcheck disable=SC2064
+        trap "graceful_cleanup_namespace '$NETNS' ${pid_vars[*]}" EXIT
+    else
+        # shellcheck disable=SC2064
+        trap "graceful_cleanup_namespace '$NETNS'" EXIT
+    fi
+
+    log_section 'Network Namespace Setup'
+
+    # Enable loopback in namespace
+    sudo ip netns exec "$NETNS" ip link set lo up
+}
+
 # --- Build Utilities ---
 
 # Ensure required binaries are built

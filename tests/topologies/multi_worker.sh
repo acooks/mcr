@@ -22,8 +22,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$PROJECT_ROOT"
-
-# Source common functions early (for ensure_binaries_built)
 source "$SCRIPT_DIR/common.sh"
 
 # Test parameters
@@ -32,20 +30,7 @@ PACKET_COUNT=100000
 SEND_RATE=100000
 NUM_WORKERS=2
 
-# Namespace name
-NETNS="mcr_multi_worker_test"
-
-# --- Check for root ---
-if [ "$EUID" -ne 0 ]; then
-    echo "ERROR: This test requires root privileges for network namespace isolation"
-    echo "Please run with: sudo $0"
-    exit 1
-fi
-
-# --- Build binaries (if needed) ---
-ensure_binaries_built
-
-# --- Create named network namespace ---
+# Print custom header
 echo "=== Multi-Worker Mode Test ==="
 echo "Workers: ${NUM_WORKERS}"
 echo "Rate: ${SEND_RATE} pps"
@@ -53,19 +38,8 @@ echo "Packets: ${PACKET_COUNT}"
 echo "Topology: Bridge + dual veth pairs"
 echo ""
 
-# Clean up any existing namespace
-ip netns del "$NETNS" 2>/dev/null || true
-
-# Create new namespace
-ip netns add "$NETNS"
-
-# Set up cleanup trap
-trap 'graceful_cleanup_namespace "$NETNS" mcr_PID' EXIT
-
-log_section 'Network Namespace Setup'
-
-# Enable loopback in namespace
-sudo ip netns exec "$NETNS" ip link set lo up
+# Initialize test (root check, binary build, namespace, cleanup trap, loopback)
+init_test "" mcr_PID
 
 # Create bridge topology for traffic flow
 setup_bridge_topology "$NETNS" br0 veth-gen veth-mcr 10.0.0.1/24 10.0.0.2/24
