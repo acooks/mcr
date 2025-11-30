@@ -45,14 +45,8 @@ ip netns del "$NETNS" 2>/dev/null || true
 # Create new namespace
 ip netns add "$NETNS"
 
-# Set up cleanup trap
-# shellcheck disable=SC2317  # Cleanup is called via trap
-cleanup() {
-    log_info "Running cleanup..."
-    ip netns pids "$NETNS" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
-    ip netns del "$NETNS" 2>/dev/null || true
-}
-trap cleanup EXIT
+# Set up cleanup trap (no PIDs - MCR is killed explicitly in each test phase)
+trap 'graceful_cleanup_namespace "$NETNS"' EXIT
 
 log_section 'Network Namespace Setup'
 
