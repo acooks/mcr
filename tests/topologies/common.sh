@@ -460,6 +460,73 @@ validate_stat_max() {
     fi
 }
 
+# Validate a statistic is at least a percentage of an expected value
+# Usage: validate_stat_percent <log_file> <stat_type> <field> <expected> <percent> <description>
+# Example: validate_stat_percent /tmp/mcr.log 'STATS:Ingress' 'matched' 10000 95 "Packet match rate"
+validate_stat_percent() {
+    local log_file="$1"
+    local stat_type="$2"
+    local field="$3"
+    local expected="$4"
+    local percent="$5"
+    local description="$6"
+
+    local min_value=$((expected * percent / 100))
+    local actual=$(extract_stat "$log_file" "$stat_type" "$field")
+
+    if [ "$actual" -ge "$min_value" ]; then
+        log_info "✅ $description: $actual (>= ${percent}% of $expected)"
+        return 0
+    else
+        log_error "❌ $description: $actual (expected >= ${percent}% of $expected = $min_value)"
+        return 1
+    fi
+}
+
+# Validate a statistic is within a range [min, max]
+# Usage: validate_stat_range <log_file> <stat_type> <field> <min_value> <max_value> <description>
+# Example: validate_stat_range /tmp/mcr.log 'STATS:Egress' 'sent' 9500 10500 "Egress count"
+validate_stat_range() {
+    local log_file="$1"
+    local stat_type="$2"
+    local field="$3"
+    local min_value="$4"
+    local max_value="$5"
+    local description="$6"
+
+    local actual=$(extract_stat "$log_file" "$stat_type" "$field")
+
+    if [ "$actual" -ge "$min_value" ] && [ "$actual" -le "$max_value" ]; then
+        log_info "✅ $description: $actual (in range [$min_value, $max_value])"
+        return 0
+    else
+        log_error "❌ $description: $actual (expected in range [$min_value, $max_value])"
+        return 1
+    fi
+}
+
+# Validate two values are approximately equal (within tolerance percentage)
+# Usage: validate_values_match <actual> <expected> <tolerance_percent> <description>
+# Example: validate_values_match 9950 10000 5 "Egress matches ingress"
+validate_values_match() {
+    local actual="$1"
+    local expected="$2"
+    local tolerance_percent="$3"
+    local description="$4"
+
+    local tolerance=$((expected * tolerance_percent / 100))
+    local min_value=$((expected - tolerance))
+    local max_value=$((expected + tolerance))
+
+    if [ "$actual" -ge "$min_value" ] && [ "$actual" -le "$max_value" ]; then
+        log_info "✅ $description: $actual ≈ $expected (±${tolerance_percent}%)"
+        return 0
+    else
+        log_error "❌ $description: $actual (expected $expected ±${tolerance_percent}%)"
+        return 1
+    fi
+}
+
 # --- Monitoring ---
 
 # Start log monitoring in background
