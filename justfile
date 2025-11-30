@@ -160,7 +160,7 @@ test-topology TEST:
     @if [ "$EUID" -ne 0 ]; then echo "ERROR: Requires root (sudo just test-topology {{TEST}})"; exit 1; fi
     @sudo tests/topologies/{{TEST}}.sh
 
-# Generate test coverage report
+# Generate test coverage report (unit tests only)
 # Uses cargo-llvm-cov for accurate LLVM-based coverage measurement
 coverage:
     #!/usr/bin/env bash
@@ -168,6 +168,49 @@ coverage:
     cargo llvm-cov --lib --html --output-dir target/coverage
     echo "Coverage report: target/coverage/html/index.html"
 
+# Generate full coverage report (unit + integration tests, requires root)
+# This provides the most accurate coverage by including integration tests
+coverage-full:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "=== Full Coverage Report (unit + integration tests) ==="
+    echo ""
+
+    # Fix any permission issues from previous runs
+    if [ -d target/llvm-cov-target ]; then
+        sudo chown -R "$(whoami):$(whoami)" target/ 2>/dev/null || true
+    fi
+
+    # Set up instrumentation environment
+    eval "$(cargo llvm-cov show-env --export-prefix)"
+    cargo llvm-cov clean --workspace 2>/dev/null || true
+
+    echo "Step 1: Building instrumented binaries..."
+    cargo build --release --all-targets
+
+    echo ""
+    echo "Step 2: Running unit tests..."
+    cargo test --lib --release
+
+    echo ""
+    echo "Step 3: Running integration tests (requires sudo)..."
+    TEST_BINARY=$(find target/release/deps -name 'integration-*' -type f -executable ! -name '*.d' | head -1)
+    if [ -z "$TEST_BINARY" ]; then
+        echo "ERROR: Integration test binary not found"
+        exit 1
+    fi
+    sudo -E LLVM_PROFILE_FILE="$LLVM_PROFILE_FILE" "$TEST_BINARY" --test-threads=1
+
+    echo ""
+    echo "Step 4: Generating coverage report..."
+    cargo llvm-cov report --release --html --output-dir target/coverage-full
+
+    echo ""
+    echo "=== Coverage Summary ==="
+    cargo llvm-cov report --release
+
+    echo ""
+    echo "Full coverage report: target/coverage-full/html/index.html"
 
 # Check unsafe code usage
 unsafe-check:
