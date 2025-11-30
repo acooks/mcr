@@ -252,7 +252,8 @@ start_mcr() {
     export "${name}_PID=$pid"
 }
 
-# Wait for MCR control sockets to be ready
+# Wait for MCR control sockets to be ready and responding
+# Verifies both socket file existence AND that control_client can connect
 # Usage: wait_for_sockets <socket1> [socket2] [socket3] ...
 wait_for_sockets() {
     log_info "Waiting for MCR instances to start..."
@@ -260,14 +261,24 @@ wait_for_sockets() {
     local start=$(date +%s)
 
     for socket in "$@"; do
+        # Phase 1: Wait for socket file to exist
         while ! [ -S "$socket" ]; do
             if [ "$(($(date +%s) - start))" -gt "$timeout" ]; then
-                log_error "Timeout waiting for $socket"
+                log_error "Timeout waiting for socket file: $socket"
                 return 1
             fi
             sleep 0.1
         done
-        log_info "Socket ready: $socket"
+
+        # Phase 2: Verify control_client can actually connect
+        while ! "$CONTROL_CLIENT_BINARY" --socket-path "$socket" list >/dev/null 2>&1; do
+            if [ "$(($(date +%s) - start))" -gt "$timeout" ]; then
+                log_error "Timeout waiting for socket to accept connections: $socket"
+                return 1
+            fi
+            sleep 0.1
+        done
+        log_info "Socket ready and responding: $socket"
     done
 }
 
