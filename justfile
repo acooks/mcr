@@ -184,6 +184,11 @@ coverage-full:
     source <(cargo llvm-cov show-env --export-prefix)
     cargo llvm-cov clean --workspace 2>/dev/null || true
 
+    # Use /tmp for profile files so privilege-dropped workers can write them
+    # This fixes "Permission denied" errors from workers running as nobody
+    export LLVM_PROFILE_FILE="/tmp/mcr-cov-%p-%m.profraw"
+    rm -f /tmp/mcr-cov-*.profraw 2>/dev/null || true
+
     echo "LLVM_PROFILE_FILE=$LLVM_PROFILE_FILE"
     echo ""
 
@@ -213,11 +218,16 @@ coverage-full:
         fi
     done
 
-    # Fix ownership of profile files created by root
-    sudo chown -R "$(whoami):$(whoami)" target/*.profraw 2>/dev/null || true
+    # Copy profile files from /tmp to target/ for cargo llvm-cov to find them
+    echo ""
+    echo "Step 5: Collecting profile data..."
+    cp /tmp/mcr-cov-*.profraw target/ 2>/dev/null || true
+    PROFILE_COUNT=$(ls -1 target/mcr-cov-*.profraw 2>/dev/null | wc -l)
+    echo "  Collected $PROFILE_COUNT profile files"
+    rm -f /tmp/mcr-cov-*.profraw 2>/dev/null || true
 
     echo ""
-    echo "Step 5: Generating coverage report..."
+    echo "Step 6: Generating coverage report..."
     cargo llvm-cov report --release --html --output-dir target/coverage-full
 
     echo ""
