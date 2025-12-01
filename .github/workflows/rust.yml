@@ -13,12 +13,10 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  quality-gates:
-    name: Build, Test, and Audit
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest]
+  test:
+    name: Test with Coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
     - name: Checkout repository
@@ -26,6 +24,14 @@ jobs:
 
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@stable
+      with:
+        components: llvm-tools-preview
+
+    - name: Install just
+      uses: extractions/setup-just@v2
+
+    - name: Install cargo-llvm-cov
+      uses: taiki-e/install-action@cargo-llvm-cov
 
     - name: Cache Cargo dependencies
       uses: actions/cache@v4
@@ -47,54 +53,34 @@ jobs:
     - name: Install Node.js dependencies
       run: npm ci
 
-    - name: Check formatting
-      run: cargo fmt --all -- --check
+    - name: Install socat (for topology tests)
+      run: sudo apt-get update && sudo apt-get install -y socat
 
-    - name: Lint Markdown documentation
-      run: npx markdownlint --config .markdownlint.json "**/*.md"
+    - name: Run all tests with coverage
+      run: just test
 
-    - name: Run Clippy linter
-      run: cargo clippy --all-targets --features integration_test -- -D warnings
-
-    - name: Build project
-      run: cargo build --all-targets --features integration_test
-
-    - name: Run unit tests
-      run: cargo test --lib --features integration_test
-
-    - name: Build integration test binary
+    - name: Generate lcov report for Codecov
       run: |
-        cargo build --release --bins
-        cargo test --test integration --no-run --release
+        source <(cargo llvm-cov show-env --export-prefix)
+        cargo llvm-cov report --release --lcov --output-path lcov.info
 
-    - name: Run integration tests (requires network namespaces)
-      timeout-minutes: 6
-      run: |
-        TEST_BINARY=$(find target/release/deps -name 'integration-*' -type f -executable ! -name '*.d' | head -1)
-        if [ -z "$TEST_BINARY" ]; then
-          echo "ERROR: Integration test binary not found"
-          exit 1
-        fi
-        echo "Running integration tests with sudo (network namespaces require CAP_NET_ADMIN)..."
-        sudo -E "$TEST_BINARY" --test-threads=1 --nocapture
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v5
+      with:
+        files: lcov.info
+        fail_ci_if_error: false
+        verbose: true
 
-    - name: Run security audit
-      run: cargo audit
-
-    - name: Check for outdated dependencies
-      run: cargo outdated
-
-  coverage:
-    name: Code Coverage
+  lint:
+    name: Lint and Audit
     runs-on: ubuntu-latest
+
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
 
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@stable
-      with:
-        components: llvm-tools-preview
 
     - name: Cache Cargo dependencies
       uses: actions/cache@v4
@@ -105,18 +91,28 @@ jobs:
           ~/.cargo/registry/cache/
           ~/.cargo/git/db/
           target/
-        key: ${{ runner.os }}-cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
+        key: ${{ runner.os }}-cargo-lint-${{ hashFiles('**/Cargo.lock') }}
 
-    - name: Install cargo-llvm-cov
-      uses: taiki-e/install-action@cargo-llvm-cov
-
-    - name: Generate coverage report (unit tests)
-      run: |
-        cargo llvm-cov --lib --lcov --output-path lcov.info
-
-    - name: Upload coverage to Codecov
-      uses: codecov/codecov-action@v5
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
       with:
-        files: lcov.info
-        fail_ci_if_error: false
-        verbose: true
+        node-version: '20'
+        cache: 'npm'
+
+    - name: Install Node.js dependencies
+      run: npm ci
+
+    - name: Check formatting
+      run: cargo fmt --all -- --check
+
+    - name: Lint Markdown documentation
+      run: npx markdownlint --config .markdownlint.json "**/*.md"
+
+    - name: Run Clippy linter
+      run: cargo clippy --all-targets --features integration_test -- -D warnings
+
+    - name: Run security audit
+      run: cargo audit
+
+    - name: Check for outdated dependencies
+      run: cargo outdated
