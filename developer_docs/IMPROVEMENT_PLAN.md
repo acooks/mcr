@@ -62,12 +62,12 @@ Phase 1 (detection) complete. Phase 2 needs: workers report ruleset hash, superv
 
 ### Test Coverage Gaps
 
-- `src/supervisor/rule_dispatch.rs:288` - send failure handling
-- `src/supervisor/network_monitor.rs:426` - Netlink integration test
-- `tests/integration/supervisor_resilience.rs:283` - rule resync test
-- `tests/integration/supervisor_resilience.rs:471` - namespace test
+- `tests/integration/supervisor_resilience.rs:471` - namespace test (`#[ignore]`, needs root)
 
-**Effort:** 1 week
+Note: `rule_dispatch.rs` and `network_monitor.rs` are orphaned code (not compiled) - related to
+Control Plane Architecture decision above. `supervisor_resilience.rs:283` test is implemented.
+
+**Effort:** 2-3 days
 
 ### Buffer Size / PACKET_MMAP
 
