@@ -130,6 +130,7 @@ pub struct UnifiedStats {
     pub rules_not_matched: u64,
     pub packets_filtered: u64, // Non-UDP packets (ARP, IPv6, TCP, etc.)
     pub buffer_pool_exhaustion: u64, // Buffer pool exhaustion events
+    pub stats_pipe_errors: u64, // Errors writing to supervisor stats pipe
 }
 
 /// Per-flow counters for stats reporting
@@ -784,7 +785,7 @@ impl UnifiedDataPlane {
                 self.logger.info(
                     Facility::DataPlane,
                     &format!(
-                        "[STATS] t_ms={} rx={} tx={} matched={} not_matched={} rx_err={} tx_err={} buf_exhaust={}",
+                        "[STATS] t_ms={} rx={} tx={} matched={} not_matched={} rx_err={} tx_err={} buf_exhaust={} pipe_err={}",
                         elapsed_ms,
                         self.stats.packets_received,
                         self.stats.packets_sent,
@@ -792,7 +793,8 @@ impl UnifiedDataPlane {
                         self.stats.rules_not_matched,
                         self.stats.recv_errors,
                         self.stats.send_errors,
-                        self.stats.buffer_pool_exhaustion
+                        self.stats.buffer_pool_exhaustion,
+                        self.stats.stats_pipe_errors
                     ),
                 );
 
@@ -813,14 +815,17 @@ impl UnifiedDataPlane {
                     );
                 }
 
-                // Write stats to pipe for supervisor (non-blocking, fire-and-forget)
+                // Write stats to pipe for supervisor (non-blocking, errors tracked not fatal)
                 if let Some(ref mut pipe) = self.stats_pipe {
                     if let Ok(json) = serde_json::to_vec(&flow_stats) {
                         use std::io::Write;
                         // Write with newline delimiter for line-based reading
-                        let _ = writeln!(pipe, "{}", String::from_utf8_lossy(&json));
-                        // Flush is okay here since it's periodic (not per-packet)
-                        let _ = pipe.flush();
+                        // Track errors but don't block packet processing
+                        let write_result = writeln!(pipe, "{}", String::from_utf8_lossy(&json));
+                        let flush_result = pipe.flush();
+                        if write_result.is_err() || flush_result.is_err() {
+                            self.stats.stats_pipe_errors += 1;
+                        }
                     }
                 }
             }
