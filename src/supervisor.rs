@@ -70,6 +70,18 @@ fn validate_interface_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Validate a port number.
+/// Port 0 is rejected as it's typically reserved and indicates a configuration error.
+fn validate_port(port: u16, context: &str) -> Result<(), String> {
+    if port == 0 {
+        return Err(format!(
+            "{} cannot be 0; valid port range is 1-65535",
+            context
+        ));
+    }
+    Ok(())
+}
+
 // --- WorkerManager Types ---
 
 /// Differentiates worker types for unified handling
@@ -181,6 +193,16 @@ pub fn handle_supervisor_command(
                         )),
                         CommandAction::None,
                     );
+                }
+            }
+
+            // Validate port numbers (reject port 0)
+            if let Err(e) = validate_port(input_port, "input_port") {
+                return (Response::Error(e), CommandAction::None);
+            }
+            for (i, output) in outputs.iter().enumerate() {
+                if let Err(e) = validate_port(output.port, &format!("output[{}].port", i)) {
+                    return (Response::Error(e), CommandAction::None);
                 }
             }
 
@@ -2290,6 +2312,100 @@ mod tests {
             crate::Response::Error(msg) => {
                 assert!(msg.contains("Invalid output_interface"));
                 assert!(msg.contains("output[0]"));
+            }
+            _ => panic!("Expected Error response, got {:?}", response),
+        }
+    }
+
+    // --- Port Number Validation Tests ---
+
+    #[test]
+    fn test_validate_port_valid() {
+        assert!(validate_port(1, "test").is_ok());
+        assert!(validate_port(80, "test").is_ok());
+        assert!(validate_port(5000, "test").is_ok());
+        assert!(validate_port(65535, "test").is_ok());
+    }
+
+    #[test]
+    fn test_validate_port_zero() {
+        let result = validate_port(0, "input_port");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("input_port"));
+        assert!(err.contains("cannot be 0"));
+        assert!(err.contains("1-65535"));
+    }
+
+    #[test]
+    fn test_add_rule_rejects_zero_input_port() {
+        let master_rules = Mutex::new(HashMap::new());
+        let worker_map = Mutex::new(HashMap::new());
+        let global_min_level =
+            std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
+        let facility_min_levels = std::sync::RwLock::new(HashMap::new());
+        let worker_stats = Mutex::new(HashMap::new());
+
+        let (response, _) = handle_supervisor_command(
+            crate::SupervisorCommand::AddRule {
+                rule_id: "test-rule".to_string(),
+                input_interface: "eth0".to_string(),
+                input_group: "224.0.0.1".parse().unwrap(),
+                input_port: 0, // Invalid
+                outputs: vec![crate::OutputDestination {
+                    group: "224.0.0.2".parse().unwrap(),
+                    port: 5001,
+                    interface: "eth1".to_string(),
+                }],
+            },
+            &master_rules,
+            &worker_map,
+            &global_min_level,
+            &facility_min_levels,
+            &worker_stats,
+        );
+
+        match response {
+            crate::Response::Error(msg) => {
+                assert!(msg.contains("input_port"));
+                assert!(msg.contains("cannot be 0"));
+            }
+            _ => panic!("Expected Error response, got {:?}", response),
+        }
+    }
+
+    #[test]
+    fn test_add_rule_rejects_zero_output_port() {
+        let master_rules = Mutex::new(HashMap::new());
+        let worker_map = Mutex::new(HashMap::new());
+        let global_min_level =
+            std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
+        let facility_min_levels = std::sync::RwLock::new(HashMap::new());
+        let worker_stats = Mutex::new(HashMap::new());
+
+        let (response, _) = handle_supervisor_command(
+            crate::SupervisorCommand::AddRule {
+                rule_id: "test-rule".to_string(),
+                input_interface: "eth0".to_string(),
+                input_group: "224.0.0.1".parse().unwrap(),
+                input_port: 5000,
+                outputs: vec![crate::OutputDestination {
+                    group: "224.0.0.2".parse().unwrap(),
+                    port: 0, // Invalid
+                    interface: "eth1".to_string(),
+                }],
+            },
+            &master_rules,
+            &worker_map,
+            &global_min_level,
+            &facility_min_levels,
+            &worker_stats,
+        );
+
+        match response {
+            crate::Response::Error(msg) => {
+                assert!(msg.contains("output[0].port"));
+                assert!(msg.contains("cannot be 0"));
             }
             _ => panic!("Expected Error response, got {:?}", response),
         }
