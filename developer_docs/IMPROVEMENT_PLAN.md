@@ -1,247 +1,124 @@
 # Project Improvement Plan
 
-Consolidated November 2025. Completed items archived.
+Last updated: December 2025
 
 ## Priority Legend
 
-- 🔴 **CRITICAL** - Core functionality or correctness issues
+- 🔴 **CRITICAL** - Security or correctness issues
 - 🟡 **HIGH** - Significant impact on maintainability or performance
-- 🟢 **MEDIUM** - Quality improvements, technical debt reduction
-- 🔵 **LOW** - Nice-to-have improvements, future enhancements
+- 🟢 **MEDIUM** - Quality improvements, technical debt
+- 🔵 **LOW** - Nice-to-have, future enhancements
 
 ---
 
-## Critical Priority (🔴)
+## 🔴 Critical
 
-### 1. Privilege Separation (AF_PACKET FD Passing)
+### Privilege Separation (AF_PACKET FD Passing)
 
 **Location:** `src/worker/mod.rs:275-289`
-**Status:** Design incomplete, using workaround
-**Security Impact:** Workers run with more privileges than necessary
+**Issue:** Workers run with more privileges than necessary
 
-**Proper Solution:**
+Supervisor should create AF_PACKET socket and pass FD via SCM_RIGHTS, allowing workers to drop all privileges after receiving the FD.
 
-1. Supervisor (running as root) creates AF_PACKET socket
-2. Passes FD to worker via Unix domain socket + SCM_RIGHTS
-3. Worker receives FD and drops to unprivileged user
-4. Worker retains access to AF_PACKET socket via inherited FD
-
-**References:** SCM_RIGHTS: man 7 unix, man 3 sendmsg
 **Effort:** 1-2 days
 
 ---
 
-## High Priority (🟡)
+## 🟡 High Priority
 
-### 3. Network State Reconciliation
+### Network State Reconciliation
 
-**Location:** `src/supervisor/network_monitor.rs:86-190`
-**Status:** Stubbed out
+**Location:** `src/supervisor/network_monitor.rs` (stubbed)
 
-**Implementation Plan:**
-
-1. Use `netlink-sys` or `rtnetlink` crate
-2. Subscribe to RTNLGRP_LINK events
-3. Detect interface up/down, address changes
-4. Send events to supervisor for rule reconciliation
+Use `rtnetlink` crate to subscribe to RTNLGRP_LINK events. Detect interface up/down and address changes, trigger rule reconciliation.
 
 **Effort:** 3-5 days
 
----
-
-### 4. Rule Hashing and Worker Distribution
+### Rule Hashing to Workers
 
 **Location:** `src/supervisor.rs:987-988`
-**Status:** Architecture documented but not implemented
 
-**Current:** All workers receive all rules
-**Intended:** Rules hashed by (input_group, input_port) to specific cores
-
-**Implementation:**
-
-1. Implement: `rule_hash(group, port) % num_workers`
-2. Supervisor sends each rule only to its assigned worker
-3. Add tests for hash distribution fairness
+Currently all workers receive all rules. Implement `rule_hash(group, port) % num_workers` to distribute rules to specific cores.
 
 **Effort:** 2-3 days
 
----
-
-### 5. Buffer Size Limitation
-
-**Location:** Buffer pool implementation
-**Status:** Superseded by PACKET_MMAP plan
-
-- **Current:** Receive uses 2KB buffers (Small), Jumbo (9KB) allocated but unused
-- **Original design:** 64KB buffers for multi-packet batching
-
-**Resolution:** The 64KB buffer design was for PACKET_MMAP ring buffers, not the current
-per-packet recv() architecture. Revisit buffer pool design when implementing PACKET_MMAP
-(see `docs/PACKET_MMAP_IMPLEMENTATION_PLAN.md`).
-
-**Current workaround:** Standard 1500 MTU packets work fine with 2KB buffers. Jumbo frame
-support would require using Jumbo buffers for receive, or detecting interface MTU.
-
----
-
-### 6. Control Plane Architecture Clarity
+### Control Plane Architecture Decision
 
 **Location:** `src/worker/control_plane.rs`
-**Status:** Dual role not well-defined
 
-**Question:** What is control plane's role?
-
-- **Option A:** Stats aggregator only (rename to stats_worker)
-- **Option B:** Authoritative state holder
-- **Option C:** Remove entirely (supervisor handles stats)
+Decide role: (A) Stats aggregator only, (B) Authoritative state holder, or (C) Remove entirely.
 
 **Effort:** 2-3 days after decision
 
----
+### Automated Drift Recovery
 
-### 7. Automated Drift Recovery (Phase 2)
-
-**Status:** Phase 1 (detection) complete, Phase 2 (recovery) not designed
-
-**What's Needed:**
-
-1. Workers periodically report ruleset hash to supervisor
-2. Supervisor compares worker hash to master_rules hash
-3. Recovery: Send full ruleset sync or restart worker
+Phase 1 (detection) complete. Phase 2 needs: workers report ruleset hash, supervisor compares and triggers sync/restart on mismatch.
 
 **Effort:** 1 week
 
 ---
 
-## Medium Priority (🟢)
+## 🟢 Medium Priority
 
-### 8. Protocol Versioning
+### Test Coverage Gaps
 
-**Status:** Designed but not implemented
-
-**Action:**
-
-1. Add `PROTOCOL_VERSION` constant
-2. Implement `VersionCheck` command
-3. Server validates version on first message
-
-**Effort:** 1 day
-
----
-
-### 9. Test Coverage Gaps
-
-**Locations:** Various test files
-
-**Known gaps:**
-
-- `src/supervisor/rule_dispatch.rs:288` - test for handling send failures
-- `src/supervisor/network_monitor.rs:426` - integration test with real Netlink
+- `src/supervisor/rule_dispatch.rs:288` - send failure handling
+- `src/supervisor/network_monitor.rs:426` - Netlink integration test
+- `tests/integration/supervisor_resilience.rs:283` - rule resync test
+- `tests/integration/supervisor_resilience.rs:471` - namespace test
 
 **Effort:** 1 week
 
----
+### Buffer Size / PACKET_MMAP
 
-### 10. Inconsistent Logging Approaches
-
-**Location:** Multiple files
-
-- Supervisor: Uses proper logging system
-- Data plane: Uses `self.logger.info()`
-- Control plane stats_aggregator: Uses `eprintln!()`
-
-**Action:** Pass Logger to stats_aggregator_task, replace all eprintln
-
-**Effort:** 2-3 days
+Current 2KB buffers work for standard MTU. Jumbo frame support and 64KB batching buffers deferred to PACKET_MMAP implementation. See `docs/PACKET_MMAP_IMPLEMENTATION_PLAN.md`.
 
 ---
 
-### 11. Node.js Dependencies in Git History
+## 🔵 Low Priority
 
-**Status:** Cleaned up, but history still contains bloat (6,044 files)
+### On-Demand Packet Tracing
 
-**Options:**
-
-- **Option A:** Document issue, leave history as-is (recommended)
-- **Option B:** Rewrite history with `git filter-repo` (breaks existing clones)
-
----
-
-### 12. Integration Test Stubs
-
-**Location:** `tests/integration/supervisor_resilience.rs`
-
-**Missing critical tests:**
-
-- `test_supervisor_resyncs_rules_on_restart()` - **Line 283** (CRITICAL)
-- `test_supervisor_in_namespace()` - **Line 471** (needs root)
-
-**Effort:** 2 days
-
----
-
-## Low Priority (🔵)
-
-### 13. On-Demand Packet Tracing
-
-**Status:** Designed but not implemented
-
-**Feature:** EnableTrace/DisableTrace/GetTrace commands, per-rule tracing
+EnableTrace/DisableTrace/GetTrace commands for per-rule debugging.
 
 **Effort:** 5-7 days
 
----
+### Troubleshooting Guide
 
-### 14. Troubleshooting Guide
-
-**Location:** `user_docs/TROUBLESHOOTING.md` (doesn't exist)
-
-**Content Needed:**
-
-- Common errors and solutions
-- Permission issues
-- Buffer exhaustion symptoms
-- Performance tuning checklist
+Create `user_docs/TROUBLESHOOTING.md` with common errors, permission issues, buffer exhaustion symptoms, performance tuning.
 
 **Effort:** 1-2 days
 
----
+### Benchmark Implementations
 
-### 15. Benchmark Implementations
-
-**Location:** `tests/benchmarks/forwarding_rate.rs:49-151`
-**Status:** Skeleton exists, implementations are placeholders
+**Location:** `tests/benchmarks/forwarding_rate.rs:49-151` (skeleton only)
 
 **Effort:** 1 week
 
----
+### Git History Cleanup (Optional)
 
-## Implementation Roadmap
-
-### Near-term (1-2 weeks)
-
-1. Rule resync integration test (#12) - 1 day
-2. Control plane architecture decision (#6) - 2-3 days
-
-### Medium-term (3-4 weeks)
-
-1. AF_PACKET FD passing (#1) - CRITICAL SECURITY
-2. Rule hashing to workers (#4)
-3. Network state reconciliation (#3)
-4. Buffer size investigation (#5)
-
-### Long-term
-
-1. Automated drift recovery (#7)
-2. Protocol versioning (#8)
-3. Complete test coverage (#9)
-4. Packet tracing (#13)
+Node.js dependencies removed but history bloated (6,044 files). Recommend documenting rather than rewriting history.
 
 ---
 
-## Completed Items (Archived)
+## Roadmap
 
-The following were completed in November 2025:
+**Near-term:** Test coverage gaps, Control plane architecture decision
+
+**Medium-term:** AF_PACKET FD passing, Rule hashing, Network reconciliation
+
+**Long-term:** Drift recovery, Packet tracing, Benchmarks
+
+---
+
+## Completed (Archived)
+
+**December 2025:**
+
+- Protocol versioning (`PROTOCOL_VERSION`, `GetVersion` command)
+- Consistent logging in stats.rs (replaced `eprintln!` with Logger)
+
+**November 2025:**
 
 - Legacy two-thread data plane removal (1,814 lines deleted)
 - Dead code cleanup
@@ -253,7 +130,7 @@ The following were completed in November 2025:
 - RemoveRule implementation in data plane
 - Ruleset sync on worker startup (SyncRules command)
 - Periodic ruleset sync (every 5 minutes)
-- GetWorkerRules command removal (architectural decision)
-- Log level control integration tests (fixed: env!("CARGO_BIN_EXE_multicast_relay"))
-- Periodic health checks (every 250ms with auto-restart + SyncRules)
-- Test verification discipline: pre-commit hook (`scripts/pre-commit`, `just setup-hooks`), CI already enforces
+- GetWorkerRules command removal
+- Log level control integration tests
+- Periodic health checks (250ms with auto-restart + SyncRules)
+- Test verification discipline (pre-commit hook)
