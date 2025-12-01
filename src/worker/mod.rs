@@ -13,7 +13,6 @@ pub mod command_reader;
 pub mod control_plane;
 pub mod data_plane;
 pub mod data_plane_integrated;
-pub mod metrics;
 pub mod packet_parser;
 pub mod stats;
 pub mod unified_loop;
