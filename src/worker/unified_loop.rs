@@ -1119,9 +1119,7 @@ mod tests {
                 group: "224.0.0.2".parse().unwrap(),
                 port: 5001,
                 interface: "lo".to_string(),
-                dtls_enabled: false,
             }],
-            dtls_enabled: false,
         }
     }
 

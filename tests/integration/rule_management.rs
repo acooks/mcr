@@ -107,7 +107,6 @@ impl ControlClient {
                 input_group: rule.input_group,
                 input_port: rule.input_port,
                 outputs: rule.outputs,
-                dtls_enabled: rule.dtls_enabled,
             })
             .await?
         {
@@ -248,7 +247,6 @@ async fn test_add_and_remove_rule_e2e() -> Result<()> {
         input_group: "239.1.1.1".parse()?,
         input_port: 5001,
         outputs: vec![],
-        dtls_enabled: false,
     };
     client.add_rule(rule.clone()).await?;
     println!("[TEST] AddRule command sent for rule '{}'.", rule.rule_id);
@@ -351,9 +349,7 @@ async fn test_get_stats_e2e() -> Result<()> {
             group: "239.2.2.2".parse()?,
             port: 6002,
             interface: veth_a.clone(), // Different from input interface to pass validation
-            dtls_enabled: false,
         }],
-        dtls_enabled: false,
     };
     client.add_rule(rule.clone()).await?;
     println!("[TEST] AddRule command sent for rule '{}'.", rule.rule_id);
@@ -534,9 +530,7 @@ async fn test_max_workers_spawning() -> Result<()> {
             group: "239.2.2.2".parse()?,
             port: 6666,
             interface: "eth0".to_string(),
-            dtls_enabled: false,
         }],
-        dtls_enabled: false,
     };
 
     client.add_rule(rule.clone()).await?;

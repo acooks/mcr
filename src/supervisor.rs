@@ -120,7 +120,6 @@ pub fn handle_supervisor_command(
             input_group,
             input_port,
             outputs,
-            dtls_enabled,
         } => {
             let rule = ForwardingRule {
                 rule_id,
@@ -128,7 +127,6 @@ pub fn handle_supervisor_command(
                 input_group,
                 input_port,
                 outputs,
-                dtls_enabled,
             };
 
             // Validate interface configuration to prevent packet loops and reflection
@@ -1537,7 +1535,6 @@ mod tests {
                 input_group: "224.0.0.1".parse().unwrap(),
                 input_port: 5000,
                 outputs: vec![],
-                dtls_enabled: false,
             },
             &master_rules,
             &worker_map,
@@ -1562,7 +1559,6 @@ mod tests {
                 input_group: "224.0.0.1".parse().unwrap(),
                 input_port: 5000,
                 outputs: vec![],
-                dtls_enabled: false,
             },
         );
         let worker_map = Mutex::new(HashMap::new());
@@ -1623,7 +1619,6 @@ mod tests {
                 input_group: "224.0.0.1".parse().unwrap(),
                 input_port: 5000,
                 outputs: vec![],
-                dtls_enabled: false,
             },
         );
         let worker_map = Mutex::new(HashMap::new());
@@ -1979,9 +1974,7 @@ mod tests {
                     group: "239.2.2.2".parse().unwrap(),
                     port: 5001,
                     interface: "eth0".to_string(), // Same as input!
-                    dtls_enabled: false,
                 }],
-                dtls_enabled: false,
             },
             &master_rules,
             &worker_map,
@@ -2025,9 +2018,7 @@ mod tests {
                     group: "239.2.2.2".parse().unwrap(),
                     port: 5001,
                     interface: "eth1".to_string(), // Different from input
-                    dtls_enabled: false,
                 }],
-                dtls_enabled: false,
             },
             &master_rules,
             &worker_map,
@@ -2075,9 +2066,7 @@ mod tests {
                     group: "239.2.2.2".parse().unwrap(),
                     port: 5001,
                     interface: "lo".to_string(), // Loopback output
-                    dtls_enabled: false,
                 }],
-                dtls_enabled: false,
             },
             &master_rules,
             &worker_map,

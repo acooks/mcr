@@ -120,7 +120,6 @@ pub struct OutputDestination {
     pub group: Ipv4Addr,
     pub port: u16,
     pub interface: String,
-    pub dtls_enabled: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -132,8 +131,6 @@ pub enum SupervisorCommand {
         input_group: Ipv4Addr,
         input_port: u16,
         outputs: Vec<OutputDestination>,
-        #[serde(default)]
-        dtls_enabled: bool,
     },
     RemoveRule {
         rule_id: String,
@@ -176,7 +173,6 @@ pub struct ForwardingRule {
     pub input_group: Ipv4Addr,
     pub input_port: u16,
     pub outputs: Vec<OutputDestination>,
-    pub dtls_enabled: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -253,9 +249,7 @@ mod tests {
                 group: "224.0.0.2".parse().unwrap(),
                 port: 5001,
                 interface: "127.0.0.1".to_string(),
-                dtls_enabled: true,
             }],
-            dtls_enabled: false,
         };
         let json = serde_json::to_string(&add_command).unwrap();
         let deserialized: SupervisorCommand = serde_json::from_str(&json).unwrap();
@@ -297,7 +291,6 @@ mod tests {
             input_group: "224.0.0.1".parse().unwrap(),
             input_port: 5000,
             outputs: vec![],
-            dtls_enabled: false,
         };
         let rules_response = Response::Rules(vec![rule]);
         let json = serde_json::to_string(&rules_response).unwrap();
@@ -329,9 +322,7 @@ mod tests {
                 group: "224.0.0.2".parse().unwrap(),
                 port: 5001,
                 interface: "127.0.0.1".to_string(),
-                dtls_enabled: true,
             }],
-            dtls_enabled: false,
         };
         let json = serde_json::to_string(&rule).unwrap();
         let deserialized: ForwardingRule = serde_json::from_str(&json).unwrap();

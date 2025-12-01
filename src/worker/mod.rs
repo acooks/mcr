@@ -428,7 +428,6 @@ mod tests {
             input_group: "224.0.0.1".parse().unwrap(),
             input_port: 5000,
             outputs: vec![],
-            dtls_enabled: false,
         });
 
         sender.send(command.clone()).await.unwrap();

@@ -210,7 +210,6 @@ mod tests {
                     input_group: Ipv4Addr::new(224, 0, 0, 1),
                     input_port: 5000,
                     outputs: vec![],
-                    dtls_enabled: false,
                 },
                 FlowStats {
                     input_group: Ipv4Addr::new(224, 0, 0, 1),
@@ -292,7 +291,6 @@ mod tests {
                 input_group: Ipv4Addr::new(224, 0, 0, 1),
                 input_port: 5000,
                 outputs: vec![],
-                dtls_enabled: false,
             },
             &flows,
         );

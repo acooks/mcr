@@ -157,7 +157,6 @@ mod tests {
             input_group: "224.0.0.1".parse().unwrap(),
             input_port: 5000,
             outputs: vec![],
-            dtls_enabled: false,
         };
 
         let result = parse_and_filter_packet(&packet, &rule);
@@ -182,7 +181,6 @@ mod tests {
             input_group: "224.0.0.2".parse().unwrap(), // Different group
             input_port: 5001,                          // Different port
             outputs: vec![],
-            dtls_enabled: false,
         };
 
         let result = parse_and_filter_packet(&packet, &rule);
@@ -225,9 +223,7 @@ mod tests {
                     group: "127.0.0.1".parse().unwrap(),
                     port: egress_addr.port(),
                     interface: "lo".to_string(),
-                    dtls_enabled: false,
                 }],
-                dtls_enabled: false,
             };
 
             // Create a mock stats channel.

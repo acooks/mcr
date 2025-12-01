@@ -248,7 +248,7 @@ Adds a new rule to forward an input stream to one or more outputs.
 | `--input-interface` | Network interface name for the input stream (e.g., `eth0`, `lo`).                               |
 | `--input-group`     | Input multicast group IP address.                                                               |
 | `--input-port`      | Input multicast UDP port.                                                                       |
-| `--outputs`         | Comma-separated list in format `group:port:interface[:dtls]` where `interface` is a network interface name (e.g., `eth0`). DTLS defaults to false. |
+| `--outputs`         | Comma-separated list in format `group:port:interface` where `interface` is a network interface name (e.g., `eth0`). |
 | `--rule-id`         | (Optional) Custom rule ID. If omitted, a UUID will be auto-generated.                           |
 
 **Examples:**
@@ -262,9 +262,9 @@ control_client add --input-interface eth0 --input-group 239.1.1.1 \
 control_client add --input-interface eth0 --input-group 239.1.1.1 \
     --input-port 5000 --outputs 239.2.2.2:6000:eth1,239.3.3.3:7000:eth2
 
-# With custom rule ID and DTLS
+# With custom rule ID
 control_client add --rule-id my-stream --input-interface eth0 \
-    --input-group 239.1.1.1 --input-port 5000 --outputs 239.2.2.2:6000:eth1:true
+    --input-group 239.1.1.1 --input-port 5000 --outputs 239.2.2.2:6000:eth1
 ```
 
 ---

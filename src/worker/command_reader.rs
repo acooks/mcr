@@ -168,9 +168,7 @@ mod tests {
                 group: Ipv4Addr::new(239, 2, 2, 2),
                 port: 6000,
                 interface: "eth1".to_string(),
-                dtls_enabled: false,
             }],
-            dtls_enabled: false,
         });
 
         let mut data = create_frame(&cmd1);
