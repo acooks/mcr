@@ -191,7 +191,8 @@ pub fn handle_supervisor_command(
         SupervisorCommand::GetStats => {
             // Aggregate stats from all data plane workers
             // Multiple workers may report stats for the same flow (same input_group:port)
-            // We aggregate by summing counters and averaging rates
+            // With PACKET_FANOUT_CPU, each worker handles a subset of packets, so we sum
+            // both counters and rates to get the total system throughput
             use std::collections::HashMap as StdHashMap;
 
             let worker_stats_locked = worker_stats.lock().unwrap();
@@ -208,7 +209,7 @@ pub fn handle_supervisor_command(
                             // Sum counters
                             existing.packets_relayed += stat.packets_relayed;
                             existing.bytes_relayed += stat.bytes_relayed;
-                            // Average rates (simple average across workers)
+                            // Sum rates (each worker handles distinct packets via fanout)
                             existing.packets_per_second += stat.packets_per_second;
                             existing.bits_per_second += stat.bits_per_second;
                         })
