@@ -160,12 +160,12 @@ test-topology TEST:
     @if [ "$EUID" -ne 0 ]; then echo "ERROR: Requires root (sudo just test-topology {{TEST}})"; exit 1; fi
     @sudo tests/topologies/{{TEST}}.sh
 
-# Generate test coverage report (unit tests only)
+# Generate test coverage report (all unprivileged tests)
 # Uses cargo-llvm-cov for accurate LLVM-based coverage measurement
 coverage:
     #!/usr/bin/env bash
     set -euxo pipefail
-    cargo llvm-cov --lib --html --output-dir target/coverage
+    cargo llvm-cov --all-targets --html --output-dir target/coverage
     echo "Coverage report: target/coverage/html/index.html"
 
 # Generate full coverage report (unit + integration + topology tests, requires root)
@@ -196,8 +196,8 @@ coverage-full:
     cargo build --release --all-targets
 
     echo ""
-    echo "Step 2: Running unit tests..."
-    cargo test --lib --release
+    echo "Step 2: Running all unprivileged tests..."
+    cargo test --release
 
     echo ""
     echo "Step 3: Running integration tests (requires sudo)..."
