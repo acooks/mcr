@@ -61,31 +61,21 @@ uname -r
 
 **Optional (Recommended):**
 
-- `cargo-nextest` - Faster, more robust test execution
 - `just` - Simplified build and test workflows
+- `cargo-llvm-cov` - Code coverage
 
 ```bash
-cargo install cargo-nextest just
+cargo install just cargo-llvm-cov
 ```
 
-### 2. Build
-
-Build all necessary binaries in release mode.
+### 2. Build and Test
 
 ```bash
-./scripts/build_all.sh
+just dev    # Format, lint, build, unit tests (no root needed)
+just test   # Full test suite with coverage (handles sudo internally)
 ```
 
-### 3. Configure Kernel for High Performance
-
-For optimal performance, tune the kernel's network buffer limits. This script increases the allowed send/receive buffer sizes.
-
-```bash
-# This is required once per boot
-sudo ./scripts/setup_kernel_tuning.sh
-```
-
-### 4. Run & Configure the Relay
+### 3. Run the Relay
 
 A full usage guide is available in the [User Guide](./user_docs/USAGE.md).
 
