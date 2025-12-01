@@ -51,8 +51,6 @@ pub enum Command {
         user: String,
         #[arg(long, default_value = "daemon")]
         group: String,
-        #[arg(long)]
-        prometheus_addr: Option<std::net::SocketAddr>,
         /// Number of data plane workers to spawn. Defaults to number of CPU cores.
         #[arg(long)]
         num_workers: Option<usize>,
@@ -69,8 +67,6 @@ pub enum Command {
         data_plane: bool,
         #[arg(long)]
         core_id: Option<u32>,
-        #[arg(long)]
-        prometheus_addr: Option<std::net::SocketAddr>,
         #[arg(long)]
         input_interface_name: Option<String>,
         #[arg(long)]
@@ -95,7 +91,6 @@ pub struct ControlPlaneConfig {
     pub uid: Option<u32>,
     pub gid: Option<u32>,
     pub relay_command_socket_path: PathBuf,
-    pub prometheus_addr: Option<std::net::SocketAddr>,
     pub reporting_interval: u64,
 }
 
@@ -104,7 +99,6 @@ pub struct DataPlaneConfig {
     pub gid: Option<u32>,
     pub supervisor_pid: u32, // PID of the supervisor process (for shared memory paths)
     pub core_id: Option<u32>,
-    pub prometheus_addr: std::net::SocketAddr,
     pub input_interface_name: Option<String>,
     pub input_group: Option<Ipv4Addr>,
     pub input_port: Option<u16>,

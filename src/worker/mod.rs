@@ -459,7 +459,6 @@ mod tests {
             uid: Some(0),
             gid: Some(0),
             relay_command_socket_path: socket_path.clone(),
-            prometheus_addr: None,
             reporting_interval: 1000,
         };
         let (supervisor_stream, _) = UnixStream::pair().unwrap();
@@ -521,7 +520,6 @@ mod tests {
             gid: Some(current_gid),
             supervisor_pid: std::process::id(),
             core_id: Some(0),
-            prometheus_addr: "127.0.0.1:9002".parse().unwrap(),
             input_interface_name: Some("lo".to_string()),
             input_group: None,
             input_port: None,

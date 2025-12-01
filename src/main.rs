@@ -15,7 +15,6 @@ fn main() -> Result<()> {
             interface,
             user,
             group,
-            prometheus_addr,
             num_workers,
         } => {
             // Create oneshot channel for graceful shutdown
@@ -49,7 +48,6 @@ fn main() -> Result<()> {
                     &user,
                     &group,
                     &interface,
-                    prometheus_addr,
                     relay_command_socket_path.clone(),
                     control_socket_path,
                     Arc::new(Mutex::new(HashMap::new())),
@@ -75,7 +73,6 @@ fn main() -> Result<()> {
             relay_command_socket_path,
             data_plane,
             core_id,
-            prometheus_addr,
             input_interface_name,
             input_group,
             input_port,
@@ -94,8 +91,6 @@ fn main() -> Result<()> {
                     gid,
                     supervisor_pid,
                     core_id,
-                    // Data plane workers do not expose prometheus, so we can safely unwrap here.
-                    prometheus_addr: prometheus_addr.unwrap_or("0.0.0.0:0".parse().unwrap()),
                     input_interface_name,
                     input_group,
                     input_port,
@@ -120,7 +115,6 @@ fn main() -> Result<()> {
                     uid,
                     gid,
                     relay_command_socket_path,
-                    prometheus_addr,
                     reporting_interval: reporting_interval.unwrap_or(1),
                 };
                 // Control Plane worker - uses standard tokio runtime (no packet I/O)
@@ -154,7 +148,6 @@ mod tests {
                 interface: "lo".to_string(),
                 user: "nobody".to_string(),
                 group: "daemon".to_string(),
-                prometheus_addr: None,
                 num_workers: None,
             }
         );
@@ -171,8 +164,6 @@ mod tests {
             "--data-plane",
             "--core-id",
             "0",
-            "--prometheus-addr",
-            "127.0.0.1:9000",
             "--input-interface-name",
             "eth0",
             "--input-group",
@@ -196,7 +187,6 @@ mod tests {
                 relay_command_socket_path: PathBuf::from("/tmp/worker_relay.sock"),
                 data_plane: true,
                 core_id: Some(0),
-                prometheus_addr: Some("127.0.0.1:9000".parse().unwrap()),
                 input_interface_name: Some("eth0".to_string()),
                 input_group: Some("224.0.0.1".parse().unwrap()),
                 input_port: Some(5000),
@@ -226,7 +216,6 @@ mod tests {
                 relay_command_socket_path: PathBuf::from("/tmp/worker_relay.sock"),
                 data_plane: false,
                 core_id: None,
-                prometheus_addr: None,
                 input_interface_name: None,
                 input_group: None,
                 input_port: None,

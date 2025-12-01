@@ -60,7 +60,6 @@ struct WorkerManager {
     gid: u32,
     interface: String,
     relay_command_socket_path: PathBuf,
-    prometheus_addr: Option<std::net::SocketAddr>,
     num_cores: usize,
     logger: Logger,
     fanout_group_id: u16,
@@ -267,7 +266,6 @@ pub async fn spawn_control_plane_worker(
     uid: u32,
     gid: u32,
     relay_command_socket_path: PathBuf,
-    prometheus_addr: Option<std::net::SocketAddr>,
     logger: &crate::logging::Logger,
 ) -> Result<(Child, UnixStream, UnixStream)> {
     logger.info(Facility::Supervisor, "Spawning Control Plane worker");
@@ -290,10 +288,6 @@ pub async fn spawn_control_plane_worker(
         .arg("--relay-command-socket-path")
         .arg(relay_command_socket_path)
         .process_group(0); // Put worker in its own process group to prevent SIGTERM propagation
-
-    if let Some(addr) = prometheus_addr {
-        command.arg("--prometheus-addr").arg(addr.to_string());
-    }
 
     // Ensure worker_sock becomes FD 3 in the child
     unsafe {
@@ -493,7 +487,6 @@ impl WorkerManager {
         gid: u32,
         interface: String,
         relay_command_socket_path: PathBuf,
-        prometheus_addr: Option<std::net::SocketAddr>,
         num_cores: usize,
         logger: Logger,
         fanout_group_id: u16,
@@ -503,7 +496,6 @@ impl WorkerManager {
             gid,
             interface,
             relay_command_socket_path,
-            prometheus_addr,
             num_cores,
             logger,
             fanout_group_id,
@@ -519,7 +511,6 @@ impl WorkerManager {
             self.uid,
             self.gid,
             self.relay_command_socket_path.clone(),
-            self.prometheus_addr,
             &self.logger,
         )
         .await?;
@@ -1159,7 +1150,6 @@ pub async fn run(
     user: &str,
     group: &str,
     interface: &str,
-    prometheus_addr: Option<std::net::SocketAddr>,
     relay_command_socket_path: PathBuf,
     control_socket_path: PathBuf,
     master_rules: Arc<Mutex<HashMap<String, ForwardingRule>>>,
@@ -1268,7 +1258,6 @@ pub async fn run(
             gid,
             interface.to_string(),
             relay_command_socket_path,
-            prometheus_addr,
             num_cores,
             supervisor_logger.clone(),
             fanout_group_id,

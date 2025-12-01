@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 use anyhow::Result;
-use metrics::gauge;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -40,16 +39,16 @@ pub async fn monitoring_task(shared_flows: SharedFlows, reporting_interval: u64)
         sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), false);
         if let Some(process) = sys.process(pid) {
             let memory_usage = process.memory();
-            gauge!("memory_usage_bytes").set(memory_usage as f64);
+            // Log memory usage for debugging (stats are available via GetStats API)
+            eprintln!(
+                "[ControlPlane] Memory usage: {} bytes, flows: {}",
+                memory_usage,
+                shared_flows.lock().await.len()
+            );
         }
 
-        let flows = shared_flows.lock().await;
-        for (rule, stats) in flows.values() {
-            // Update Prometheus metrics with labels for each rule
-            gauge!("packets_per_second", "rule_id" => rule.rule_id.clone())
-                .set(stats.packets_per_second);
-            gauge!("bits_per_second", "rule_id" => rule.rule_id.clone()).set(stats.bits_per_second);
-        }
+        // Stats are available via GetStats API call - no prometheus endpoint
+        let _ = &shared_flows; // Keep shared_flows in scope for future use
 
         tokio::time::sleep(reporting_duration).await;
     }
