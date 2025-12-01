@@ -27,6 +27,49 @@ const MAX_BACKOFF_MS: u64 = 16000; // 16 seconds
 const SHUTDOWN_TIMEOUT_SECS: u64 = 10; // Timeout for graceful worker shutdown
 const PERIODIC_SYNC_INTERVAL_SECS: u64 = 300; // 5 minutes - periodic full ruleset sync to all workers
 
+/// Maximum interface name length (IFNAMSIZ - 1 for null terminator)
+const MAX_INTERFACE_NAME_LEN: usize = 15;
+
+/// Validate an interface name according to Linux kernel rules.
+/// Returns Ok(()) if valid, Err(reason) if invalid.
+fn validate_interface_name(name: &str) -> Result<(), String> {
+    // Must not be empty
+    if name.is_empty() {
+        return Err("interface name cannot be empty".to_string());
+    }
+
+    // Must not exceed IFNAMSIZ - 1 (15 chars)
+    if name.len() > MAX_INTERFACE_NAME_LEN {
+        return Err(format!(
+            "interface name '{}' exceeds maximum length of {} characters",
+            name, MAX_INTERFACE_NAME_LEN
+        ));
+    }
+
+    // Must contain only valid characters: alphanumeric, dash, underscore
+    // (Linux allows most characters but these are the safe/common ones)
+    for (i, c) in name.chars().enumerate() {
+        if !c.is_ascii_alphanumeric() && c != '-' && c != '_' && c != '.' {
+            return Err(format!(
+                "interface name '{}' contains invalid character '{}' at position {}; \
+                only alphanumeric, dash, underscore, and dot are allowed",
+                name, c, i
+            ));
+        }
+    }
+
+    // Must not start with a dash or dot (kernel restriction)
+    if name.starts_with('-') || name.starts_with('.') {
+        return Err(format!(
+            "interface name '{}' cannot start with '{}'; must start with alphanumeric or underscore",
+            name,
+            name.chars().next().unwrap()
+        ));
+    }
+
+    Ok(())
+}
+
 // --- WorkerManager Types ---
 
 /// Differentiates worker types for unified handling
@@ -120,6 +163,27 @@ pub fn handle_supervisor_command(
             input_port,
             outputs,
         } => {
+            // Validate input interface name
+            if let Err(e) = validate_interface_name(&input_interface) {
+                return (
+                    Response::Error(format!("Invalid input_interface: {}", e)),
+                    CommandAction::None,
+                );
+            }
+
+            // Validate all output interface names
+            for (i, output) in outputs.iter().enumerate() {
+                if let Err(e) = validate_interface_name(&output.interface) {
+                    return (
+                        Response::Error(format!(
+                            "Invalid output_interface in output[{}]: {}",
+                            i, e
+                        )),
+                        CommandAction::None,
+                    );
+                }
+            }
+
             let rule = ForwardingRule {
                 rule_id,
                 input_interface,
@@ -2073,5 +2137,161 @@ mod tests {
 
         // Rule should be added despite loopback warning
         assert_eq!(master_rules.lock().unwrap().len(), 1);
+    }
+
+    // --- Interface Name Validation Tests ---
+
+    #[test]
+    fn test_validate_interface_name_valid() {
+        // Standard interface names
+        assert!(validate_interface_name("lo").is_ok());
+        assert!(validate_interface_name("eth0").is_ok());
+        assert!(validate_interface_name("eth1").is_ok());
+        assert!(validate_interface_name("enp0s3").is_ok());
+        assert!(validate_interface_name("wlan0").is_ok());
+        assert!(validate_interface_name("br0").is_ok());
+        assert!(validate_interface_name("docker0").is_ok());
+        assert!(validate_interface_name("veth123abc").is_ok());
+
+        // Names with underscores and dashes
+        assert!(validate_interface_name("my_bridge").is_ok());
+        assert!(validate_interface_name("veth-peer").is_ok());
+        assert!(validate_interface_name("tap_vm1").is_ok());
+
+        // Names with dots
+        assert!(validate_interface_name("eth0.100").is_ok()); // VLAN interface
+
+        // Maximum length (15 chars)
+        assert!(validate_interface_name("123456789012345").is_ok());
+    }
+
+    #[test]
+    fn test_validate_interface_name_empty() {
+        let result = validate_interface_name("");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("cannot be empty"));
+    }
+
+    #[test]
+    fn test_validate_interface_name_too_long() {
+        // 16 characters - too long
+        let result = validate_interface_name("1234567890123456");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("exceeds maximum length"));
+
+        // 20 characters - definitely too long
+        let result = validate_interface_name("12345678901234567890");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_interface_name_invalid_chars() {
+        // Space
+        let result = validate_interface_name("eth 0");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("invalid character"));
+
+        // Slash
+        let result = validate_interface_name("eth/0");
+        assert!(result.is_err());
+
+        // Colon
+        let result = validate_interface_name("eth:0");
+        assert!(result.is_err());
+
+        // At sign
+        let result = validate_interface_name("eth@0");
+        assert!(result.is_err());
+
+        // Unicode
+        let result = validate_interface_name("ethö0");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_interface_name_invalid_start() {
+        // Cannot start with dash
+        let result = validate_interface_name("-eth0");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("cannot start with"));
+
+        // Cannot start with dot
+        let result = validate_interface_name(".eth0");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("cannot start with"));
+    }
+
+    #[test]
+    fn test_add_rule_rejects_invalid_input_interface() {
+        let master_rules = Mutex::new(HashMap::new());
+        let worker_map = Mutex::new(HashMap::new());
+        let global_min_level =
+            std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
+        let facility_min_levels = std::sync::RwLock::new(HashMap::new());
+        let worker_stats = Mutex::new(HashMap::new());
+
+        let (response, _) = handle_supervisor_command(
+            crate::SupervisorCommand::AddRule {
+                rule_id: "test-rule".to_string(),
+                input_interface: "this_interface_name_is_way_too_long".to_string(),
+                input_group: "224.0.0.1".parse().unwrap(),
+                input_port: 5000,
+                outputs: vec![crate::OutputDestination {
+                    group: "224.0.0.2".parse().unwrap(),
+                    port: 5001,
+                    interface: "eth1".to_string(),
+                }],
+            },
+            &master_rules,
+            &worker_map,
+            &global_min_level,
+            &facility_min_levels,
+            &worker_stats,
+        );
+
+        match response {
+            crate::Response::Error(msg) => {
+                assert!(msg.contains("Invalid input_interface"));
+                assert!(msg.contains("exceeds maximum length"));
+            }
+            _ => panic!("Expected Error response, got {:?}", response),
+        }
+    }
+
+    #[test]
+    fn test_add_rule_rejects_invalid_output_interface() {
+        let master_rules = Mutex::new(HashMap::new());
+        let worker_map = Mutex::new(HashMap::new());
+        let global_min_level =
+            std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
+        let facility_min_levels = std::sync::RwLock::new(HashMap::new());
+        let worker_stats = Mutex::new(HashMap::new());
+
+        let (response, _) = handle_supervisor_command(
+            crate::SupervisorCommand::AddRule {
+                rule_id: "test-rule".to_string(),
+                input_interface: "eth0".to_string(),
+                input_group: "224.0.0.1".parse().unwrap(),
+                input_port: 5000,
+                outputs: vec![crate::OutputDestination {
+                    group: "224.0.0.2".parse().unwrap(),
+                    port: 5001,
+                    interface: "invalid/name".to_string(),
+                }],
+            },
+            &master_rules,
+            &worker_map,
+            &global_min_level,
+            &facility_min_levels,
+            &worker_stats,
+        );
+
+        match response {
+            crate::Response::Error(msg) => {
+                assert!(msg.contains("Invalid output_interface"));
+                assert!(msg.contains("output[0]"));
+            }
+            _ => panic!("Expected Error response, got {:?}", response),
+        }
     }
 }
