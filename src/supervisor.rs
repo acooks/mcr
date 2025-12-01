@@ -337,6 +337,13 @@ pub fn handle_supervisor_command(
             )
         }
 
+        SupervisorCommand::GetVersion => (
+            Response::Version {
+                protocol_version: crate::PROTOCOL_VERSION,
+            },
+            CommandAction::None,
+        ),
+
         SupervisorCommand::Ping => {
             // Health check - broadcast ping to all data plane workers
             // If they can receive and process this command, they're ready
@@ -1839,6 +1846,33 @@ mod tests {
                 );
             }
             _ => panic!("Expected LogLevels response"),
+        }
+        assert_eq!(action, CommandAction::None);
+    }
+
+    #[test]
+    fn test_handle_get_version() {
+        let master_rules = Mutex::new(HashMap::new());
+        let worker_map = Mutex::new(HashMap::new());
+        let global_min_level =
+            std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
+        let facility_min_levels = std::sync::RwLock::new(HashMap::new());
+        let worker_stats = Mutex::new(HashMap::new());
+
+        let (response, action) = handle_supervisor_command(
+            crate::SupervisorCommand::GetVersion,
+            &master_rules,
+            &worker_map,
+            &global_min_level,
+            &facility_min_levels,
+            &worker_stats,
+        );
+
+        match response {
+            crate::Response::Version { protocol_version } => {
+                assert_eq!(protocol_version, crate::PROTOCOL_VERSION);
+            }
+            _ => panic!("Expected Version response"),
         }
         assert_eq!(action, CommandAction::None);
     }

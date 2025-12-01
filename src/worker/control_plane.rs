@@ -54,6 +54,9 @@ pub fn handle_worker_command(
         SupervisorCommand::Ping => {
             Response::Error("Ping command should be handled by the supervisor".to_string())
         }
+        SupervisorCommand::GetVersion => {
+            Response::Error("GetVersion command should be handled by the supervisor".to_string())
+        }
     }
 }
 

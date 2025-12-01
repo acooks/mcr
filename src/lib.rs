@@ -8,6 +8,10 @@ use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use uuid::Uuid;
 
+/// Protocol version for supervisor-client communication.
+/// Increment when making breaking changes to SupervisorCommand or Response.
+pub const PROTOCOL_VERSION: u32 = 1;
+
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct WorkerInfo {
     pub pid: u32,
@@ -145,6 +149,8 @@ pub enum SupervisorCommand {
     },
     /// Get all configured log levels (global + per-facility overrides)
     GetLogLevels,
+    /// Get protocol version for compatibility checking
+    GetVersion,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -157,6 +163,9 @@ pub enum Response {
     LogLevels {
         global: logging::Severity,
         facility_overrides: std::collections::HashMap<logging::Facility, logging::Severity>,
+    },
+    Version {
+        protocol_version: u32,
     },
 }
 

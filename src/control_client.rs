@@ -52,6 +52,8 @@ pub enum CliCommand {
         #[clap(subcommand)]
         action: LogLevelAction,
     },
+    /// Get supervisor protocol version
+    Version,
 }
 
 #[derive(Parser, Debug)]
@@ -177,6 +179,7 @@ pub fn build_command(cli_command: CliCommand) -> Result<multicast_relay::Supervi
                 }
             }
         },
+        CliCommand::Version => multicast_relay::SupervisorCommand::GetVersion,
     })
 }
 
