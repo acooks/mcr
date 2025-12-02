@@ -132,7 +132,7 @@ Egress: sent=0 submitted=0 ch_recv=0 errors=0 bytes=0
 ```text
 Error: Failed to add rule: error: invalid value
 '239.2.2.2:5002:veth1a,239.3.3.3:5003:veth2a,239.4.4.4:5004:veth3a'
-for '--outputs <OUTPUTS>': Invalid format. Expected group:port:interface[:dtls]
+for '--outputs <OUTPUTS>': Invalid format. Expected group:port:interface
 ```
 
 **Analysis**:

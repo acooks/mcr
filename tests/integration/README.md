@@ -208,4 +208,3 @@ If tests show missing FINAL stats, increase the flush delay.
 - Multi-hop topology tests
 - Performance tests (high packet rates)
 - Failure injection tests
-- DTLS encryption tests

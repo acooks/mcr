@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 use anyhow::Result;
-use metrics::gauge;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -8,6 +7,7 @@ use sysinfo::{Pid, ProcessesToUpdate, System};
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
 
+use crate::logging::{Facility, Logger};
 use crate::{FlowStats, ForwardingRule};
 
 type SharedFlows = Arc<Mutex<HashMap<String, (ForwardingRule, FlowStats)>>>;
@@ -15,6 +15,7 @@ type SharedFlows = Arc<Mutex<HashMap<String, (ForwardingRule, FlowStats)>>>;
 pub async fn stats_aggregator_task(
     mut stats_rx: mpsc::Receiver<(ForwardingRule, FlowStats)>,
     shared_flows: SharedFlows,
+    logger: Option<Logger>,
 ) -> Result<()> {
     while let Some((rule, stats)) = stats_rx.recv().await {
         let mut flows = shared_flows.lock().await;
@@ -22,16 +23,25 @@ pub async fn stats_aggregator_task(
 
         // Log ruleset hash for drift detection
         let ruleset_hash = crate::compute_ruleset_hash(flows.values().map(|(r, _)| r));
-        eprintln!(
-            "[ControlPlane] Ruleset updated: hash={:016x} rule_count={}",
-            ruleset_hash,
-            flows.len()
-        );
+        if let Some(ref log) = logger {
+            log.debug(
+                Facility::Stats,
+                &format!(
+                    "Ruleset updated: hash={:016x} rule_count={}",
+                    ruleset_hash,
+                    flows.len()
+                ),
+            );
+        }
     }
     Ok(())
 }
 
-pub async fn monitoring_task(shared_flows: SharedFlows, reporting_interval: u64) -> Result<()> {
+pub async fn monitoring_task(
+    shared_flows: SharedFlows,
+    reporting_interval: u64,
+    logger: Option<Logger>,
+) -> Result<()> {
     let mut sys = System::new_all();
     let pid = Pid::from(std::process::id() as usize);
     let reporting_duration = Duration::from_secs(reporting_interval);
@@ -40,16 +50,21 @@ pub async fn monitoring_task(shared_flows: SharedFlows, reporting_interval: u64)
         sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), false);
         if let Some(process) = sys.process(pid) {
             let memory_usage = process.memory();
-            gauge!("memory_usage_bytes").set(memory_usage as f64);
+            // Log memory usage for debugging (stats are available via GetStats API)
+            if let Some(ref log) = logger {
+                log.debug(
+                    Facility::Stats,
+                    &format!(
+                        "Memory usage: {} bytes, flows: {}",
+                        memory_usage,
+                        shared_flows.lock().await.len()
+                    ),
+                );
+            }
         }
 
-        let flows = shared_flows.lock().await;
-        for (rule, stats) in flows.values() {
-            // Update Prometheus metrics with labels for each rule
-            gauge!("packets_per_second", "rule_id" => rule.rule_id.clone())
-                .set(stats.packets_per_second);
-            gauge!("bits_per_second", "rule_id" => rule.rule_id.clone()).set(stats.bits_per_second);
-        }
+        // Stats are available via GetStats API call - no prometheus endpoint
+        let _ = &shared_flows; // Keep shared_flows in scope for future use
 
         tokio::time::sleep(reporting_duration).await;
     }
@@ -66,7 +81,8 @@ mod tests {
         let shared_flows: SharedFlows = Arc::new(Mutex::new(HashMap::new()));
         let (stats_tx, stats_rx) = mpsc::channel(10);
 
-        let aggregator_task = tokio::spawn(stats_aggregator_task(stats_rx, shared_flows.clone()));
+        let aggregator_task =
+            tokio::spawn(stats_aggregator_task(stats_rx, shared_flows.clone(), None));
 
         let rule = ForwardingRule {
             rule_id: "test-rule".to_string(),
@@ -77,9 +93,7 @@ mod tests {
                 group: "224.0.0.2".parse().unwrap(),
                 port: 5001,
                 interface: "lo".to_string(),
-                dtls_enabled: false,
             }],
-            dtls_enabled: false,
         };
 
         let stats = FlowStats {
@@ -121,7 +135,6 @@ mod tests {
             input_group: "224.0.0.1".parse().unwrap(),
             input_port: 5000,
             outputs: vec![],
-            dtls_enabled: false,
         };
 
         let stats = FlowStats {
@@ -138,7 +151,11 @@ mod tests {
             flows.insert(rule.rule_id.clone(), (rule, stats));
         }
 
-        let monitoring = tokio::spawn(monitoring_task(shared_flows.clone(), reporting_interval));
+        let monitoring = tokio::spawn(monitoring_task(
+            shared_flows.clone(),
+            reporting_interval,
+            None,
+        ));
 
         // Let the task run for a short period to execute its loop once
         tokio::time::sleep(Duration::from_millis(1100)).await;

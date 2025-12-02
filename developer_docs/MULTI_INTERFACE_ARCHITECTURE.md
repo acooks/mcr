@@ -261,7 +261,6 @@ pub struct ForwardingRule {
     pub input_group: Ipv4Addr,
     pub input_port: u16,
     pub outputs: Vec<OutputDestination>,
-    pub dtls_enabled: bool,
 }
 ```
 

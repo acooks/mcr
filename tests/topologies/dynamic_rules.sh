@@ -18,53 +18,15 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$PROJECT_ROOT"
+source "$SCRIPT_DIR/common.sh"
 
 # Test parameters
 PACKET_SIZE=1400
 SEND_RATE=20000
 PACKETS_PER_PHASE=10000
 
-# Namespace name
-NETNS="mcr_dynamic_test"
-
-# --- Check for root ---
-if [ "$EUID" -ne 0 ]; then
-    echo "ERROR: This test requires root privileges for network namespace isolation"
-    echo "Please run with: sudo $0"
-    exit 1
-fi
-
-# --- Build binaries ---
-echo "=== Building Release Binaries ==="
-cargo build --release
-echo ""
-
-# Source common functions
-source "$SCRIPT_DIR/common.sh"
-
-# --- Create named network namespace ---
-echo "=== Dynamic Rule Change Test ==="
-echo ""
-
-# Clean up any existing namespace
-ip netns del "$NETNS" 2>/dev/null || true
-
-# Create new namespace
-ip netns add "$NETNS"
-
-# Set up cleanup trap
-# shellcheck disable=SC2317  # Cleanup is called via trap
-cleanup() {
-    log_info "Running cleanup..."
-    ip netns pids "$NETNS" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
-    ip netns del "$NETNS" 2>/dev/null || true
-}
-trap cleanup EXIT
-
-log_section 'Network Namespace Setup'
-
-# Enable loopback in namespace
-ip netns exec "$NETNS" ip link set lo up
+# Initialize test (root check, binary build, namespace, cleanup trap, loopback)
+init_test "Dynamic Rule Change Test"
 
 # Create bridge topology for traffic flow
 setup_bridge_topology "$NETNS" br0 veth-gen veth-mcr 10.0.0.1/24 10.0.0.2/24
@@ -149,13 +111,10 @@ NEW_MATCHED=$((AFTER_MATCHED - BEFORE_MATCHED))
 
 log_info "After adding rule: matched=$NEW_MATCHED new packets"
 
-# Should match most of the new packets
-MIN_EXPECTED=$((PACKETS_PER_PHASE * 80 / 100))
-if [ "$NEW_MATCHED" -ge "$MIN_EXPECTED" ]; then
-    log_info "Test 2 (Add Rule): PASSED - $NEW_MATCHED packets matched after adding rule"
+# Should match most of the new packets (80% threshold)
+if validate_min_percent "$NEW_MATCHED" "$PACKETS_PER_PHASE" 80 "Test 2 (Add Rule)"; then
     TEST2_PASSED=0
 else
-    log_error "Test 2 (Add Rule): FAILED - only $NEW_MATCHED packets matched (expected >= $MIN_EXPECTED)"
     TEST2_PASSED=1
 fi
 
@@ -203,14 +162,11 @@ NEW_MATCHED=$((AFTER_MATCHED - BEFORE_MATCHED))
 
 log_info "After concurrent traffic: matched=$NEW_MATCHED new packets"
 
-# Should match most packets from both streams
+# Should match most packets from both streams (80% threshold)
 TOTAL_SENT=$((PACKETS_PER_PHASE * 2))
-MIN_EXPECTED=$((TOTAL_SENT * 80 / 100))  # 80% threshold, consistent with other tests
-if [ "$NEW_MATCHED" -ge "$MIN_EXPECTED" ]; then
-    log_info "Test 3 (Multiple Rules): PASSED - $NEW_MATCHED packets matched"
+if validate_min_percent "$NEW_MATCHED" "$TOTAL_SENT" 80 "Test 3 (Multiple Rules)"; then
     TEST3_PASSED=0
 else
-    log_error "Test 3 (Multiple Rules): FAILED - only $NEW_MATCHED packets matched (expected >= $MIN_EXPECTED)"
     TEST3_PASSED=1
 fi
 

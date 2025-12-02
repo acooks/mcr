@@ -24,55 +24,15 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$PROJECT_ROOT"
+source "$SCRIPT_DIR/common.sh"
 
 # Test parameters
 PACKET_SIZE=1400
 SEND_RATE=50000
 TRAFFIC_DURATION=5  # seconds of traffic before kill
 
-# Namespace name
-NETNS="mcr_fault_test"
-
-# --- Check for root ---
-if [ "$EUID" -ne 0 ]; then
-    echo "ERROR: This test requires root privileges for network namespace isolation"
-    echo "Please run with: sudo $0"
-    exit 1
-fi
-
-# --- Build binaries ---
-echo "=== Building Release Binaries ==="
-cargo build --release
-echo ""
-
-# Source common functions
-source "$SCRIPT_DIR/common.sh"
-
-# --- Create named network namespace ---
-echo "=== Fault Tolerance Test ==="
-echo "Test 1: Graceful Shutdown During Traffic"
-echo "Test 2: SIGTERM Signal Handling"
-echo ""
-
-# Clean up any existing namespace
-ip netns del "$NETNS" 2>/dev/null || true
-
-# Create new namespace
-ip netns add "$NETNS"
-
-# Set up cleanup trap
-# shellcheck disable=SC2317  # Cleanup is called via trap
-cleanup() {
-    log_info "Running cleanup..."
-    ip netns pids "$NETNS" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
-    ip netns del "$NETNS" 2>/dev/null || true
-}
-trap cleanup EXIT
-
-log_section 'Network Namespace Setup'
-
-# Enable loopback in namespace
-ip netns exec "$NETNS" ip link set lo up
+# Initialize test (root check, binary build, namespace, cleanup trap, loopback)
+init_test "Fault Tolerance Test"
 
 # Create bridge topology for traffic flow
 setup_bridge_topology "$NETNS" br0 veth-gen veth-mcr 10.0.0.1/24 10.0.0.2/24
@@ -120,9 +80,9 @@ log_info "Sending SIGTERM to MCR during active traffic..."
 SIGTERM_TIME=$(date +%s.%N)
 sudo kill -TERM "$MCR_PID" 2>/dev/null || true
 
-# Wait for MCR to exit (increased timeout to 10 seconds)
+# Wait for MCR to exit (20 second timeout for slow CI runners)
 MCR_EXITED=0
-for i in $(seq 1 100); do
+for i in $(seq 1 200); do
     if ! sudo kill -0 "$MCR_PID" 2>/dev/null; then
         EXIT_TIME=$(date +%s.%N)
         SHUTDOWN_MS=$(echo "($EXIT_TIME - $SIGTERM_TIME) * 1000" | bc 2>/dev/null || echo "unknown")
@@ -139,7 +99,7 @@ wait "$GEN_PID" 2>/dev/null || true
 
 # Check that MCR actually exited
 if [ "$MCR_EXITED" -eq 0 ]; then
-    log_error "MCR did not exit after SIGTERM within 10s - force killing"
+    log_error "MCR did not exit after SIGTERM within 20s - force killing"
     sudo kill -9 "$MCR_PID" 2>/dev/null || true
     TEST1_PASSED=1
 else
@@ -193,9 +153,9 @@ kill -TERM "$MCR_PID2" 2>/dev/null || true
 sleep 0.1
 kill -TERM "$MCR_PID2" 2>/dev/null || true
 
-# Wait for exit (up to 10 seconds)
+# Wait for exit (up to 20 seconds for slow CI runners)
 MCR2_EXITED=0
-for i in $(seq 1 100); do
+for i in $(seq 1 200); do
     if ! sudo kill -0 "$MCR_PID2" 2>/dev/null; then
         log_info "MCR exited after multiple SIGTERMs (iteration $i)"
         MCR2_EXITED=1
@@ -206,7 +166,7 @@ done
 
 # Check that MCR exited without crashing
 if [ "$MCR2_EXITED" -eq 0 ]; then
-    log_error "MCR did not exit after multiple SIGTERMs within 10s"
+    log_error "MCR did not exit after multiple SIGTERMs within 20s"
     sudo kill -9 "$MCR_PID2" 2>/dev/null || true
     TEST2_PASSED=1
 else

@@ -25,6 +25,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$PROJECT_ROOT"
+source "$SCRIPT_DIR/common.sh"
 
 # Test parameters
 PACKET_SIZE=1400
@@ -32,44 +33,15 @@ PACKET_COUNT=30000   # Per-source (total 90k packets)
 SEND_RATE=30000      # Per-source (total 90k pps)
 NUM_SOURCES=3
 
-# Namespace name
-NETNS="mcr_converge_test"
-
-# --- Check for root ---
-if [ "$EUID" -ne 0 ]; then
-    echo "ERROR: This test requires root privileges for network namespace isolation"
-    echo "Please run with: sudo $0"
-    exit 1
-fi
-
-# --- Build binaries ---
-echo "=== Building Release Binaries ==="
-cargo build --release
-echo ""
-
-# Source common functions
-source "$SCRIPT_DIR/common.sh"
-
-# --- Create named network namespace ---
+# Print custom header
 echo "=== Tree Convergence (N:1) Test ==="
 echo "Sources: ${NUM_SOURCES}"
 echo "Per-source: ${SEND_RATE} pps, ${PACKET_COUNT} packets"
 echo "Total: $((SEND_RATE * NUM_SOURCES)) pps, $((PACKET_COUNT * NUM_SOURCES)) packets"
 echo ""
 
-# Clean up any existing namespace
-ip netns del "$NETNS" 2>/dev/null || true
-
-# Create new namespace
-ip netns add "$NETNS"
-
-# Set up cleanup trap
-trap 'graceful_cleanup_namespace "$NETNS" mcr_PID' EXIT
-
-log_section 'Network Namespace Setup'
-
-# Enable loopback in namespace
-ip netns exec "$NETNS" ip link set lo up
+# Initialize test (root check, binary build, namespace, cleanup trap, loopback)
+init_test "" mcr_PID
 
 # Create bridge topology for traffic flow
 # All 3 generators share the same bridge to MCR

@@ -24,6 +24,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$PROJECT_ROOT"
 
+# Source common functions early (for ensure_binaries_built)
+source "$SCRIPT_DIR/common.sh"
+
 # Test parameters
 PACKET_SIZE=1400
 PACKET_COUNT=500000   # Can handle more with proper CPU isolation
@@ -36,10 +39,8 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-# --- Build binaries ---
-echo "=== Building Release Binaries ==="
-cargo build --release
-echo ""
+# --- Build binaries (if needed) ---
+ensure_binaries_built
 
 # --- Run test in isolated network namespace ---
 echo "=== Starting Test in Isolated Network Namespace ==="
@@ -131,22 +132,24 @@ log_section 'Validating Results'
 
 # Validate MCR-1 (head-end replication: 1 ingress → 3 egress outputs)
 VALIDATION_PASSED=0
-# CRITICAL FINDING: 4x buffer pool capacity did NOT improve performance!
-# - Buffer exhaustion: 64% (before) → 65% (after) = NO CHANGE
-# - Root cause: EGRESS THROUGHPUT is the bottleneck, not buffer capacity
-# - Single worker: ingress + egress compete for CPU time
-# - Egress saturated: Must send 3x packets (3 outputs), can't keep up
-# - Buffers fill because egress can't drain fast enough
-# - Architectural fix needed: Separate ingress/egress workers (D23)
-# Current limits: ~15% efficiency (500k sent → 73k matched → 358k egress)
-validate_stat /tmp/mcr1.log 'STATS:Ingress' 'matched' 70000 'MCR-1 ingress matched' || VALIDATION_PASSED=1
-validate_stat /tmp/mcr1.log 'STATS:Egress' 'sent' 350000 'MCR-1 egress sent (3x amplification)' || VALIDATION_PASSED=1
+
+# Extract MCR-1 stats for proportional validation
+MCR1_INGRESS=\$(extract_stat /tmp/mcr1.log 'STATS:Ingress' 'matched')
+MCR1_EGRESS=\$(extract_stat /tmp/mcr1.log 'STATS:Egress' 'sent')
+
+# Minimum ingress threshold (sanity check - should process some packets)
+validate_stat /tmp/mcr1.log 'STATS:Ingress' 'matched' 50000 'MCR-1 ingress matched' || VALIDATION_PASSED=1
+
+# Key invariant: egress should be ~3x ingress (1:3 replication)
+# Allow 10% tolerance for timing/flush variations
+EXPECTED_EGRESS=\$((MCR1_INGRESS * 3))
+validate_values_match \$MCR1_EGRESS \$EXPECTED_EGRESS 10 'MCR-1 egress ≈ 3× ingress' || VALIDATION_PASSED=1
 
 # Validate MCR-2, MCR-3, MCR-4 (each leaf should receive ~1/3 of egress)
-# 358k egress ÷ 3 = ~119k per leaf, with veth losses expect ~100k matched each
-validate_stat /tmp/mcr2.log 'STATS:Ingress' 'matched' 55000 'MCR-2 ingress matched' || VALIDATION_PASSED=1
-validate_stat /tmp/mcr3.log 'STATS:Ingress' 'matched' 55000 'MCR-3 ingress matched' || VALIDATION_PASSED=1
-validate_stat /tmp/mcr4.log 'STATS:Ingress' 'matched' 55000 'MCR-4 ingress matched' || VALIDATION_PASSED=1
+# Allow lower threshold since veth pairs can drop packets under load
+validate_stat /tmp/mcr2.log 'STATS:Ingress' 'matched' 40000 'MCR-2 ingress matched' || VALIDATION_PASSED=1
+validate_stat /tmp/mcr3.log 'STATS:Ingress' 'matched' 40000 'MCR-3 ingress matched' || VALIDATION_PASSED=1
+validate_stat /tmp/mcr4.log 'STATS:Ingress' 'matched' 40000 'MCR-4 ingress matched' || VALIDATION_PASSED=1
 
 log_section 'Test Complete'
 

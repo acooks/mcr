@@ -9,10 +9,117 @@ RELAY_BINARY="${RELAY_BINARY:-target/release/multicast_relay}"
 CONTROL_CLIENT_BINARY="${CONTROL_CLIENT_BINARY:-target/release/control_client}"
 TRAFFIC_GENERATOR_BINARY="${TRAFFIC_GENERATOR_BINARY:-target/release/traffic_generator}"
 
+# --- Test Initialization ---
+
+# Initialize test environment with network namespace
+# Handles: root check, binary build, namespace creation, cleanup trap, loopback
+#
+# Usage: init_test <test_title> [pid_var_names...]
+#
+# Arguments:
+#   test_title    - Display name for the test (e.g., "Edge Case Tests")
+#   pid_var_names - Optional: variable names holding PIDs for graceful cleanup
+#                   (e.g., mcr1_PID mcr2_PID)
+#
+# Sets:
+#   NETNS - The namespace name (derived from script filename)
+#
+# Example:
+#   init_test "Baseline Performance Test" mcr1_PID mcr2_PID
+#   setup_bridge_topology "$NETNS" br0 veth-gen veth-mcr 10.0.0.1/24 10.0.0.2/24
+#
+init_test() {
+    local test_title="$1"
+    shift
+    local pid_vars=("$@")  # Remaining args are PID variable names for cleanup
+
+    # Derive namespace from calling script's filename
+    # e.g., edge_cases.sh -> mcr_edge_cases
+    local script_basename
+    script_basename=$(basename "${BASH_SOURCE[1]}" .sh)
+    NETNS="mcr_${script_basename}"
+    export NETNS
+
+    # Check for root privileges
+    if [ "$EUID" -ne 0 ]; then
+        echo "ERROR: This test requires root privileges for network namespace isolation"
+        echo "Please run with: sudo $0"
+        exit 1
+    fi
+
+    # Build binaries if needed
+    ensure_binaries_built
+
+    # Print test header (skip if empty - caller will print custom header)
+    if [ -n "$test_title" ]; then
+        echo "=== $test_title ==="
+        echo ""
+    fi
+
+    # Clean up any existing namespace
+    ip netns del "$NETNS" 2>/dev/null || true
+
+    # Create new namespace
+    ip netns add "$NETNS"
+
+    # Set up cleanup trap with optional PID variables
+    if [ ${#pid_vars[@]} -gt 0 ]; then
+        # shellcheck disable=SC2064
+        trap "graceful_cleanup_namespace '$NETNS' ${pid_vars[*]}" EXIT
+    else
+        # shellcheck disable=SC2064
+        trap "graceful_cleanup_namespace '$NETNS'" EXIT
+    fi
+
+    log_section 'Network Namespace Setup'
+
+    # Enable loopback in namespace
+    sudo ip netns exec "$NETNS" ip link set lo up
+}
+
+# --- Build Utilities ---
+
+# Ensure required binaries are built
+# Checks if pre-built binaries exist; if not, attempts to build with cargo.
+# This allows CI to pre-build binaries and skip redundant builds when running
+# scripts with sudo (where cargo may not be in PATH).
+#
+# Usage: ensure_binaries_built
+ensure_binaries_built() {
+    local need_build=false
+
+    # Check if all required binaries exist and are executable
+    for binary in "$RELAY_BINARY" "$CONTROL_CLIENT_BINARY" "$TRAFFIC_GENERATOR_BINARY"; do
+        if [ ! -x "$binary" ]; then
+            need_build=true
+            break
+        fi
+    done
+
+    if [ "$need_build" = true ]; then
+        echo "=== Building Release Binaries ==="
+        if ! command -v cargo &> /dev/null; then
+            echo "ERROR: cargo not found and pre-built binaries not available"
+            echo "Either install Rust/cargo or pre-build with: cargo build --release --bins"
+            exit 1
+        fi
+        cargo build --release
+        echo ""
+    else
+        echo "=== Using Pre-built Binaries ==="
+    fi
+}
+
 # Default test parameters
 DEFAULT_PACKET_SIZE=1400      # Leaves room for headers (UDP 8 + IP 20 + Ethernet 14)
 DEFAULT_PACKET_COUNT=1000000  # 1M packets for quick tests
 DEFAULT_SEND_RATE=500000      # 500k pps target
+
+# Timeout constants (in seconds) - can be overridden before sourcing
+TIMEOUT_INTERFACE_READY="${TIMEOUT_INTERFACE_READY:-5}"    # Wait for interface UP state
+TIMEOUT_BRIDGE_FORWARD="${TIMEOUT_BRIDGE_FORWARD:-10}"     # Wait for bridge STP forwarding
+TIMEOUT_SOCKET_READY="${TIMEOUT_SOCKET_READY:-15}"         # Wait for control socket creation
+TIMEOUT_GRACEFUL_SHUTDOWN="${TIMEOUT_GRACEFUL_SHUTDOWN:-2}" # Wait for graceful SIGTERM exit
 
 # --- Logging Utilities ---
 log_info() {
@@ -109,7 +216,7 @@ wait_for_bridge_forwarding() {
     shift 2
     local ports=("$@")
 
-    local timeout=10
+    local timeout=$TIMEOUT_BRIDGE_FORWARD
     local start=$(date +%s)
 
     log_info "Waiting for bridge $bridge ports to reach forwarding state..."
@@ -158,7 +265,7 @@ start_mcr() {
     rm -f "$control_socket"
 
     # Wait for interface to be ready (critical for network namespace timing)
-    local timeout=5
+    local timeout=$TIMEOUT_INTERFACE_READY
     local elapsed=0
     if [ -n "$netns" ]; then
         while ! sudo ip netns exec "$netns" ip link show "$interface" >/dev/null 2>&1; do
@@ -213,22 +320,33 @@ start_mcr() {
     export "${name}_PID=$pid"
 }
 
-# Wait for MCR control sockets to be ready
+# Wait for MCR control sockets to be ready and responding
+# Verifies both socket file existence AND that control_client can connect
 # Usage: wait_for_sockets <socket1> [socket2] [socket3] ...
 wait_for_sockets() {
     log_info "Waiting for MCR instances to start..."
-    local timeout=15
+    local timeout=$TIMEOUT_SOCKET_READY
     local start=$(date +%s)
 
     for socket in "$@"; do
+        # Phase 1: Wait for socket file to exist
         while ! [ -S "$socket" ]; do
             if [ "$(($(date +%s) - start))" -gt "$timeout" ]; then
-                log_error "Timeout waiting for $socket"
+                log_error "Timeout waiting for socket file: $socket"
                 return 1
             fi
             sleep 0.1
         done
-        log_info "Socket ready: $socket"
+
+        # Phase 2: Verify control_client can actually connect
+        while ! "$CONTROL_CLIENT_BINARY" --socket-path "$socket" list >/dev/null 2>&1; do
+            if [ "$(($(date +%s) - start))" -gt "$timeout" ]; then
+                log_error "Timeout waiting for socket to accept connections: $socket"
+                return 1
+            fi
+            sleep 0.1
+        done
+        log_info "Socket ready and responding: $socket"
     done
 }
 
@@ -410,6 +528,94 @@ validate_stat_max() {
     fi
 }
 
+# Validate a statistic is at least a percentage of an expected value
+# Usage: validate_stat_percent <log_file> <stat_type> <field> <expected> <percent> <description>
+# Example: validate_stat_percent /tmp/mcr.log 'STATS:Ingress' 'matched' 10000 95 "Packet match rate"
+validate_stat_percent() {
+    local log_file="$1"
+    local stat_type="$2"
+    local field="$3"
+    local expected="$4"
+    local percent="$5"
+    local description="$6"
+
+    local min_value=$((expected * percent / 100))
+    local actual=$(extract_stat "$log_file" "$stat_type" "$field")
+
+    if [ "$actual" -ge "$min_value" ]; then
+        log_info "✅ $description: $actual (>= ${percent}% of $expected)"
+        return 0
+    else
+        log_error "❌ $description: $actual (expected >= ${percent}% of $expected = $min_value)"
+        return 1
+    fi
+}
+
+# Validate a statistic is within a range [min, max]
+# Usage: validate_stat_range <log_file> <stat_type> <field> <min_value> <max_value> <description>
+# Example: validate_stat_range /tmp/mcr.log 'STATS:Egress' 'sent' 9500 10500 "Egress count"
+validate_stat_range() {
+    local log_file="$1"
+    local stat_type="$2"
+    local field="$3"
+    local min_value="$4"
+    local max_value="$5"
+    local description="$6"
+
+    local actual=$(extract_stat "$log_file" "$stat_type" "$field")
+
+    if [ "$actual" -ge "$min_value" ] && [ "$actual" -le "$max_value" ]; then
+        log_info "✅ $description: $actual (in range [$min_value, $max_value])"
+        return 0
+    else
+        log_error "❌ $description: $actual (expected in range [$min_value, $max_value])"
+        return 1
+    fi
+}
+
+# Validate two values are approximately equal (within tolerance percentage)
+# Usage: validate_values_match <actual> <expected> <tolerance_percent> <description>
+# Example: validate_values_match 9950 10000 5 "Egress matches ingress"
+validate_values_match() {
+    local actual="$1"
+    local expected="$2"
+    local tolerance_percent="$3"
+    local description="$4"
+
+    local tolerance=$((expected * tolerance_percent / 100))
+    local min_value=$((expected - tolerance))
+    local max_value=$((expected + tolerance))
+
+    if [ "$actual" -ge "$min_value" ] && [ "$actual" -le "$max_value" ]; then
+        log_info "✅ $description: $actual ≈ $expected (±${tolerance_percent}%)"
+        return 0
+    else
+        log_error "❌ $description: $actual (expected $expected ±${tolerance_percent}%)"
+        return 1
+    fi
+}
+
+# Validate a raw value is at least a percentage of an expected value
+# Use for calculated values (like deltas) that aren't extracted from logs
+# Usage: validate_min_percent <actual> <expected> <percent> <description>
+# Example: validate_min_percent $delta 10000 80 "Delta packet count"
+validate_min_percent() {
+    local actual="$1"
+    local expected="$2"
+    local percent="$3"
+    local description="$4"
+
+    local min_value=$((expected * percent / 100))
+
+    if [ "$actual" -ge "$min_value" ]; then
+        log_info "✅ $description: $actual (>= ${percent}% of $expected)"
+        return 0
+    else
+        log_error "❌ $description: $actual (expected >= ${percent}% of $expected = $min_value)"
+        return 1
+    fi
+}
+
 # --- Monitoring ---
 
 # Start log monitoring in background
@@ -452,7 +658,7 @@ graceful_cleanup_namespace() {
 
     # Wait for graceful shutdown (includes 500ms grace period + worker exit time)
     log_info "Waiting for graceful shutdown..."
-    sleep 2
+    sleep "$TIMEOUT_GRACEFUL_SHUTDOWN"
 
     # Force-kill any remaining processes in namespace
     log_info "Force-killing any remaining processes"
@@ -481,7 +687,7 @@ graceful_cleanup_unshare() {
 
     # Wait for graceful shutdown (includes 500ms grace period + worker exit time)
     log_info "Waiting for graceful shutdown..."
-    sleep 2
+    sleep "$TIMEOUT_GRACEFUL_SHUTDOWN"
 
     # Force-kill any remaining MCR processes
     log_info "Force-killing any remaining processes"

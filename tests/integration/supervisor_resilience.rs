@@ -203,7 +203,6 @@ mod control_client {
                 input_group: rule.input_group,
                 input_port: rule.input_port,
                 outputs: rule.outputs,
-                dtls_enabled: rule.dtls_enabled,
             }).await? {
                 Response::Success(_) => Ok(()),
                 Response::Error(e) => anyhow::bail!("Failed to add rule: {}", e),
@@ -296,7 +295,6 @@ async fn test_supervisor_resyncs_rules_on_restart() -> Result<()> {
         input_group: "239.0.0.1".parse()?,
         input_port: 5001,
         outputs: vec![],
-        dtls_enabled: false,
     };
     client.add_rule(rule).await?;
     sleep(Duration::from_millis(200)).await; // Give rule time to propagate
@@ -523,7 +521,6 @@ async fn test_supervisor_handles_concurrent_requests() -> Result<()> {
         input_group: "239.0.0.2".parse()?,
         input_port: 5002,
         outputs: vec![],
-        dtls_enabled: false,
     };
     client.add_rule(rule).await?;
     sleep(Duration::from_millis(200)).await;

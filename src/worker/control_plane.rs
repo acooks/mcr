@@ -54,6 +54,9 @@ pub fn handle_worker_command(
         SupervisorCommand::Ping => {
             Response::Error("Ping command should be handled by the supervisor".to_string())
         }
+        SupervisorCommand::GetVersion => {
+            Response::Error("GetVersion command should be handled by the supervisor".to_string())
+        }
     }
 }
 
@@ -210,7 +213,6 @@ mod tests {
                     input_group: Ipv4Addr::new(224, 0, 0, 1),
                     input_port: 5000,
                     outputs: vec![],
-                    dtls_enabled: false,
                 },
                 FlowStats {
                     input_group: Ipv4Addr::new(224, 0, 0, 1),
@@ -292,7 +294,6 @@ mod tests {
                 input_group: Ipv4Addr::new(224, 0, 0, 1),
                 input_port: 5000,
                 outputs: vec![],
-                dtls_enabled: false,
             },
             &flows,
         );

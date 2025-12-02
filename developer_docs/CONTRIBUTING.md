@@ -80,23 +80,38 @@ This project does not prescribe specific developer environment setups or pin exa
 
 ## Local Development Workflow
 
-This project uses `just` as its command runner to orchestrate all development and quality checks. The workflow is designed to be simple, consistent, and repeatable.
+This project uses `just` as its command runner. The workflow is simple:
 
-### 1. Day-to-Day: Run Checks
-
-To run the full suite of quality checks, mirroring the CI pipeline, use the `check` command from the project root:
+### Quick Feedback (No Root)
 
 ```bash
-just check
+just dev
 ```
 
-This command will format, lint, build, and test the project, ensuring your changes adhere to all standards. For other available commands (e.g., `just test-unit`, `just test-all`), refer to the `justfile`.
+Runs format check, linter, build, and unit tests. Use this for fast iteration.
+
+### Full Test Suite (Before Commit)
+
+```bash
+just test
+```
+
+Runs **all** tests with coverage:
+
+- Unit tests
+- Integration tests (network namespaces)
+- Topology tests (payload integrity, scaling, etc.)
+- Generates coverage report at `target/coverage/html/index.html`
+
+This command handles `sudo` internally - you don't need to think about privileges.
+
+For the full command reference, see [`JUSTFILE_QUICK_REFERENCE.md`](JUSTFILE_QUICK_REFERENCE.md).
 
 ## Enforcement
 
-To ensure all code adheres to these standards, we will implement automated checks:
+All code must pass automated checks before merging:
 
-1. **CI Pipeline:** A Continuous Integration pipeline will automatically run `just check` on every pull request. Pull requests that fail these checks cannot be merged.
-2. **Pre-commit Hooks (Recommended):** It is highly recommended that developers use a pre-commit hook to run `just check` locally before they even commit. This provides faster feedback and helps keep the repository history clean.
+1. **CI Pipeline:** GitHub Actions runs `just test` on every pull request. This includes all tests and coverage. Pull requests that fail cannot be merged.
+2. **Pre-commit Hook:** Install with `just setup-hooks`. This runs format check, linter, and unit tests before each commit, providing fast local feedback.
 
 By following these guidelines, we can build a robust, secure, and maintainable application.

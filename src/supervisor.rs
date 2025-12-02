@@ -27,6 +27,61 @@ const MAX_BACKOFF_MS: u64 = 16000; // 16 seconds
 const SHUTDOWN_TIMEOUT_SECS: u64 = 10; // Timeout for graceful worker shutdown
 const PERIODIC_SYNC_INTERVAL_SECS: u64 = 300; // 5 minutes - periodic full ruleset sync to all workers
 
+/// Maximum interface name length (IFNAMSIZ - 1 for null terminator)
+const MAX_INTERFACE_NAME_LEN: usize = 15;
+
+/// Validate an interface name according to Linux kernel rules.
+/// Returns Ok(()) if valid, Err(reason) if invalid.
+fn validate_interface_name(name: &str) -> Result<(), String> {
+    // Must not be empty
+    if name.is_empty() {
+        return Err("interface name cannot be empty".to_string());
+    }
+
+    // Must not exceed IFNAMSIZ - 1 (15 chars)
+    if name.len() > MAX_INTERFACE_NAME_LEN {
+        return Err(format!(
+            "interface name '{}' exceeds maximum length of {} characters",
+            name, MAX_INTERFACE_NAME_LEN
+        ));
+    }
+
+    // Must contain only valid characters: alphanumeric, dash, underscore
+    // (Linux allows most characters but these are the safe/common ones)
+    for (i, c) in name.chars().enumerate() {
+        if !c.is_ascii_alphanumeric() && c != '-' && c != '_' && c != '.' {
+            return Err(format!(
+                "interface name '{}' contains invalid character '{}' at position {}; \
+                only alphanumeric, dash, underscore, and dot are allowed",
+                name, c, i
+            ));
+        }
+    }
+
+    // Must not start with a dash or dot (kernel restriction)
+    if name.starts_with('-') || name.starts_with('.') {
+        return Err(format!(
+            "interface name '{}' cannot start with '{}'; must start with alphanumeric or underscore",
+            name,
+            name.chars().next().unwrap()
+        ));
+    }
+
+    Ok(())
+}
+
+/// Validate a port number.
+/// Port 0 is rejected as it's typically reserved and indicates a configuration error.
+fn validate_port(port: u16, context: &str) -> Result<(), String> {
+    if port == 0 {
+        return Err(format!(
+            "{} cannot be 0; valid port range is 1-65535",
+            context
+        ));
+    }
+    Ok(())
+}
+
 // --- WorkerManager Types ---
 
 /// Differentiates worker types for unified handling
@@ -60,7 +115,6 @@ struct WorkerManager {
     gid: u32,
     interface: String,
     relay_command_socket_path: PathBuf,
-    prometheus_addr: Option<std::net::SocketAddr>,
     num_cores: usize,
     logger: Logger,
     fanout_group_id: u16,
@@ -120,15 +174,44 @@ pub fn handle_supervisor_command(
             input_group,
             input_port,
             outputs,
-            dtls_enabled,
         } => {
+            // Validate input interface name
+            if let Err(e) = validate_interface_name(&input_interface) {
+                return (
+                    Response::Error(format!("Invalid input_interface: {}", e)),
+                    CommandAction::None,
+                );
+            }
+
+            // Validate all output interface names
+            for (i, output) in outputs.iter().enumerate() {
+                if let Err(e) = validate_interface_name(&output.interface) {
+                    return (
+                        Response::Error(format!(
+                            "Invalid output_interface in output[{}]: {}",
+                            i, e
+                        )),
+                        CommandAction::None,
+                    );
+                }
+            }
+
+            // Validate port numbers (reject port 0)
+            if let Err(e) = validate_port(input_port, "input_port") {
+                return (Response::Error(e), CommandAction::None);
+            }
+            for (i, output) in outputs.iter().enumerate() {
+                if let Err(e) = validate_port(output.port, &format!("output[{}].port", i)) {
+                    return (Response::Error(e), CommandAction::None);
+                }
+            }
+
             let rule = ForwardingRule {
                 rule_id,
                 input_interface,
                 input_group,
                 input_port,
                 outputs,
-                dtls_enabled,
             };
 
             // Validate interface configuration to prevent packet loops and reflection
@@ -194,7 +277,8 @@ pub fn handle_supervisor_command(
         SupervisorCommand::GetStats => {
             // Aggregate stats from all data plane workers
             // Multiple workers may report stats for the same flow (same input_group:port)
-            // We aggregate by summing counters and averaging rates
+            // With PACKET_FANOUT_CPU, each worker handles a subset of packets, so we sum
+            // both counters and rates to get the total system throughput
             use std::collections::HashMap as StdHashMap;
 
             let worker_stats_locked = worker_stats.lock().unwrap();
@@ -211,7 +295,7 @@ pub fn handle_supervisor_command(
                             // Sum counters
                             existing.packets_relayed += stat.packets_relayed;
                             existing.bytes_relayed += stat.bytes_relayed;
-                            // Average rates (simple average across workers)
+                            // Sum rates (each worker handles distinct packets via fanout)
                             existing.packets_per_second += stat.packets_per_second;
                             existing.bits_per_second += stat.bits_per_second;
                         })
@@ -253,6 +337,13 @@ pub fn handle_supervisor_command(
             )
         }
 
+        SupervisorCommand::GetVersion => (
+            Response::Version {
+                protocol_version: crate::PROTOCOL_VERSION,
+            },
+            CommandAction::None,
+        ),
+
         SupervisorCommand::Ping => {
             // Health check - broadcast ping to all data plane workers
             // If they can receive and process this command, they're ready
@@ -269,7 +360,6 @@ pub async fn spawn_control_plane_worker(
     uid: u32,
     gid: u32,
     relay_command_socket_path: PathBuf,
-    prometheus_addr: Option<std::net::SocketAddr>,
     logger: &crate::logging::Logger,
 ) -> Result<(Child, UnixStream, UnixStream)> {
     logger.info(Facility::Supervisor, "Spawning Control Plane worker");
@@ -292,10 +382,6 @@ pub async fn spawn_control_plane_worker(
         .arg("--relay-command-socket-path")
         .arg(relay_command_socket_path)
         .process_group(0); // Put worker in its own process group to prevent SIGTERM propagation
-
-    if let Some(addr) = prometheus_addr {
-        command.arg("--prometheus-addr").arg(addr.to_string());
-    }
 
     // Ensure worker_sock becomes FD 3 in the child
     unsafe {
@@ -495,7 +581,6 @@ impl WorkerManager {
         gid: u32,
         interface: String,
         relay_command_socket_path: PathBuf,
-        prometheus_addr: Option<std::net::SocketAddr>,
         num_cores: usize,
         logger: Logger,
         fanout_group_id: u16,
@@ -505,7 +590,6 @@ impl WorkerManager {
             gid,
             interface,
             relay_command_socket_path,
-            prometheus_addr,
             num_cores,
             logger,
             fanout_group_id,
@@ -521,7 +605,6 @@ impl WorkerManager {
             self.uid,
             self.gid,
             self.relay_command_socket_path.clone(),
-            self.prometheus_addr,
             &self.logger,
         )
         .await?;
@@ -1161,7 +1244,6 @@ pub async fn run(
     user: &str,
     group: &str,
     interface: &str,
-    prometheus_addr: Option<std::net::SocketAddr>,
     relay_command_socket_path: PathBuf,
     control_socket_path: PathBuf,
     master_rules: Arc<Mutex<HashMap<String, ForwardingRule>>>,
@@ -1270,7 +1352,6 @@ pub async fn run(
             gid,
             interface.to_string(),
             relay_command_socket_path,
-            prometheus_addr,
             num_cores,
             supervisor_logger.clone(),
             fanout_group_id,
@@ -1537,7 +1618,6 @@ mod tests {
                 input_group: "224.0.0.1".parse().unwrap(),
                 input_port: 5000,
                 outputs: vec![],
-                dtls_enabled: false,
             },
             &master_rules,
             &worker_map,
@@ -1562,7 +1642,6 @@ mod tests {
                 input_group: "224.0.0.1".parse().unwrap(),
                 input_port: 5000,
                 outputs: vec![],
-                dtls_enabled: false,
             },
         );
         let worker_map = Mutex::new(HashMap::new());
@@ -1623,7 +1702,6 @@ mod tests {
                 input_group: "224.0.0.1".parse().unwrap(),
                 input_port: 5000,
                 outputs: vec![],
-                dtls_enabled: false,
             },
         );
         let worker_map = Mutex::new(HashMap::new());
@@ -1768,6 +1846,33 @@ mod tests {
                 );
             }
             _ => panic!("Expected LogLevels response"),
+        }
+        assert_eq!(action, CommandAction::None);
+    }
+
+    #[test]
+    fn test_handle_get_version() {
+        let master_rules = Mutex::new(HashMap::new());
+        let worker_map = Mutex::new(HashMap::new());
+        let global_min_level =
+            std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
+        let facility_min_levels = std::sync::RwLock::new(HashMap::new());
+        let worker_stats = Mutex::new(HashMap::new());
+
+        let (response, action) = handle_supervisor_command(
+            crate::SupervisorCommand::GetVersion,
+            &master_rules,
+            &worker_map,
+            &global_min_level,
+            &facility_min_levels,
+            &worker_stats,
+        );
+
+        match response {
+            crate::Response::Version { protocol_version } => {
+                assert_eq!(protocol_version, crate::PROTOCOL_VERSION);
+            }
+            _ => panic!("Expected Version response"),
         }
         assert_eq!(action, CommandAction::None);
     }
@@ -1979,9 +2084,7 @@ mod tests {
                     group: "239.2.2.2".parse().unwrap(),
                     port: 5001,
                     interface: "eth0".to_string(), // Same as input!
-                    dtls_enabled: false,
                 }],
-                dtls_enabled: false,
             },
             &master_rules,
             &worker_map,
@@ -2025,9 +2128,7 @@ mod tests {
                     group: "239.2.2.2".parse().unwrap(),
                     port: 5001,
                     interface: "eth1".to_string(), // Different from input
-                    dtls_enabled: false,
                 }],
-                dtls_enabled: false,
             },
             &master_rules,
             &worker_map,
@@ -2075,9 +2176,7 @@ mod tests {
                     group: "239.2.2.2".parse().unwrap(),
                     port: 5001,
                     interface: "lo".to_string(), // Loopback output
-                    dtls_enabled: false,
                 }],
-                dtls_enabled: false,
             },
             &master_rules,
             &worker_map,
@@ -2094,5 +2193,255 @@ mod tests {
 
         // Rule should be added despite loopback warning
         assert_eq!(master_rules.lock().unwrap().len(), 1);
+    }
+
+    // --- Interface Name Validation Tests ---
+
+    #[test]
+    fn test_validate_interface_name_valid() {
+        // Standard interface names
+        assert!(validate_interface_name("lo").is_ok());
+        assert!(validate_interface_name("eth0").is_ok());
+        assert!(validate_interface_name("eth1").is_ok());
+        assert!(validate_interface_name("enp0s3").is_ok());
+        assert!(validate_interface_name("wlan0").is_ok());
+        assert!(validate_interface_name("br0").is_ok());
+        assert!(validate_interface_name("docker0").is_ok());
+        assert!(validate_interface_name("veth123abc").is_ok());
+
+        // Names with underscores and dashes
+        assert!(validate_interface_name("my_bridge").is_ok());
+        assert!(validate_interface_name("veth-peer").is_ok());
+        assert!(validate_interface_name("tap_vm1").is_ok());
+
+        // Names with dots
+        assert!(validate_interface_name("eth0.100").is_ok()); // VLAN interface
+
+        // Maximum length (15 chars)
+        assert!(validate_interface_name("123456789012345").is_ok());
+    }
+
+    #[test]
+    fn test_validate_interface_name_empty() {
+        let result = validate_interface_name("");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("cannot be empty"));
+    }
+
+    #[test]
+    fn test_validate_interface_name_too_long() {
+        // 16 characters - too long
+        let result = validate_interface_name("1234567890123456");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("exceeds maximum length"));
+
+        // 20 characters - definitely too long
+        let result = validate_interface_name("12345678901234567890");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_interface_name_invalid_chars() {
+        // Space
+        let result = validate_interface_name("eth 0");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("invalid character"));
+
+        // Slash
+        let result = validate_interface_name("eth/0");
+        assert!(result.is_err());
+
+        // Colon
+        let result = validate_interface_name("eth:0");
+        assert!(result.is_err());
+
+        // At sign
+        let result = validate_interface_name("eth@0");
+        assert!(result.is_err());
+
+        // Unicode
+        let result = validate_interface_name("ethö0");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_interface_name_invalid_start() {
+        // Cannot start with dash
+        let result = validate_interface_name("-eth0");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("cannot start with"));
+
+        // Cannot start with dot
+        let result = validate_interface_name(".eth0");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("cannot start with"));
+    }
+
+    #[test]
+    fn test_add_rule_rejects_invalid_input_interface() {
+        let master_rules = Mutex::new(HashMap::new());
+        let worker_map = Mutex::new(HashMap::new());
+        let global_min_level =
+            std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
+        let facility_min_levels = std::sync::RwLock::new(HashMap::new());
+        let worker_stats = Mutex::new(HashMap::new());
+
+        let (response, _) = handle_supervisor_command(
+            crate::SupervisorCommand::AddRule {
+                rule_id: "test-rule".to_string(),
+                input_interface: "this_interface_name_is_way_too_long".to_string(),
+                input_group: "224.0.0.1".parse().unwrap(),
+                input_port: 5000,
+                outputs: vec![crate::OutputDestination {
+                    group: "224.0.0.2".parse().unwrap(),
+                    port: 5001,
+                    interface: "eth1".to_string(),
+                }],
+            },
+            &master_rules,
+            &worker_map,
+            &global_min_level,
+            &facility_min_levels,
+            &worker_stats,
+        );
+
+        match response {
+            crate::Response::Error(msg) => {
+                assert!(msg.contains("Invalid input_interface"));
+                assert!(msg.contains("exceeds maximum length"));
+            }
+            _ => panic!("Expected Error response, got {:?}", response),
+        }
+    }
+
+    #[test]
+    fn test_add_rule_rejects_invalid_output_interface() {
+        let master_rules = Mutex::new(HashMap::new());
+        let worker_map = Mutex::new(HashMap::new());
+        let global_min_level =
+            std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
+        let facility_min_levels = std::sync::RwLock::new(HashMap::new());
+        let worker_stats = Mutex::new(HashMap::new());
+
+        let (response, _) = handle_supervisor_command(
+            crate::SupervisorCommand::AddRule {
+                rule_id: "test-rule".to_string(),
+                input_interface: "eth0".to_string(),
+                input_group: "224.0.0.1".parse().unwrap(),
+                input_port: 5000,
+                outputs: vec![crate::OutputDestination {
+                    group: "224.0.0.2".parse().unwrap(),
+                    port: 5001,
+                    interface: "invalid/name".to_string(),
+                }],
+            },
+            &master_rules,
+            &worker_map,
+            &global_min_level,
+            &facility_min_levels,
+            &worker_stats,
+        );
+
+        match response {
+            crate::Response::Error(msg) => {
+                assert!(msg.contains("Invalid output_interface"));
+                assert!(msg.contains("output[0]"));
+            }
+            _ => panic!("Expected Error response, got {:?}", response),
+        }
+    }
+
+    // --- Port Number Validation Tests ---
+
+    #[test]
+    fn test_validate_port_valid() {
+        assert!(validate_port(1, "test").is_ok());
+        assert!(validate_port(80, "test").is_ok());
+        assert!(validate_port(5000, "test").is_ok());
+        assert!(validate_port(65535, "test").is_ok());
+    }
+
+    #[test]
+    fn test_validate_port_zero() {
+        let result = validate_port(0, "input_port");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("input_port"));
+        assert!(err.contains("cannot be 0"));
+        assert!(err.contains("1-65535"));
+    }
+
+    #[test]
+    fn test_add_rule_rejects_zero_input_port() {
+        let master_rules = Mutex::new(HashMap::new());
+        let worker_map = Mutex::new(HashMap::new());
+        let global_min_level =
+            std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
+        let facility_min_levels = std::sync::RwLock::new(HashMap::new());
+        let worker_stats = Mutex::new(HashMap::new());
+
+        let (response, _) = handle_supervisor_command(
+            crate::SupervisorCommand::AddRule {
+                rule_id: "test-rule".to_string(),
+                input_interface: "eth0".to_string(),
+                input_group: "224.0.0.1".parse().unwrap(),
+                input_port: 0, // Invalid
+                outputs: vec![crate::OutputDestination {
+                    group: "224.0.0.2".parse().unwrap(),
+                    port: 5001,
+                    interface: "eth1".to_string(),
+                }],
+            },
+            &master_rules,
+            &worker_map,
+            &global_min_level,
+            &facility_min_levels,
+            &worker_stats,
+        );
+
+        match response {
+            crate::Response::Error(msg) => {
+                assert!(msg.contains("input_port"));
+                assert!(msg.contains("cannot be 0"));
+            }
+            _ => panic!("Expected Error response, got {:?}", response),
+        }
+    }
+
+    #[test]
+    fn test_add_rule_rejects_zero_output_port() {
+        let master_rules = Mutex::new(HashMap::new());
+        let worker_map = Mutex::new(HashMap::new());
+        let global_min_level =
+            std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
+        let facility_min_levels = std::sync::RwLock::new(HashMap::new());
+        let worker_stats = Mutex::new(HashMap::new());
+
+        let (response, _) = handle_supervisor_command(
+            crate::SupervisorCommand::AddRule {
+                rule_id: "test-rule".to_string(),
+                input_interface: "eth0".to_string(),
+                input_group: "224.0.0.1".parse().unwrap(),
+                input_port: 5000,
+                outputs: vec![crate::OutputDestination {
+                    group: "224.0.0.2".parse().unwrap(),
+                    port: 0, // Invalid
+                    interface: "eth1".to_string(),
+                }],
+            },
+            &master_rules,
+            &worker_map,
+            &global_min_level,
+            &facility_min_levels,
+            &worker_stats,
+        );
+
+        match response {
+            crate::Response::Error(msg) => {
+                assert!(msg.contains("output[0].port"));
+                assert!(msg.contains("cannot be 0"));
+            }
+            _ => panic!("Expected Error response, got {:?}", response),
+        }
     }
 }

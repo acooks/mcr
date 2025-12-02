@@ -52,6 +52,8 @@ pub enum CliCommand {
         #[clap(subcommand)]
         action: LogLevelAction,
     },
+    /// Get supervisor protocol version
+    Version,
 }
 
 #[derive(Parser, Debug)]
@@ -74,8 +76,8 @@ pub enum LogLevelAction {
 
 fn parse_output_destination(s: &str) -> Result<OutputDestination, String> {
     let parts: Vec<&str> = s.split(':').collect();
-    if parts.len() != 3 && parts.len() != 4 {
-        return Err("Invalid format. Expected group:port:interface[:dtls]".to_string());
+    if parts.len() != 3 {
+        return Err("Invalid format. Expected group:port:interface".to_string());
     }
     let group = parts[0]
         .parse()
@@ -86,18 +88,10 @@ fn parse_output_destination(s: &str) -> Result<OutputDestination, String> {
     let interface = parts[2]
         .parse()
         .map_err(|e| format!("Invalid interface IP: {}", e))?;
-    let dtls_enabled = if parts.len() == 4 {
-        parts[3]
-            .parse()
-            .map_err(|e| format!("Invalid dtls flag: {}", e))?
-    } else {
-        false
-    };
     Ok(OutputDestination {
         group,
         port,
         interface,
-        dtls_enabled,
     })
 }
 
@@ -154,7 +148,6 @@ pub fn build_command(cli_command: CliCommand) -> Result<multicast_relay::Supervi
             input_group,
             input_port,
             outputs,
-            dtls_enabled: false,
         },
         CliCommand::Remove { rule_id } => {
             multicast_relay::SupervisorCommand::RemoveRule { rule_id }
@@ -186,6 +179,7 @@ pub fn build_command(cli_command: CliCommand) -> Result<multicast_relay::Supervi
                 }
             }
         },
+        CliCommand::Version => multicast_relay::SupervisorCommand::GetVersion,
     })
 }
 
@@ -226,15 +220,6 @@ mod tests {
         assert_eq!(dest.group, "224.0.0.1".parse::<Ipv4Addr>().unwrap());
         assert_eq!(dest.port, 5000);
         assert_eq!(dest.interface, "127.0.0.1".to_string());
-        assert!(!dest.dtls_enabled);
-
-        let s_dtls_true = "224.0.0.1:5000:127.0.0.1:true";
-        let dest_dtls_true = parse_output_destination(s_dtls_true).unwrap();
-        assert!(dest_dtls_true.dtls_enabled);
-
-        let s_dtls_false = "224.0.0.1:5000:127.0.0.1:false";
-        let dest_dtls_false = parse_output_destination(s_dtls_false).unwrap();
-        assert!(!dest_dtls_false.dtls_enabled);
 
         // --- Error Cases ---
         let s_invalid_parts = "invalid";
@@ -246,10 +231,7 @@ mod tests {
         let s_invalid_port = "224.0.0.1:not-a-port:127.0.0.1";
         assert!(parse_output_destination(s_invalid_port).is_err());
 
-        let s_invalid_dtls = "224.0.0.1:5000:127.0.0.1:not-a-bool";
-        assert!(parse_output_destination(s_invalid_dtls).is_err());
-
-        let s_too_many_parts = "224.0.0.1:5000:127.0.0.1:true:extra";
+        let s_too_many_parts = "224.0.0.1:5000:127.0.0.1:extra";
         assert!(parse_output_destination(s_too_many_parts).is_err());
     }
 

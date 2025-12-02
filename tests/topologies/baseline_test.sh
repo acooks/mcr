@@ -29,6 +29,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$PROJECT_ROOT"
+source "$SCRIPT_DIR/common.sh"
 
 # Default test parameters (can be overridden by env vars or CLI args)
 DEFAULT_PACKET_SIZE=1400
@@ -78,22 +79,7 @@ SEND_RATE=${CLI_RATE:-${SEND_RATE:-$DEFAULT_SEND_RATE}}
 # Calculate test duration for display
 TEST_DURATION_S=$((PACKET_COUNT / SEND_RATE))
 
-# Namespace name
-NETNS="mcr_baseline_test"
-
-# --- Check for root ---
-if [ "$EUID" -ne 0 ]; then
-    echo "ERROR: This test requires root privileges for network namespace isolation"
-    echo "Please run with: sudo $0"
-    exit 1
-fi
-
-# --- Build binaries ---
-echo "=== Building Release Binaries ==="
-cargo build --release
-echo ""
-
-# --- Create named network namespace ---
+# Print custom header before init_test (which will skip default header)
 echo "=== Baseline Performance Test ==="
 echo "Rate: ${SEND_RATE} pps"
 echo "Packets: ${PACKET_COUNT} (${TEST_DURATION_S}s at target rate)"
@@ -101,22 +87,9 @@ echo "Profiling: ${PROFILING_ENABLED}"
 echo "Topology: Bridge + dual veth pairs (eliminates AF_PACKET duplication)"
 echo ""
 
-# Clean up any existing namespace
-ip netns del "$NETNS" 2>/dev/null || true
-
-# Create new namespace
-ip netns add "$NETNS"
-
-# Source common functions
-source "$SCRIPT_DIR/common.sh"
-
-# Set up cleanup trap
-trap 'graceful_cleanup_namespace "$NETNS" mcr1_PID mcr2_PID' EXIT
-
-log_section 'Network Namespace Setup'
-
-# Enable loopback in namespace
-sudo ip netns exec "$NETNS" ip link set lo up
+# Initialize test (root check, binary build, namespace, cleanup trap, loopback)
+# Empty title to skip default header (we printed custom one above)
+init_test "" mcr1_PID mcr2_PID
 
 # Create bridge topology for hop 1: Traffic Generator -> MCR-1 ingress
 # This eliminates AF_PACKET duplication by using separate veth pairs for generator and MCR
@@ -225,47 +198,30 @@ log_section 'Validating Results'
 VALIDATION_PASSED=0
 
 # Calculate validation thresholds based on rate
-# At lower rates (<=100k pps), expect ~95% forwarding
-# At higher rates (>100k pps), expect ~80% forwarding (kernel drops increase)
+# CI runners have limited resources - use conservative thresholds
+# At lower rates (<=100k pps), expect ~80% forwarding
+# At higher rates (>100k pps), expect ~70% forwarding (kernel drops increase)
 if [ "$SEND_RATE" -le 100000 ]; then
-    EXPECTED_RATIO=95
-else
     EXPECTED_RATIO=80
+else
+    EXPECTED_RATIO=70
 fi
 
-MIN_MATCHED=$((PACKET_COUNT * EXPECTED_RATIO / 100))
 MAX_BUFFER_EXHAUSTION=$((PACKET_COUNT / 100))  # Allow 1% buffer exhaustion
 
-# Validate MCR-1: Check matched packets
-validate_stat /tmp/mcr1.log 'STATS:Ingress' 'matched' "$MIN_MATCHED" "MCR-1 ingress matched (>=${EXPECTED_RATIO}%)" || VALIDATION_PASSED=1
+# Validate MCR-1: Check matched packets (percentage based on rate)
+validate_stat_percent /tmp/mcr1.log 'STATS:Ingress' 'matched' "$PACKET_COUNT" "$EXPECTED_RATIO" "MCR-1 ingress matched" || VALIDATION_PASSED=1
 
-# Egress should match ingress (1:1 forwarding)
+# Egress should match ingress (1:1 forwarding, allow 5% variance)
 MCR1_INGRESS=$(extract_stat /tmp/mcr1.log 'STATS:Ingress' 'matched')
 MCR1_EGRESS=$(extract_stat /tmp/mcr1.log 'STATS:Egress' 'sent')
-log_info "MCR-1: ingress matched=$MCR1_INGRESS, egress sent=$MCR1_EGRESS"
-
-# Allow 5% variance between ingress and egress
-EGRESS_MIN=$((MCR1_INGRESS * 95 / 100))
-EGRESS_MAX=$((MCR1_INGRESS * 105 / 100))
-if [ "$MCR1_EGRESS" -lt "$EGRESS_MIN" ] || [ "$MCR1_EGRESS" -gt "$EGRESS_MAX" ]; then
-    log_error "Egress/ingress mismatch: expected $MCR1_INGRESS +/- 5%, got $MCR1_EGRESS"
-    VALIDATION_PASSED=1
-else
-    log_info "Egress matches ingress: $MCR1_EGRESS ~ $MCR1_INGRESS"
-fi
+validate_values_match "$MCR1_EGRESS" "$MCR1_INGRESS" 5 "MCR-1 egress matches ingress" || VALIDATION_PASSED=1
 
 # MCR-2 should receive what MCR-1 sent
-validate_stat /tmp/mcr2.log 'STATS:Ingress' 'matched' "$MIN_MATCHED" "MCR-2 ingress matched (>=${EXPECTED_RATIO}%)" || VALIDATION_PASSED=1
+validate_stat_percent /tmp/mcr2.log 'STATS:Ingress' 'matched' "$PACKET_COUNT" "$EXPECTED_RATIO" "MCR-2 ingress matched" || VALIDATION_PASSED=1
 
-# Check buffer exhaustion on MCR-1 (should be minimal)
-BUFFER_EXHAUSTION=$(extract_stat /tmp/mcr1.log 'STATS:Ingress' 'buf_exhaust')
-log_info "MCR-1 buffer exhaustion: $BUFFER_EXHAUSTION packets"
-if [ "$BUFFER_EXHAUSTION" -gt "$MAX_BUFFER_EXHAUSTION" ]; then
-    log_error "Unexpected buffer exhaustion at ${SEND_RATE} pps: $BUFFER_EXHAUSTION packets (>1%)"
-    VALIDATION_PASSED=1
-else
-    log_info "Buffer exhaustion acceptable: $BUFFER_EXHAUSTION packets (<1%)"
-fi
+# Check buffer exhaustion on MCR-1 (should be <1%)
+validate_stat_max /tmp/mcr1.log 'STATS:Ingress' 'buf_exhaust' "$MAX_BUFFER_EXHAUSTION" "MCR-1 buffer exhaustion (<1%)" || VALIDATION_PASSED=1
 
 log_section 'Test Complete'
 

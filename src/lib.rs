@@ -8,6 +8,10 @@ use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use uuid::Uuid;
 
+/// Protocol version for supervisor-client communication.
+/// Increment when making breaking changes to SupervisorCommand or Response.
+pub const PROTOCOL_VERSION: u32 = 1;
+
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct WorkerInfo {
     pub pid: u32,
@@ -51,8 +55,6 @@ pub enum Command {
         user: String,
         #[arg(long, default_value = "daemon")]
         group: String,
-        #[arg(long)]
-        prometheus_addr: Option<std::net::SocketAddr>,
         /// Number of data plane workers to spawn. Defaults to number of CPU cores.
         #[arg(long)]
         num_workers: Option<usize>,
@@ -69,8 +71,6 @@ pub enum Command {
         data_plane: bool,
         #[arg(long)]
         core_id: Option<u32>,
-        #[arg(long)]
-        prometheus_addr: Option<std::net::SocketAddr>,
         #[arg(long)]
         input_interface_name: Option<String>,
         #[arg(long)]
@@ -95,7 +95,6 @@ pub struct ControlPlaneConfig {
     pub uid: Option<u32>,
     pub gid: Option<u32>,
     pub relay_command_socket_path: PathBuf,
-    pub prometheus_addr: Option<std::net::SocketAddr>,
     pub reporting_interval: u64,
 }
 
@@ -104,7 +103,6 @@ pub struct DataPlaneConfig {
     pub gid: Option<u32>,
     pub supervisor_pid: u32, // PID of the supervisor process (for shared memory paths)
     pub core_id: Option<u32>,
-    pub prometheus_addr: std::net::SocketAddr,
     pub input_interface_name: Option<String>,
     pub input_group: Option<Ipv4Addr>,
     pub input_port: Option<u16>,
@@ -120,7 +118,6 @@ pub struct OutputDestination {
     pub group: Ipv4Addr,
     pub port: u16,
     pub interface: String,
-    pub dtls_enabled: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -132,8 +129,6 @@ pub enum SupervisorCommand {
         input_group: Ipv4Addr,
         input_port: u16,
         outputs: Vec<OutputDestination>,
-        #[serde(default)]
-        dtls_enabled: bool,
     },
     RemoveRule {
         rule_id: String,
@@ -154,6 +149,8 @@ pub enum SupervisorCommand {
     },
     /// Get all configured log levels (global + per-facility overrides)
     GetLogLevels,
+    /// Get protocol version for compatibility checking
+    GetVersion,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -167,6 +164,9 @@ pub enum Response {
         global: logging::Severity,
         facility_overrides: std::collections::HashMap<logging::Facility, logging::Severity>,
     },
+    Version {
+        protocol_version: u32,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Hash)]
@@ -176,7 +176,6 @@ pub struct ForwardingRule {
     pub input_group: Ipv4Addr,
     pub input_port: u16,
     pub outputs: Vec<OutputDestination>,
-    pub dtls_enabled: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -253,9 +252,7 @@ mod tests {
                 group: "224.0.0.2".parse().unwrap(),
                 port: 5001,
                 interface: "127.0.0.1".to_string(),
-                dtls_enabled: true,
             }],
-            dtls_enabled: false,
         };
         let json = serde_json::to_string(&add_command).unwrap();
         let deserialized: SupervisorCommand = serde_json::from_str(&json).unwrap();
@@ -297,7 +294,6 @@ mod tests {
             input_group: "224.0.0.1".parse().unwrap(),
             input_port: 5000,
             outputs: vec![],
-            dtls_enabled: false,
         };
         let rules_response = Response::Rules(vec![rule]);
         let json = serde_json::to_string(&rules_response).unwrap();
@@ -329,9 +325,7 @@ mod tests {
                 group: "224.0.0.2".parse().unwrap(),
                 port: 5001,
                 interface: "127.0.0.1".to_string(),
-                dtls_enabled: true,
             }],
-            dtls_enabled: false,
         };
         let json = serde_json::to_string(&rule).unwrap();
         let deserialized: ForwardingRule = serde_json::from_str(&json).unwrap();
