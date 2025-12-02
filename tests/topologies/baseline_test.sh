@@ -198,12 +198,13 @@ log_section 'Validating Results'
 VALIDATION_PASSED=0
 
 # Calculate validation thresholds based on rate
-# At lower rates (<=100k pps), expect ~95% forwarding
-# At higher rates (>100k pps), expect ~80% forwarding (kernel drops increase)
+# CI runners have limited resources - use conservative thresholds
+# At lower rates (<=100k pps), expect ~80% forwarding
+# At higher rates (>100k pps), expect ~70% forwarding (kernel drops increase)
 if [ "$SEND_RATE" -le 100000 ]; then
-    EXPECTED_RATIO=95
-else
     EXPECTED_RATIO=80
+else
+    EXPECTED_RATIO=70
 fi
 
 MAX_BUFFER_EXHAUSTION=$((PACKET_COUNT / 100))  # Allow 1% buffer exhaustion

@@ -177,15 +177,7 @@ coverage:
         [ "$(basename "$test")" = "common.sh" ] && continue
         testname="$(basename "$test")"
         echo "  $testname..."
-        # baseline_*.sh tests are performance-sensitive and may fail on CI runners
-        # with limited resources - treat as soft-fail (report but don't block)
-        if [[ "$testname" == baseline_*.sh ]]; then
-            if ! sudo -E LLVM_PROFILE_FILE="$LLVM_PROFILE_FILE" bash "$test"; then
-                echo "  ⚠️  $testname failed (soft-fail, not blocking CI)"
-            fi
-        else
-            sudo -E LLVM_PROFILE_FILE="$LLVM_PROFILE_FILE" bash "$test" || exit 1
-        fi
+        sudo -E LLVM_PROFILE_FILE="$LLVM_PROFILE_FILE" bash "$test" || exit 1
     done
 
     # Collect profile data
