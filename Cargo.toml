@@ -9,7 +9,7 @@ anyhow = "1.0.100"
 chrono = "0.4"
 clap = { version = "4.5.53", features = ["derive"] }
 io-uring = "0.7.11"
-libc = "0.2.155"
+libc = "0.2.178"
 log = "0.4"
 nix = { version = "0.30.1", features = ["sched", "process", "socket", "user", "fs", "signal", "event", "uio", "mman"] }
 num_cpus = "1.16.0"
