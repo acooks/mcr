@@ -623,7 +623,6 @@ Workers should:
 ## References
 
 - [Linux kernel RSS documentation](https://www.kernel.org/doc/Documentation/networking/scaling.txt)
-- [Intel's RSS guide](https://www.intel.com/content/www/us/en/support/articles/000005811/network-and-i-o/ethernet-products.html)
 - [ethtool man page](https://man7.org/linux/man-pages/man8/ethtool.8.html)
 - [AF_PACKET PACKET_FANOUT](https://man7.org/linux/man-pages/man7/packet.7.html)
 - [CPU affinity](https://man7.org/linux/man-pages/man2/sched_setaffinity.2.html)
