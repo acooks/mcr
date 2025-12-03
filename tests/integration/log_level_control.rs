@@ -18,17 +18,23 @@ mod tests {
     use tokio::process::{Child, Command};
     use tokio::time::sleep;
 
-    /// Spawns a supervisor process with a unique socket path
-    async fn spawn_supervisor(socket_path: &PathBuf) -> Result<Child> {
+    /// Spawns a supervisor process with unique socket paths
+    async fn spawn_supervisor(control_socket_path: &PathBuf) -> Result<Child> {
         let binary_path = env!("CARGO_BIN_EXE_multicast_relay");
 
-        cleanup_socket(socket_path);
+        // Generate unique relay socket path for this test instance
+        let relay_socket_path = control_socket_path.with_extension("relay.sock");
+
+        cleanup_socket(control_socket_path);
+        cleanup_socket(&relay_socket_path);
 
         let mut supervisor_cmd = Command::new(binary_path);
         supervisor_cmd
             .arg("supervisor")
             .arg("--control-socket-path")
-            .arg(socket_path.as_os_str())
+            .arg(control_socket_path.as_os_str())
+            .arg("--relay-command-socket-path")
+            .arg(relay_socket_path.as_os_str())
             .arg("--user")
             .arg(std::env::var("USER").unwrap_or_else(|_| "nobody".to_string()))
             .arg("--group")
@@ -36,13 +42,37 @@ mod tests {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
 
-        let supervisor_process = supervisor_cmd.spawn()?;
+        let mut supervisor_process = supervisor_cmd.spawn()?;
 
-        // Wait for socket to be created
+        // Wait for control socket to be created
         let mut wait_count = 0;
-        while !socket_path.exists() {
+        while !control_socket_path.exists() {
             if wait_count > 20 {
-                return Err(anyhow::anyhow!("Socket creation timeout"));
+                // Check if process is still running
+                match supervisor_process.try_wait() {
+                    Ok(Some(status)) => {
+                        // Process has exited - capture stderr
+                        let mut stderr_output = String::new();
+                        if let Some(mut stderr) = supervisor_process.stderr.take() {
+                            use tokio::io::AsyncReadExt;
+                            let _ = stderr.read_to_string(&mut stderr_output).await;
+                        }
+                        return Err(anyhow::anyhow!(
+                            "Supervisor exited with status {} before creating socket. stderr: {}",
+                            status,
+                            stderr_output
+                        ));
+                    }
+                    Ok(None) => {
+                        // Process still running but no socket yet
+                        return Err(anyhow::anyhow!(
+                            "Socket creation timeout (process still running)"
+                        ));
+                    }
+                    Err(e) => {
+                        return Err(anyhow::anyhow!("Failed to check process status: {}", e));
+                    }
+                }
             }
             sleep(Duration::from_millis(100)).await;
             wait_count += 1;

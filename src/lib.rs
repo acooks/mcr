@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 use clap::Parser;
-pub mod ipc;
 pub mod logging;
 
 use serde::{Deserialize, Serialize};
@@ -88,14 +87,6 @@ pub enum Command {
         #[arg(long)]
         fanout_group_id: Option<u16>,
     },
-}
-
-#[derive(Debug, Clone)]
-pub struct ControlPlaneConfig {
-    pub uid: Option<u32>,
-    pub gid: Option<u32>,
-    pub relay_command_socket_path: PathBuf,
-    pub reporting_interval: u64,
 }
 
 pub struct DataPlaneConfig {

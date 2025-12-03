@@ -117,7 +117,6 @@ fn parse_facility(s: &str) -> Result<Facility, String> {
         "Supervisor" => Ok(Facility::Supervisor),
         "RuleDispatch" => Ok(Facility::RuleDispatch),
         "ControlSocket" => Ok(Facility::ControlSocket),
-        "ControlPlane" => Ok(Facility::ControlPlane),
         "DataPlane" => Ok(Facility::DataPlane),
         "Ingress" => Ok(Facility::Ingress),
         "Egress" => Ok(Facility::Egress),
@@ -128,7 +127,7 @@ fn parse_facility(s: &str) -> Result<Facility, String> {
         "Network" => Ok(Facility::Network),
         "Test" => Ok(Facility::Test),
         _ => Err(format!(
-            "Invalid facility: {}. Valid values: Supervisor, RuleDispatch, ControlSocket, ControlPlane, DataPlane, Ingress, Egress, BufferPool, PacketParser, Stats, Security, Network, Test",
+            "Invalid facility: {}. Valid values: Supervisor, RuleDispatch, ControlSocket, DataPlane, Ingress, Egress, BufferPool, PacketParser, Stats, Security, Network, Test",
             s
         )),
     }

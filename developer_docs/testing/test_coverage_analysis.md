@@ -40,33 +40,24 @@
 - Coverage: Ring buffer (SPSC/MPSC), log levels, async/blocking consumers
 - **Strength**: Comprehensive concurrency testing
 
-#### 3. Control Plane (`src/worker/control_plane.rs`)
+#### 3. Supervisor (`src/supervisor.rs`)
 
-- **428 LoC, ~14 unit tests**
-- Coverage: All IPC commands (add/remove rules, get stats, log levels)
+- **~1,200 LoC, ~35 unit tests**
+- Coverage: All IPC commands (add/remove rules, get stats, log levels), worker management
 - **Strength**: Complete command handler coverage
 - **Integration**: `tests/integration/rule_management.rs` tests E2E propagation
-
-#### 4. Stats & Monitoring (`src/worker/stats.rs`)
-
-- **144 LoC, 2 unit tests**
-- Coverage: Stats aggregator, monitoring task
-- **Strength**: Task coordination tested
 
 ---
 
 ### ⚠️ **Partially Covered Components**
 
-#### 1. Supervisor (`src/supervisor.rs`)
+#### 1. Worker (`src/worker/`)
 
-- **1,540 LoC, ~0 active unit tests**
-- **Critical Gap**: Worker management, health checks, rule dispatch
-- **Why**: Tests were removed as "redundant" but integration tests don't fully replace them
-- **Deferred**: 7 resilience tests need API rewrite
+- **Deferred**: 6 supervisor resilience tests need API rewrite
 
 **Missing Coverage:**
 
-- Worker restart logic (exponential backoff)
+- Worker restart logic (exponential backoff) - tested in deferred resilience tests
 - Multi-worker scenarios
 - Concurrent request handling
 - Error recovery paths
@@ -322,15 +313,15 @@
 
 - Excellent packet parser coverage with property testing
 - Good logging system testing
-- Comprehensive control plane command coverage
+- Comprehensive supervisor command coverage (~35 unit tests)
 - Integration tests verify key E2E flows
 
-**Critical Weaknesses:**
+**Remaining Weaknesses:**
 
-- Supervisor has almost zero test coverage (1,540 LoC)
 - Multi-worker scenarios largely untested
 - Error paths and edge cases undertested
 - No automated performance regression detection
+- 6 deferred supervisor resilience tests need API rewrite
 - Concurrency testing minimal
 
 **Immediate Actions:**

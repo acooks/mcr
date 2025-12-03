@@ -13,7 +13,6 @@ exclude-files = [
 # These tests work fine in normal cargo test but fail under tarpaulin
 args = [
     "--skip", "test_run_data_plane_starts_successfully",
-    "--skip", "test_run_control_plane_starts_successfully",
 ]
 
 # Output configuration

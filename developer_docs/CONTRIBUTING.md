@@ -10,7 +10,7 @@ Beyond the mechanical checks for formatting and linting, this project adheres to
 
 1. **Simplicity and Linearity in the Fast Path:** The data plane code that processes packets must be as simple and linear as possible. It must be non-blocking, avoid dynamic memory allocation, and handle all transient errors with a "Drop and Count" strategy (D26).
 
-2. **Strict Separation of Concerns:** The roles of the Supervisor, Control Plane, and Data Plane workers are distinct and must not be blurred. The Supervisor manages lifecycles and privileged operations. The Control Plane handles user interaction. The Data Plane only processes packets.
+2. **Strict Separation of Concerns:** The roles of the Supervisor and Data Plane workers are distinct and must not be blurred. The Supervisor manages lifecycles, privileged operations, and user interaction via the control socket. The Data Plane only processes packets.
 
 3. **State is Centralized and Explicit:** The Supervisor is the single source of truth for configuration (D18). Data plane workers operate on replicated state and never modify their own configuration based on the data they process.
 
@@ -29,9 +29,8 @@ We adhere to standard, idiomatic Rust conventions. The primary goal is to write 
 The project's module structure directly mirrors the multi-process architecture to ensure a clear separation of concerns.
 
 - **`main.rs` (Binary Entry Point):** Responsible only for parsing arguments, initializing the environment, and launching the Supervisor Process.
-- **`supervisor.rs`:** Contains all logic for the privileged Supervisor Process, including lifecycle management of worker processes, privileged operations, and handling network interface changes.
-- **`control_plane.rs`:** Contains all logic for the unprivileged Control Plane Worker Process, including managing the JSON Unix socket and communicating with the Supervisor.
-- **`data_plane.rs`:** Contains all logic for the unprivileged Data Plane Worker Processes. This is the performance-critical "hot path" for packet processing.
+- **`supervisor.rs`:** Contains all logic for the privileged Supervisor Process, including lifecycle management of worker processes, privileged operations, control socket handling, and network interface changes.
+- **`worker/`:** Contains all logic for the unprivileged Data Plane Worker Processes. This is the performance-critical "hot path" for packet processing.
 - **`lib.rs` (Shared Library Crate):** Defines all shared data structures, types, and constants used across the different processes (e.g., `ForwardingRule`, `Command`, `Response`).
 
 This layout makes the codebase easier to navigate and reinforces the architectural separation of concerns.

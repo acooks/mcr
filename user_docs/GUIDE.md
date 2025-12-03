@@ -40,7 +40,7 @@ The compiled binaries will be available in the `target/release/` directory. You 
 
 ## Configuration
 
-For detailed information on kernel tuning, environment variables for performance tuning, and the full command-line reference for all utilities, please see the **[MCR Configuration Guide](./CONFIGURATION.md)**.
+For detailed information on kernel tuning, environment variables for performance tuning, and the full command-line reference for all utilities, please see the **[Reference Manual](./REFERENCE.md)**.
 
 ## Running the Relay
 
@@ -50,7 +50,7 @@ To run the main relay application, which will start the supervisor and its worke
 sudo ./target/release/multicast_relay supervisor
 ```
 
-The supervisor starts with default settings (all CPU cores as workers, nobody:daemon user/group). For additional options, see the **[MCR Configuration Guide](./CONFIGURATION.md)**.
+The supervisor starts with default settings (all CPU cores as workers, nobody:daemon user/group). For additional options, see the **[Reference Manual](./REFERENCE.md)**.
 
 All forwarding rules and runtime operations are managed via the `control_client`.
 
@@ -126,7 +126,7 @@ Here are some common examples of how to use the `control_client` to manage the r
 
 Available log levels (least to most verbose): `emergency`, `alert`, `critical`, `error`, `warning`, `notice`, `info`, `debug`
 
-For a complete command reference and advanced configuration options, see **[CONFIGURATION.md](./CONFIGURATION.md)**.
+For a complete command reference and advanced configuration options, see the **[Reference Manual](./REFERENCE.md)**.
 
 ## Basic `traffic_generator` Example
 

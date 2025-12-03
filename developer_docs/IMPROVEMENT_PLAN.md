@@ -42,14 +42,6 @@ Currently all workers receive all rules. Implement `rule_hash(group, port) % num
 
 **Effort:** 2-3 days
 
-### Control Plane Architecture Decision
-
-**Location:** `src/worker/control_plane.rs`
-
-Decide role: (A) Stats aggregator only, (B) Authoritative state holder, or (C) Remove entirely.
-
-**Effort:** 2-3 days after decision
-
 ### Automated Drift Recovery
 
 Phase 1 (detection) complete. Phase 2 needs: workers report ruleset hash, supervisor compares and triggers sync/restart on mismatch.
@@ -62,16 +54,15 @@ Phase 1 (detection) complete. Phase 2 needs: workers report ruleset hash, superv
 
 ### Test Coverage Gaps
 
-- `tests/integration/supervisor_resilience.rs:471` - namespace test (`#[ignore]`, needs root)
-
-Note: `rule_dispatch.rs` and `network_monitor.rs` are orphaned code (not compiled) - related to
-Control Plane Architecture decision above. `supervisor_resilience.rs:283` test is implemented.
+- `tests/integration/supervisor_resilience.rs` - namespace test (`#[ignore]`, needs root)
 
 **Effort:** 2-3 days
 
-### Buffer Size / PACKET_MMAP
+### Buffer Size / PACKET_MMAP [REJECTED]
 
-Current 2KB buffers work for standard MTU. Jumbo frame support and 64KB batching buffers deferred to PACKET_MMAP implementation. See `docs/PACKET_MMAP_IMPLEMENTATION_PLAN.md`.
+Proposal to use `PACKET_MMAP` for zero-copy ingress has been **rejected** due to architectural complexity and head-of-line blocking risks. See `developer_docs/decisions/001_buffer_management_strategy.md`.
+
+Current strategy: Continue using `io_uring` with copy-based ingress and `Arc` fan-out.
 
 ---
 
@@ -103,7 +94,7 @@ Node.js dependencies removed but history bloated (6,044 files). Recommend docume
 
 ## Roadmap
 
-**Near-term:** Test coverage gaps, Control plane architecture decision
+**Near-term:** Test coverage gaps
 
 **Medium-term:** AF_PACKET FD passing, Rule hashing, Network reconciliation
 
@@ -115,6 +106,8 @@ Node.js dependencies removed but history bloated (6,044 files). Recommend docume
 
 **December 2025:**
 
+- **REJECTED:** PACKET_MMAP / Zero-Copy Ingress (ADR 001)
+- Data Plane Fan-Out (`Arc<[u8]>` based zero-copy sharing)
 - Protocol versioning (`PROTOCOL_VERSION`, `GetVersion` command)
 - Consistent logging in stats.rs (replaced `eprintln!` with Logger)
 

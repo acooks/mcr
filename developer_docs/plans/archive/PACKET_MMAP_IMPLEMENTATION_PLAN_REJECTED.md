@@ -1,4 +1,8 @@
-# PACKET_MMAP Implementation Plan
+# PACKET_MMAP Implementation Plan [REJECTED]
+
+> **Status:** REJECTED
+> **Decision Record:** [ADR 001: Data Plane Buffer Management Strategy](../../decisions/001_buffer_management_strategy.md)
+> **Reason:** Analysis showed that zero-copy ingress introduces significant complexity for multicast fan-out (Head-of-Line blocking risk) and relies on older APIs. Current io_uring implementation is sufficient.
 
 ## Status
 

@@ -2,6 +2,17 @@
 
 This guide explains how to monitor the Multicast Relay (MCR) application, understand its statistical output, and diagnose common operational issues.
 
+## Table of Contents
+
+- [Monitoring MCR](#monitoring-mcr)
+- [Understanding the Statistics Output](#understanding-the-statistics-output)
+  - [Ingress Statistics](#ingress-statistics)
+  - [Egress Statistics](#egress-statistics)
+- [Troubleshooting & Common Scenarios](#troubleshooting--common-scenarios)
+  - [Healthy Operation (At Capacity)](#healthy-operation-at-capacity)
+  - [Egress Path Failure](#egress-path-failure)
+  - [No Matching Rules](#no-matching-rules)
+
 ## Monitoring MCR
 
 MCR is designed for "at-a-glance" observability. All key metrics are regularly printed to the console (or log file) as structured, single-line messages. For most use cases, monitoring the application is as simple as using `tail -f` on the log output.
@@ -42,7 +53,7 @@ The Egress stats line shows how many packets are being sent out.
 - **`bytes`**: The total number of bytes sent.
 - **`pps` (Packets Per Second):** The current rate of _sent_ packets.
 
-## Interpreting Common Scenarios
+## Troubleshooting & Common Scenarios
 
 By comparing the Ingress and Egress stats, you can quickly diagnose the health of the system.
 

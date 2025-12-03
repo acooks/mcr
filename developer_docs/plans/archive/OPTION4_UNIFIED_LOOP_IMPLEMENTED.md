@@ -1,4 +1,8 @@
-# Option 4: Single-Threaded Unified io_uring Architecture
+# Option 4: Single-Threaded Unified io_uring Architecture [IMPLEMENTED]
+
+> **Status:** IMPLEMENTED
+> **Date:** 2025-12-03
+> **Note:** This architecture is now the active implementation in `src/worker/unified_loop.rs`.
 
 **Date:** 2025-11-17
 **Status:** INTEGRATED AND ACTIVE - Testing in progress

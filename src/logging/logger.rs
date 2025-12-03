@@ -266,7 +266,6 @@ impl LogRegistry {
             Facility::Supervisor,
             Facility::RuleDispatch,
             Facility::ControlSocket,
-            Facility::ControlPlane,
             Facility::DataPlane,
             Facility::Ingress,
             Facility::Egress,

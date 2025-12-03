@@ -2,7 +2,7 @@
 // High-performance logging system for MCR
 //
 // Uses pipe-based JSON logging for data plane workers,
-// and MPSC ring buffers for control plane components.
+// and MPSC ring buffers for testing.
 
 mod consumer;
 mod entry;
@@ -23,13 +23,15 @@ pub use logger::{LogRegistry, Logger};
 pub use ringbuffer::{MPSCRingBuffer, SPSCRingBuffer};
 pub use severity::Severity;
 
-// Re-export ControlPlaneLogging for backward compatibility
-// This is a simple wrapper around Logger with MPSC ring buffers
-pub struct ControlPlaneLogging {
+/// Test logging system using MPSC ring buffers
+/// Used only in test builds for data plane worker logging
+#[cfg(feature = "testing")]
+pub struct TestLogging {
     registry: LogRegistry,
 }
 
-impl ControlPlaneLogging {
+#[cfg(feature = "testing")]
+impl TestLogging {
     pub fn new() -> Self {
         Self {
             registry: LogRegistry::new_mpsc(),
@@ -52,7 +54,8 @@ impl ControlPlaneLogging {
     }
 }
 
-impl Default for ControlPlaneLogging {
+#[cfg(feature = "testing")]
+impl Default for TestLogging {
     fn default() -> Self {
         Self::new()
     }

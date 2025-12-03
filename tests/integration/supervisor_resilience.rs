@@ -29,18 +29,6 @@ use tokio::time::{sleep, timeout};
 
 use crate::tests::{cleanup_socket, unique_socket_path_with_prefix};
 
-/// Default timeout for supervisor resilience tests (30 seconds)
-const TEST_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Helper macro to wrap test body with timeout
-macro_rules! with_timeout {
-    ($body:expr) => {
-        timeout(TEST_TIMEOUT, $body)
-            .await
-            .context("Test timed out after 30 seconds")?
-    };
-}
-
 /// Helper to start supervisor in background for testing
 async fn start_supervisor() -> Result<(Child, PathBuf)> {
     // 1. Generate unique socket paths
@@ -94,68 +82,6 @@ fn is_process_running(pid: u32) -> bool {
     // but checks if we have permission to send one
     // (i.e., if the process exists)
     kill(Pid::from_raw(pid as i32), Signal::from_c_int(0).unwrap()).is_ok()
-}
-
-/// **Tier 2 Integration Test**
-///
-/// - **Purpose:** Verify supervisor detects and restarts a failed control plane worker
-/// - **Method:**
-///   1. Start supervisor
-///   2. Identify control plane worker PID via `list-workers` command
-///   3. Kill the worker using SIGKILL
-///   4. Poll `list-workers` until a new control plane worker appears
-///   5. Verify the new worker has a different PID and is running
-/// - **Tier:** 2 (Integration)
-#[tokio::test]
-async fn test_supervisor_restarts_control_plane_worker() -> Result<()> {
-    timeout(TEST_TIMEOUT, async {
-        // Step 1: Start supervisor
-        let (mut supervisor, socket_path) = start_supervisor().await?;
-        let client = control_client::ControlClient::new(&socket_path);
-
-        // Step 2: Get control plane worker PID
-        let workers = client.list_workers().await?;
-        let cp_worker = workers
-            .iter()
-            .find(|w| w.worker_type == "ControlPlane")
-            .ok_or_else(|| anyhow::anyhow!("No control plane worker found"))?;
-        let original_pid = cp_worker.pid;
-        println!("[TEST] Original control plane worker PID: {}", original_pid);
-
-        // Step 3: Kill the worker
-        kill_worker(original_pid).await?;
-        sleep(Duration::from_millis(200)).await; // Give supervisor time to notice
-        assert!(!is_process_running(original_pid), "Worker should be dead");
-        println!("[TEST] Worker {} killed successfully", original_pid);
-
-        // Step 4 & 5: Wait for supervisor to restart the worker
-        let mut new_pid = None;
-        for _ in 0..50 { // 5 second timeout
-            if let Ok(workers) = client.list_workers().await {
-                if let Some(cp) = workers.iter().find(|w| w.worker_type == "ControlPlane") {
-                    if cp.pid != original_pid && is_process_running(cp.pid) {
-                        new_pid = Some(cp.pid);
-                        println!("[TEST] Worker restarted with new PID: {}", cp.pid);
-                        break;
-                    }
-                }
-            }
-            sleep(Duration::from_millis(100)).await;
-        }
-
-        // Step 6: Verify restart succeeded
-        assert!(new_pid.is_some(), "Supervisor should have restarted the worker");
-        let new_pid = new_pid.unwrap();
-        assert_ne!(new_pid, original_pid, "New worker should have a different PID");
-        assert!(is_process_running(new_pid), "New worker should be running");
-
-        // Cleanup
-        supervisor.kill().await?;
-        cleanup_socket(&socket_path);
-        Ok(())
-    })
-    .await
-    .context("Test timed out after 30 seconds")?
 }
 
 mod control_client {
@@ -492,7 +418,7 @@ async fn test_supervisor_in_namespace() -> Result<()> {
     //     b.  Use a temporary directory for socket paths.
     //     c.  Spawn the command.
     // 5.  **Perform a Simple Test:** Run a simplified version of the restart test
-    //     (e.g., `test_supervisor_restarts_control_plane_worker`) against the
+    //     (e.g., `test_supervisor_restarts_data_plane_worker`) against the
     //     supervisor running inside the namespace.
     // 6.  **Cleanup:** Ensure the namespace is deleted at the end of the test, even
     //     if it fails. An RAII guard or a `defer` block would be ideal, but a

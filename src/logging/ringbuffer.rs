@@ -2,7 +2,7 @@
 // Lock-free ring buffers for logging
 //
 // Based on analysis of Linux printk_ringbuffer and FreeBSD msgbuf designs.
-// See design/RINGBUFFER_IMPLEMENTATION.md for details.
+// See design/archive/RINGBUFFER_IMPLEMENTATION.md for details.
 
 use super::entry::{LogEntry, EMPTY, READY, WRITING};
 use std::cell::UnsafeCell;
@@ -480,7 +480,7 @@ use std::os::fd::OwnedFd;
 ///
 /// The supervisor PID is included to prevent collisions when multiple MCR instances run
 /// concurrently (e.g., in different network namespaces for testing).
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn shm_id_for_facility(
     supervisor_pid: u32,
     core_id: u8,

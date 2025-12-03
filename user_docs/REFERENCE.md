@@ -448,7 +448,7 @@ Controls the verbosity of MCR's logging at runtime.
 ```
 
 - **Levels:** `emergency`, `alert`, `critical`, `error`, `warning`, `notice`, `info`, `debug`
-- **Facilities:** `Supervisor`, `DataPlane`, `Ingress`, `Egress`, `ControlPlane`, etc.
+- **Facilities:** `Supervisor`, `RuleDispatch`, `ControlSocket`, `DataPlane`, `Ingress`, `Egress`, `BufferPool`, `PacketParser`, `Stats`, `Security`, `Network`, `Test`
 
 ---
 

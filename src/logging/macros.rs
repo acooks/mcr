@@ -83,7 +83,7 @@ macro_rules! log_notice {
 ///
 /// # Examples
 /// ```ignore
-/// log_info!(logger, Facility::ControlPlane, "Rule added");
+/// log_info!(logger, Facility::Supervisor, "Rule added");
 /// ```
 #[macro_export]
 macro_rules! log_info {

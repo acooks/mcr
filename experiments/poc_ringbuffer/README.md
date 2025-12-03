@@ -136,8 +136,8 @@ Tests cover:
 
 ## Related Documents
 
-- `design/RINGBUFFER_IMPLEMENTATION.md` - Detailed implementation spec
-- `design/KERNEL_RINGBUFFER_ANALYSIS.md` - Linux/FreeBSD analysis
+- `design/archive/RINGBUFFER_IMPLEMENTATION.md` - Detailed implementation spec
+- `design/archive/KERNEL_RINGBUFFER_ANALYSIS.md` - Linux/FreeBSD analysis
 - `design/LOGGING_DESIGN.md` - Overall logging system design
 
 ## Next Steps

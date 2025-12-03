@@ -1,4 +1,8 @@
-# Fan-Out Implementation Review and Next Steps
+# Fan-Out Implementation Review and Next Steps [COMPLETED]
+
+> **Status:** COMPLETED / IMPLEMENTED
+> **Date:** 2025-12-03
+> **Note:** The Arc-based fan-out logic described here is fully implemented in `src/worker/unified_loop.rs`.
 
 **Date:** 2025-11-18
 **Status:** READY FOR IMPLEMENTATION (Next Session)

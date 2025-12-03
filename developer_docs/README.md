@@ -14,7 +14,8 @@ If you are a new contributor, start here.
 Understand how MCR is designed.
 
 - **[ARCHITECTURE.md](./ARCHITECTURE.md):** The definitive guide to the system's design, components, and data flow.
-- **[design/](../design/):** Detailed design specifications for various MCR subsystems.
+- **[design/](../design/):** Active design specifications for MCR subsystems.
+- **[design/archive/](../design/archive/):** Historical design research and analysis (e.g., ringbuffer implementation research).
 
 ## 3. Development & Testing
 
@@ -33,3 +34,4 @@ Deeper dives into specific topics, policies, and historical analysis.
 - **[reports/README.md](./reports/README.md):** Summary reports from major investigations and decisions.
 - **[comparisons/README.md](./comparisons/README.md):** Analysis and comparison of MCR with other networking tools.
 - **[reference_docs/](./reference_docs/):** Detailed investigation archives and completed implementation plans (see [completed/](./reference_docs/completed/) and [experiments/](./reference_docs/experiments/))
+- **[plans/](./plans/):** Implementation plans for upcoming features and improvements.

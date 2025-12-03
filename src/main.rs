@@ -82,50 +82,35 @@ fn main() -> Result<()> {
             reporting_interval,
             fanout_group_id,
         } => {
-            if data_plane {
-                // Get parent process ID (supervisor PID) for shared memory paths
-                let supervisor_pid = std::os::unix::process::parent_id();
+            // All workers are now data plane workers
+            let _ = (data_plane, relay_command_socket_path); // Silence unused variable warnings
 
-                let config = multicast_relay::DataPlaneConfig {
-                    uid,
-                    gid,
-                    supervisor_pid,
-                    core_id,
-                    input_interface_name,
-                    input_group,
-                    input_port,
-                    output_group,
-                    output_port,
-                    output_interface,
-                    reporting_interval: reporting_interval.unwrap_or(1),
-                    fanout_group_id,
-                };
-                // D1, D7: The worker process uses a `tokio-uring` runtime
-                // to drive the high-performance data plane.
-                tokio_uring::start(async {
-                    if let Err(e) =
-                        worker::run_data_plane(config, worker::DefaultWorkerLifecycle).await
-                    {
-                        eprintln!("Data Plane worker process failed: {}", e);
-                        std::process::exit(1);
-                    }
-                });
-            } else {
-                let config = multicast_relay::ControlPlaneConfig {
-                    uid,
-                    gid,
-                    relay_command_socket_path,
-                    reporting_interval: reporting_interval.unwrap_or(1),
-                };
-                // Control Plane worker - uses standard tokio runtime (no packet I/O)
-                let runtime = tokio::runtime::Runtime::new()?;
-                runtime.block_on(async {
-                    if let Err(e) = worker::run_control_plane(config).await {
-                        eprintln!("Control Plane worker process failed: {}", e);
-                        std::process::exit(1);
-                    }
-                });
-            }
+            // Get parent process ID (supervisor PID) for shared memory paths
+            let supervisor_pid = std::os::unix::process::parent_id();
+
+            let config = multicast_relay::DataPlaneConfig {
+                uid,
+                gid,
+                supervisor_pid,
+                core_id,
+                input_interface_name,
+                input_group,
+                input_port,
+                output_group,
+                output_port,
+                output_interface,
+                reporting_interval: reporting_interval.unwrap_or(1),
+                fanout_group_id,
+            };
+            // D1, D7: The worker process uses a `tokio-uring` runtime
+            // to drive the high-performance data plane.
+            tokio_uring::start(async {
+                if let Err(e) = worker::run_data_plane(config, worker::DefaultWorkerLifecycle).await
+                {
+                    eprintln!("Data Plane worker process failed: {}", e);
+                    std::process::exit(1);
+                }
+            });
         }
     }
 

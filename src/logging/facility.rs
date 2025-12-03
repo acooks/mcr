@@ -15,10 +15,6 @@ pub enum Facility {
     /// Unix domain socket control interface
     ControlSocket = 2,
 
-    // === Control Plane Worker (tokio async) ===
-    /// Control plane request/response handling
-    ControlPlane = 3,
-
     // === Data Plane Worker (io_uring/blocking) ===
     /// Data plane coordinator/integration
     DataPlane = 4,
@@ -60,7 +56,6 @@ impl Facility {
             Facility::Supervisor => "Supervisor",
             Facility::RuleDispatch => "RuleDispatch",
             Facility::ControlSocket => "ControlSocket",
-            Facility::ControlPlane => "ControlPlane",
             Facility::DataPlane => "DataPlane",
             Facility::Ingress => "Ingress",
             Facility::Egress => "Egress",
@@ -80,7 +75,6 @@ impl Facility {
             0 => Facility::Supervisor,
             1 => Facility::RuleDispatch,
             2 => Facility::ControlSocket,
-            3 => Facility::ControlPlane,
             4 => Facility::DataPlane,
             5 => Facility::Ingress,
             6 => Facility::Egress,
@@ -113,7 +107,6 @@ impl Facility {
             Facility::PacketParser => 4096, // 1 MB per worker
             Facility::DataPlane => 2048,    // 512 KB
             Facility::Supervisor => 1024,   // 256 KB
-            Facility::ControlPlane => 1024, // 256 KB
             _ => 512,                       // 128 KB default
         }
     }
@@ -156,7 +149,7 @@ mod tests {
         assert!(Facility::Egress.is_high_frequency());
         assert!(Facility::PacketParser.is_high_frequency());
         assert!(!Facility::Supervisor.is_high_frequency());
-        assert!(!Facility::ControlPlane.is_high_frequency());
+        assert!(!Facility::DataPlane.is_high_frequency());
     }
 
     #[test]
