@@ -69,9 +69,11 @@ Control Plane Architecture decision above. `supervisor_resilience.rs:283` test i
 
 **Effort:** 2-3 days
 
-### Buffer Size / PACKET_MMAP
+### Buffer Size / PACKET_MMAP [REJECTED]
 
-Current 2KB buffers work for standard MTU. Jumbo frame support and 64KB batching buffers deferred to PACKET_MMAP implementation. See `developer_docs/plans/PACKET_MMAP_IMPLEMENTATION_PLAN.md`.
+Proposal to use `PACKET_MMAP` for zero-copy ingress has been **rejected** due to architectural complexity and head-of-line blocking risks. See `developer_docs/decisions/001_buffer_management_strategy.md`.
+
+Current strategy: Continue using `io_uring` with copy-based ingress and `Arc` fan-out.
 
 ---
 
@@ -115,6 +117,8 @@ Node.js dependencies removed but history bloated (6,044 files). Recommend docume
 
 **December 2025:**
 
+- **REJECTED:** PACKET_MMAP / Zero-Copy Ingress (ADR 001)
+- Data Plane Fan-Out (`Arc<[u8]>` based zero-copy sharing)
 - Protocol versioning (`PROTOCOL_VERSION`, `GetVersion` command)
 - Consistent logging in stats.rs (replaced `eprintln!` with Logger)
 
