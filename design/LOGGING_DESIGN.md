@@ -10,7 +10,6 @@ MCR uses a **multi-process architecture** where data plane workers run as separa
 
 ```text
 Supervisor Process (async tokio)
-├─ Control Plane Worker (process) - async, handles management
 └─ Data Plane Workers (processes) - sync io_uring, packet forwarding
 ```
 
@@ -106,7 +105,7 @@ Data Plane Worker Process                 Supervisor Process
 **Phase 5: COMPLETE** ✅ (commits 06f5273, cc4bf9d)
 
 - Shared memory ring buffers for data plane workers (lock-free cross-process)
-- Control plane workers use MPSC ring buffers (async-safe)
+- Supervisor uses MPSC ring buffers (async-safe)
 - All workers integrated with structured logging
 - Supervisor and workers use appropriate logging systems
 - 106/107 tests passing
@@ -132,23 +131,6 @@ let logger = logging.logger(Facility::Supervisor).unwrap();
 // 2. Log messages
 logger.info(Facility::Supervisor, "Starting MCR supervisor");
 logger.error(Facility::Supervisor, "Worker process exited unexpectedly");
-
-// 3. Shutdown logging before exit
-logging.shutdown().await;
-```
-
-### Control Plane Worker (Async Context)
-
-```rust
-use multicast_relay::logging::*;
-
-// 1. Initialize control plane logging (MPSC ring buffers)
-let logging = ControlPlaneLogging::new();
-let logger = logging.logger(Facility::ControlPlane).unwrap();
-
-// 2. Log messages
-logger.info(Facility::ControlPlane, "Control plane worker started");
-logger.error(Facility::ControlPlane, "Failed to read from supervisor stream");
 
 // 3. Shutdown logging before exit
 logging.shutdown().await;
@@ -215,7 +197,7 @@ pub enum Severity {
 | --------- | ------------------------------- | ------------------------------------------ |
 | Emergency | Process cannot continue         | Supervisor panic, all workers dead         |
 | Alert     | Requires immediate admin action | Lost CAP_NET_RAW, AF_PACKET socket failure |
-| Critical  | Component degraded/restarting   | Worker crash, control plane reconnect      |
+| Critical  | Component degraded/restarting   | Worker crash, supervisor reconnect         |
 | Error     | Operation failed                | Packet parsing error, failed rule dispatch |
 | Warning   | Potential problem               | Buffer pool 90% full, worker backoff       |
 | Notice    | Normal significant event        | Worker started, interface configured       |
@@ -234,9 +216,7 @@ pub enum Facility {
     Supervisor    = 0,   // Supervisor core logic, worker lifecycle
     RuleDispatch  = 1,   // Rule distribution to workers
     ControlSocket = 2,   // Unix domain socket control interface
-
-    // === Control Plane Worker (tokio async) ===
-    ControlPlane  = 3,   // Control plane request/response handling
+    // Note: Value 3 was previously ControlPlane, now unused
 
     // === Data Plane Worker (io_uring/blocking) ===
     DataPlane     = 4,   // Data plane coordinator/integration
@@ -262,7 +242,6 @@ pub enum Facility {
 | ------------ | ------------------- | ------------- | -------------------------------- |
 | Supervisor   | Tokio async         | Low           | Shared buffer with mutex         |
 | RuleDispatch | Tokio async         | Low-Medium    | Shared buffer                    |
-| ControlPlane | Tokio async         | Low-Medium    | Per-worker buffer                |
 | DataPlane    | Dedicated thread    | Medium        | Per-core ring buffer             |
 | Ingress      | io_uring (blocking) | **Very High** | Per-core ring buffer (lock-free) |
 | Egress       | io_uring (blocking) | High          | Per-core ring buffer (lock-free) |
@@ -353,7 +332,6 @@ Optimized for small systems (1-2 CPUs) with 256-byte entries:
 | PacketParser (per-core) | 4,096 entries  | 1 MB              | Called from ingress path   |
 | DataPlane               | 2,048 entries  | 512 KB            | Coordinator messages       |
 | Supervisor              | 1,024 entries  | 256 KB            | Low-frequency control      |
-| ControlPlane            | 1,024 entries  | 256 KB            | Low-frequency async        |
 | Other facilities        | 512 entries    | 128 KB            | Default for utilities      |
 
 **Memory Footprint Examples:**
@@ -431,7 +409,7 @@ pub struct LogRegistry {
 }
 
 impl LogRegistry {
-    // For supervisor/control plane (async, multiple writers)
+    // For supervisor (async, multiple writers)
     pub fn new_mpsc() -> Self;
 
     // For data plane workers (single thread, single writer)
@@ -635,12 +613,11 @@ mcr-control log reset-stats
 ### Phase 3: Integration ✅ COMPLETE
 
 1. ✅ Created `SupervisorLogging` with MPSC buffers and AsyncConsumer
-2. ✅ Created `ControlPlaneLogging` with MPSC buffers and AsyncConsumer
-3. ✅ Created `SharedMemoryLogManager` for data plane cross-process logging
-4. ✅ Created `DataPlaneLogging` for workers to attach to shared memory
-5. ✅ Integrated logging in supervisor, control plane, and data plane workers
-6. ✅ Replaced all debug `println!`/`eprintln!` with structured logging
-7. ✅ Documented intentional remaining prints (pre-logging initialization, CLI tools)
+2. ✅ Created `SharedMemoryLogManager` for data plane cross-process logging
+3. ✅ Created `DataPlaneLogging` for workers to attach to shared memory
+4. ✅ Integrated logging in supervisor and data plane workers
+5. ✅ Replaced all debug `println!`/`eprintln!` with structured logging
+6. ✅ Documented intentional remaining prints (pre-logging initialization, CLI tools)
 
 ### Phase 4: Advanced Features ⏳ AVAILABLE FOR FUTURE ENHANCEMENT
 
@@ -663,7 +640,7 @@ mcr-control log reset-stats
 | Metric                          | Target        | Rationale                           |
 | ------------------------------- | ------------- | ----------------------------------- |
 | Logging latency (data plane)    | < 100ns       | Minimal impact on packet processing |
-| Logging latency (control plane) | < 1µs         | Acceptable for async operations     |
+| Logging latency (supervisor)    | < 1µs         | Acceptable for async operations     |
 | Memory overhead                 | < 100 MB      | Bounded ring buffers                |
 | Log throughput                  | > 1M msgs/sec | High-frequency ingress events       |
 | Overrun rate                    | < 0.01%       | Rarely drop messages                |
