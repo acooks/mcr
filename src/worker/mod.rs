@@ -10,7 +10,6 @@ use tokio::sync::Mutex;
 pub mod adaptive_wakeup;
 pub mod buffer_pool;
 pub mod command_reader;
-pub mod data_plane;
 pub mod data_plane_integrated;
 pub mod packet_parser;
 pub mod unified_loop;
