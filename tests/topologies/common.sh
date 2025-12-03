@@ -118,7 +118,7 @@ DEFAULT_SEND_RATE=500000      # 500k pps target
 # Timeout constants (in seconds) - can be overridden before sourcing
 TIMEOUT_INTERFACE_READY="${TIMEOUT_INTERFACE_READY:-5}"    # Wait for interface UP state
 TIMEOUT_BRIDGE_FORWARD="${TIMEOUT_BRIDGE_FORWARD:-10}"     # Wait for bridge STP forwarding
-TIMEOUT_SOCKET_READY="${TIMEOUT_SOCKET_READY:-15}"         # Wait for control socket creation
+TIMEOUT_SOCKET_READY="${TIMEOUT_SOCKET_READY:-30}"         # Wait for control socket creation (CI can be slow)
 TIMEOUT_GRACEFUL_SHUTDOWN="${TIMEOUT_GRACEFUL_SHUTDOWN:-2}" # Wait for graceful SIGTERM exit
 
 # --- Logging Utilities ---
@@ -261,8 +261,9 @@ start_mcr() {
 
     log_info "Starting $name (interface: $interface, socket: $control_socket, CPU core: $core_id)"
 
-    # Clean up any existing sockets
+    # Clean up any stale files from previous runs (prevents collision between tests)
     rm -f "$control_socket"
+    rm -f "$log_file"
 
     # Wait for interface to be ready (critical for network namespace timing)
     local timeout=$TIMEOUT_INTERFACE_READY
@@ -329,10 +330,18 @@ wait_for_sockets() {
     local start=$(date +%s)
 
     for socket in "$@"; do
+        # Derive log file from socket path (e.g., /tmp/mcr1.sock -> /tmp/mcr1.log)
+        local log_file="${socket%.sock}.log"
+
         # Phase 1: Wait for socket file to exist
         while ! [ -S "$socket" ]; do
             if [ "$(($(date +%s) - start))" -gt "$timeout" ]; then
                 log_error "Timeout waiting for socket file: $socket"
+                # Show MCR log to help debug why it didn't start
+                if [ -f "$log_file" ]; then
+                    log_error "MCR log ($log_file):"
+                    tail -20 "$log_file" >&2 || true
+                fi
                 return 1
             fi
             sleep 0.1
