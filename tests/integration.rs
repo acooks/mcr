@@ -49,8 +49,7 @@ mod test_topologies; // Multi-hop and fanout topology tests (requires root)
 // REMOVED: 4 tests from log_level_control.rs - redundant with supervisor unit tests (kept 2 IPC tests)
 
 // DEFERRED: supervisor_resilience.rs - needs complete rewrite for current supervisor API
-// This contains 7 important tests that should be implemented after Phase 2-3 completion:
-// - test_supervisor_restarts_control_plane_worker
+// This contains 6 important tests that should be implemented after Phase 2-3 completion:
 // - test_supervisor_restarts_data_plane_worker
 // - test_supervisor_resyncs_rules_on_restart
 // - test_supervisor_applies_exponential_backoff
