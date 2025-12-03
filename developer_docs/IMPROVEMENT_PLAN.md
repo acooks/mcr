@@ -42,14 +42,6 @@ Currently all workers receive all rules. Implement `rule_hash(group, port) % num
 
 **Effort:** 2-3 days
 
-### Control Plane Architecture Decision
-
-**Location:** `src/worker/control_plane.rs`
-
-Decide role: (A) Stats aggregator only, (B) Authoritative state holder, or (C) Remove entirely.
-
-**Effort:** 2-3 days after decision
-
 ### Automated Drift Recovery
 
 Phase 1 (detection) complete. Phase 2 needs: workers report ruleset hash, supervisor compares and triggers sync/restart on mismatch.
@@ -62,10 +54,7 @@ Phase 1 (detection) complete. Phase 2 needs: workers report ruleset hash, superv
 
 ### Test Coverage Gaps
 
-- `tests/integration/supervisor_resilience.rs:471` - namespace test (`#[ignore]`, needs root)
-
-Note: `rule_dispatch.rs` and `network_monitor.rs` are orphaned code (not compiled) - related to
-Control Plane Architecture decision above. `supervisor_resilience.rs:283` test is implemented.
+- `tests/integration/supervisor_resilience.rs` - namespace test (`#[ignore]`, needs root)
 
 **Effort:** 2-3 days
 
@@ -105,7 +94,7 @@ Node.js dependencies removed but history bloated (6,044 files). Recommend docume
 
 ## Roadmap
 
-**Near-term:** Test coverage gaps, Control plane architecture decision
+**Near-term:** Test coverage gaps
 
 **Medium-term:** AF_PACKET FD passing, Rule hashing, Network reconciliation
 

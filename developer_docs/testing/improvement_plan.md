@@ -46,8 +46,8 @@ Based on comprehensive analysis (see `/tmp/test_coverage_analysis.md`), the MCR 
        }
 
        #[tokio::test]
-       async fn test_control_plane_initialization() {
-           // Test CP worker spawns and registers correctly
+       async fn test_supervisor_initialization() {
+           // Test supervisor initializes and spawns workers correctly
        }
 
        #[tokio::test]
@@ -191,7 +191,6 @@ Key findings from cargo tarpaulin:
 - **`worker/adaptive_wakeup.rs`: 3% (2/71 lines)**
 - **`main.rs`: 0% (0/51 lines)**
 - `worker/mod.rs`: 8% (10/133 lines)
-- `worker/control_plane.rs`: 53% (36/68 lines) - Room for improvement
 - `logging/mod.rs`: 0% (0/8 lines)
 
 ### Coverage Report

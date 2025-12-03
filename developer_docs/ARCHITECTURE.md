@@ -23,28 +23,25 @@ This document describes both **current implementation** and **target architectur
 
 **✅ Fully Implemented:**
 
-- Multi-process architecture with supervisor and worker processes
+- Multi-process architecture with supervisor and data plane worker processes
 - Unified io_uring-based data plane for packet forwarding
-- JSON-based control plane protocol (AddRule, RemoveRule, ListRules, ListWorkers)
-- Control plane worker privilege dropping
+- JSON-based control protocol (AddRule, RemoveRule, ListRules, ListWorkers)
 - Fire-and-forget command delivery to workers
 - Hash-based ruleset drift detection (manual, via logs)
+- Real-time statistics aggregation (pipe-based IPC from workers to supervisor)
+- Worker process monitoring and restart with rule resynchronization
+- Periodic health checks (250ms with auto-restart + SyncRules)
+- Protocol versioning (PROTOCOL_VERSION, GetVersion command)
 
 **⚠️ Partially Implemented:**
 
-- Statistics aggregation infrastructure exists, but data plane workers don't push stats
-- Worker process monitoring and restart (but without rule resynchronization)
-- Observability via GetStats (returns empty/stale data without stats pushing)
+- Observability via GetStats (functional, aggregates stats from all workers)
 
 **❌ Not Yet Implemented:**
 
 - Rule hashing to specific CPU cores (all workers receive all rules)
-- Automatic rule resynchronization when workers restart
-- Proactive statistics pushing from data plane to control plane
-- Automated drift detection and recovery
+- Automated drift detection and recovery (Phase 2 - detection complete, recovery pending)
 - Network state reconciliation via Netlink
-- Periodic health checks
-- Protocol versioning
 - On-demand packet tracing
 - Data plane worker privilege dropping (AF_PACKET FD passing)
 
@@ -184,13 +181,13 @@ flowchart LR
 - **Egress Path and Zero-Copy Fan-Out:** MCR now supports high-performance, multi-output "fan-out." When a packet needs to be forwarded to multiple destinations, the payload of the single received packet is wrapped in a reference-counted pointer (`Arc<[u8]>`). This allows the same memory to be queued for sending on multiple egress sockets without any memory copying, which is critical for scalable performance. This also applies to single-output forwarding, eliminating the previous `memcpy` overhead.
 
   The application utilizes three distinct egress paths:
-  1. **Control Plane:** Uses `AF_UNIX` sockets for local IPC. MTU is not applicable.
+  1. **Control Interface:** Uses `AF_UNIX` sockets for local IPC. MTU is not applicable.
   2. **IGMP Signaling:** Uses `AF_INET` sockets managed by the Supervisor. MTU is not a practical concern.
   3. **Fast Data Path:** Uses `AF_INET` sockets managed by the data plane workers. This is the exclusive subject of all high-performance design decisions concerning MTU handling, fragmentation, and NIC offloading.
 
-- **Egress Error Handling:** The application will use a "Drop and Count" strategy for transient egress errors. Packets that fail to send due to transient errors will be dropped immediately, with no retry mechanism, to preserve low latency and prevent head-of-line blocking. A new metric, `egress_errors_total`, will be tracked on a per-output-destination basis and exposed via the control plane to provide immediate visibility into egress failures.
+- **Egress Error Handling:** The application will use a "Drop and Count" strategy for transient egress errors. Packets that fail to send due to transient errors will be dropped immediately, with no retry mechanism, to preserve low latency and prevent head-of-line blocking. A new metric, `egress_errors_total`, will be tracked on a per-output-destination basis and exposed via the control interface to provide immediate visibility into egress failures.
 
-- **No IP Reassembly:** The application will not support IP fragmentation. The data plane will inspect the IP header of every incoming packet to identify fragments. Any packet identified as a fragment (either the first, middle, or last) will be immediately dropped. A new metric, `ip_fragments_dropped_total`, will be tracked on a per-core basis and exposed via the control plane to make the presence of fragmented traffic visible to the operator.
+- **No IP Reassembly:** The application will not support IP fragmentation. The data plane will inspect the IP header of every incoming packet to identify fragments. Any packet identified as a fragment (either the first, middle, or last) will be immediately dropped. A new metric, `ip_fragments_dropped_total`, will be tracked on a per-core basis and exposed via the control interface to make the presence of fragmented traffic visible to the operator.
 
 - **Egress Fragmentation by Kernel:** The application will not implement userspace IP fragmentation. It will always present the complete, reconstructed datagram (UDP payload) to the egress `AF_INET` socket, regardless of size. The application will rely entirely on the Linux kernel's IP stack to perform any necessary fragmentation on the egress path if a packet's size exceeds the egress interface's MTU. The operational documentation will strongly recommend that operators maintain consistent MTU sizes across the data path to avoid performance degradation from fragmentation, and will instruct them to use tools like `netstat` to monitor for kernel-level fragmentation.
 
@@ -200,60 +197,53 @@ flowchart LR
 
 - **Nuanced NIC Offloading:** For the application to function correctly, NIC offloading features that coalesce packets must be disabled on all ingress interfaces. Generic Receive Offload (GRO) and Large Receive Offload (LRO) **must be disabled** on all `input_interface`s. These features are fundamentally incompatible with the application's `AF_PACKET` processing model and can cause artificial jumbo frames, leading to unnecessary egress fragmentation. For egress offloads (GSO/TSO), the recommendation depends on the operator's goal: for handling MTU mismatches, it is **recommended to enable** GSO/TSO on the egress interface; for maximum predictability or performance testing, it is **recommended to disable** GSO/TSO. These explicit, nuanced recommendations will be a critical part of the operational documentation.
 
-## 5. The Control Plane
+## 5. The Control Interface
 
-The control plane provides the mechanism for runtime configuration and monitoring.
+The control interface provides runtime configuration and monitoring. The supervisor handles all control operations directly via a Unix domain socket.
 
-- **Centralized RPC Server:** A single, centralized `control_plane_task` runs within the application.
-- **Communication:** It listens on a single Unix Domain Socket for local, secure communication.
-- **Protocol:** It uses a **JSON**-based protocol for commands and responses. This was chosen for ease of debugging, testing, and future interoperability over the negligible performance gains of a binary format for this interface.
-- **Server-Side Idempotency:** The control plane ensures client recovery and idempotency through a server-side mechanism. The supervisor generates a unique ID for each new rule upon creation, and this ID is returned in the `AddRule` success response. The `ListRules` command is the primary mechanism for a client to reconcile its state after a disconnect or timeout. The `AddRule` command retains "create new rule" semantics.
+- **Centralized in Supervisor:** Control socket handling runs within the supervisor's tokio async runtime.
+- **Communication:** Listens on a Unix Domain Socket for local, secure communication.
+- **Protocol:** Uses a **JSON**-based protocol for commands and responses. This was chosen for ease of debugging, testing, and future interoperability over the negligible performance gains of a binary format for this interface.
+- **Protocol Versioning:** A `PROTOCOL_VERSION` constant is compiled into the application. The `GetVersion` command returns this version for client compatibility checks.
+- **Server-Side Idempotency:** The supervisor generates a unique ID for each new rule upon creation, and this ID is returned in the `AddRule` success response. The `ListRules` command is the primary mechanism for a client to reconcile its state after a disconnect or timeout.
 
 ### Rule Assignment
 
 - **Rule-to-Core Assignment Strategy (NOT IMPLEMENTED):** _Future work:_ The application is designed to use a hybrid strategy for assigning forwarding rules to data plane cores using a consistent hash of the rule's stable identifiers (e.g., `input_group`, `input_port`). **Current implementation:** All rules are broadcast to all data plane workers. Each worker maintains a complete copy of the ruleset and processes packets for any matching rule. This simplifies implementation but reduces cache locality and limits scalability.
 
-- **Decoupled Statistics Aggregation (PARTIALLY IMPLEMENTED):** The infrastructure for statistics aggregation exists but is not fully wired up:
-  - **Implemented:** A dedicated `StatsAggregator` task (`stats_aggregator_task`) runs in the control plane worker and can receive statistics via a channel.
-  - **NOT IMPLEMENTED:** Data plane workers do not currently push their state and metrics to the aggregator. The `stats_tx` channel exists in data plane workers but is unused.
-  - **Current Behavior:** The `GetStats` command returns data only from the control plane's `shared_flows` HashMap, which is populated by the stats aggregator task. Since data plane workers don't push stats, this HashMap may be empty or stale.
-  - **ListRules works:** The `ListRules` command correctly returns the supervisor's authoritative `master_rules` state.
-
-- **Strict Protocol Versioning (NOT IMPLEMENTED):** _Future work:_ The control plane protocol will use a strict, fail-fast versioning scheme. A single, shared `PROTOCOL_VERSION` constant will be defined and compiled into both the server and client. The first message on any new connection must be a `VersionCheck` from the client. The server will compare the client's version to its own; if they do not match exactly, the server will respond with a `VersionMismatch` error and close the connection. Any change to the JSON protocol requires incrementing the shared `PROTOCOL_VERSION` constant.
+- **Statistics Aggregation:** Data plane workers push statistics to the supervisor via pipes. The supervisor aggregates stats from all workers and returns them via the `GetStats` command.
 
 - **Command Dispatch via Unix Sockets (Fire-and-Forget):** Communication from the Supervisor to the data plane worker processes uses a dedicated `UnixStream` socket pair for each worker.
-  - The Supervisor serializes commands (e.g., `AddRule`, `RemoveRule`) into a length-prefixed JSON payload and writes them to its end of the socket using its `tokio` runtime.
+  - The Supervisor serializes commands (e.g., `AddRule`, `RemoveRule`, `SyncRules`) into a length-prefixed JSON payload and writes them to its end of the socket using its `tokio` runtime.
   - The worker's `io_uring` runtime polls its end of the socket. When data arrives, a command reader parses the length-prefixed JSON back into a command struct for processing.
-  - This mechanism acts as a bridge between the supervisor's `tokio`-based control plane and the worker's `io_uring`-based data plane.
+  - This mechanism bridges the supervisor's `tokio`-based async runtime and the worker's `io_uring`-based data plane.
 
   **Reliability Characteristics:**
   - **Fire-and-Forget Delivery:** The supervisor broadcasts commands to all workers asynchronously. Send errors are **explicitly ignored** to prioritize supervisor responsiveness over guaranteed delivery.
   - **No Acknowledgments:** Workers do not send acknowledgments when they receive or process commands.
   - **No Retries:** Failed sends are not retried. If a worker's socket buffer is full or the worker is unresponsive, the command is silently lost.
   - **Eventual Consistency:** The system is designed for eventual consistency. The supervisor's `master_rules` HashMap is the authoritative source of truth. Workers may temporarily have stale state due to lost broadcasts.
+  - **Rule Resynchronization:** When workers restart, the supervisor sends a `SyncRules` command with the complete ruleset. Periodic health checks (every 250ms) detect dead workers and trigger automatic restart with rule resync.
   - **Drift Detection:** Hash-based drift detection enables manual detection of workers with stale rulesets by comparing hash values in log output. Each component (supervisor, workers) logs a hash of its ruleset when rules change.
 
 ## 6. Monitoring and Hotspot Strategy
 
 - **Hotspot Management (Observe, Don't Act):** The initial design will not implement an automatic hotspot mitigation strategy. Instead, it will rely on a robust, **core-aware monitoring system** to make any potential single-core saturation observable to the operator.
 
-  **Current Status (PARTIALLY IMPLEMENTED):**
-  - **Infrastructure exists:** Statistics aggregation task and data structures are in place.
-  - **NOT wired up:** Data plane workers do not currently push per-core packet rates and CPU utilization metrics to the aggregator (see Section 5 "Decoupled Statistics Aggregation").
-  - **Manual monitoring:** Operators can use standard tools (`top`, `htop`) to observe per-core CPU usage, but per-flow statistics are not available.
+  **Current Status:**
+  - **Statistics Collection:** Data plane workers push per-flow statistics (packets/bytes relayed, packets/bits per second) to the supervisor via pipes.
+  - **Aggregation:** The supervisor aggregates statistics from all workers, summing counters and rates for flows handled by multiple workers (via PACKET_FANOUT_CPU).
+  - **Manual monitoring:** Operators can use standard tools (`top`, `htop`) to observe per-core CPU usage.
 
-- **Custom Observability via Control Plane (PARTIALLY FUNCTIONAL):** The application provides observability through its control plane, compensating for the lack of visibility from standard networking tools like `netstat`.
+- **Custom Observability via Control Interface:** The application provides observability through its control interface, compensating for the lack of visibility from standard networking tools like `netstat`.
 
-  **What Works:**
-  - **ListRules:** Returns the complete forwarding table from the supervisor's authoritative `master_rules`. This is fully functional and reliable.
+  **Available Commands:**
+  - **ListRules:** Returns the complete forwarding table from the supervisor's authoritative `master_rules`.
   - **ListWorkers:** Returns information about all spawned worker processes (PID, type, core assignment).
+  - **GetStats:** Returns aggregated statistics from all data plane workers (packets/bytes relayed, rates per flow).
+  - **GetVersion:** Returns the protocol version for client compatibility checks.
 
-  **What Doesn't Work:**
-  - **GetStats:** Returns data from the control plane's `shared_flows` HashMap. Since data plane workers don't push stats (see Section 5), this may return empty or stale data.
-  - **Per-core metrics:** Not available until stats pushing is implemented.
-  - **Per-destination granularity:** Not implemented; stats (when available) are aggregated at the rule level.
-
-- **On-Demand Packet Tracing (NOT IMPLEMENTED):** _Future work:_ The application will implement a low-impact, on-demand packet tracing capability. Tracing will be configurable on a per-rule basis via control plane commands (`EnableTrace`, `DisableTrace`, `GetTrace`) and disabled by default. Each data plane worker will maintain a pre-allocated, in-memory ring buffer to store key diagnostic events for packets matching an enabled rule. The `GetTrace` command will retrieve these events, providing a detailed, chronological log of a packet's lifecycle or the reason for its drop.
+- **On-Demand Packet Tracing (NOT IMPLEMENTED):** _Future work:_ The application will implement a low-impact, on-demand packet tracing capability. Tracing will be configurable on a per-rule basis via control interface commands (`EnableTrace`, `DisableTrace`, `GetTrace`) and disabled by default. Each data plane worker will maintain a pre-allocated, in-memory ring buffer to store key diagnostic events for packets matching an enabled rule. The `GetTrace` command will retrieve these events, providing a detailed, chronological log of a packet's lifecycle or the reason for its drop.
 
 ## 7. Logging Architecture
 
@@ -275,88 +265,30 @@ The statistics reporting system must respect critical fast path constraints to m
 4. **No Dynamic Allocation:** Memory allocation in the fast path causes unpredictable latency.
 5. **Fire-and-Forget Only:** Data plane should push stats asynchronously, never respond to queries.
 
-**Architectural Decision:** Data plane workers **push** statistics periodically to the control plane/supervisor. They do NOT handle request-response IPC (no stats queries). This keeps the data plane event loop simple and focused solely on packet forwarding.
+**Architectural Decision:** Data plane workers **push** statistics periodically to the supervisor via pipes. They do NOT handle request-response IPC (no stats queries). This keeps the data plane event loop simple and focused solely on packet forwarding.
 
-### Current Implementation (PARTIALLY COMPLETE)
+### Current Implementation
 
-**✅ Implemented:**
+**✅ Fully Implemented:**
 
 - Per-flow counters tracked in data plane workers (`flow_counters: HashMap<(Ipv4Addr, u16), FlowCounters>`)
 - Rate calculation (packets_per_second, bits_per_second) using snapshot-based deltas
-- Periodic logging of stats to structured logs (`[FLOW_STATS]` marker)
-- Stats aggregator infrastructure exists in control plane worker (`stats_aggregator_task`)
-- Control plane has `shared_flows` HashMap ready to receive stats
+- Pipe-based IPC: Workers write stats to dedicated pipes, supervisor reads asynchronously
+- Supervisor aggregates stats from all workers (summing counters and rates for PACKET_FANOUT flows)
+- `GetStats` returns real aggregated data
 
-**❌ Not Implemented:**
+**Implementation Details:**
 
-- IPC mechanism for data plane to push stats to control plane
-- Supervisor reading stats from workers and feeding to aggregator
-- GetStats returning real data (currently returns zeros)
-
-### Design Trade-Offs and Alternatives
-
-| Approach | Fast Path Impact | Complexity | Proven | Trade-Offs |
-|----------|-----------------|------------|--------|------------|
-| **Option 1: Unix Pipes** | Periodic `write()` syscall + JSON serialization | Low (reuse logging pattern) | ✅ Yes (logs) | Simple, kernel-managed, but syscall overhead |
-| **Option 2: Shared Memory Ring Buffer** | Atomic writes only (no syscalls) | High (shm_open, mmap, cleanup) | ❌ No (code exists, unused) | Zero-overhead writes, but complex and unproven |
-| **Option 3: Unix Domain Sockets** | Similar to pipes | Medium | Partial | Message boundaries, but more complex than pipes |
-| **Option 4: Logs Only** | None (already logging) | None | ✅ Yes | No new code, but GetStats API non-functional |
-
-### Selected Approach: Pipe-Based (Pragmatic Compromise)
-
-**Decision:** Use Unix pipes for stats reporting, mirroring the proven logging architecture.
-
-**Rationale:**
-
-- **Proven Pattern:** Pipes already work reliably for cross-process logging
-- **Kernel-Managed Buffering:** Aligns with Architectural Principle #2 (kernel-managed state)
-- **Fire-and-Forget:** Non-blocking writes preserve data plane responsiveness
-- **Minimal Complexity:** Reuses existing supervisor infrastructure for pipe reading
-- **Acceptable Overhead:** Periodic syscall is off the critical per-packet path
+1. **Worker → Supervisor:** Stats written to dedicated pipe per worker (JSON-serialized `Vec<FlowStats>`)
+2. **Timing:** Stats pushed at configurable reporting interval (default 10 seconds)
+3. **Non-blocking:** Workers use non-blocking writes; on buffer full, update is dropped
+4. **Aggregation:** Supervisor sums stats across workers for flows distributed via PACKET_FANOUT_CPU
 
 **Performance Characteristics:**
 
-- Stats written during existing periodic check (same cadence as logging)
-- Write batched with rule hash logging (amortized overhead)
-- If pipe buffer full, write fails gracefully (drop stats update, continue processing)
+- Stats written during periodic interval (off critical per-packet path)
+- Fire-and-forget: write failures don't block packet processing
 - Overhead: ~1 `write()` syscall per reporting interval per worker
-
-### Planned Implementation
-
-#### Phase 1: Infrastructure (Current)
-
-- ✅ Data plane tracks per-flow counters
-- ✅ Rate calculation implemented
-- ✅ Periodic logging working
-- ✅ Stats aggregator ready
-
-#### Phase 2: Pipe-Based IPC (Planned)
-
-1. **Supervisor:** Create stats pipe for each data plane worker (alongside log pipe)
-2. **Data Plane:** Periodically serialize `Vec<FlowStats>` to JSON and write to stats pipe
-   - Timing: During existing periodic check (same as logging)
-   - Non-blocking write via `fcntl(O_NONBLOCK)`
-   - On error: drop update, log warning, continue processing
-3. **Supervisor:** Async task reads from stats pipes (tokio)
-4. **Supervisor:** Deserialize and send to `stats_aggregator_task` via tokio mpsc channel
-5. **Control Plane:** Aggregator updates `shared_flows` HashMap
-6. **Control Plane:** GetStats returns current data from HashMap
-
-#### Phase 3: Optimization (Future)
-
-- Monitor pipe write overhead via metrics
-- If profiling shows significant impact, migrate to shared memory ring buffer
-- Maintain pipe-based as fallback for simplicity
-
-### Alternative: Shared Memory (Future Work)
-
-Shared memory ring buffers (`SharedSPSCRingBuffer`) exist in the codebase for potential future use. This approach would eliminate syscall overhead entirely but requires:
-
-- Proper cleanup on worker crashes (`shm_unlink`)
-- More complex error handling
-- Testing and validation in production workloads
-
-**Decision Criteria for Migration:** Only migrate to shared memory if profiling demonstrates that pipe write overhead is a measurable bottleneck in production traffic scenarios (>1% CPU or >100μs latency impact).
 
 ### Fast Path Guarantee
 
@@ -385,11 +317,11 @@ Shared memory ring buffers (`SharedSPSCRingBuffer`) exist in the codebase for po
   **Critical Limitation - No Rule Resynchronization:**
   - When a worker process is restarted, it starts with an **empty ruleset**.
   - The supervisor **does not** automatically send existing rules to newly started workers.
-  - **Impact:** A restarted worker will drop all traffic until new rules are explicitly added via the control plane, or the supervisor is restarted.
-  - **Workaround:** Manual intervention required - operators must re-add all rules, or restart the supervisor entirely.
+  - **Impact:** ~~A restarted worker will drop all traffic until new rules are explicitly added.~~ **RESOLVED:** Workers now receive `SyncRules` on restart.
+  - **Current Behavior:** When a worker restarts, the supervisor automatically sends a `SyncRules` command with the complete ruleset.
 
 - **Worker Drift Detection (IMPLEMENTED):** Hash-based drift detection enables manual identification of workers with stale rulesets:
-  - Each component (supervisor, data plane workers, control plane) logs a hash of its ruleset when rules change.
+  - Each component (supervisor, data plane workers) logs a hash of its ruleset when rules change.
   - Operators can compare hashes in logs to detect when worker state diverges from supervisor's authoritative `master_rules`.
   - **Manual process:** No automated comparison or recovery yet.
 
@@ -397,51 +329,30 @@ Shared memory ring buffers (`SharedSPSCRingBuffer`) exist in the codebase for po
 
 ### Supervisor Lifecycle Management
 
-**Current Actual Behavior:**
+**Current Behavior:**
 
 ```mermaid
 stateDiagram-v2
     [*] --> Initializing
-    Initializing --> Running: All workers spawned
+    Initializing --> Running: All workers spawned + SyncRules sent
 
     state Running {
         [*] --> MonitoringWorkers
-        MonitoringWorkers --> WorkerCrashed: Worker panic/exit
-        WorkerCrashed --> BackoffDelay: failure_count++
-        BackoffDelay --> RespawningWorker: After delay
-        RespawningWorker --> MonitoringWorkers: Worker restarted (EMPTY RULESET)
-        note right of MonitoringWorkers
-            CRITICAL LIMITATION:
-            Restarted workers do NOT
-            receive existing rules.
-            Traffic drops until manual
-            intervention.
-        end note
-    }
-
-    Running --> ShuttingDown: SIGTERM/SIGINT
-    ShuttingDown --> [*]: All workers stopped
-```
-
-**Target Behavior (NOT YET IMPLEMENTED):**
-
-```mermaid
-stateDiagram-v2
-    [*] --> Initializing
-    Initializing --> Running: All workers spawned
-
-    state Running {
-        [*] --> MonitoringWorkers
-        MonitoringWorkers --> WorkerCrashed: Worker panic/exit
+        MonitoringWorkers --> WorkerCrashed: Worker panic/exit (250ms health check)
         WorkerCrashed --> BackoffDelay: failure_count++
         BackoffDelay --> RespawningWorker: After delay
         RespawningWorker --> ResyncingRules: Worker restarted
-        ResyncingRules --> MonitoringWorkers: Full ruleset sent
+        ResyncingRules --> MonitoringWorkers: SyncRules sent
     }
 
     Running --> ShuttingDown: SIGTERM/SIGINT
     ShuttingDown --> [*]: All workers stopped
 ```
+
+- Workers receive full ruleset via `SyncRules` on initial startup
+- Health checks run every 250ms to detect crashed workers
+- Crashed workers are restarted with exponential backoff
+- Restarted workers receive `SyncRules` with complete ruleset
 
 ## 10. Security and Privilege Model
 
@@ -451,17 +362,14 @@ stateDiagram-v2
 
 The application uses a **multi-process architecture** where components run as separate OS processes:
 
-- **Supervisor Process**: Main tokio-based async process that spawns and monitors workers
-- **Control Plane Worker**: Separate process spawned by supervisor
+- **Supervisor Process**: Main tokio-based async process that spawns and monitors workers, handles control socket
 - **Data Plane Workers**: Separate processes, one per CPU core
 
 Each worker is spawned as a separate OS process with its own PID using `tokio::process::Command`.
 
 **Privilege Separation Status:**
 
-✅ **Control Plane Worker**: Successfully drops privileges to unprivileged user (`nobody:nobody` or configured user) immediately after startup. This worker handles runtime configuration and management without requiring elevated privileges.
-
-⚠️ **Data Plane Workers**: Currently **do NOT drop privileges** and run as root. This is a known limitation documented in the code (see `src/worker/mod.rs:283-307`). Data plane workers require `CAP_NET_RAW` to create `AF_PACKET` sockets, and the ambient capabilities workaround doesn't survive `setuid()`.
+⚠️ **Data Plane Workers**: Currently **do NOT drop privileges** and run as root. This is a known limitation documented in the code (see `src/worker/mod.rs`). Data plane workers require `CAP_NET_RAW` to create `AF_PACKET` sockets, and the ambient capabilities workaround doesn't survive `setuid()`.
 
 **Target Architecture (Future Work):**
 
