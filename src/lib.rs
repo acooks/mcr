@@ -90,14 +90,6 @@ pub enum Command {
     },
 }
 
-#[derive(Debug, Clone)]
-pub struct ControlPlaneConfig {
-    pub uid: Option<u32>,
-    pub gid: Option<u32>,
-    pub relay_command_socket_path: PathBuf,
-    pub reporting_interval: u64,
-}
-
 pub struct DataPlaneConfig {
     pub uid: Option<u32>,
     pub gid: Option<u32>,

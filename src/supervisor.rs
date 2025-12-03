@@ -87,7 +87,6 @@ fn validate_port(port: u16, context: &str) -> Result<(), String> {
 /// Differentiates worker types for unified handling
 #[derive(Debug, Clone, PartialEq)]
 enum WorkerType {
-    ControlPlane,
     DataPlane { core_id: u32 },
 }
 
@@ -97,11 +96,8 @@ struct Worker {
     worker_type: WorkerType,
     child: Child,
     // Data plane workers have TWO command streams (ingress + egress)
-    // Control plane workers have ONE command stream
     ingress_cmd_stream: Option<Arc<tokio::sync::Mutex<UnixStream>>>,
     egress_cmd_stream: Option<Arc<tokio::sync::Mutex<UnixStream>>>,
-    #[allow(dead_code)] // Used for Request::ListRules debugging (see Section 8.2.6)
-    req_stream: Option<Arc<tokio::sync::Mutex<UnixStream>>>, // Request stream for control plane (Request::ListRules etc, used by GetWorkerRules)
     #[allow(dead_code)] // Reserved for future log aggregation feature
     log_pipe: Option<std::os::unix::io::OwnedFd>, // Pipe for reading worker's stderr (JSON logs)
     #[allow(dead_code)] // Reserved for future stats aggregation feature
@@ -356,57 +352,6 @@ pub fn handle_supervisor_command(
     }
 }
 
-pub async fn spawn_control_plane_worker(
-    uid: u32,
-    gid: u32,
-    relay_command_socket_path: PathBuf,
-    logger: &crate::logging::Logger,
-) -> Result<(Child, UnixStream, UnixStream)> {
-    logger.info(Facility::Supervisor, "Spawning Control Plane worker");
-
-    // Create the supervisor-worker communication socket pair
-    // This will be passed as FD 3 to the worker
-    let (supervisor_sock, worker_sock) = UnixStream::pair()?;
-
-    // Keep worker_sock alive as FD 3 for the child process
-    let worker_sock_std = worker_sock.into_std()?;
-    let worker_fd = worker_sock_std.into_raw_fd();
-
-    let mut command = Command::new(std::env::current_exe()?);
-    command
-        .arg("worker")
-        .arg("--uid")
-        .arg(uid.to_string())
-        .arg("--gid")
-        .arg(gid.to_string())
-        .arg("--relay-command-socket-path")
-        .arg(relay_command_socket_path)
-        .process_group(0); // Put worker in its own process group to prevent SIGTERM propagation
-
-    // Ensure worker_sock becomes FD 3 in the child
-    unsafe {
-        command.pre_exec(move || {
-            // Dup worker_fd to FD 3
-            if worker_fd != 3 {
-                if libc::dup2(worker_fd, 3) == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                if libc::close(worker_fd) == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-            }
-            Ok(())
-        });
-    }
-
-    let child = command.spawn()?;
-
-    // Send request socket pair (used for Request::ListRules and similar requests)
-    let req_supervisor_stream = create_and_send_socketpair(&supervisor_sock).await?;
-
-    Ok((child, supervisor_sock, req_supervisor_stream))
-}
-
 pub async fn spawn_data_plane_worker(
     core_id: u32,
     _uid: u32,
@@ -599,41 +544,6 @@ impl WorkerManager {
         }
     }
 
-    /// Spawn the control plane worker
-    async fn spawn_control_plane(&mut self) -> Result<()> {
-        let (child, cmd_stream, req_stream) = spawn_control_plane_worker(
-            self.uid,
-            self.gid,
-            self.relay_command_socket_path.clone(),
-            &self.logger,
-        )
-        .await?;
-
-        let pid = child.id().unwrap();
-        let cmd_stream_arc = Arc::new(tokio::sync::Mutex::new(cmd_stream));
-        let req_stream_arc = Arc::new(tokio::sync::Mutex::new(req_stream));
-
-        // Store worker info - control plane only has one command stream
-        self.workers.insert(
-            pid,
-            Worker {
-                pid,
-                worker_type: WorkerType::ControlPlane,
-                child,
-                ingress_cmd_stream: Some(cmd_stream_arc.clone()),
-                egress_cmd_stream: Some(cmd_stream_arc), // Same stream for CP
-                req_stream: Some(req_stream_arc),
-                log_pipe: None,   // Control plane uses MPSC ring buffer
-                stats_pipe: None, // Control plane doesn't have stats pipe
-            },
-        );
-
-        // Initialize backoff counter (core_id 0 for CP)
-        self.backoff_counters.insert(0, INITIAL_BACKOFF_MS);
-
-        Ok(())
-    }
-
     /// Spawn a data plane worker for the given core
     async fn spawn_data_plane(&mut self, core_id: u32) -> Result<()> {
         let (child, ingress_cmd_stream, egress_cmd_stream, log_pipe, stats_pipe) =
@@ -661,7 +571,6 @@ impl WorkerManager {
                 child,
                 ingress_cmd_stream: Some(ingress_cmd_stream_arc),
                 egress_cmd_stream: Some(egress_cmd_stream_arc),
-                req_stream: None, // Data plane workers don't use req_stream
                 log_pipe,
                 stats_pipe,
             },
@@ -686,21 +595,13 @@ impl WorkerManager {
         Ok(())
     }
 
-    /// Spawn all initial workers (1 CP + N DP workers)
+    /// Spawn all initial data plane workers
     async fn spawn_all_initial_workers(&mut self) -> Result<()> {
         log_info!(
             self.logger,
             Facility::Supervisor,
             &format!("Starting with {} data plane workers", self.num_cores)
         );
-
-        // Spawn control plane worker
-        log_info!(
-            self.logger,
-            Facility::Supervisor,
-            "Spawning Control Plane worker"
-        );
-        self.spawn_control_plane().await?;
 
         // Spawn data plane workers
         for core_id in 0..self.num_cores as u32 {
@@ -736,63 +637,36 @@ impl WorkerManager {
         // Remove from workers map
         let _worker = self.workers.remove(&pid).unwrap();
 
-        // Restart logic based on worker type
-        match worker_type {
-            WorkerType::ControlPlane => {
-                let backoff = self.backoff_counters.entry(0).or_insert(INITIAL_BACKOFF_MS);
-                if status.success() {
-                    log_info!(
-                        self.logger,
-                        Facility::Supervisor,
-                        "Control Plane worker exited gracefully, restarting immediately"
-                    );
-                    *backoff = INITIAL_BACKOFF_MS;
-                } else {
-                    log_warning!(
-                        self.logger,
-                        Facility::Supervisor,
-                        &format!(
-                            "Control Plane worker failed (status: {}), restarting after {}ms",
-                            status, *backoff
-                        )
-                    );
-                    sleep(Duration::from_millis(*backoff)).await;
-                    *backoff = (*backoff * 2).min(MAX_BACKOFF_MS);
-                }
-                self.spawn_control_plane().await?;
-                Ok(Some((pid, false)))
-            }
-            WorkerType::DataPlane { core_id } => {
-                let backoff = self
-                    .backoff_counters
-                    .entry(core_id + 1)
-                    .or_insert(INITIAL_BACKOFF_MS);
-                if status.success() {
-                    log_info!(
-                        self.logger,
-                        Facility::Supervisor,
-                        &format!(
-                            "Data Plane worker (core {}) exited gracefully, restarting immediately",
-                            core_id
-                        )
-                    );
-                    *backoff = INITIAL_BACKOFF_MS;
-                } else {
-                    log_warning!(
-                        self.logger,
-                        Facility::Supervisor,
-                        &format!(
-                            "Data Plane worker (core {}) failed (status: {}), restarting after {}ms",
-                            core_id, status, *backoff
-                        )
-                    );
-                    sleep(Duration::from_millis(*backoff)).await;
-                    *backoff = (*backoff * 2).min(MAX_BACKOFF_MS);
-                }
-                self.spawn_data_plane(core_id).await?;
-                Ok(Some((pid, true)))
-            }
+        // Restart the data plane worker
+        let WorkerType::DataPlane { core_id } = worker_type;
+        let backoff = self
+            .backoff_counters
+            .entry(core_id + 1)
+            .or_insert(INITIAL_BACKOFF_MS);
+        if status.success() {
+            log_info!(
+                self.logger,
+                Facility::Supervisor,
+                &format!(
+                    "Data Plane worker (core {}) exited gracefully, restarting immediately",
+                    core_id
+                )
+            );
+            *backoff = INITIAL_BACKOFF_MS;
+        } else {
+            log_warning!(
+                self.logger,
+                Facility::Supervisor,
+                &format!(
+                    "Data Plane worker (core {}) failed (status: {}), restarting after {}ms",
+                    core_id, status, *backoff
+                )
+            );
+            sleep(Duration::from_millis(*backoff)).await;
+            *backoff = (*backoff * 2).min(MAX_BACKOFF_MS);
         }
+        self.spawn_data_plane(core_id).await?;
+        Ok(Some((pid, true)))
     }
 
     /// Initiate graceful shutdown of all workers with timeout
@@ -974,16 +848,13 @@ impl WorkerManager {
     fn get_worker_info(&self) -> Vec<crate::WorkerInfo> {
         self.workers
             .values()
-            .map(|w| crate::WorkerInfo {
-                pid: w.pid,
-                worker_type: match &w.worker_type {
-                    WorkerType::ControlPlane => "ControlPlane".to_string(),
-                    WorkerType::DataPlane { .. } => "DataPlane".to_string(),
-                },
-                core_id: match &w.worker_type {
-                    WorkerType::ControlPlane => None,
-                    WorkerType::DataPlane { core_id } => Some(*core_id),
-                },
+            .map(|w| {
+                let WorkerType::DataPlane { core_id } = &w.worker_type;
+                crate::WorkerInfo {
+                    pid: w.pid,
+                    worker_type: "DataPlane".to_string(),
+                    core_id: Some(*core_id),
+                }
             })
             .collect()
     }

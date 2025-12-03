@@ -3,25 +3,20 @@ use anyhow::{Context, Result};
 use nix::sched::{sched_setaffinity, CpuSet};
 use nix::unistd::{getpid, Gid, Uid};
 use std::os::unix::io::{FromRawFd, OwnedFd, RawFd};
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
 
 pub mod adaptive_wakeup;
 pub mod buffer_pool;
 pub mod command_reader;
-pub mod control_plane;
 pub mod data_plane;
 pub mod data_plane_integrated;
 pub mod packet_parser;
-pub mod stats;
 pub mod unified_loop;
 
-#[cfg(feature = "testing")]
-use crate::logging::ControlPlaneLogging;
 use crate::logging::{Facility, Logger};
-use crate::{ControlPlaneConfig, DataPlaneConfig, RelayCommand};
-use control_plane::ControlPlane;
+use crate::{DataPlaneConfig, RelayCommand};
 // Unified single-threaded data plane with io_uring
 use data_plane_integrated::run_unified_data_plane as data_plane_task;
 
@@ -152,73 +147,6 @@ impl<T: AsyncWrite + Unpin> UnixSocketRelayCommandSender<T> {
     }
 }
 
-// --- Worker Entrypoints ---
-
-/// Generic control plane runner for testing purposes (without logging).
-pub async fn run_control_plane_generic<S: AsyncRead + AsyncWrite + Unpin>(
-    supervisor_stream: S,
-    request_stream: UnixStream,
-) -> Result<()> {
-    let control_plane = ControlPlane::new(supervisor_stream, request_stream);
-    control_plane.run().await
-}
-
-/// Generic control plane runner with logger support.
-pub async fn run_control_plane_generic_with_logger<S: AsyncRead + AsyncWrite + Unpin>(
-    supervisor_stream: S,
-    request_stream: UnixStream,
-    logger: Logger,
-) -> Result<()> {
-    let control_plane = ControlPlane::new_with_logger(supervisor_stream, request_stream, logger);
-    control_plane.run().await
-}
-
-pub async fn run_control_plane(config: ControlPlaneConfig) -> Result<()> {
-    // Note: Can't use logging yet as it's not initialized
-    if let (Some(uid), Some(gid)) = (config.uid, config.gid) {
-        eprintln!(
-            "[ControlPlane] Worker process started, dropping privileges to UID {} and GID {}",
-            uid, gid
-        );
-        drop_privileges(Uid::from_raw(uid), Gid::from_raw(gid), None)?;
-    } else {
-        eprintln!("[ControlPlane] Worker process started without dropping privileges");
-    }
-
-    // Initialize logging system (MPSC ring buffers with async consumer)
-    use crate::logging::ControlPlaneLogging;
-    let logging = ControlPlaneLogging::new();
-    let logger = logging
-        .logger(Facility::ControlPlane)
-        .ok_or_else(|| anyhow::anyhow!("Failed to get logger for ControlPlane facility"))?;
-
-    logger.info(Facility::ControlPlane, "Control plane worker started");
-
-    // Get FD 3 from supervisor and set it to non-blocking before wrapping in tokio UnixStream
-    let supervisor_sock = unsafe {
-        let std_sock = std::os::unix::net::UnixStream::from_raw_fd(3);
-        std_sock.set_nonblocking(true)?;
-        UnixStream::from_std(std_sock)?
-    };
-
-    // Receive request stream FD from supervisor (used for Request::ListRules etc)
-    let request_fd = recv_fd(&supervisor_sock).await?;
-    let request_stream = unsafe {
-        let std_sock = std::os::unix::net::UnixStream::from_raw_fd(request_fd);
-        std_sock.set_nonblocking(true)?;
-        UnixStream::from_std(std_sock)?
-    };
-
-    let result =
-        run_control_plane_generic_with_logger(supervisor_sock, request_stream, logger.clone())
-            .await;
-
-    // Shutdown logging before exiting
-    logging.shutdown().await;
-
-    result
-}
-
 // --- Worker Lifecycle Abstraction for Testing ---
 
 pub trait WorkerLifecycle: Send + 'static {
@@ -316,7 +244,9 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
     // (stderr is redirected to pipe by supervisor)
     use std::io::Write;
 
-    // For testing, use ControlPlaneLogging (MPSC ring buffer)
+    // For testing, use MPSC ring buffer logging
+    #[cfg(feature = "testing")]
+    use crate::logging::ControlPlaneLogging;
     #[cfg(feature = "testing")]
     let logging = ControlPlaneLogging::new();
 
@@ -402,10 +332,7 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ControlPlaneConfig, ForwardingRule, RelayCommand};
-    use std::time::Duration;
-    use tempfile::tempdir;
-    use tokio::net::UnixStream;
+    use crate::{ForwardingRule, RelayCommand};
 
     use tokio::io::AsyncReadExt;
 
@@ -438,34 +365,6 @@ mod tests {
 
         let received_command: RelayCommand = serde_json::from_slice(&buffer).unwrap();
         assert_eq!(command, received_command);
-    }
-
-    /// **Tier 1 Unit Test**
-    ///
-    /// - **Purpose:** Verify that the `run_control_plane` function can be invoked and enters its main loop
-    ///   without panicking.
-    /// - **Method:** The test sets up the necessary configuration, including a mock Unix socket for the supervisor
-    ///   connection. It uses the current user's UID/GID to ensure the privilege-dropping logic doesn't fail
-    ///   due to lack of permissions during the test run. The `run_control_plane` future is run with a short
-    ///   timeout. The test passes if the future times out, which proves it has entered its infinite loop
-    ///   and has not crashed.
-    /// - **Tier:** 1 (Logic)
-    #[tokio::test]
-    async fn test_run_control_plane_starts_successfully() {
-        // Basic test to ensure the control plane can start up without panicking.
-        let temp_dir = tempdir().unwrap();
-        let socket_path = temp_dir.path().join("test.sock");
-        let _config = ControlPlaneConfig {
-            uid: Some(0),
-            gid: Some(0),
-            relay_command_socket_path: socket_path.clone(),
-            reporting_interval: 1000,
-        };
-        let (supervisor_stream, _) = UnixStream::pair().unwrap();
-        let (req_stream, _) = UnixStream::pair().unwrap();
-        let run_future = run_control_plane_generic(supervisor_stream, req_stream);
-        // The important part is that this doesn't panic.
-        let _ = tokio::time::timeout(Duration::from_millis(100), run_future).await;
     }
 
     /// **Tier 1 Unit Test**
