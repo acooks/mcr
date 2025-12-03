@@ -246,9 +246,9 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
 
     // For testing, use MPSC ring buffer logging
     #[cfg(feature = "testing")]
-    use crate::logging::ControlPlaneLogging;
+    use crate::logging::TestLogging;
     #[cfg(feature = "testing")]
-    let logging = ControlPlaneLogging::new();
+    let logging = TestLogging::new();
 
     #[cfg(feature = "testing")]
     let logger = logging
