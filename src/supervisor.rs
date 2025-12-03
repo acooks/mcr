@@ -98,9 +98,9 @@ struct Worker {
     // Data plane workers have TWO command streams (ingress + egress)
     ingress_cmd_stream: Option<Arc<tokio::sync::Mutex<UnixStream>>>,
     egress_cmd_stream: Option<Arc<tokio::sync::Mutex<UnixStream>>>,
-    #[allow(dead_code)] // Reserved for future log aggregation feature
+    #[allow(dead_code)] // Used in production only (not with feature="testing")
     log_pipe: Option<std::os::unix::io::OwnedFd>, // Pipe for reading worker's stderr (JSON logs)
-    #[allow(dead_code)] // Reserved for future stats aggregation feature
+    #[allow(dead_code)] // Used in production only (not with feature="testing")
     stats_pipe: Option<std::os::unix::io::OwnedFd>, // Pipe for reading worker's stats (JSON)
 }
 

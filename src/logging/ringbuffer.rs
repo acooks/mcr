@@ -480,7 +480,7 @@ use std::os::fd::OwnedFd;
 ///
 /// The supervisor PID is included to prevent collisions when multiple MCR instances run
 /// concurrently (e.g., in different network namespaces for testing).
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn shm_id_for_facility(
     supervisor_pid: u32,
     core_id: u8,
