@@ -77,7 +77,7 @@ just test   # Full test suite with coverage (handles sudo internally)
 
 ### 3. Run the Relay
 
-A full usage guide is available in the [User Guide](./user_docs/USAGE.md).
+A full usage guide is available in the [User Guide](./user_docs/GUIDE.md).
 
 ---
 
@@ -87,8 +87,8 @@ This project provides separate documentation for users and developers.
 
 ### For Users
 
-- **[USAGE.md](./user_docs/USAGE.md):** A quick-start guide to get MCR up and running.
-- **[CONFIGURATION.md](./user_docs/CONFIGURATION.md):** The complete guide to configuring MCR, including kernel tuning, environment variables, and control plane commands.
+- **[User Guide](./user_docs/GUIDE.md):** A quick-start guide to get MCR up and running.
+- **[Reference Manual](./user_docs/REFERENCE.md):** The complete reference for configuring MCR, including kernel tuning, environment variables, and control plane commands.
 - **[WHY_USE_MCR.md](./user_docs/WHY_USE_MCR.md):** Explains the core problem MCR solves and compares it to other tools like `socat`.
 
 ### For Developers
