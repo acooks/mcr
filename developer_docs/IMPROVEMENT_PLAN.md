@@ -71,7 +71,7 @@ Control Plane Architecture decision above. `supervisor_resilience.rs:283` test i
 
 ### Buffer Size / PACKET_MMAP
 
-Current 2KB buffers work for standard MTU. Jumbo frame support and 64KB batching buffers deferred to PACKET_MMAP implementation. See `docs/PACKET_MMAP_IMPLEMENTATION_PLAN.md`.
+Current 2KB buffers work for standard MTU. Jumbo frame support and 64KB batching buffers deferred to PACKET_MMAP implementation. See `developer_docs/plans/PACKET_MMAP_IMPLEMENTATION_PLAN.md`.
 
 ---
 
