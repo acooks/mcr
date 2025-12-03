@@ -186,6 +186,24 @@ coverage:
     cp /tmp/mcr-cov-*.profraw target/ 2>/dev/null || true
     rm -f /tmp/mcr-cov-*.profraw 2>/dev/null || true
 
+    # Remove corrupt profile files (from killed processes that didn't flush)
+    # Find llvm-profdata from rustup toolchain or system PATH
+    LLVM_PROFDATA=$(find ~/.rustup/toolchains -name llvm-profdata -type f 2>/dev/null | head -1)
+    [ -z "$LLVM_PROFDATA" ] && LLVM_PROFDATA=$(command -v llvm-profdata 2>/dev/null || true)
+
+    if [ -n "$LLVM_PROFDATA" ]; then
+        echo "Validating profile data..."
+        for prof in target/mcr-cov-*.profraw; do
+            [ -f "$prof" ] || continue
+            if ! "$LLVM_PROFDATA" show "$prof" >/dev/null 2>&1; then
+                echo "  Removing corrupt profile: $(basename "$prof")"
+                rm -f "$prof"
+            fi
+        done
+    else
+        echo "Warning: llvm-profdata not found, skipping profile validation"
+    fi
+
     echo ""
     echo "Generating report..."
     cargo llvm-cov report --release --html --output-dir target/coverage
