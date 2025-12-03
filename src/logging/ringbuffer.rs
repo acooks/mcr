@@ -2,7 +2,7 @@
 // Lock-free ring buffers for logging
 //
 // Based on analysis of Linux printk_ringbuffer and FreeBSD msgbuf designs.
-// See design/RINGBUFFER_IMPLEMENTATION.md for details.
+// See design/archive/RINGBUFFER_IMPLEMENTATION.md for details.
 
 use super::entry::{LogEntry, EMPTY, READY, WRITING};
 use std::cell::UnsafeCell;
