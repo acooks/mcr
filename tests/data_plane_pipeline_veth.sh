@@ -130,9 +130,7 @@ echo "Starting MCR-1 (ingress: $VETH0_PEER, egress: $VETH1A)..."
     --relay-command-socket-path "$MCR1_RELAY_SOCKET" \
     --control-socket-path "$MCR1_SOCKET" \
     --interface "$VETH0_PEER" \
-    --num-workers 1 \
-    --user "$SUDO_USER" \
-    --group "$SUDO_USER" > /tmp/mcr1_veth.log 2>&1 &
+    --num-workers 1 > /tmp/mcr1_veth.log 2>&1 &
 MCR1_PID=$!
 
 # Start MCR-2 (ingress: veth1b, egress: veth2a)
@@ -141,9 +139,7 @@ echo "Starting MCR-2 (ingress: $VETH1B, egress: $VETH2A)..."
     --relay-command-socket-path "$MCR2_RELAY_SOCKET" \
     --control-socket-path "$MCR2_SOCKET" \
     --interface "$VETH1B" \
-    --num-workers 1 \
-    --user "$SUDO_USER" \
-    --group "$SUDO_USER" > /tmp/mcr2_veth.log 2>&1 &
+    --num-workers 1 > /tmp/mcr2_veth.log 2>&1 &
 MCR2_PID=$!
 
 # Start MCR-3 (ingress: veth2b)
@@ -152,9 +148,7 @@ echo "Starting MCR-3 (ingress: $VETH2B)..."
     --relay-command-socket-path "$MCR3_RELAY_SOCKET" \
     --control-socket-path "$MCR3_SOCKET" \
     --interface "$VETH2B" \
-    --num-workers 1 \
-    --user "$SUDO_USER" \
-    --group "$SUDO_USER" > /tmp/mcr3_veth.log 2>&1 &
+    --num-workers 1 > /tmp/mcr3_veth.log 2>&1 &
 MCR3_PID=$!
 
 # Wait for all sockets

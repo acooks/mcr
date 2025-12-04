@@ -29,8 +29,9 @@ pub fn run_unified_data_plane(
 
     logger.info(Facility::DataPlane, "Unified data plane starting");
 
-    // Extract command stream FD
+    // Extract FDs from channel sets
     let cmd_stream_fd = ingress_channels.cmd_stream_fd;
+    let af_packet_fd = ingress_channels.af_packet_fd;
 
     // Get buffer pool configuration from environment
     let buffer_pool_small = std::env::var("MCR_BUFFER_POOL_SMALL")
@@ -49,7 +50,7 @@ pub fn run_unified_data_plane(
     // Create buffer pool
     let buffer_pool = BufferPool::new(buffer_pool_small, buffer_pool_standard, buffer_pool_jumbo);
 
-    // Get interface name
+    // Get interface name (still needed for IP lookups)
     let interface_name = config
         .input_interface_name
         .clone()
@@ -58,19 +59,19 @@ pub fn run_unified_data_plane(
     // Create unified data plane configuration
     let unified_config = UnifiedConfig::default();
 
-    eprintln!("[run_unified_data_plane] Creating UnifiedDataPlane");
+    eprintln!(
+        "[run_unified_data_plane] Creating UnifiedDataPlane with pre-configured AF_PACKET socket"
+    );
     std::io::stderr().flush().ok();
 
-    // Get PACKET_FANOUT group ID
-    let fanout_group_id = config.fanout_group_id.unwrap_or(0);
-
-    // Create and run unified data plane
-    let mut unified = UnifiedDataPlane::new(
+    // Create and run unified data plane using the pre-configured AF_PACKET socket
+    // from the supervisor (privilege separation - worker doesn't need CAP_NET_RAW)
+    let mut unified = UnifiedDataPlane::new_with_socket(
         &interface_name,
         unified_config,
         buffer_pool,
         cmd_stream_fd,
-        fanout_group_id,
+        af_packet_fd,
         logger.clone(),
     )?;
 

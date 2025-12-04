@@ -56,9 +56,7 @@ cleanup  # Ensure clean state
 
 "$RELAY_BINARY" supervisor \
     --control-socket-path "$SUPERVISOR_SOCKET" \
-    --num-workers 1 \
-    --user "$SUDO_USER" \
-    --group "$SUDO_USER" &
+    --num-workers 1 &
 SUPERVISOR_PID=$!
 
 echo "Waiting for supervisor socket..."

@@ -49,21 +49,12 @@ pub enum Command {
         #[clap(long, default_value = "lo")]
         interface: String,
 
-        /// User to run worker processes as.
-        #[clap(long, default_value = "nobody")]
-        user: String,
-        #[arg(long, default_value = "daemon")]
-        group: String,
         /// Number of data plane workers to spawn. Defaults to number of CPU cores.
         #[arg(long)]
         num_workers: Option<usize>,
     },
     /// Run the worker process (intended to be called by the supervisor)
     Worker {
-        #[arg(long)]
-        uid: Option<u32>,
-        #[arg(long)]
-        gid: Option<u32>,
         #[arg(long)]
         relay_command_socket_path: PathBuf,
         #[arg(long)]
@@ -90,8 +81,6 @@ pub enum Command {
 }
 
 pub struct DataPlaneConfig {
-    pub uid: Option<u32>,
-    pub gid: Option<u32>,
     pub supervisor_pid: u32, // PID of the supervisor process (for shared memory paths)
     pub core_id: Option<u32>,
     pub input_interface_name: Option<String>,

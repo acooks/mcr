@@ -8,7 +8,7 @@ use log::error;
 use nix::sys::socket::{
     sendmsg, socketpair, AddressFamily, ControlMessage, MsgFlags, SockFlag, SockType,
 };
-use nix::unistd::{Gid, Group, Uid, User};
+use nix::unistd::{Gid, Uid};
 use std::collections::HashMap;
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use std::path::PathBuf;
@@ -107,8 +107,6 @@ struct Worker {
 /// Centralized manager for all worker lifecycle operations
 struct WorkerManager {
     // Configuration
-    uid: u32,
-    gid: u32,
     interface: String,
     relay_command_socket_path: PathBuf,
     num_cores: usize,
@@ -354,8 +352,6 @@ pub fn handle_supervisor_command(
 
 pub async fn spawn_data_plane_worker(
     core_id: u32,
-    _uid: u32,
-    _gid: u32,
     interface: String,
     relay_command_socket_path: PathBuf,
     fanout_group_id: u16,
@@ -413,7 +409,7 @@ pub async fn spawn_data_plane_worker(
         .arg("--relay-command-socket-path")
         .arg(relay_command_socket_path)
         .arg("--input-interface-name")
-        .arg(interface)
+        .arg(&interface)
         .arg("--fanout-group-id")
         .arg(fanout_group_id.to_string())
         .process_group(0); // Put worker in its own process group to prevent SIGTERM propagation
@@ -507,6 +503,14 @@ pub async fn spawn_data_plane_worker(
     let ingress_cmd_supervisor_stream = create_and_send_socketpair(&supervisor_sock).await?;
     let egress_cmd_supervisor_stream = create_and_send_socketpair(&supervisor_sock).await?;
 
+    // Create the AF_PACKET socket in the supervisor (requires CAP_NET_RAW/root)
+    // and send it to the worker. This enables full privilege separation:
+    // the worker can drop all privileges after receiving this pre-configured socket.
+    let af_packet_socket = create_af_packet_socket(&interface, fanout_group_id, logger)?;
+    send_fd(&supervisor_sock, af_packet_socket.as_raw_fd()).await?;
+    // Keep the socket alive until the worker receives it
+    drop(af_packet_socket);
+
     Ok((
         child,
         ingress_cmd_supervisor_stream,
@@ -522,8 +526,6 @@ impl WorkerManager {
     /// Create a new WorkerManager with the given configuration
     #[allow(clippy::too_many_arguments)]
     fn new(
-        uid: u32,
-        gid: u32,
         interface: String,
         relay_command_socket_path: PathBuf,
         num_cores: usize,
@@ -531,8 +533,6 @@ impl WorkerManager {
         fanout_group_id: u16,
     ) -> Self {
         Self {
-            uid,
-            gid,
             interface,
             relay_command_socket_path,
             num_cores,
@@ -549,8 +549,6 @@ impl WorkerManager {
         let (child, ingress_cmd_stream, egress_cmd_stream, log_pipe, stats_pipe) =
             spawn_data_plane_worker(
                 core_id,
-                self.uid,
-                self.gid,
                 self.interface.clone(),
                 self.relay_command_socket_path.clone(),
                 self.fanout_group_id,
@@ -558,7 +556,9 @@ impl WorkerManager {
             )
             .await?;
 
-        let pid = child.id().unwrap();
+        let pid = child
+            .id()
+            .ok_or_else(|| anyhow::anyhow!("Worker process exited immediately after spawn"))?;
         let ingress_cmd_stream_arc = Arc::new(tokio::sync::Mutex::new(ingress_cmd_stream));
         let egress_cmd_stream_arc = Arc::new(tokio::sync::Mutex::new(egress_cmd_stream));
 
@@ -634,8 +634,14 @@ impl WorkerManager {
         // Handle the first exited worker
         let (pid, worker_type, status) = exited_workers.remove(0);
 
-        // Remove from workers map
-        let _worker = self.workers.remove(&pid).unwrap();
+        // Remove from workers map (should always exist, but handle gracefully)
+        if self.workers.remove(&pid).is_none() {
+            log_warning!(
+                self.logger,
+                Facility::Supervisor,
+                &format!("Worker {} not found in workers map during restart", pid)
+            );
+        }
 
         // Restart the data plane worker
         let WorkerType::DataPlane { core_id } = worker_type;
@@ -1112,8 +1118,6 @@ async fn handle_client(
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
-    user: &str,
-    group: &str,
     interface: &str,
     relay_command_socket_path: PathBuf,
     control_socket_path: PathBuf,
@@ -1121,15 +1125,6 @@ pub async fn run(
     num_workers: Option<usize>,
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<()> {
-    let uid = User::from_name(user)
-        .with_context(|| format!("User '{}' not found", user))?
-        .map(|u| u.uid.as_raw())
-        .with_context(|| format!("User '{}' not found", user))?;
-    let gid = Group::from_name(group)
-        .with_context(|| format!("Group '{}' not found", group))?
-        .map(|g| g.gid.as_raw())
-        .with_context(|| format!("Group '{}' not found", group))?;
-
     // Determine number of cores to use
     // TODO: ARCHITECTURAL FIX NEEDED
     // Per architecture (D21, D23): One worker per CPU core, rules hashed to cores.
@@ -1175,10 +1170,13 @@ pub async fn run(
         std_listener.set_nonblocking(true)?;
         tokio::net::UnixListener::from_std(std_listener)?
     };
+    // Workers run as nobody:nobody, so chown the socket to match
+    const NOBODY_UID: u32 = 65534;
+    const NOBODY_GID: u32 = 65534;
     nix::unistd::chown(
         &relay_command_socket_path,
-        Some(Uid::from_raw(uid)),
-        Some(Gid::from_raw(gid)),
+        Some(Uid::from_raw(NOBODY_UID)),
+        Some(Gid::from_raw(NOBODY_GID)),
     )?;
 
     // Set up control socket for client connections
@@ -1219,8 +1217,6 @@ pub async fn run(
     // Initialize WorkerManager and wrap it in Arc<Mutex<>>
     let worker_manager = {
         let mut manager = WorkerManager::new(
-            uid,
-            gid,
             interface.to_string(),
             relay_command_socket_path,
             num_cores,
@@ -1392,6 +1388,164 @@ pub async fn run(
     }
 
     Ok(())
+}
+
+/// Create and configure an AF_PACKET socket bound to a specific interface.
+///
+/// This function creates the socket with CAP_NET_RAW privileges in the supervisor,
+/// then the socket FD can be passed to unprivileged workers via SCM_RIGHTS.
+///
+/// # Arguments
+/// * `interface_name` - Network interface to bind to (e.g., "eth0")
+/// * `fanout_group_id` - PACKET_FANOUT group ID for load balancing (0 = disabled)
+/// * `logger` - Logger instance for status messages
+///
+/// # Returns
+/// An owned file descriptor for the configured AF_PACKET socket
+fn create_af_packet_socket(
+    interface_name: &str,
+    fanout_group_id: u16,
+    logger: &Logger,
+) -> Result<std::os::fd::OwnedFd> {
+    use socket2::{Domain, Protocol, Socket, Type};
+
+    logger.info(
+        Facility::Supervisor,
+        &format!(
+            "Creating AF_PACKET socket for interface {} (fanout_group_id={})",
+            interface_name, fanout_group_id
+        ),
+    );
+
+    // Create AF_PACKET socket for receiving
+    let recv_socket = Socket::new(Domain::PACKET, Type::RAW, Some(Protocol::from(0x0003)))
+        .context("Failed to create AF_PACKET socket")?;
+
+    // Set large receive buffer to prevent drops during traffic bursts.
+    // Default system buffer (~212KB) can only hold ~150 packets at 1400 bytes each.
+    // At 100k pps, that's only 1.5ms of buffering - not enough for io_uring latency.
+    // We request 16MB which gives ~11k packets / ~110ms of burst tolerance.
+    // Note: Actual size may be limited by net.core.rmem_max sysctl.
+    const RECV_BUFFER_SIZE: i32 = 16 * 1024 * 1024; // 16MB
+    unsafe {
+        let ret = libc::setsockopt(
+            recv_socket.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_RCVBUF,
+            &RECV_BUFFER_SIZE as *const _ as *const _,
+            std::mem::size_of::<i32>() as libc::socklen_t,
+        );
+        if ret < 0 {
+            // Log warning but don't fail - system may have lower limits
+            logger.warning(
+                Facility::Supervisor,
+                &format!(
+                    "Failed to set SO_RCVBUF to {}MB, using system default",
+                    RECV_BUFFER_SIZE / 1024 / 1024
+                ),
+            );
+        } else {
+            // Read back actual size (kernel may have adjusted it)
+            let mut actual_size: i32 = 0;
+            let mut len: libc::socklen_t = std::mem::size_of::<i32>() as libc::socklen_t;
+            libc::getsockopt(
+                recv_socket.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_RCVBUF,
+                &mut actual_size as *mut _ as *mut _,
+                &mut len,
+            );
+            logger.info(
+                Facility::Supervisor,
+                &format!(
+                    "AF_PACKET SO_RCVBUF set to {}KB (requested {}MB)",
+                    actual_size / 1024,
+                    RECV_BUFFER_SIZE / 1024 / 1024
+                ),
+            );
+        }
+    }
+
+    // Get interface index
+    let iface_index = get_interface_index(interface_name)?;
+
+    // Bind to interface using raw libc bind
+    unsafe {
+        let sockaddr_ll = libc::sockaddr_ll {
+            sll_family: libc::AF_PACKET as u16,
+            sll_protocol: (libc::ETH_P_ALL as u16).to_be(),
+            sll_ifindex: iface_index,
+            sll_hatype: 0,
+            sll_pkttype: 0,
+            sll_halen: 0,
+            sll_addr: [0; 8],
+        };
+        let ret = libc::bind(
+            recv_socket.as_raw_fd(),
+            &sockaddr_ll as *const _ as *const libc::sockaddr,
+            std::mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t,
+        );
+        if ret < 0 {
+            return Err(anyhow::anyhow!(
+                "Failed to bind AF_PACKET socket to {}: {}",
+                interface_name,
+                std::io::Error::last_os_error()
+            ));
+        }
+    }
+
+    // Configure PACKET_FANOUT if fanout_group_id is non-zero
+    if fanout_group_id > 0 {
+        let fanout_arg: u32 = (fanout_group_id as u32) | (libc::PACKET_FANOUT_CPU << 16);
+
+        unsafe {
+            if libc::setsockopt(
+                recv_socket.as_raw_fd(),
+                libc::SOL_PACKET,
+                libc::PACKET_FANOUT,
+                &fanout_arg as *const _ as *const _,
+                std::mem::size_of::<u32>() as _,
+            ) < 0
+            {
+                return Err(anyhow::anyhow!(
+                    "PACKET_FANOUT failed for {}: {}",
+                    interface_name,
+                    std::io::Error::last_os_error()
+                ));
+            }
+        }
+        logger.info(
+            Facility::Supervisor,
+            &format!(
+                "PACKET_FANOUT configured for {} (group_id={}, mode=CPU)",
+                interface_name, fanout_group_id
+            ),
+        );
+    }
+
+    // Set non-blocking
+    recv_socket.set_nonblocking(true)?;
+
+    logger.info(
+        Facility::Supervisor,
+        &format!(
+            "AF_PACKET socket created successfully for interface {}",
+            interface_name
+        ),
+    );
+
+    // Convert to OwnedFd
+    Ok(std::os::fd::OwnedFd::from(recv_socket))
+}
+
+/// Get network interface index by name
+fn get_interface_index(interface_name: &str) -> Result<i32> {
+    for iface in pnet::datalink::interfaces() {
+        if iface.name == interface_name {
+            return Ok(iface.index as i32);
+        }
+    }
+    Err(anyhow::anyhow!("Interface not found: {}", interface_name))
 }
 
 /// Send a file descriptor to a worker process via SCM_RIGHTS

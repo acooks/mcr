@@ -13,8 +13,6 @@ fn main() -> Result<()> {
             relay_command_socket_path,
             control_socket_path,
             interface,
-            user,
-            group,
             num_workers,
         } => {
             // Create oneshot channel for graceful shutdown
@@ -45,8 +43,6 @@ fn main() -> Result<()> {
 
                 // Run supervisor - it will exit when shutdown_rx is triggered
                 let result = supervisor::run(
-                    &user,
-                    &group,
                     &interface,
                     relay_command_socket_path.clone(),
                     control_socket_path,
@@ -68,8 +64,6 @@ fn main() -> Result<()> {
             });
         }
         Command::Worker {
-            uid,
-            gid,
             relay_command_socket_path,
             data_plane,
             core_id,
@@ -89,8 +83,6 @@ fn main() -> Result<()> {
             let supervisor_pid = std::os::unix::process::parent_id();
 
             let config = multicast_relay::DataPlaneConfig {
-                uid,
-                gid,
                 supervisor_pid,
                 core_id,
                 input_interface_name,
@@ -131,8 +123,6 @@ mod tests {
                 relay_command_socket_path: PathBuf::from("/tmp/mcr_relay_commands.sock"),
                 control_socket_path: PathBuf::from("/tmp/multicast_relay_control.sock"),
                 interface: "lo".to_string(),
-                user: "nobody".to_string(),
-                group: "daemon".to_string(),
                 num_workers: None,
             }
         );
@@ -140,10 +130,6 @@ mod tests {
         let args = Args::parse_from([
             "multicast_relay",
             "worker",
-            "--uid",
-            "0",
-            "--gid",
-            "0",
             "--relay-command-socket-path",
             "/tmp/worker_relay.sock",
             "--data-plane",
@@ -167,8 +153,6 @@ mod tests {
         assert_eq!(
             args.command,
             Command::Worker {
-                uid: Some(0),
-                gid: Some(0),
                 relay_command_socket_path: PathBuf::from("/tmp/worker_relay.sock"),
                 data_plane: true,
                 core_id: Some(0),
@@ -186,18 +170,12 @@ mod tests {
         let args = Args::parse_from([
             "multicast_relay",
             "worker",
-            "--uid",
-            "0",
-            "--gid",
-            "0",
             "--relay-command-socket-path",
             "/tmp/worker_relay.sock",
         ]);
         assert_eq!(
             args.command,
             Command::Worker {
-                uid: Some(0),
-                gid: Some(0),
                 relay_command_socket_path: PathBuf::from("/tmp/worker_relay.sock"),
                 data_plane: false,
                 core_id: None,
