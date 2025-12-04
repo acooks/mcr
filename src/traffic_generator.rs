@@ -586,6 +586,11 @@ impl TrafficGenerator {
     }
 
     /// Run in async mode (tokio timers)
+    ///
+    /// For high rates (>10k pps), uses adaptive batching to reduce timer overhead:
+    /// - Sends multiple packets per timer tick
+    /// - Timer frequency capped at 1000 Hz to reduce async overhead
+    /// - This improves rate accuracy on busy systems (like CI) without high CPU usage
     async fn run_async(&self, verbose: bool) -> anyhow::Result<TrafficGeneratorStats> {
         use std::net::SocketAddrV4;
         use tokio::time::{self, Duration};
@@ -596,14 +601,34 @@ impl TrafficGenerator {
         let socket = tokio::net::UdpSocket::from_std(socket)?;
 
         let dest_addr = SocketAddrV4::new(self.config.group, self.config.port);
-        let interval = Duration::from_secs_f64(1.0 / self.config.rate as f64);
+
+        // Adaptive batching: cap timer frequency at 1000 Hz to reduce async overhead
+        // At 50k pps: 50 packets per tick at 1000 Hz
+        // At 100k pps: 100 packets per tick at 1000 Hz
+        // At 1k pps: 1 packet per tick at 1000 Hz
+        const MAX_TIMER_HZ: u64 = 1000;
+        let packets_per_tick = self.config.rate.div_ceil(MAX_TIMER_HZ);
+        let actual_timer_hz = self.config.rate.div_ceil(packets_per_tick);
+        let interval = Duration::from_secs_f64(1.0 / actual_timer_hz as f64);
         let mut interval_timer = time::interval(interval);
 
         if verbose {
-            println!(
-                "Async mode: sending to {}:{} from {} at {} pps",
-                self.config.group, self.config.port, self.config.interface, self.config.rate
-            );
+            if packets_per_tick > 1 {
+                println!(
+                    "Async mode: sending to {}:{} from {} at {} pps ({} packets/tick @ {} Hz)",
+                    self.config.group,
+                    self.config.port,
+                    self.config.interface,
+                    self.config.rate,
+                    packets_per_tick,
+                    actual_timer_hz
+                );
+            } else {
+                println!(
+                    "Async mode: sending to {}:{} from {} at {} pps",
+                    self.config.group, self.config.port, self.config.interface, self.config.rate
+                );
+            }
         }
 
         let mut packets_sent: u64 = 0;
@@ -615,10 +640,17 @@ impl TrafficGenerator {
         loop {
             interval_timer.tick().await;
 
-            if let Err(_e) = socket.send_to(&self.packet, dest_addr).await {
-                errors += 1;
+            // Send batch of packets
+            for _ in 0..packets_per_tick {
+                if let Err(_e) = socket.send_to(&self.packet, dest_addr).await {
+                    errors += 1;
+                }
+                packets_sent += 1;
+
+                if self.config.count > 0 && packets_sent >= self.config.count {
+                    break;
+                }
             }
-            packets_sent += 1;
 
             if verbose {
                 let now = std::time::Instant::now();
