@@ -40,13 +40,6 @@ Current buffer pool is undersized for jumbo frames (9000+ bytes). Options: add j
 
 **Related:** PACKET_MMAP proposal was **rejected** (see `developer_docs/decisions/001_buffer_management_strategy.md`).
 
-### Disabled Integration Tests
-
-Two tests in `tests/integration/supervisor_resilience.rs` are disabled:
-
-- Line 270: `test_supervisor_applies_exponential_backoff` - needs `run_generic` function or rewrite
-- Line 407: `test_supervisor_in_namespace` - unimplemented skeleton, requires root
-
 ### Multi-Interface Test Coverage
 
 Remaining tests needed:

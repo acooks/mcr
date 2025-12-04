@@ -99,4 +99,11 @@ Our test suite is continuously evolving. Based on `TODO` comments in the source 
 
 - **Performance Benchmarks:** The benchmark tests in `tests/benchmarks/` are currently stubs and need to be fully implemented to provide meaningful performance metrics for forwarding rate, latency, and control interface operations.
 - **Rule Removal E2E Test:** The E2E test suite is missing a test case to validate the removal of forwarding rules via the `mcrctl`.
-- **Supervisor Resilience:** While some resilience is tested, more complex failure scenarios (e.g., worker crash loops) could be added to the integration test suite.
+
+### Supervisor Resilience (Implemented)
+
+The `tests/integration/supervisor_resilience.rs` module provides comprehensive coverage of supervisor fault tolerance:
+
+- **`test_supervisor_restarts_killed_worker`** - Verifies that when a data plane worker is killed (SIGKILL), the supervisor detects the failure and spawns a replacement worker with a new PID.
+- **`test_rules_persist_after_worker_restart`** - Verifies that the supervisor's rule state is preserved when workers are killed, and new rules can still be added after restart.
+- **`test_supervisor_handles_multiple_worker_failures`** - Verifies that the supervisor can handle simultaneous failures of multiple workers and restart all of them.
