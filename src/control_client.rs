@@ -2,7 +2,7 @@
 use anyhow::Result;
 use clap::Parser;
 use multicast_relay::logging::{Facility, Severity};
-use multicast_relay::OutputDestination;
+use multicast_relay::{Config, OutputDestination};
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 
@@ -54,6 +54,38 @@ pub enum CliCommand {
     },
     /// Get supervisor protocol version
     Version,
+    /// Configuration management
+    Config {
+        #[clap(subcommand)]
+        action: ConfigAction,
+    },
+}
+
+#[derive(Parser, Debug)]
+pub enum ConfigAction {
+    /// Show running configuration (JSON5 format)
+    Show,
+    /// Load configuration from a file
+    Load {
+        /// Path to configuration file
+        #[arg(long)]
+        file: PathBuf,
+        /// Replace all existing rules (default: merge with existing)
+        #[arg(long)]
+        replace: bool,
+    },
+    /// Save running configuration to a file
+    Save {
+        /// Path to save configuration to
+        #[arg(long)]
+        file: Option<PathBuf>,
+    },
+    /// Validate a configuration file without loading it
+    Check {
+        /// Path to configuration file
+        #[arg(long)]
+        file: PathBuf,
+    },
 }
 
 #[derive(Parser, Debug)]
@@ -180,6 +212,22 @@ pub fn build_command(cli_command: CliCommand) -> Result<multicast_relay::Supervi
             }
         },
         CliCommand::Version => multicast_relay::SupervisorCommand::GetVersion,
+        CliCommand::Config { action } => match action {
+            ConfigAction::Show => multicast_relay::SupervisorCommand::GetConfig,
+            ConfigAction::Load { file, replace } => {
+                // Load and parse the config file
+                let config = Config::load_from_file(&file).map_err(|e| anyhow::anyhow!("{}", e))?;
+                multicast_relay::SupervisorCommand::LoadConfig { config, replace }
+            }
+            ConfigAction::Save { file } => {
+                multicast_relay::SupervisorCommand::SaveConfig { path: file }
+            }
+            ConfigAction::Check { file } => {
+                // Load and parse the config file for validation
+                let config = Config::load_from_file(&file).map_err(|e| anyhow::anyhow!("{}", e))?;
+                multicast_relay::SupervisorCommand::CheckConfig { config }
+            }
+        },
     })
 }
 
