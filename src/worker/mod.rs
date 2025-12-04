@@ -28,6 +28,10 @@ use std::os::unix::io::AsRawFd;
 /// Channel set for ingress thread communication
 pub struct IngressChannelSet {
     pub cmd_stream_fd: OwnedFd,
+    /// Pre-configured AF_PACKET socket received from supervisor.
+    /// This socket is created and configured (bound, fanout set) by the supervisor
+    /// with CAP_NET_RAW privileges, allowing the worker to drop all privileges.
+    pub af_packet_fd: OwnedFd,
 }
 
 /// Channel set for egress thread communication
@@ -43,26 +47,39 @@ async fn recv_fd(sock: &UnixStream) -> Result<RawFd> {
     let mut iov = [std::io::IoSliceMut::new(&mut data)];
     let mut cmsg_buf = nix::cmsg_space!([RawFd; 2]);
 
-    sock.ready(tokio::io::Interest::READABLE).await?;
-    let msg = sock.try_io(tokio::io::Interest::READABLE, || {
-        recvmsg::<()>(
-            sock.as_raw_fd(),
-            &mut iov,
-            Some(&mut cmsg_buf),
-            MsgFlags::empty(),
-        )
-        .map_err(std::io::Error::other)
-    })?;
-
-    for cmsg in msg.cmsgs()? {
-        if let nix::sys::socket::ControlMessageOwned::ScmRights(fds) = cmsg {
-            if let Some(&fd) = fds.first() {
-                return Ok(fd);
+    // Retry loop to handle race condition where supervisor hasn't sent FD yet
+    loop {
+        sock.ready(tokio::io::Interest::READABLE).await?;
+        match sock.try_io(tokio::io::Interest::READABLE, || {
+            recvmsg::<()>(
+                sock.as_raw_fd(),
+                &mut iov,
+                Some(&mut cmsg_buf),
+                MsgFlags::empty(),
+            )
+            .map_err(|e| {
+                // Convert nix::errno::Errno to std::io::Error properly
+                // so that error kinds like WouldBlock are preserved
+                std::io::Error::from_raw_os_error(e as i32)
+            })
+        }) {
+            Ok(msg) => {
+                for cmsg in msg.cmsgs()? {
+                    if let nix::sys::socket::ControlMessageOwned::ScmRights(fds) = cmsg {
+                        if let Some(&fd) = fds.first() {
+                            return Ok(fd);
+                        }
+                    }
+                }
+                anyhow::bail!("No file descriptor received in SCM_RIGHTS message");
             }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // Socket not ready yet, wait and retry
+                continue;
+            }
+            Err(e) => return Err(e.into()),
         }
     }
-
-    anyhow::bail!("No file descriptor received in SCM_RIGHTS message");
 }
 fn drop_privileges(uid: Uid, gid: Gid, caps_to_keep: Option<&HashSet<Capability>>) -> Result<()> {
     let current_uid = nix::unistd::getuid();
@@ -73,15 +90,12 @@ fn drop_privileges(uid: Uid, gid: Gid, caps_to_keep: Option<&HashSet<Capability>
     // (which requires root privileges)
     if current_uid == uid && current_gid == gid {
         // Note: Can't use logging here as we may not have initialized it yet
-        eprintln!(
-            "[Worker] Already running as uid={}, gid={}, skipping privilege drop",
-            uid, gid
-        );
+        eprintln!("[Worker] Already running as nobody, skipping privilege drop");
         return Ok(());
     }
 
     // Note: Can't use logging here as we may not have initialized it yet
-    eprintln!("[Worker] Dropping privileges to uid={}, gid={}", uid, gid);
+    eprintln!("[Worker] Dropping privileges to nobody");
 
     // Get the username for initgroups
     let user = nix::unistd::User::from_uid(uid)?
@@ -198,31 +212,14 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
 ) -> Result<()> {
     use nix::sys::eventfd::{EfdFlags, EventFd};
 
-    // TODO: ARCHITECTURAL ISSUE - Privilege dropping with CAP_NET_RAW
-    // Problem: Ambient capabilities are cleared by setuid(), so we can't retain
-    // CAP_NET_RAW for child threads after dropping privileges.
-    //
-    // Proper solution: Supervisor should create AF_PACKET sockets and pass FDs to workers
-    // via SCM_RIGHTS. This allows workers to drop ALL privileges completely.
-    //
-    // Temporary workaround: Don't drop privileges for data plane workers.
-    // They need CAP_NET_RAW anyway, so running as root is acceptable until FD passing is implemented.
+    // AF_PACKET socket is created by the supervisor and passed to us via SCM_RIGHTS.
+    // This allows workers to drop ALL privileges after receiving the pre-configured socket.
+    // Privilege dropping happens after we receive all FDs from the supervisor.
 
     // Note: Can't use logging yet as it's not initialized
     eprintln!(
-        "[DataPlane] Worker process started (keeping root privileges - CAP_NET_RAW required)"
+        "[DataPlane] Worker process started (will drop privileges after receiving AF_PACKET FD)"
     );
-    eprintln!("[DataPlane] TODO: Implement AF_PACKET FD passing from supervisor for proper privilege separation");
-
-    // Skip privilege drop for now
-    // let mut caps_to_keep = HashSet::new();
-    // caps_to_keep.insert(Capability::CAP_NET_RAW);
-    // caps_to_keep.insert(Capability::CAP_SETUID);
-    // lifecycle.drop_privileges(
-    //     Uid::from_raw(config.uid),
-    //     Gid::from_raw(config.gid),
-    //     Some(&caps_to_keep),
-    // )?;
 
     if let Some(core_id) = config.core_id {
         lifecycle.set_cpu_affinity(core_id as usize)?;
@@ -297,8 +294,33 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
 
     let egress_cmd_fd = recv_fd(&supervisor_sock).await?;
 
-    eprintln!("[DataPlane] Got all FDs from supervisor (ingress_cmd, egress_cmd)");
+    eprintln!("[DataPlane] Receiving AF_PACKET socket FD...");
     std::io::stderr().flush().ok();
+
+    let af_packet_fd = recv_fd(&supervisor_sock).await?;
+
+    eprintln!("[DataPlane] Got all FDs from supervisor (ingress_cmd, egress_cmd, af_packet)");
+    std::io::stderr().flush().ok();
+
+    // Now that we have the pre-configured AF_PACKET socket from the supervisor,
+    // we can safely drop all privileges. The socket is already bound to the
+    // interface and has PACKET_FANOUT configured.
+    //
+    // Always drop privileges to nobody:nobody (uid=65534, gid=65534)
+    // This is a standard Linux pattern for unprivileged daemons.
+    const NOBODY_UID: u32 = 65534;
+    const NOBODY_GID: u32 = 65534;
+
+    logger.info(Facility::DataPlane, "Dropping privileges to nobody");
+
+    // Drop privileges completely - no capabilities needed since we have the socket FD
+    lifecycle.drop_privileges(
+        Uid::from_raw(NOBODY_UID),
+        Gid::from_raw(NOBODY_GID),
+        None, // No capabilities needed - we have the pre-configured AF_PACKET socket
+    )?;
+
+    logger.info(Facility::DataPlane, "Privileges dropped successfully");
 
     // Create shutdown eventfd for egress (data path wakeup from ingress)
     let egress_shutdown_event_fd = EventFd::from_value_and_flags(0, EfdFlags::EFD_NONBLOCK)
@@ -307,10 +329,12 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
     // Convert raw FDs to OwnedFd for channel sets
     let ingress_cmd_owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(ingress_cmd_fd) };
     let egress_cmd_owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(egress_cmd_fd) };
+    let af_packet_owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(af_packet_fd) };
 
     // Create channel sets (no more mpsc or tokio bridge!)
     let ingress_channels = IngressChannelSet {
         cmd_stream_fd: ingress_cmd_owned,
+        af_packet_fd: af_packet_owned,
     };
 
     let egress_channels = EgressChannelSet {

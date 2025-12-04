@@ -45,7 +45,7 @@ use io_uring::{opcode, types, IoUring};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::collections::{HashMap, VecDeque};
 use std::net::{Ipv4Addr, SocketAddr};
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::sync::Arc;
 
 use crate::logging::{Facility, Logger};
@@ -187,6 +187,48 @@ pub struct UnifiedDataPlane {
 }
 
 impl UnifiedDataPlane {
+    /// Create a new UnifiedDataPlane using a pre-configured AF_PACKET socket.
+    ///
+    /// This is the preferred constructor for privilege separation. The supervisor
+    /// creates the AF_PACKET socket with CAP_NET_RAW privileges, configures it
+    /// (binds to interface, sets PACKET_FANOUT), and passes the FD to the worker.
+    /// The worker can then drop all privileges.
+    ///
+    /// # Arguments
+    /// * `interface_name` - Network interface name (used for IP lookups, not socket binding)
+    /// * `config` - Configuration for queue depth, batch sizes, etc.
+    /// * `buffer_pool` - Shared buffer pool for packet storage
+    /// * `cmd_stream_fd` - FD for receiving commands from supervisor
+    /// * `af_packet_fd` - Pre-configured AF_PACKET socket FD from supervisor
+    /// * `logger` - Logger instance
+    #[allow(dead_code)] // Used by data_plane_integrated.rs
+    pub fn new_with_socket(
+        _interface_name: &str,
+        config: UnifiedConfig,
+        buffer_pool: std::sync::Arc<BufferPool>,
+        cmd_stream_fd: OwnedFd,
+        af_packet_fd: OwnedFd,
+        logger: Logger,
+    ) -> Result<Self> {
+        logger.info(
+            Facility::DataPlane,
+            "Creating unified data plane loop with pre-configured AF_PACKET socket",
+        );
+
+        // Convert the pre-configured AF_PACKET FD to a Socket
+        // SAFETY: The supervisor created and configured this socket, we're taking ownership
+        let recv_socket = unsafe { Socket::from_raw_fd(af_packet_fd.into_raw_fd()) };
+
+        Self::new_internal(config, buffer_pool, cmd_stream_fd, recv_socket, logger)
+    }
+
+    /// Create a new UnifiedDataPlane, creating the AF_PACKET socket internally.
+    ///
+    /// **DEPRECATED**: This constructor requires CAP_NET_RAW privileges in the worker.
+    /// Use `new_with_socket` with privilege separation instead.
+    ///
+    /// Kept for backward compatibility with tests that run as root.
+    #[allow(dead_code)] // May be used by tests
     pub fn new(
         interface_name: &str,
         config: UnifiedConfig,
@@ -195,9 +237,12 @@ impl UnifiedDataPlane {
         fanout_group_id: u16,
         logger: Logger,
     ) -> Result<Self> {
-        logger.info(Facility::DataPlane, "Creating unified data plane loop");
+        logger.info(
+            Facility::DataPlane,
+            "Creating unified data plane loop (legacy mode - creating socket internally)",
+        );
 
-        // Create AF_PACKET socket for receiving
+        // Create AF_PACKET socket for receiving (requires CAP_NET_RAW)
         let recv_socket = Socket::new(Domain::PACKET, Type::RAW, Some(Protocol::from(0x0003)))
             .context("Failed to create AF_PACKET socket")?;
 
@@ -291,6 +336,17 @@ impl UnifiedDataPlane {
         // Set non-blocking
         recv_socket.set_nonblocking(true)?;
 
+        Self::new_internal(config, buffer_pool, cmd_stream_fd, recv_socket, logger)
+    }
+
+    /// Internal constructor used by both `new` and `new_with_socket`.
+    fn new_internal(
+        config: UnifiedConfig,
+        buffer_pool: std::sync::Arc<BufferPool>,
+        cmd_stream_fd: OwnedFd,
+        recv_socket: Socket,
+        logger: Logger,
+    ) -> Result<Self> {
         // Open stats pipe for writing stats to supervisor
         // Only available for data plane workers (not in testing mode)
         // FD is passed via MCR_STATS_PIPE_FD environment variable for security
