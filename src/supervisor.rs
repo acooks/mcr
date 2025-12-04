@@ -1712,6 +1712,13 @@ pub async fn run(
         Arc::new(Mutex::new(manager))
     };
 
+    // Create interval timers outside the loop so they persist across iterations
+    // Using tokio::time::interval instead of sleep ensures the timer isn't reset
+    // when other select! branches complete (critical bug fix!)
+    let mut health_check_interval = tokio::time::interval(Duration::from_millis(250));
+    let mut periodic_sync_interval =
+        tokio::time::interval(Duration::from_secs(PERIODIC_SYNC_INTERVAL_SECS));
+
     // Main supervisor loop
     loop {
         tokio::select! {
@@ -1742,7 +1749,7 @@ pub async fn run(
             }
 
             // Periodic worker health check (every 250ms)
-            _ = tokio::time::sleep(Duration::from_millis(250)) => {
+            _ = health_check_interval.tick() => {
                 // Check for crashed workers and restart them
                 let restart_result = {
                     let mut manager = worker_manager.lock().unwrap();
@@ -1789,7 +1796,7 @@ pub async fn run(
             // Periodic ruleset sync (every 5 minutes)
             // Part of Option C (Hybrid Approach) for fire-and-forget broadcast reliability
             // Recovers from any missed broadcasts due to transient failures
-            _ = tokio::time::sleep(Duration::from_secs(PERIODIC_SYNC_INTERVAL_SECS)) => {
+            _ = periodic_sync_interval.tick() => {
                 let rules_snapshot: Vec<ForwardingRule> = {
                     let rules = master_rules.lock().unwrap();
                     rules.values().cloned().collect()

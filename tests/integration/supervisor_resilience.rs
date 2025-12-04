@@ -46,13 +46,7 @@ async fn kill_worker(pid: u32) -> Result<()> {
 ///
 /// Verifies that when a data plane worker is killed, the supervisor
 /// detects the failure and spawns a replacement worker.
-///
-/// NOTE: This test is currently ignored because worker restart detection
-/// appears to not be working correctly in the supervisor's main loop.
-/// The worker is killed successfully, but the supervisor doesn't detect
-/// the exit and spawn a replacement. This needs investigation.
 #[tokio::test]
-#[ignore = "Worker restart detection not working - needs investigation"]
 async fn test_supervisor_restarts_killed_worker() -> Result<()> {
     require_root!();
 
@@ -201,11 +195,7 @@ async fn test_rules_persist_after_worker_restart() -> Result<()> {
 ///
 /// Starts supervisor with multiple workers, kills all of them, and
 /// verifies the supervisor restarts all of them.
-///
-/// NOTE: This test is currently ignored because worker restart detection
-/// appears to not be working correctly. See test_supervisor_restarts_killed_worker.
 #[tokio::test]
-#[ignore = "Worker restart detection not working - needs investigation"]
 async fn test_supervisor_handles_multiple_worker_failures() -> Result<()> {
     require_root!();
 
