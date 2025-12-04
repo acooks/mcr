@@ -222,6 +222,13 @@ pub fn handle_supervisor_command(
                 }
             }
 
+            // Generate stable rule ID if not provided
+            let rule_id = if rule_id.is_empty() {
+                crate::generate_rule_id(&input_interface, input_group, input_port)
+            } else {
+                rule_id
+            };
+
             let rule = ForwardingRule {
                 rule_id,
                 input_interface,

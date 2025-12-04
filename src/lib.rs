@@ -4,9 +4,9 @@ pub mod config;
 pub mod logging;
 
 use serde::{Deserialize, Serialize};
+use std::hash::{Hash, Hasher};
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
-use uuid::Uuid;
 
 pub use config::{Config, ConfigRule, InputSpec, OutputSpec};
 
@@ -232,8 +232,20 @@ impl RelayCommand {
     }
 }
 
+/// Default rule_id for serde deserialization.
+/// Returns empty string, signaling that the supervisor should generate a hash-based ID.
 fn default_rule_id() -> String {
-    Uuid::new_v4().to_string()
+    String::new()
+}
+
+/// Generate a stable rule ID from the input tuple (interface, group, port).
+/// This produces a deterministic 16-character hex string that is stable across reloads.
+pub fn generate_rule_id(interface: &str, group: Ipv4Addr, port: u16) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    interface.hash(&mut hasher);
+    group.hash(&mut hasher);
+    port.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 /// Compute a deterministic hash of a ruleset for drift detection.
@@ -368,11 +380,36 @@ mod tests {
     }
 
     #[test]
-    fn test_default_rule_id_is_valid_uuid() {
+    fn test_default_rule_id_is_empty() {
         let rule_id = default_rule_id();
         assert!(
-            Uuid::parse_str(&rule_id).is_ok(),
-            "Generated rule_id should be a valid UUID"
+            rule_id.is_empty(),
+            "default_rule_id() should return empty string (supervisor generates hash-based ID)"
         );
+    }
+
+    #[test]
+    fn test_generate_rule_id_is_stable() {
+        // Same inputs should produce same ID
+        let id1 = generate_rule_id("eth0", "224.0.0.1".parse().unwrap(), 5000);
+        let id2 = generate_rule_id("eth0", "224.0.0.1".parse().unwrap(), 5000);
+        assert_eq!(id1, id2, "Same inputs should generate same ID");
+
+        // ID should be 16 hex characters
+        assert_eq!(id1.len(), 16, "Rule ID should be 16 hex characters");
+        assert!(
+            id1.chars().all(|c| c.is_ascii_hexdigit()),
+            "Rule ID should contain only hex digits"
+        );
+
+        // Different inputs should produce different IDs
+        let id3 = generate_rule_id("eth0", "224.0.0.1".parse().unwrap(), 5001);
+        assert_ne!(id1, id3, "Different port should generate different ID");
+
+        let id4 = generate_rule_id("eth1", "224.0.0.1".parse().unwrap(), 5000);
+        assert_ne!(id1, id4, "Different interface should generate different ID");
+
+        let id5 = generate_rule_id("eth0", "224.0.0.2".parse().unwrap(), 5000);
+        assert_ne!(id1, id5, "Different group should generate different ID");
     }
 }

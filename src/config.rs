@@ -241,14 +241,7 @@ impl ConfigRule {
 
     /// Generate a stable rule ID from the input tuple (hash-based)
     fn generate_rule_id(&self) -> String {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = DefaultHasher::new();
-        self.input.interface.hash(&mut hasher);
-        self.input.group.hash(&mut hasher);
-        self.input.port.hash(&mut hasher);
-        format!("{:016x}", hasher.finish())
+        crate::generate_rule_id(&self.input.interface, self.input.group, self.input.port)
     }
 }
 
