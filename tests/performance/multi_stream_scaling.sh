@@ -41,9 +41,9 @@ MAX_STREAMS="${1:-150}"
 NUM_WORKERS="${NUM_WORKERS:-4}"  # 4 workers (can scale up with environment variable)
 
 # Binary paths
-TRAFFIC_GEN="$PROJECT_ROOT/target/release/traffic_generator"
-MCR_SUPERVISOR="$PROJECT_ROOT/target/release/multicast_relay"
-CONTROL_CLIENT="$PROJECT_ROOT/target/release/control_client"
+TRAFFIC_GEN="$PROJECT_ROOT/target/release/mcrgen"
+MCR_SUPERVISOR="$PROJECT_ROOT/target/release/mcrd"
+CONTROL_CLIENT="$PROJECT_ROOT/target/release/mcrctl"
 
 # File paths
 MCR_SOCK="/tmp/mcr_multistream.sock"
@@ -80,8 +80,8 @@ cleanup_all() {
     ip netns del sink-ns 2>/dev/null || true
 
     # Kill any remaining processes
-    pkill -9 -f "traffic_generator" 2>/dev/null || true
-    pkill -9 -f "multicast_relay" 2>/dev/null || true
+    pkill -9 -f "mcrgen" 2>/dev/null || true
+    pkill -9 -f "mcrd" 2>/dev/null || true
     pkill -9 -f "socat.*UDP4" 2>/dev/null || true
 
     # Clean up files

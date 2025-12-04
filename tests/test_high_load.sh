@@ -7,7 +7,7 @@ set -e
 cargo build --release
 
 # Start the relay in the background
-./target/release/multicast_relay &
+./target/release/mcrd &
 RELAY_PID=$!
 echo "Relay started with PID $RELAY_PID"
 
@@ -19,7 +19,7 @@ for i in {1..50}; do
     INPUT_GROUP="224.0.1.$i"
     OUTPUT_GROUP="224.0.2.$i"
     INTERFACE="127.0.0.1" # Assuming loopback for testing
-    ./target/release/control_client add --input-group $INPUT_GROUP --input-port 5000 --outputs "$OUTPUT_GROUP:5000:$INTERFACE"
+    ./target/release/mcrctl add --input-group $INPUT_GROUP --input-port 5000 --outputs "$OUTPUT_GROUP:5000:$INTERFACE"
 done
 
 echo "Added 50 forwarding rules."
@@ -29,7 +29,7 @@ PIDS=()
 for i in {1..50}; do
     INPUT_GROUP="224.0.1.$i"
     INTERFACE="127.0.0.1"
-    ./target/release/traffic_generator --group $INPUT_GROUP --port 5000 --interface $INTERFACE --rate 100000 &
+    ./target/release/mcrgen --group $INPUT_GROUP --port 5000 --interface $INTERFACE --rate 100000 &
     PIDS+=($!)
 done
 

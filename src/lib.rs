@@ -37,7 +37,7 @@ pub enum Command {
         relay_command_socket_path: PathBuf,
 
         /// Path to the Unix socket for client command and control.
-        #[clap(long, default_value = "/tmp/multicast_relay_control.sock")]
+        #[clap(long, default_value = "/tmp/mcrd_control.sock")]
         control_socket_path: PathBuf,
 
         /// Network interface for data plane workers to listen on.

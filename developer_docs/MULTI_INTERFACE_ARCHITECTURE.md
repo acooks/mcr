@@ -483,7 +483,7 @@ No changes needed.
 ### Current: Single Interface
 
 ```bash
-multicast_relay supervisor \
+mcrd supervisor \
   --interface eth0 \
   --num-workers 48
 ```
@@ -498,7 +498,7 @@ Internally:
 ### Future: Multiple Interfaces (Manual Groups)
 
 ```bash
-multicast_relay supervisor \
+mcrd supervisor \
   --interface-group 0:eth0 --workers-per-group 24 \
   --interface-group 1:eth1 --workers-per-group 24 \
   --interface-group 2:eth2 --workers-per-group 24 \
@@ -516,7 +516,7 @@ Internally:
 ### Future: Auto-Scaling
 
 ```bash
-multicast_relay supervisor \
+mcrd supervisor \
   --auto-scale \
   --interfaces eth0,eth1,eth2,eth3 \
   --min-workers-per-interface 1 \

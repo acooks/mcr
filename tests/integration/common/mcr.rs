@@ -42,7 +42,7 @@ impl McrInstance {
         let _ = std::fs::remove_file(&control_socket);
         let _ = std::fs::remove_file(&log_file);
 
-        let relay_bin = binary_path("multicast_relay");
+        let relay_bin = binary_path("mcrd");
 
         // Build command
         let mut cmd = if let Some(core_id) = core {

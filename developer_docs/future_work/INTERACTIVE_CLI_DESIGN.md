@@ -142,17 +142,17 @@ tokio = { version = "1", features = ["full"] }
 
 ### D5: TUI Architecture - Separate Binary
 
-**Decision**: Create `mcr-monitor` as a separate binary from `control_client`.
+**Decision**: Create `mcr-monitor` as a separate binary from `mcrctl`.
 
 **Rationale**:
 
-- Keep `control_client` simple for scripting/automation
+- Keep `mcrctl` simple for scripting/automation
 - TUI has different dependencies and runtime model
 - Allows separate evolution of interfaces
 
 **Binaries**:
 
-- `control_client` - Simple one-shot CLI (existing)
+- `mcrctl` - Simple one-shot CLI (existing)
 - `mcr-monitor` - Interactive TUI (new)
 
 ## Feature Breakdown
@@ -165,12 +165,12 @@ tokio = { version = "1", features = ["full"] }
 
 ```bash
 # CLI interface
-control_client log-level get
-control_client log-level set --global info
-control_client log-level set --facility Ingress --level debug
+mcrctl log-level get
+mcrctl log-level set --global info
+mcrctl log-level set --facility Ingress --level debug
 
 # Example output
-control_client log-level get
+mcrctl log-level get
 {
   "LogLevels": {
     "global": "Info",
@@ -188,7 +188,7 @@ control_client log-level get
 2. ✅ Modified Logger::should_log() with facility-override-first logic
 3. ✅ Added SetGlobalLogLevel/SetFacilityLogLevel/GetLogLevels commands
 4. ✅ Implemented command handlers in supervisor with proper async lock scoping
-5. ✅ Added log-level subcommands to control_client with parse_severity/parse_facility
+5. ✅ Added log-level subcommands to mcrctl with parse_severity/parse_facility
 6. ✅ Added 5 comprehensive unit tests for level filtering
 7. ✅ Created 6 integration tests for runtime log-level changes
 
@@ -211,10 +211,10 @@ control_client log-level get
 
 ```bash
 # Tail logs (like journalctl -f)
-control_client logs tail --facility Ingress --level debug
+mcrctl logs tail --facility Ingress --level debug
 
 # Dump last N lines
-control_client logs dump --lines 1000 > /tmp/mcr-logs.txt
+mcrctl logs dump --lines 1000 > /tmp/mcr-logs.txt
 ```
 
 **Implementation Tasks**:
@@ -222,7 +222,7 @@ control_client logs dump --lines 1000 > /tmp/mcr-logs.txt
 1. Add DumpLogs/StreamLogs to SupervisorCommand
 2. Implement ring buffer dump in AsyncConsumer
 3. Implement streaming protocol (length-delimited JSON)
-4. Add logs subcommands to control_client
+4. Add logs subcommands to mcrctl
 5. Handle client disconnect gracefully
 
 **Technical Challenge**: Ring buffer is consumed by AsyncConsumer.
@@ -353,7 +353,7 @@ SupervisorCommand::StreamLogs { facilities, min_level } => {
 
 1. **End-to-end log filtering**
    - Start supervisor with default log level
-   - Change level via control_client
+   - Change level via mcrctl
    - Verify filtered logs don't appear
 
 2. **Log streaming**
@@ -423,7 +423,7 @@ if tx.try_send(entry).is_err() {
 
 ### CLI Backward Compatibility
 
-Adding new commands to `control_client` is backward compatible:
+Adding new commands to `mcrctl` is backward compatible:
 
 - Old binaries ignore new commands (unknown variant error)
 - New binaries support old commands

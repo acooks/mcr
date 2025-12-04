@@ -39,8 +39,8 @@ async fn start_supervisor() -> Result<(Child, PathBuf)> {
     cleanup_socket(&control_socket);
     cleanup_socket(&relay_socket);
 
-    // 3. Get path to the multicast_relay binary
-    let binary = env!("CARGO_BIN_EXE_multicast_relay");
+    // 3. Get path to the mcrd binary
+    let binary = env!("CARGO_BIN_EXE_mcrd");
 
     // 4. Spawn supervisor process
     let supervisor = Command::new(binary)

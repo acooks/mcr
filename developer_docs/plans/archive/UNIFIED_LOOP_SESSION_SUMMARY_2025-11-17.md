@@ -317,7 +317,7 @@ Operating margin: 62% of total pool available
 #### Test 1: Single Worker Startup
 
 ```bash
-sudo multicast_relay supervisor \
+sudo mcrd supervisor \
     --control-socket-path /tmp/test.sock \
     --interface lo \
     --num-workers 1
@@ -380,7 +380,7 @@ cargo test --release test_add_and_remove_rule_e2e
 
 ```bash
 $ cargo build --release
-   Compiling multicast_relay v0.1.0 (/home/acooks/mcr)
+   Compiling mcrd v0.1.0 (/home/acooks/mcr)
     Finished `release` profile [optimized] target(s) in 2.95s
 ```
 
@@ -389,7 +389,7 @@ $ cargo build --release
 ### Binary Info
 
 ```text
-File: /home/acooks/mcr/target/release/multicast_relay
+File: /home/acooks/mcr/target/release/mcrd
 Built: 2025-11-17 20:13
 Size: 3,364,664 bytes
 MD5: 48b1fcf85d86ab452099e71f0d862621
@@ -430,7 +430,7 @@ MD5: 48b1fcf85d86ab452099e71f0d862621
 **Test Plan:**
 
 - Start supervisor with unified loop
-- Add forwarding rule via control_client
+- Add forwarding rule via mcrctl
 - Send multicast traffic
 - Verify packets forwarded correctly
 - Check stats for correct counts

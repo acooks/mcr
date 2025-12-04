@@ -60,9 +60,9 @@ Phase 1 (detection) complete. Phase 2 needs: workers report ruleset hash, superv
 
 Rename binaries to conventional names:
 
-- `multicast_relay` → `mcrd` (daemon)
-- `control_client` → `mcrctl` (control CLI)
-- `traffic_generator` → `mcrgen` (testing tool)
+- `mcrd` → `mcrd` (daemon)
+- `mcrctl` → `mcrctl` (control CLI)
+- `mcrgen` → `mcrgen` (testing tool)
 
 **Effort:** 1 day (part of multi-interface work)
 

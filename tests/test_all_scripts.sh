@@ -29,7 +29,7 @@ echo "Test results will be saved to: $TEST_RUN_DIR"
 # Cleanup function
 cleanup() {
     echo -e "\n${YELLOW}Cleaning up...${NC}"
-    sudo pkill -9 multicast_relay 2>/dev/null || true
+    sudo pkill -9 mcrd 2>/dev/null || true
     sudo pkill -9 socat 2>/dev/null || true
     sudo rm -f /dev/shm/mcr_* 2>/dev/null || true
     sudo rm -f /tmp/*.sock 2>/dev/null || true

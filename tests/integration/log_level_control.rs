@@ -20,7 +20,7 @@ mod tests {
 
     /// Spawns a supervisor process with unique socket paths
     async fn spawn_supervisor(control_socket_path: &PathBuf) -> Result<Child> {
-        let binary_path = env!("CARGO_BIN_EXE_multicast_relay");
+        let binary_path = env!("CARGO_BIN_EXE_mcrd");
 
         // Generate unique relay socket path for this test instance
         let relay_socket_path = control_socket_path.with_extension("relay.sock");

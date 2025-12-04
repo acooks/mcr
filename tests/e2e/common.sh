@@ -8,10 +8,10 @@ VETH_HOST="vh-$$"
 VETH_NS="vn-$$"
 IP_HOST="192.168.200.1/24"
 IP_NS="192.168.200.2/24"
-IP_NS_ADDR="192.168.200.2" # Without CIDR for traffic_generator
+IP_NS_ADDR="192.168.200.2" # Without CIDR for mcrgen
 
 RELAY_COMMAND_SOCKET="/tmp/mcr_relay_e2e_$$.sock"
-WORKER_CONTROL_SOCKET="/tmp/multicast_relay_control.sock"
+WORKER_CONTROL_SOCKET="/tmp/mcrd_control.sock"
 OUTPUT_FILE="/tmp/mcr_e2e_output_$$.txt"
 
 # --- Helper Functions ---
@@ -72,29 +72,29 @@ start_listener() {
     sleep 1 # Give socat time to start up
 }
 
-# Function to start the multicast_relay supervisor in the namespace
+# Function to start the mcrd supervisor in the namespace
 start_relay() {
-    echo "--- Starting multicast_relay in background ---"
+    echo "--- Starting mcrd in background ---"
     # Note: The relay needs to be run with sudo to have CAP_NET_RAW for AF_PACKET
     # The supervisor and workers will run with privileges dropped to the configured user/group
     # (or root if not configured, which is fine for tests).
     # Use --num-workers 1 for faster, more reliable test execution
     sudo ip netns exec "$NS_NAME" \
-        ./target/debug/multicast_relay supervisor \
+        ./target/debug/mcrd supervisor \
         --relay-command-socket-path "$RELAY_COMMAND_SOCKET" \
         --num-workers 1 &
     RELAY_PID=$!
     echo "Relay started with PID $RELAY_PID."
 
     # The worker's control socket is created by the supervisor (as root),
-    # so we need to change its ownership to allow the control_client (as user) to connect.
+    # so we need to change its ownership to allow the mcrctl (as user) to connect.
     sleep 1
     sudo chown "$(id -u):$(id -g)" "$WORKER_CONTROL_SOCKET"
 
     sleep 1 # Give the relay time to fully initialize
 }
 
-# Function to send packets using traffic_generator
+# Function to send packets using mcrgen
 send_packets() {
     local input_group="$1"
     local input_port="$2"
@@ -102,7 +102,7 @@ send_packets() {
     local packet_payload="$4"
     echo "--- Sending $packet_count test packets ---"
     sudo ip netns exec "$NS_NAME" \
-        ./target/debug/traffic_generator \
+        ./target/debug/mcrgen \
         --group "$input_group" \
         --port "$input_port" \
         --interface "$IP_NS_ADDR" \
@@ -122,7 +122,7 @@ add_rule() {
     local output_port="$6"
     local output_interface="$7"
     echo "--- Adding forwarding rule ($rule_id) ---"
-    ./target/debug/control_client --socket-path "$WORKER_CONTROL_SOCKET" add \
+    ./target/debug/mcrctl --socket-path "$WORKER_CONTROL_SOCKET" add \
         --rule-id "$rule_id" \
         --input-interface "$input_interface" \
         --input-group "$input_group" \
@@ -135,7 +135,7 @@ add_rule() {
 remove_rule() {
     local rule_id="$1"
     echo "--- Removing forwarding rule ($rule_id) ---"
-    ./target/debug/control_client --socket-path "$WORKER_CONTROL_SOCKET" remove \
+    ./target/debug/mcrctl --socket-path "$WORKER_CONTROL_SOCKET" remove \
         --rule-id "$rule_id"
     echo "Rule removed."
 }
@@ -143,13 +143,13 @@ remove_rule() {
 # Function to list forwarding rules
 list_rules() {
     echo "--- Listing forwarding rules ---"
-    ./target/debug/control_client --socket-path "$WORKER_CONTROL_SOCKET" list
+    ./target/debug/mcrctl --socket-path "$WORKER_CONTROL_SOCKET" list
 }
 
 # Function to get flow statistics
 get_stats() {
     echo "--- Getting flow statistics ---"
-    ./target/debug/control_client --socket-path "$WORKER_CONTROL_SOCKET" stats
+    ./target/debug/mcrctl --socket-path "$WORKER_CONTROL_SOCKET" stats
 }
 
 # Function to assert the number of packets received
@@ -175,7 +175,7 @@ find_worker_pid() {
     local worker_type="$1" # e.g., "Data Plane", "Control Plane"
     # Find the PID of the worker process within the namespace
     # This assumes the worker process prints "Worker process started." and then its type
-    sudo ip netns exec "$NS_NAME" pgrep -f "multicast_relay worker.*$worker_type" | head -n 1
+    sudo ip netns exec "$NS_NAME" pgrep -f "mcrd worker.*$worker_type" | head -n 1
 }
 
 # Ensure cleanup runs on script exit

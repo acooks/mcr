@@ -76,7 +76,7 @@ Egress: sent=0 ch_recv=0 ❌
 **Proposed Syntax**:
 
 ```bash
-control_client add \
+mcrctl add \
   --input-interface eth0 \
   --input-group 239.1.1.1 \
   --input-port 5000 \
@@ -318,14 +318,14 @@ sudo -E RUST_BACKTRACE=full \
 **Check for running processes**:
 
 ```bash
-ps aux | grep multicast_relay
+ps aux | grep mcrd
 sudo ip netns list
 ```
 
 **Clean up if needed**:
 
 ```bash
-sudo pkill -9 multicast_relay
+sudo pkill -9 mcrd
 sudo ip netns del <namespace>
 ```
 

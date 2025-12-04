@@ -150,7 +150,7 @@ MCR_SOCKET_SNDBUF=8388608 sudo tests/data_plane_pipeline_veth.sh
 
 - `src/worker/unified_loop.rs` - Queue depth 1024, socket buffer 4MB
 - `scripts/setup_kernel_tuning.sh` - Kernel config helper (NEW)
-- Binary rebuilt: `target/release/multicast_relay`
+- Binary rebuilt: `target/release/mcrd`
 
 ---
 

@@ -13,9 +13,9 @@ set -u
 set -o pipefail
 
 # --- Configuration ---
-RELAY_BINARY="target/release/multicast_relay"
-CONTROL_CLIENT_BINARY="target/release/control_client"
-TRAFFIC_GENERATOR_BINARY="target/release/traffic_generator"
+RELAY_BINARY="target/release/mcrd"
+CONTROL_CLIENT_BINARY="target/release/mcrctl"
+TRAFFIC_GENERATOR_BINARY="target/release/mcrgen"
 
 # Socket paths for each MCR instance
 MCR1_SOCKET="/tmp/mcr_veth_1.sock"
@@ -46,8 +46,8 @@ SEND_RATE=1000000      # Target 1M pps (will achieve ~667k pps for 15 sec = 10M 
 cleanup() {
     echo ""
     echo "--- Cleaning up ---"
-    sudo killall -q multicast_relay || true
-    sudo killall -q traffic_generator || true
+    sudo killall -q mcrd || true
+    sudo killall -q mcrgen || true
     rm -f "$MCR1_SOCKET" "$MCR2_SOCKET" "$MCR3_SOCKET"
     rm -f "$MCR1_RELAY_SOCKET" "$MCR2_RELAY_SOCKET" "$MCR3_RELAY_SOCKET"
 

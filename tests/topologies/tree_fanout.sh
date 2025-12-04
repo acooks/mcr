@@ -98,7 +98,7 @@ log_section 'Configuring Forwarding Rules'
 # MCR-1: Receive on veth0p (239.1.1.1:5001) → Forward to 3 destinations (HEAD-END REPLICATION)
 log_info 'MCR-1: Configuring 1:3 head-end replication (single rule, multiple outputs)'
 
-# Use control_client directly to add single rule with multiple outputs
+# Use mcrctl directly to add single rule with multiple outputs
 \$CONTROL_CLIENT_BINARY --socket-path /tmp/mcr1.sock add \
     --input-interface veth0p \
     --input-group 239.1.1.1 \

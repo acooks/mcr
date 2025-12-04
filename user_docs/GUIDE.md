@@ -14,11 +14,11 @@ This project provides a high-performance, dynamically configurable multicast rel
 
 MCR operates on a few core concepts:
 
-- **Supervisor:** This is the main process that you launch when you run `multicast_relay`. It is responsible for managing the high-performance workers and handling runtime configuration commands. It does not process any multicast traffic itself.
+- **Supervisor:** This is the main process that you launch when you run `mcrd`. It is responsible for managing the high-performance workers and handling runtime configuration commands. It does not process any multicast traffic itself.
 
 - **Worker:** These are the high-performance processes that do the actual work of receiving, processing, and re-transmitting multicast packets. The supervisor spawns one or more workers, typically pinning each to a specific CPU core to maximize performance.
 
-- **Forwarding Rule:** A forwarding rule is a configuration object that tells a worker what to do. Each rule defines a specific input stream (based on multicast group and port) and a list of one or more outputs where that stream should be re-transmitted. You can manage these rules at runtime using the `control_client`.
+- **Forwarding Rule:** A forwarding rule is a configuration object that tells a worker what to do. Each rule defines a specific input stream (based on multicast group and port) and a list of one or more outputs where that stream should be re-transmitted. You can manage these rules at runtime using the `mcrctl`.
 
 ## Installation
 
@@ -47,21 +47,21 @@ For detailed information on kernel tuning, environment variables for performance
 To run the main relay application, which will start the supervisor and its workers:
 
 ```bash
-sudo ./target/release/multicast_relay supervisor
+sudo ./target/release/mcrd supervisor
 ```
 
 The supervisor starts with default settings (all CPU cores as workers, nobody:daemon user/group). For additional options, see the **[Reference Manual](./REFERENCE.md)**.
 
-All forwarding rules and runtime operations are managed via the `control_client`.
+All forwarding rules and runtime operations are managed via the `mcrctl`.
 
-## Basic `control_client` Examples
+## Basic `mcrctl` Examples
 
-Here are some common examples of how to use the `control_client` to manage the relay.
+Here are some common examples of how to use the `mcrctl` to manage the relay.
 
 **Add a 1-to-1 Forwarding Rule:**
 
 ```bash
-./target/release/control_client add \
+./target/release/mcrctl add \
     --input-interface eth0 \
     --input-group 239.10.1.2 \
     --input-port 8001 \
@@ -71,7 +71,7 @@ Here are some common examples of how to use the `control_client` to manage the r
 **Add a 1-to-2 Fan-Out Rule:**
 
 ```bash
-./target/release/control_client add \
+./target/release/mcrctl add \
     --input-interface eth0 \
     --input-group 239.10.1.2 \
     --input-port 8001 \
@@ -81,59 +81,59 @@ Here are some common examples of how to use the `control_client` to manage the r
 **List Active Rules:**
 
 ```bash
-./target/release/control_client list
+./target/release/mcrctl list
 ```
 
 **Remove a Rule:**
 
 ```bash
-./target/release/control_client remove \
+./target/release/mcrctl remove \
     --rule-id <rule_id>
 ```
 
-**Note:** Use `./target/release/control_client list` to see all rules and their IDs.
+**Note:** Use `./target/release/mcrctl list` to see all rules and their IDs.
 
 **View Statistics:**
 
 ```bash
-./target/release/control_client stats
+./target/release/mcrctl stats
 ```
 
 **List Workers:**
 
 ```bash
-./target/release/control_client list-workers
+./target/release/mcrctl list-workers
 ```
 
 **Health Check:**
 
 ```bash
-./target/release/control_client ping
+./target/release/mcrctl ping
 ```
 
 **Manage Log Levels:**
 
 ```bash
 # Get current log levels
-./target/release/control_client log-level get
+./target/release/mcrctl log-level get
 
 # Set global log level
-./target/release/control_client log-level set --global info
+./target/release/mcrctl log-level set --global info
 
 # Set facility-specific log level
-./target/release/control_client log-level set --facility DataPlane --level debug
+./target/release/mcrctl log-level set --facility DataPlane --level debug
 ```
 
 Available log levels (least to most verbose): `emergency`, `alert`, `critical`, `error`, `warning`, `notice`, `info`, `debug`
 
 For a complete command reference and advanced configuration options, see the **[Reference Manual](./REFERENCE.md)**.
 
-## Basic `traffic_generator` Example
+## Basic `mcrgen` Example
 
-The `traffic_generator` can be used to send multicast traffic for testing purposes.
+The `mcrgen` can be used to send multicast traffic for testing purposes.
 
 ```bash
-./target/release/traffic_generator \
+./target/release/mcrgen \
     --group 239.1.1.1 \
     --port 5000 \
     --interface 10.0.0.1 \

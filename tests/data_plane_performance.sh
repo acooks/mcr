@@ -19,9 +19,9 @@ set -u
 set -o pipefail
 
 # --- Configuration ---
-RELAY_BINARY="target/release/multicast_relay"
-CONTROL_CLIENT_BINARY="target/release/control_client"
-TRAFFIC_GENERATOR_BINARY="target/release/traffic_generator"
+RELAY_BINARY="target/release/mcrd"
+CONTROL_CLIENT_BINARY="target/release/mcrctl"
+TRAFFIC_GENERATOR_BINARY="target/release/mcrgen"
 
 SUPERVISOR_SOCKET="/tmp/mcr_perf_test.sock"
 INPUT_INTERFACE="lo"
@@ -40,8 +40,8 @@ SEND_RATE=1000000  # Target send rate (pps) - will be limited by system
 # --- Cleanup ---
 cleanup() {
     echo "--- Cleaning up ---"
-    sudo killall -q multicast_relay || true
-    sudo killall -q traffic_generator || true
+    sudo killall -q mcrd || true
+    sudo killall -q mcrgen || true
     killall -q nc || true
     sudo rm -f "$SUPERVISOR_SOCKET" || true
     echo "Cleanup complete."

@@ -5,9 +5,9 @@
 set -euo pipefail
 
 # --- Configuration Variables (can be overridden before sourcing) ---
-RELAY_BINARY="${RELAY_BINARY:-target/release/multicast_relay}"
-CONTROL_CLIENT_BINARY="${CONTROL_CLIENT_BINARY:-target/release/control_client}"
-TRAFFIC_GENERATOR_BINARY="${TRAFFIC_GENERATOR_BINARY:-target/release/traffic_generator}"
+RELAY_BINARY="${RELAY_BINARY:-target/release/mcrd}"
+CONTROL_CLIENT_BINARY="${CONTROL_CLIENT_BINARY:-target/release/mcrctl}"
+TRAFFIC_GENERATOR_BINARY="${TRAFFIC_GENERATOR_BINARY:-target/release/mcrgen}"
 
 # --- Test Initialization ---
 
@@ -322,7 +322,7 @@ start_mcr() {
 }
 
 # Wait for MCR control sockets to be ready and responding
-# Verifies both socket file existence AND that control_client can connect
+# Verifies both socket file existence AND that mcrctl can connect
 # Usage: wait_for_sockets <socket1> [socket2] [socket3] ...
 wait_for_sockets() {
     log_info "Waiting for MCR instances to start..."
@@ -347,7 +347,7 @@ wait_for_sockets() {
             sleep 0.1
         done
 
-        # Phase 2: Verify control_client can actually connect
+        # Phase 2: Verify mcrctl can actually connect
         while ! "$CONTROL_CLIENT_BINARY" --socket-path "$socket" list >/dev/null 2>&1; do
             if [ "$(($(date +%s) - start))" -gt "$timeout" ]; then
                 log_error "Timeout waiting for socket to accept connections: $socket"
@@ -700,8 +700,8 @@ graceful_cleanup_unshare() {
 
     # Force-kill any remaining MCR processes
     log_info "Force-killing any remaining processes"
-    killall -q -9 multicast_relay 2>/dev/null || true
-    killall -q -9 traffic_generator 2>/dev/null || true
+    killall -q -9 mcrd 2>/dev/null || true
+    killall -q -9 mcrgen 2>/dev/null || true
 
     # Clean up socket files
     rm -f /tmp/mcr*.sock

@@ -178,7 +178,7 @@ Key findings from cargo tarpaulin:
 - `logging/consumer.rs`: 82% (73/89 lines)
 - `logging/ringbuffer.rs`: 78% (179/229 lines)
 - `logging/logger.rs`: 77% (96/124 lines)
-- `control_client.rs`: 81% (59/73 lines)
+- `mcrctl.rs`: 81% (59/73 lines)
 - `command_reader.rs`: 77% (20/26 lines)
 
 ### Critically Under-Covered Modules (<10% coverage)

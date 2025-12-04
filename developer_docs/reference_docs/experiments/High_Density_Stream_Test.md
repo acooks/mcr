@@ -44,15 +44,15 @@ A new test script, `tests/performance/high_density_streams.sh`, will be created 
 
 2. **MCR Test Run:**
    - Start a **single MCR supervisor process**, configured to use multiple worker cores (e.g., `--num-workers 4`).
-   - In a loop, execute the `control_client add` command **50 times** to dynamically configure all 50 forwarding rules.
-   - In parallel, start **50 `traffic_generator` processes** in the background, each sending one of the 50 streams.
+   - In a loop, execute the `mcrctl add` command **50 times** to dynamically configure all 50 forwarding rules.
+   - In parallel, start **50 `mcrgen` processes** in the background, each sending one of the 50 streams.
    - Wait for all generators to finish, then gracefully shut down MCR.
    - Validate the results by parsing MCR's `FINAL` stats. The key metrics will be `ingress matched` (should be ~1.5M) and `egress sent` (should also be ~1.5M).
 
 3. **`socat` Test Run:**
    - In a loop, start **50 `socat` sink processes** in the background to receive the traffic.
    - In a second loop, start **50 `socat` relay processes** in the background, one for each of the 50 stream translations.
-   - In parallel, start the same **50 `traffic_generator` processes**.
+   - In parallel, start the same **50 `mcrgen` processes**.
    - Wait for all processes to complete.
    - Validate the results by counting the total number of packets received across all 50 sink output files.
 

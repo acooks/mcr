@@ -27,7 +27,7 @@ We use a three-tiered strategy to test different aspects of the application. All
 
 - **Purpose:** To test the interaction between MCR's Rust components. These are divided into unprivileged and privileged tests.
 - **Scope:**
-- Control interface functionality (`control_client` -> `supervisor`).
+- Control interface functionality (`mcrctl` -> `supervisor`).
 - Supervisor/worker process lifecycle.
 - Behavior in isolated network namespaces (privileged only).
 - **Commands:**
@@ -98,5 +98,5 @@ When writing or debugging these scripts, pay close attention to the patterns for
 Our test suite is continuously evolving. Based on `TODO` comments in the source code, here are some known areas where coverage could be improved:
 
 - **Performance Benchmarks:** The benchmark tests in `tests/benchmarks/` are currently stubs and need to be fully implemented to provide meaningful performance metrics for forwarding rate, latency, and control interface operations.
-- **Rule Removal E2E Test:** The E2E test suite is missing a test case to validate the removal of forwarding rules via the `control_client`.
+- **Rule Removal E2E Test:** The E2E test suite is missing a test case to validate the removal of forwarding rules via the `mcrctl`.
 - **Supervisor Resilience:** While some resilience is tested, more complex failure scenarios (e.g., worker crash loops) could be added to the integration test suite.

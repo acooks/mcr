@@ -5,11 +5,11 @@
 
 ---
 
-This document describes the architecture of the `multicast_relay` application. It is the definitive, up-to-date guide to the system's design, components, and core technical decisions. As the project evolves, this document is updated to reflect the current state of the implementation.
+This document describes the architecture of the `mcrd` application. It is the definitive, up-to-date guide to the system's design, components, and core technical decisions. As the project evolves, this document is updated to reflect the current state of the implementation.
 
 ## 1. System Overview
 
-The `multicast_relay` is a high-performance userspace application designed to address the "unroutable source" problem for multicast traffic. It receives multicast UDP packets, which may originate from unroutable sources, and re-transmits them from a routable local interface.
+The `mcrd` is a high-performance userspace application designed to address the "unroutable source" problem for multicast traffic. It receives multicast UDP packets, which may originate from unroutable sources, and re-transmits them from a routable local interface.
 
 The architecture is designed around three core principles:
 
@@ -95,7 +95,7 @@ The system is architected as a multi-process application to ensure robust privil
 ```mermaid
 graph TD
     subgraph User Space
-        A["User/Operator"] --> B{"control_client"};
+        A["User/Operator"] --> B{"mcrctl"};
     end
 
     subgraph MCR Application
@@ -124,8 +124,8 @@ graph TD
     style DN fill:#bbf,stroke:#333,stroke-width:2px
 ```
 
-- **User/Operator:** Interacts with the system via the `control_client`.
-- **`control_client`:** A command-line tool that sends JSON commands to the supervisor over a Unix socket.
+- **User/Operator:** Interacts with the system via the `mcrctl`.
+- **`mcrctl`:** A command-line tool that sends JSON commands to the supervisor over a Unix socket.
 - **Supervisor Process:** The main process that manages workers, handles configuration commands, and centralizes logging and statistics. It runs with privileges but does not handle high-speed packet forwarding.
 - **Worker Processes:** High-performance data plane processes, each pinned to a specific CPU core. They receive, process, and re-transmit all multicast traffic.
 

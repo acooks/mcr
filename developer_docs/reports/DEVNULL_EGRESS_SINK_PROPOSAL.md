@@ -72,7 +72,7 @@ Test scaling without network I/O becoming the bottleneck:
 ```bash
 # Test 100 concurrent streams without network overhead
 for stream in {1..100}; do
-    control_client add --input "239.1.1.$stream:5000@eth0" --output "devnull"
+    mcrctl add --input "239.1.1.$stream:5000@eth0" --output "devnull"
 done
 
 send_traffic_to_all_streams
@@ -84,7 +84,7 @@ send_traffic_to_all_streams
 Profile CPU usage of packet processing without I/O noise:
 
 ```bash
-perf record -g ./multicast_relay --output devnull ...
+perf record -g ./mcrd --output devnull ...
 # Clean CPU profile of packet matching logic
 ```
 
@@ -93,7 +93,7 @@ perf record -g ./multicast_relay --output devnull ...
 ### Option 1: Special Output Syntax
 
 ```bash
-control_client add \
+mcrctl add \
   --input-interface eth0 \
   --input-group 239.1.1.1 \
   --input-port 5000 \
@@ -114,7 +114,7 @@ control_client add \
 ### Option 2: Dummy Network Sink
 
 ```bash
-control_client add \
+mcrctl add \
   --input-interface eth0 \
   --input-group 239.1.1.1 \
   --input-port 5000 \
@@ -136,7 +136,7 @@ control_client add \
 ### Option 3: Egress Flag
 
 ```bash
-control_client add \
+mcrctl add \
   --input-interface eth0 \
   --input-group 239.1.1.1 \
   --input-port 5000 \

@@ -10,16 +10,16 @@
 # 5. Sends a burst of test packets using the traffic generator
 # 6. Verifies that the listener received the correct number of packets
 #
-# TODO: Add test for rule removal once control_client returns rule IDs
+# TODO: Add test for rule removal once mcrctl returns rule IDs
 
 set -e
 set -u
 set -o pipefail
 
 # --- Configuration ---
-RELAY_BINARY="target/release/multicast_relay"
-CONTROL_CLIENT_BINARY="target/release/control_client"
-TRAFFIC_GENERATOR_BINARY="target/release/traffic_generator"
+RELAY_BINARY="target/release/mcrd"
+CONTROL_CLIENT_BINARY="target/release/mcrctl"
+TRAFFIC_GENERATOR_BINARY="target/release/mcrgen"
 
 # Use unique paths to avoid conflicts between concurrent test runs
 TEST_ID="$$"
@@ -53,7 +53,7 @@ PAYLOAD="E2E_TEST_PACKET"
 cleanup() {
     echo ""
     echo "--- Cleaning up ---"
-    sudo killall -q multicast_relay socat || true
+    sudo killall -q mcrd socat || true
     sudo ip netns pids "$NS_NAME" 2>/dev/null | xargs -r sudo kill 2>/dev/null || true
     sudo ip netns del "$NS_NAME" 2>/dev/null || true
     sudo rm -f "$SUPERVISOR_SOCKET" || true

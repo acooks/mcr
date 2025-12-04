@@ -50,9 +50,9 @@ MCR_RESULTS_FILE="/tmp/mcr_bridge_results.txt"
 SOCAT_RESULTS_FILE="/tmp/socat_bridge_results.txt"
 
 # Binary paths
-TRAFFIC_GEN="$PROJECT_ROOT/target/release/traffic_generator"
-MCR_SUPERVISOR="$PROJECT_ROOT/target/release/multicast_relay"
-CONTROL_CLIENT="$PROJECT_ROOT/target/release/control_client"
+TRAFFIC_GEN="$PROJECT_ROOT/target/release/mcrgen"
+MCR_SUPERVISOR="$PROJECT_ROOT/target/release/mcrd"
+CONTROL_CLIENT="$PROJECT_ROOT/target/release/mcrctl"
 
 # --- Check for root ---
 if [ "$EUID" -ne 0 ]; then

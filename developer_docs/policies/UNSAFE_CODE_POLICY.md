@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document defines the policy for using `unsafe` code in the multicast_relay project and describes the automated checks that enforce this policy.
+This document defines the policy for using `unsafe` code in the mcrd project and describes the automated checks that enforce this policy.
 
 ## Policy
 
@@ -90,7 +90,7 @@ just unsafe-report   # Generates target/geiger-report.txt
 
 ```text
 Functions  Expressions  Impls  Traits  Methods  Dependency
-327/697    29568/43304  466/568 52/55  825/1120  multicast_relay
+327/697    29568/43304  466/568 52/55  825/1120  mcrd
 0/90       34/687       0/2    0/0     8/92     ├── libc 0.2.177
 8/8        506/540      2/2    0/0     20/20    ├── io-uring 0.6.4
 21/25      2275/2761    110/114 3/3    108/117  └── tokio 1.48.0

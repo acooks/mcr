@@ -410,8 +410,8 @@ done
 ### Check Worker CPU Affinity
 
 ```bash
-# Find multicast_relay worker PIDs
-pgrep -f "multicast_relay worker" | while read pid; do
+# Find mcrd worker PIDs
+pgrep -f "mcrd worker" | while read pid; do
     affinity=$(taskset -pc "$pid" 2>/dev/null | awk '{print $NF}')
     echo "Worker PID $pid → CPU $affinity"
 done
@@ -458,7 +458,7 @@ sudo ethtool -N eth0 rx-flow-hash udp4 sdfn
 ethtool -S eth0 | grep rx_queue_.*_packets
 
 # If balanced at NIC but not at workers, check CPU affinity
-pgrep -f "multicast_relay worker" | xargs -I {} taskset -cp {}
+pgrep -f "mcrd worker" | xargs -I {} taskset -cp {}
 ```
 
 ### Issue 3: High CPU Usage on CPU 0

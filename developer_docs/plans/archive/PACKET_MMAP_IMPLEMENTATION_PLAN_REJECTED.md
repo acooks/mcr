@@ -222,7 +222,7 @@ NIC → Kernel Driver → PACKET_MMAP Ring Buffer (shared memory) → MCR Proces
 2. **Test multi-worker scenario:**
 
    ```bash
-   ./multicast_relay supervisor --num-workers 4 --interface eth0
+   ./mcrd supervisor --num-workers 4 --interface eth0
    ```
 
 ## File Changes Summary

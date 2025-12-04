@@ -9,7 +9,7 @@ echo ""
 
 # Cleanup function
 cleanup() {
-    sudo pkill -9 multicast_relay 2>/dev/null || true
+    sudo pkill -9 mcrd 2>/dev/null || true
     sudo rm -f /tmp/mcr_shutdown_test.sock
 }
 trap cleanup EXIT
@@ -21,7 +21,7 @@ echo ""
 
 # Start the supervisor
 echo "Starting supervisor..."
-sudo ./target/debug/multicast_relay supervisor \
+sudo ./target/debug/mcrd supervisor \
     --control-socket-path /tmp/mcr_shutdown_test.sock \
     --num-workers 1 \
     --interface lo 2>&1 | tee /tmp/shutdown_test.log &

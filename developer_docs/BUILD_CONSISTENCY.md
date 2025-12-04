@@ -22,8 +22,8 @@ When running tests, Cargo rebuilds the project with different compile-time confi
 
 **Issue:** `cargo test` and `cargo build` create different compilation units:
 
-- `cargo build --release` → `target/release/multicast_relay`
-- `cargo test --release` → `target/release/deps/multicast_relay-<hash>` + test harness
+- `cargo build --release` → `target/release/mcrd`
+- `cargo test --release` → `target/release/deps/mcrd-<hash>` + test harness
 
 Even though your integration tests use `binary_path()` to find release binaries, running `cargo test` triggers dependency recompilation.
 
@@ -80,7 +80,7 @@ These dependencies can cause different feature resolution in the dependency tree
 cargo test --release test_single_hop_1000_packets
 # → Recompiles with test harness
 # → Binary is in target/release/deps/
-# → Test finds target/release/multicast_relay (may be stale!)
+# → Test finds target/release/mcrd (may be stale!)
 ```
 
 ### Scenario 2: Run Shell Script Test
@@ -89,7 +89,7 @@ cargo test --release test_single_hop_1000_packets
 sudo tests/data_plane_pipeline_veth.sh
 # → Runs "cargo build --release" internally
 # → May recompile if cargo test was run before
-# → Uses target/release/multicast_relay
+# → Uses target/release/mcrd
 ```
 
 ### Scenario 3: Mixed Testing
@@ -121,9 +121,9 @@ cargo build --release --bins
 
 echo ""
 echo "=== Build complete ==="
-ls -lh target/release/multicast_relay
-ls -lh target/release/control_client
-ls -lh target/release/traffic_generator
+ls -lh target/release/mcrd
+ls -lh target/release/mcrctl
+ls -lh target/release/mcrgen
 echo ""
 echo "Binaries ready in: target/release/"
 echo "Run tests with: ./scripts/run_tests.sh"
@@ -136,7 +136,7 @@ echo "Run tests with: ./scripts/run_tests.sh"
 set -e
 
 # Ensure binaries are built
-if [ ! -f target/release/multicast_relay ]; then
+if [ ! -f target/release/mcrd ]; then
     echo "ERROR: Binaries not found. Run: ./scripts/build_all.sh"
     exit 1
 fi
@@ -200,7 +200,7 @@ sudo tests/*.sh              # Run shell tests (no rebuild)
 
 CARGO := cargo
 RELEASE_DIR := target/release
-BINARIES := multicast_relay control_client traffic_generator
+BINARIES := mcrd mcrctl mcrgen
 
 all: build
 
@@ -208,9 +208,9 @@ build:
     $(CARGO) build --release --bins
     @echo ""
     @echo "=== Binaries built ==="
-    @ls -lh $(RELEASE_DIR)/multicast_relay
-    @ls -lh $(RELEASE_DIR)/control_client
-    @ls -lh $(RELEASE_DIR)/traffic_generator
+    @ls -lh $(RELEASE_DIR)/mcrd
+    @ls -lh $(RELEASE_DIR)/mcrctl
+    @ls -lh $(RELEASE_DIR)/mcrgen
 
 test: build
     @echo "=== Running integration tests ==="
@@ -248,7 +248,7 @@ build:
     cargo build --release --bins
     @echo ""
     @echo "Binaries ready:"
-    @ls -lh target/release/multicast_relay
+    @ls -lh target/release/mcrd
 
 # Run Rust integration tests
 test-rust:
@@ -271,9 +271,9 @@ rebuild:
 # Show binary info
 info:
     @echo "=== Binary Information ==="
-    @stat target/release/multicast_relay 2>/dev/null || echo "Not built"
+    @stat target/release/mcrd 2>/dev/null || echo "Not built"
     @echo ""
-    @md5sum target/release/multicast_relay 2>/dev/null || true
+    @md5sum target/release/mcrd 2>/dev/null || true
 ```
 
 **Usage:**
@@ -433,7 +433,7 @@ time sudo tests/data_plane_pipeline_veth.sh
 # Should use existing binary
 
 # Verify no recompilation occurred
-ls -lh target/release/multicast_relay
+ls -lh target/release/mcrd
 # Timestamp should be from first build
 ```
 

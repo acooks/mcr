@@ -51,15 +51,15 @@ path = "experiments/closure_passing_test.rs"
 required-features = ["integration_test"]
 
 [[bin]]
-name = "multicast_relay"
+name = "mcrd"
 path = "src/main.rs"
 
 [[bin]]
-name = "traffic_generator"
+name = "mcrgen"
 path = "src/traffic_generator.rs"
 
 [[bin]]
-name = "control_client"
+name = "mcrctl"
 path = "src/control_client.rs"
 
 [[test]]

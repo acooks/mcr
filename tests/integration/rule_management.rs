@@ -170,7 +170,7 @@ async fn start_supervisor_with_workers(num_workers: Option<u32>) -> Result<TestS
     cleanup_socket(&control_socket);
     cleanup_socket(&relay_socket);
 
-    let binary = env!("CARGO_BIN_EXE_multicast_relay");
+    let binary = env!("CARGO_BIN_EXE_mcrd");
 
     let mut cmd = Command::new(binary);
     cmd.arg("supervisor")

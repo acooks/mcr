@@ -13,7 +13,7 @@
 # Test Parameters:
 #   - Configurable packet count and send rate (defaults: 100k packets @ 50k pps)
 #   - Packet size: 1024 bytes
-#   - Uses traffic_generator for accurate high-rate generation
+#   - Uses mcrgen for accurate high-rate generation
 #
 
 set -euo pipefail
@@ -34,9 +34,9 @@ PORT_IN="5001"
 PORT_OUT="5099"
 
 # Binary paths
-TRAFFIC_GEN="$PROJECT_ROOT/target/release/traffic_generator"
-MCR_SUPERVISOR="$PROJECT_ROOT/target/release/multicast_relay"
-CONTROL_CLIENT="$PROJECT_ROOT/target/release/control_client"
+TRAFFIC_GEN="$PROJECT_ROOT/target/release/mcrgen"
+MCR_SUPERVISOR="$PROJECT_ROOT/target/release/mcrd"
+CONTROL_CLIENT="$PROJECT_ROOT/target/release/mcrctl"
 
 # File paths
 MCR_SOCK="/tmp/mcr_chain.sock"
@@ -61,8 +61,8 @@ cleanup_all() {
     echo "[INFO] Running cleanup"
     
     # Kill processes
-    pkill -f "traffic_generator" 2>/dev/null || true
-    pkill -f "multicast_relay" 2>/dev/null || true
+    pkill -f "mcrgen" 2>/dev/null || true
+    pkill -f "mcrd" 2>/dev/null || true
     pkill -f "socat.*UDP4" 2>/dev/null || true
     
     # Delete namespaces

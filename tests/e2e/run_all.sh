@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# This script runs all end-to-end tests for the multicast_relay.
+# This script runs all end-to-end tests for the mcrd.
 
 # Exit immediately if a command exits with a non-zero status.
 set -e

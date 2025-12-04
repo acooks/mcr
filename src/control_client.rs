@@ -13,7 +13,7 @@ struct Args {
     command: CliCommand,
 
     /// Path to the control socket
-    #[arg(long, default_value = "/tmp/multicast_relay_control.sock")]
+    #[arg(long, default_value = "/tmp/mcrd_control.sock")]
     socket_path: PathBuf,
 }
 

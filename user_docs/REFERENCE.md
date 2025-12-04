@@ -116,10 +116,10 @@ After verifying your kernel version, test MCR:
 ./scripts/build_all.sh
 
 # Run a simple forwarding test
-sudo ./target/release/multicast_relay supervisor --interface lo --num-workers 1
+sudo ./target/release/mcrd supervisor --interface lo --num-workers 1
 
 # In another terminal
-./target/release/control_client add \
+./target/release/mcrctl add \
   --input-interface lo --input-group 239.1.1.1 --input-port 5000 \
   --outputs 239.2.2.2:6000:lo
 ```
@@ -170,17 +170,17 @@ These environment variables can be used to fine-tune the data plane's performanc
 
 ```bash
 # Run MCR with an 8 MB socket buffer and 4 worker threads
-MCR_SOCKET_SNDBUF=8388608 sudo ./target/release/multicast_relay supervisor --num-workers 4
+MCR_SOCKET_SNDBUF=8388608 sudo ./target/release/mcrd supervisor --num-workers 4
 ```
 
 ---
 
-## 4. `multicast_relay` Supervisor
+## 4. `mcrd` Supervisor
 
-The main `multicast_relay` application is the supervisor. Start it with the `supervisor` subcommand:
+The main `mcrd` application is the supervisor. Start it with the `supervisor` subcommand:
 
 ```bash
-sudo ./target/release/multicast_relay supervisor [OPTIONS]
+sudo ./target/release/mcrd supervisor [OPTIONS]
 ```
 
 ### Supervisor Options
@@ -191,40 +191,40 @@ sudo ./target/release/multicast_relay supervisor [OPTIONS]
 | `--user <USER>`               | `nobody`                                | User to run worker processes as (privilege separation). |
 | `--group <GROUP>`             | `daemon`                                | Group to run worker processes as.                       |
 | `--interface <IFACE>`         | `lo`                                    | Network interface for data plane workers (deprecated).  |
-| `--control-socket-path <PATH>`| `/tmp/multicast_relay_control.sock`     | Unix socket path for control_client connections.        |
+| `--control-socket-path <PATH>`| `/tmp/mcrd_control.sock`     | Unix socket path for mcrctl connections.        |
 | `--relay-command-socket-path` | `/tmp/mcr_relay_commands.sock`          | Unix socket path for supervisor-to-worker commands.     |
 
-**Note:** The `--interface` parameter is deprecated and will be removed. Per the architecture design, interfaces should be specified per-rule via `control_client add --input-interface`, not globally.
+**Note:** The `--interface` parameter is deprecated and will be removed. Per the architecture design, interfaces should be specified per-rule via `mcrctl add --input-interface`, not globally.
 
 ### Examples
 
 ```bash
 # Basic start with defaults
-sudo ./target/release/multicast_relay supervisor
+sudo ./target/release/mcrd supervisor
 
 # Custom worker count and user
-sudo ./target/release/multicast_relay supervisor --num-workers 4 --user mcr --group mcr
+sudo ./target/release/mcrd supervisor --num-workers 4 --user mcr --group mcr
 
 # Custom socket paths (useful for testing)
-sudo ./target/release/multicast_relay supervisor \
+sudo ./target/release/mcrd supervisor \
     --control-socket-path /var/run/mcr_control.sock \
     --relay-command-socket-path /var/run/mcr_relay.sock
 ```
 
-All forwarding rules are managed dynamically at runtime via the `control_client`.
+All forwarding rules are managed dynamically at runtime via the `mcrctl`.
 
 ---
 
-## 5. `control_client` Commands
+## 5. `mcrctl` Commands
 
-The `control_client` is the command-line tool for managing the MCR supervisor at runtime.
+The `mcrctl` is the command-line tool for managing the MCR supervisor at runtime.
 
 ### 5.1. Add a Forwarding Rule
 
 Adds a new rule to forward an input stream to one or more outputs.
 
 ```bash
-./target/release/control_client add \
+./target/release/mcrctl add \
     --input-interface <iface> \
     --input-group <ip> \
     --input-port <port> \
@@ -251,15 +251,15 @@ Adds a new rule to forward an input stream to one or more outputs.
 
 ```bash
 # Single output
-control_client add --input-interface eth0 --input-group 239.1.1.1 \
+mcrctl add --input-interface eth0 --input-group 239.1.1.1 \
     --input-port 5000 --outputs 239.2.2.2:6000:eth1
 
 # Fan-out to multiple outputs
-control_client add --input-interface eth0 --input-group 239.1.1.1 \
+mcrctl add --input-interface eth0 --input-group 239.1.1.1 \
     --input-port 5000 --outputs 239.2.2.2:6000:eth1,239.3.3.3:7000:eth2
 
 # With custom rule ID
-control_client add --rule-id my-stream --input-interface eth0 \
+mcrctl add --rule-id my-stream --input-interface eth0 \
     --input-group 239.1.1.1 --input-port 5000 --outputs 239.2.2.2:6000:eth1
 ```
 
@@ -287,7 +287,7 @@ Every forwarding rule has a unique **rule ID** that identifies it throughout its
 Use the `list` command to see all active rules and their IDs:
 
 ```bash
-./target/release/control_client list
+./target/release/mcrctl list
 ```
 
 **Example output:**
@@ -340,12 +340,12 @@ Use the `list` command to see all active rules and their IDs:
 
 ```bash
 # Add with custom ID
-control_client add --rule-id my-stream \
+mcrctl add --rule-id my-stream \
     --input-interface eth0 --input-group 239.1.1.1 \
     --input-port 5000 --outputs 239.2.2.2:6000:eth1
 
 # Remove using the same ID
-control_client remove --rule-id my-stream
+mcrctl remove --rule-id my-stream
 ```
 
 ---
@@ -355,7 +355,7 @@ control_client remove --rule-id my-stream
 Removes an existing rule, identified by its rule ID.
 
 ```bash
-./target/release/control_client remove \
+./target/release/mcrctl remove \
     --rule-id <rule_id>
 ```
 
@@ -366,7 +366,7 @@ Removes an existing rule, identified by its rule ID.
 Displays all currently active forwarding rules.
 
 ```bash
-./target/release/control_client list
+./target/release/mcrctl list
 ```
 
 ### 5.4. Get Statistics
@@ -374,7 +374,7 @@ Displays all currently active forwarding rules.
 Retrieves and displays aggregated performance statistics from all data plane workers.
 
 ```bash
-./target/release/control_client stats
+./target/release/mcrctl stats
 ```
 
 #### Output Format
@@ -438,13 +438,13 @@ Controls the verbosity of MCR's logging at runtime.
 
 ```bash
 # Get current levels
-./target/release/control_client log-level get
+./target/release/mcrctl log-level get
 
 # Set a global level
-./target/release/control_client log-level set --global <level>
+./target/release/mcrctl log-level set --global <level>
 
 # Set a facility-specific level
-./target/release/control_client log-level set --facility <facility> --level <level>
+./target/release/mcrctl log-level set --facility <facility> --level <level>
 ```
 
 - **Levels:** `emergency`, `alert`, `critical`, `error`, `warning`, `notice`, `info`, `debug`
@@ -452,12 +452,12 @@ Controls the verbosity of MCR's logging at runtime.
 
 ---
 
-## 6. `traffic_generator`
+## 6. `mcrgen`
 
 A utility for sending test multicast traffic.
 
 ```bash
-./target/release/traffic_generator \
+./target/release/mcrgen \
     --interface <ip> \
     --group <ip> \
     --port <port> \
@@ -475,4 +475,4 @@ A utility for sending test multicast traffic.
 | `--rate`      | The target send rate in packets per second.          |
 | `--size`      | The size of the UDP payload in bytes.                |
 
-**Note:** Unlike `control_client` which uses network interface names (e.g., `eth0`), the `traffic_generator` `--interface` parameter expects an IP address (e.g., `10.0.0.1`).
+**Note:** Unlike `mcrctl` which uses network interface names (e.g., `eth0`), the `mcrgen` `--interface` parameter expects an IP address (e.g., `10.0.0.1`).

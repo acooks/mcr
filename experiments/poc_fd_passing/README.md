@@ -2,11 +2,11 @@
 
 ## Overview
 
-This experiment demonstrates **file descriptor passing** between processes using Unix domain sockets and the `SCM_RIGHTS` ancillary data mechanism. This is a fundamental technique used in the multicast_relay supervisor architecture for privilege separation.
+This experiment demonstrates **file descriptor passing** between processes using Unix domain sockets and the `SCM_RIGHTS` ancillary data mechanism. This is a fundamental technique used in the mcrd supervisor architecture for privilege separation.
 
 ## What Problem Does This Solve?
 
-In multicast_relay, we need to:
+In mcrd, we need to:
 
 1. **Open privileged sockets** (AF_PACKET raw sockets require `CAP_NET_RAW`)
 2. **Drop privileges** for security (workers shouldn't run with elevated rights)
@@ -128,7 +128,7 @@ Shows parent process creating a file, then passing the FD to a child process:
 
 ### Demo 2: Supervisor Pattern
 
-Simulates the multicast_relay architecture:
+Simulates the mcrd architecture:
 
 1. **Supervisor** (privileged) opens "socket"
 2. **Supervisor** spawns worker process
@@ -160,7 +160,7 @@ cargo run
 ```text
 ╔════════════════════════════════════════════════════════╗
 ║   File Descriptor Passing - Educational Demonstration  ║
-║   Showing SCM_RIGHTS mechanism used in multicast_relay ║
+║   Showing SCM_RIGHTS mechanism used in mcrd ║
 ╚════════════════════════════════════════════════════════╝
 
 === File Descriptor Passing Demonstration ===
@@ -235,9 +235,9 @@ let file = unsafe { File::from_raw_fd(received_fd) };
 // file automatically closed on drop
 ```
 
-## How multicast_relay Uses This
+## How mcrd Uses This
 
-In the multicast_relay architecture:
+In the mcrd architecture:
 
 ```rust
 // Supervisor (privileged)
@@ -312,7 +312,7 @@ After running this experiment, you should understand:
 ✅ Why FD numbers differ between processes
 ✅ How this enables privilege separation architectures
 ✅ Safety considerations when working with raw FDs
-✅ The connection to multicast_relay's supervisor design
+✅ The connection to mcrd's supervisor design
 
 ## Next Steps
 

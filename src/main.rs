@@ -116,19 +116,19 @@ mod tests {
 
     #[test]
     fn test_arg_parsing() {
-        let args = Args::parse_from(["multicast_relay", "supervisor"]);
+        let args = Args::parse_from(["mcrd", "supervisor"]);
         assert_eq!(
             args.command,
             Command::Supervisor {
                 relay_command_socket_path: PathBuf::from("/tmp/mcr_relay_commands.sock"),
-                control_socket_path: PathBuf::from("/tmp/multicast_relay_control.sock"),
+                control_socket_path: PathBuf::from("/tmp/mcrd_control.sock"),
                 interface: "lo".to_string(),
                 num_workers: None,
             }
         );
 
         let args = Args::parse_from([
-            "multicast_relay",
+            "mcrd",
             "worker",
             "--relay-command-socket-path",
             "/tmp/worker_relay.sock",
@@ -168,7 +168,7 @@ mod tests {
         );
 
         let args = Args::parse_from([
-            "multicast_relay",
+            "mcrd",
             "worker",
             "--relay-command-socket-path",
             "/tmp/worker_relay.sock",
