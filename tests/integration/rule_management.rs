@@ -259,17 +259,14 @@ async fn test_max_workers_spawning() -> Result<()> {
     );
 
     // Verify we can add a rule (tests that workers are functional)
+    // Use empty outputs since this test is about worker spawning, not data plane
     let rule = ForwardingRule {
         rule_id: "test-max-workers".to_string(),
         name: None,
         input_interface: "lo".to_string(),
         input_group: "239.1.1.1".parse()?,
         input_port: 5555,
-        outputs: vec![multicast_relay::OutputDestination {
-            group: "239.2.2.2".parse()?,
-            port: 6666,
-            interface: "eth0".to_string(),
-        }],
+        outputs: vec![],
     };
 
     client.add_rule(rule.clone()).await?;

@@ -60,15 +60,15 @@ async fn test_config_startup_spawns_workers_for_interface() -> Result<()> {
     Ok(())
 }
 
-/// Test: Dynamic worker spawning when adding a rule for a new interface
+/// Test: Adding a rule for an existing interface doesn't spawn new workers
 ///
-/// When a rule is added for an interface that doesn't have workers yet,
-/// the supervisor should dynamically spawn workers for that interface.
+/// When a rule is added for an interface that already has workers,
+/// no new workers should be spawned - the existing workers handle it.
 #[tokio::test]
-async fn test_dynamic_worker_spawn_on_add_rule() -> Result<()> {
+async fn test_add_rule_same_interface_no_new_workers() -> Result<()> {
     require_root!();
 
-    // Start supervisor without config (default interface 'lo')
+    // Start supervisor (default interface 'lo')
     let mcr = McrInstance::builder()
         .num_workers(1)
         .start_async()
@@ -82,9 +82,9 @@ async fn test_dynamic_worker_spawn_on_add_rule() -> Result<()> {
     // Get initial worker count
     let initial_workers = client.list_workers().await?;
     let initial_count = initial_workers.len();
+    assert!(initial_count > 0, "Should have initial workers for 'lo'");
 
-    // Add a rule with no outputs (fanout to nothing is valid)
-    // This tests rule management without needing separate interfaces
+    // Add a rule for the same interface ('lo')
     client
         .add_rule_with_name(
             "test-rule-1".to_string(),
@@ -98,17 +98,16 @@ async fn test_dynamic_worker_spawn_on_add_rule() -> Result<()> {
 
     sleep(Duration::from_millis(300)).await;
 
-    let workers_after = client.list_workers().await?;
-
     // Verify rule was added
     let rules = client.list_rules().await?;
     assert_eq!(rules.len(), 1, "Should have 1 rule");
 
     // Worker count should not have changed (same interface)
+    let workers_after = client.list_workers().await?;
     assert_eq!(
         workers_after.len(),
         initial_count,
-        "Worker count should be stable for same interface"
+        "Worker count should be stable when adding rule for same interface"
     );
 
     Ok(())

@@ -284,9 +284,18 @@ async fn test_cli_log_level_set_global() -> Result<()> {
         output
     );
 
-    // Verify the change
+    // Verify the change - should now show Debug level
     let get_output = run_mcrctl(mcr.control_socket(), &["log-level", "get"])?;
-    assert!(get_output.contains("LogLevels"));
+    assert!(
+        get_output.contains("LogLevels"),
+        "Expected LogLevels in response, got: {}",
+        get_output
+    );
+    assert!(
+        get_output.contains("Debug") || get_output.contains("debug"),
+        "Expected Debug level after setting, got: {}",
+        get_output
+    );
 
     Ok(())
 }
