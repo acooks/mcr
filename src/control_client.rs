@@ -434,4 +434,293 @@ mod tests {
         };
         assert!(build_command(cmd).is_err());
     }
+
+    #[test]
+    fn test_build_command_add() {
+        let cmd = CliCommand::Add {
+            rule_id: Some("test-rule".to_string()),
+            input_interface: "eth0".to_string(),
+            input_group: "239.1.1.1".parse().unwrap(),
+            input_port: 5000,
+            outputs: vec![OutputDestination {
+                group: "239.2.2.2".parse().unwrap(),
+                port: 6000,
+                interface: "eth1".to_string(),
+            }],
+        };
+        let supervisor_cmd = build_command(cmd).unwrap();
+        match supervisor_cmd {
+            SupervisorCommand::AddRule {
+                rule_id,
+                name,
+                input_interface,
+                input_group,
+                input_port,
+                outputs,
+            } => {
+                assert_eq!(rule_id, "test-rule");
+                assert!(name.is_none());
+                assert_eq!(input_interface, "eth0");
+                assert_eq!(input_group, "239.1.1.1".parse::<Ipv4Addr>().unwrap());
+                assert_eq!(input_port, 5000);
+                assert_eq!(outputs.len(), 1);
+            }
+            _ => panic!("Expected AddRule command"),
+        }
+
+        // Test with no rule_id (should default to empty string)
+        let cmd = CliCommand::Add {
+            rule_id: None,
+            input_interface: "eth0".to_string(),
+            input_group: "239.1.1.1".parse().unwrap(),
+            input_port: 5000,
+            outputs: vec![],
+        };
+        let supervisor_cmd = build_command(cmd).unwrap();
+        match supervisor_cmd {
+            SupervisorCommand::AddRule { rule_id, .. } => {
+                assert_eq!(rule_id, "");
+            }
+            _ => panic!("Expected AddRule command"),
+        }
+    }
+
+    #[test]
+    fn test_build_command_remove() {
+        let cmd = CliCommand::Remove {
+            rule_id: "rule-to-remove".to_string(),
+        };
+        let supervisor_cmd = build_command(cmd).unwrap();
+        match supervisor_cmd {
+            SupervisorCommand::RemoveRule { rule_id } => {
+                assert_eq!(rule_id, "rule-to-remove");
+            }
+            _ => panic!("Expected RemoveRule command"),
+        }
+    }
+
+    #[test]
+    fn test_build_command_list_and_list_rules() {
+        // Both List and ListRules should map to ListRules
+        let cmd = CliCommand::List;
+        let supervisor_cmd = build_command(cmd).unwrap();
+        assert!(matches!(supervisor_cmd, SupervisorCommand::ListRules));
+
+        let cmd = CliCommand::ListRules;
+        let supervisor_cmd = build_command(cmd).unwrap();
+        assert!(matches!(supervisor_cmd, SupervisorCommand::ListRules));
+    }
+
+    #[test]
+    fn test_build_command_stats() {
+        let cmd = CliCommand::Stats;
+        let supervisor_cmd = build_command(cmd).unwrap();
+        assert!(matches!(supervisor_cmd, SupervisorCommand::GetStats));
+    }
+
+    #[test]
+    fn test_build_command_list_workers() {
+        let cmd = CliCommand::ListWorkers;
+        let supervisor_cmd = build_command(cmd).unwrap();
+        assert!(matches!(supervisor_cmd, SupervisorCommand::ListWorkers));
+    }
+
+    #[test]
+    fn test_build_command_ping() {
+        let cmd = CliCommand::Ping;
+        let supervisor_cmd = build_command(cmd).unwrap();
+        assert!(matches!(supervisor_cmd, SupervisorCommand::Ping));
+    }
+
+    #[test]
+    fn test_build_command_version() {
+        let cmd = CliCommand::Version;
+        let supervisor_cmd = build_command(cmd).unwrap();
+        assert!(matches!(supervisor_cmd, SupervisorCommand::GetVersion));
+    }
+
+    #[test]
+    fn test_build_command_config_show() {
+        let cmd = CliCommand::Config {
+            action: ConfigAction::Show,
+        };
+        let supervisor_cmd = build_command(cmd).unwrap();
+        assert!(matches!(supervisor_cmd, SupervisorCommand::GetConfig));
+    }
+
+    #[test]
+    fn test_build_command_config_save() {
+        // With path
+        let cmd = CliCommand::Config {
+            action: ConfigAction::Save {
+                file: Some(PathBuf::from("/tmp/config.json5")),
+            },
+        };
+        let supervisor_cmd = build_command(cmd).unwrap();
+        match supervisor_cmd {
+            SupervisorCommand::SaveConfig { path } => {
+                assert_eq!(path, Some(PathBuf::from("/tmp/config.json5")));
+            }
+            _ => panic!("Expected SaveConfig command"),
+        }
+
+        // Without path (use startup path)
+        let cmd = CliCommand::Config {
+            action: ConfigAction::Save { file: None },
+        };
+        let supervisor_cmd = build_command(cmd).unwrap();
+        match supervisor_cmd {
+            SupervisorCommand::SaveConfig { path } => {
+                assert!(path.is_none());
+            }
+            _ => panic!("Expected SaveConfig command"),
+        }
+    }
+
+    #[test]
+    fn test_build_command_config_load_nonexistent_file() {
+        let cmd = CliCommand::Config {
+            action: ConfigAction::Load {
+                file: PathBuf::from("/nonexistent/config.json5"),
+                replace: false,
+            },
+        };
+        // Should fail because file doesn't exist
+        assert!(build_command(cmd).is_err());
+    }
+
+    #[test]
+    fn test_build_command_config_check_nonexistent_file() {
+        let cmd = CliCommand::Config {
+            action: ConfigAction::Check {
+                file: PathBuf::from("/nonexistent/config.json5"),
+            },
+        };
+        // Should fail because file doesn't exist
+        assert!(build_command(cmd).is_err());
+    }
+
+    #[test]
+    fn test_build_command_config_load_valid_file() {
+        use std::io::Write;
+
+        // Create a temporary config file
+        let mut temp = tempfile::NamedTempFile::new().unwrap();
+        writeln!(
+            temp,
+            r#"{{
+            rules: [
+                {{
+                    input: {{ interface: "eth0", group: "239.1.1.1", port: 5000 }},
+                    outputs: [{{ interface: "eth1", group: "239.2.2.2", port: 6000 }}]
+                }}
+            ]
+        }}"#
+        )
+        .unwrap();
+        temp.flush().unwrap();
+
+        let cmd = CliCommand::Config {
+            action: ConfigAction::Load {
+                file: temp.path().to_path_buf(),
+                replace: true,
+            },
+        };
+        let supervisor_cmd = build_command(cmd).unwrap();
+        match supervisor_cmd {
+            SupervisorCommand::LoadConfig { config, replace } => {
+                assert!(replace);
+                assert_eq!(config.rules.len(), 1);
+            }
+            _ => panic!("Expected LoadConfig command"),
+        }
+    }
+
+    #[test]
+    fn test_build_command_config_check_valid_file() {
+        use std::io::Write;
+
+        // Create a temporary config file
+        let mut temp = tempfile::NamedTempFile::new().unwrap();
+        writeln!(
+            temp,
+            r#"{{
+            rules: [
+                {{
+                    input: {{ interface: "eth0", group: "239.1.1.1", port: 5000 }},
+                    outputs: [{{ interface: "eth1", group: "239.2.2.2", port: 6000 }}]
+                }}
+            ]
+        }}"#
+        )
+        .unwrap();
+        temp.flush().unwrap();
+
+        let cmd = CliCommand::Config {
+            action: ConfigAction::Check {
+                file: temp.path().to_path_buf(),
+            },
+        };
+        let supervisor_cmd = build_command(cmd).unwrap();
+        match supervisor_cmd {
+            SupervisorCommand::CheckConfig { config } => {
+                assert_eq!(config.rules.len(), 1);
+            }
+            _ => panic!("Expected CheckConfig command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_facility_all_variants() {
+        // Test all facility variants
+        assert_eq!(parse_facility("Supervisor").unwrap(), Facility::Supervisor);
+        assert_eq!(
+            parse_facility("RuleDispatch").unwrap(),
+            Facility::RuleDispatch
+        );
+        assert_eq!(
+            parse_facility("ControlSocket").unwrap(),
+            Facility::ControlSocket
+        );
+        assert_eq!(parse_facility("DataPlane").unwrap(), Facility::DataPlane);
+        assert_eq!(parse_facility("Ingress").unwrap(), Facility::Ingress);
+        assert_eq!(parse_facility("Egress").unwrap(), Facility::Egress);
+        assert_eq!(parse_facility("BufferPool").unwrap(), Facility::BufferPool);
+        assert_eq!(
+            parse_facility("PacketParser").unwrap(),
+            Facility::PacketParser
+        );
+        assert_eq!(parse_facility("Stats").unwrap(), Facility::Stats);
+        assert_eq!(parse_facility("Security").unwrap(), Facility::Security);
+        assert_eq!(parse_facility("Network").unwrap(), Facility::Network);
+        assert_eq!(parse_facility("Test").unwrap(), Facility::Test);
+
+        // Invalid facility
+        let err = parse_facility("NotAFacility").unwrap_err();
+        assert!(err.contains("Invalid facility"));
+    }
+
+    #[test]
+    fn test_log_level_set_invalid_severity() {
+        let cmd = CliCommand::LogLevel {
+            action: LogLevelAction::Set {
+                global: Some("not-a-level".to_string()),
+                facility: None,
+                level: None,
+            },
+        };
+        assert!(build_command(cmd).is_err());
+    }
+
+    #[test]
+    fn test_log_level_set_invalid_facility() {
+        let cmd = CliCommand::LogLevel {
+            action: LogLevelAction::Set {
+                global: None,
+                facility: Some("NotAFacility".to_string()),
+                level: Some("debug".to_string()),
+            },
+        };
+        assert!(build_command(cmd).is_err());
+    }
 }

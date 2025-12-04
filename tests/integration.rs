@@ -47,6 +47,9 @@ mod test_topologies; // Multi-hop and fanout topology tests (requires root)
 #[path = "integration/multi_interface.rs"]
 mod multi_interface; // Multi-interface architecture tests (requires root)
 
+#[path = "integration/cli_functional.rs"]
+mod cli_functional; // CLI functional tests: mcrctl commands against running supervisor (requires root)
+
 // REMOVED: supervisor.rs - redundant with unit tests in src/supervisor.rs
 // REMOVED: ipc.rs - broken code, redundant with rule_management.rs
 // REMOVED: 4 tests from log_level_control.rs - redundant with supervisor unit tests (kept 2 IPC tests)
