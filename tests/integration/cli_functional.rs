@@ -169,29 +169,42 @@ async fn test_cli_add_and_list_rule() -> Result<()> {
 
     sleep(Duration::from_millis(300)).await;
 
-    // Add a rule (use lo->lo which should fail validation, so use empty outputs)
+    // Add a rule with empty outputs (valid - no outputs means input-only rule)
+    // Omitting --outputs entirely gives an empty vec, which is valid
     let add_output = run_mcrctl(
         mcr.control_socket(),
         &[
             "add",
+            "--rule-id",
+            "test-cli-rule",
             "--input-interface",
             "lo",
             "--input-group",
             "239.1.1.1",
             "--input-port",
             "5000",
-            "--outputs",
-            "", // Empty outputs to avoid self-loop validation
         ],
+    )?;
+
+    // Verify the add command succeeded
+    assert!(
+        add_output.contains("Success"),
+        "Expected Success response for add, got: {}",
+        add_output
     );
 
-    // Empty outputs might cause an error, that's ok for this test
-    // The point is to test the CLI flow
-    let _ = add_output;
-
-    // List rules
+    // List rules and verify our rule is present
     let list_output = run_mcrctl(mcr.control_socket(), &["list"])?;
-    assert!(list_output.contains("Rules"));
+    assert!(
+        list_output.contains("Rules"),
+        "Expected Rules in response, got: {}",
+        list_output
+    );
+    assert!(
+        list_output.contains("test-cli-rule"),
+        "Expected our rule to be listed, got: {}",
+        list_output
+    );
 
     Ok(())
 }

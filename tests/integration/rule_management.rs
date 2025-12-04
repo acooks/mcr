@@ -163,23 +163,13 @@ async fn test_get_stats_e2e() -> Result<()> {
         .arg("10000")
         .output();
 
-    match output {
-        Ok(output) if output.status.success() => {}
-        Ok(output) => {
-            println!(
-                "[TEST] Traffic generator failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            return Ok(());
-        }
-        Err(e) => {
-            println!(
-                "[TEST] Could not run traffic generator: {}. Skipping traffic test.",
-                e
-            );
-            return Ok(());
-        }
-    }
+    let output =
+        output.context("Failed to run traffic generator (mcrgen). Run: cargo build --release")?;
+    assert!(
+        output.status.success(),
+        "Traffic generator failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     // Give workers time to process and report stats
     sleep(Duration::from_millis(500)).await;

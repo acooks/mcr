@@ -70,30 +70,21 @@ mod privileged {
             stats.egress.bytes
         );
 
-        // With veth interfaces, AF_PACKET sees both RX and TX packets
-        // So we expect roughly half the packets (this is a known limitation)
-        // For now, just validate we got SOME packets and forwarding is working
+        // Validate packet matching - should receive close to 1000 packets
+        // (some OS-level packet loss is acceptable under load, but not orders of magnitude)
         assert!(
-            stats.ingress.matched > 0,
-            "Should match at least some packets, got {}",
+            stats.ingress.matched >= 900,
+            "Should match at least 90% of 1000 packets, got {}",
             stats.ingress.matched
         );
 
+        // Validate 1:1 forwarding through the pipeline
         assert_eq!(
             stats.ingress.matched, stats.ingress.egr_sent,
-            "Ingress matched should equal egress sent"
+            "Ingress matched ({}) should equal egr_sent ({})",
+            stats.ingress.matched, stats.ingress.egr_sent
         );
 
-        // Validate no packet errors
-        // Note: Parse errors are expected with AF_PACKET sockets (ARP, IPv6, etc.)
-        assert_eq!(
-            stats.ingress.buf_exhaust, 0,
-            "Should have no buffer exhaustion"
-        );
-        assert_eq!(stats.egress.errors, 0, "Should have no egress errors");
-
-        // This is the critical assertion - egress should receive what ingress sent
-        // If this fails, we have the 2x packet bug
         assert_eq!(
             stats.egress.ch_recv, stats.ingress.egr_sent,
             "Egress ch_recv ({}) should equal ingress egr_sent ({})",
@@ -102,13 +93,22 @@ mod privileged {
 
         assert_eq!(
             stats.egress.sent, stats.egress.ch_recv,
-            "Egress sent should equal ch_recv (no packet loss)"
+            "Egress sent ({}) should equal ch_recv ({})",
+            stats.egress.sent, stats.egress.ch_recv
         );
 
         assert_eq!(
             stats.egress.sent, stats.egress.submitted,
-            "Egress sent should equal submitted (all submissions succeeded)"
+            "Egress sent ({}) should equal submitted ({})",
+            stats.egress.sent, stats.egress.submitted
         );
+
+        // Validate no errors
+        assert_eq!(
+            stats.ingress.buf_exhaust, 0,
+            "Should have no buffer exhaustion"
+        );
+        assert_eq!(stats.egress.errors, 0, "Should have no egress errors");
 
         println!("\n=== ✅ Test passed ===\n");
 

@@ -463,16 +463,27 @@ mod privileged {
         // Validate MCR-1: Should replicate 1 → 3 (3x egress)
         assert!(stats1.ingress.matched > 0, "MCR-1 should match packets");
 
-        // Critical assertion: egress should be ~3x ingress due to replication
-        let expected_egress = stats1.ingress.matched * 3;
-        let egress_tolerance = expected_egress / 10; // 10% tolerance
-        assert!(
-            stats1.egress.sent >= expected_egress - egress_tolerance
-                && stats1.egress.sent <= expected_egress + egress_tolerance,
-            "MCR-1 should send ~3x packets (matched={}, sent={}, expected={})",
+        // Ingress should enqueue 3x packets (one per output destination)
+        assert_eq!(
+            stats1.ingress.egr_sent,
+            stats1.ingress.matched * 3,
+            "MCR-1 ingress should enqueue 3x packets for 1:3 fanout (matched={}, egr_sent={})",
             stats1.ingress.matched,
-            stats1.egress.sent,
-            expected_egress
+            stats1.ingress.egr_sent
+        );
+
+        // Egress should receive exactly what ingress sent
+        assert_eq!(
+            stats1.egress.ch_recv, stats1.ingress.egr_sent,
+            "MCR-1 egress should receive all enqueued packets (ch_recv={}, egr_sent={})",
+            stats1.egress.ch_recv, stats1.ingress.egr_sent
+        );
+
+        // Egress should send all received packets
+        assert_eq!(
+            stats1.egress.sent, stats1.egress.ch_recv,
+            "MCR-1 egress should send all received packets (sent={}, ch_recv={})",
+            stats1.egress.sent, stats1.egress.ch_recv
         );
 
         // Each leaf should receive roughly equal share
