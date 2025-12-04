@@ -87,7 +87,7 @@ fn validate_port(port: u16, context: &str) -> Result<(), String> {
 /// Differentiates worker types for unified handling
 #[derive(Debug, Clone, PartialEq)]
 enum WorkerType {
-    DataPlane { core_id: u32 },
+    DataPlane { interface: String, core_id: u32 },
 }
 
 /// Holds all information about a single worker process
@@ -104,18 +104,32 @@ struct Worker {
     stats_pipe: Option<std::os::unix::io::OwnedFd>, // Pipe for reading worker's stats (JSON)
 }
 
+/// Per-interface worker configuration and state
+struct InterfaceWorkers {
+    /// Number of workers for this interface (from pinning config or default 1)
+    num_workers: usize,
+    /// Fanout group ID for this interface (auto-assigned, unique per interface)
+    fanout_group_id: u16,
+    /// Whether this interface was from startup config (pinned) or dynamic
+    #[allow(dead_code)] // Will be used for dynamic worker lifecycle management
+    is_pinned: bool,
+}
+
 /// Centralized manager for all worker lifecycle operations
 struct WorkerManager {
     // Configuration
-    interface: String,
+    default_interface: String, // CLI --interface (for backward compat)
     relay_command_socket_path: PathBuf,
-    num_cores: usize,
+    num_cores_per_interface: usize, // Default workers per interface
     logger: Logger,
-    fanout_group_id: u16,
+
+    // Per-interface state
+    interfaces: HashMap<String, InterfaceWorkers>,
+    next_fanout_group_id: u16, // Auto-increment for new interfaces
 
     // Worker state
-    workers: HashMap<u32, Worker>,       // keyed by PID
-    backoff_counters: HashMap<u32, u64>, // keyed by core_id (0 for CP, 1+ for DP)
+    workers: HashMap<u32, Worker>,                 // keyed by PID
+    backoff_counters: HashMap<(String, u32), u64>, // keyed by (interface, core_id)
     worker_stats: Arc<Mutex<HashMap<u32, Vec<crate::FlowStats>>>>, // Stats from data plane workers (keyed by PID)
 }
 
@@ -126,6 +140,13 @@ pub enum CommandAction {
     None,
     /// Broadcast a relay command to all data plane workers
     BroadcastToDataPlane(RelayCommand),
+    /// Ensure workers exist for interface, then broadcast command
+    /// (interface, is_pinned, command)
+    EnsureWorkersAndBroadcast {
+        interface: String,
+        is_pinned: bool,
+        command: RelayCommand,
+    },
 }
 
 /// Handle a supervisor command by updating state and returning a response + action.
@@ -239,13 +260,21 @@ pub fn handle_supervisor_command(
                 );
             }
 
+            // Extract input_interface before inserting
+            let input_interface = rule.input_interface.clone();
+
             master_rules
                 .lock()
                 .unwrap()
                 .insert(rule.rule_id.clone(), rule.clone());
 
             let response = Response::Success(format!("Rule {} added", rule.rule_id));
-            let action = CommandAction::BroadcastToDataPlane(RelayCommand::AddRule(rule));
+            // Use EnsureWorkersAndBroadcast to dynamically spawn workers for new interfaces
+            let action = CommandAction::EnsureWorkersAndBroadcast {
+                interface: input_interface,
+                is_pinned: false, // Runtime rules create dynamic (non-pinned) workers
+                command: RelayCommand::AddRule(rule),
+            };
             (response, action)
         }
 
@@ -656,32 +685,94 @@ impl WorkerManager {
     /// Create a new WorkerManager with the given configuration
     #[allow(clippy::too_many_arguments)]
     fn new(
-        interface: String,
+        default_interface: String,
         relay_command_socket_path: PathBuf,
-        num_cores: usize,
+        num_cores_per_interface: usize,
         logger: Logger,
-        fanout_group_id: u16,
+        initial_fanout_group_id: u16,
     ) -> Self {
         Self {
-            interface,
+            default_interface,
             relay_command_socket_path,
-            num_cores,
+            num_cores_per_interface,
             logger,
-            fanout_group_id,
+            interfaces: HashMap::new(),
+            next_fanout_group_id: initial_fanout_group_id,
             workers: HashMap::new(),
             backoff_counters: HashMap::new(),
             worker_stats: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    /// Spawn a data plane worker for the given core
-    async fn spawn_data_plane(&mut self, core_id: u32) -> Result<()> {
+    /// Get or create fanout group ID for an interface
+    fn get_or_create_interface(&mut self, interface: &str, is_pinned: bool) -> u16 {
+        if let Some(iface_workers) = self.interfaces.get(interface) {
+            return iface_workers.fanout_group_id;
+        }
+
+        // Allocate new fanout group ID
+        let fanout_group_id = self.next_fanout_group_id;
+        self.next_fanout_group_id = self.next_fanout_group_id.wrapping_add(1);
+
+        // Determine number of workers (for now, use default; pinning support added later)
+        let num_workers = if is_pinned {
+            self.num_cores_per_interface
+        } else {
+            1 // Dynamic interfaces get 1 worker by default
+        };
+
+        self.interfaces.insert(
+            interface.to_string(),
+            InterfaceWorkers {
+                num_workers,
+                fanout_group_id,
+                is_pinned,
+            },
+        );
+
+        log_info!(
+            self.logger,
+            Facility::Supervisor,
+            &format!(
+                "Registered interface '{}' with fanout_group_id={}, workers={}, pinned={}",
+                interface, fanout_group_id, num_workers, is_pinned
+            )
+        );
+
+        fanout_group_id
+    }
+
+    /// Check if workers exist for a given interface
+    fn has_workers_for_interface(&self, interface: &str) -> bool {
+        self.workers.values().any(|w| {
+            matches!(&w.worker_type, WorkerType::DataPlane { interface: iface, .. } if iface == interface)
+        })
+    }
+
+    /// Get the number of workers for a given interface
+    #[allow(dead_code)] // Will be used for worker management features
+    fn worker_count_for_interface(&self, interface: &str) -> usize {
+        self.workers
+            .values()
+            .filter(|w| {
+                matches!(&w.worker_type, WorkerType::DataPlane { interface: iface, .. } if iface == interface)
+            })
+            .count()
+    }
+
+    /// Spawn a data plane worker for the given interface and core
+    async fn spawn_data_plane_for_interface(
+        &mut self,
+        interface: &str,
+        core_id: u32,
+        fanout_group_id: u16,
+    ) -> Result<()> {
         let (child, ingress_cmd_stream, egress_cmd_stream, log_pipe, stats_pipe) =
             spawn_data_plane_worker(
                 core_id,
-                self.interface.clone(),
+                interface.to_string(),
                 self.relay_command_socket_path.clone(),
-                self.fanout_group_id,
+                fanout_group_id,
                 &self.logger,
             )
             .await?;
@@ -697,7 +788,10 @@ impl WorkerManager {
             pid,
             Worker {
                 pid,
-                worker_type: WorkerType::DataPlane { core_id },
+                worker_type: WorkerType::DataPlane {
+                    interface: interface.to_string(),
+                    core_id,
+                },
                 child,
                 ingress_cmd_stream: Some(ingress_cmd_stream_arc),
                 egress_cmd_stream: Some(egress_cmd_stream_arc),
@@ -706,9 +800,9 @@ impl WorkerManager {
             },
         );
 
-        // Initialize backoff counter
+        // Initialize backoff counter - key by (interface, core_id) tuple
         self.backoff_counters
-            .insert(core_id + 1, INITIAL_BACKOFF_MS);
+            .insert((interface.to_string(), core_id), INITIAL_BACKOFF_MS);
 
         // Spawn log consumer task for this worker
         #[cfg(not(feature = "testing"))]
@@ -725,17 +819,64 @@ impl WorkerManager {
         Ok(())
     }
 
-    /// Spawn all initial data plane workers
-    async fn spawn_all_initial_workers(&mut self) -> Result<()> {
+    /// Spawn workers for an interface (if not already spawned)
+    /// Returns true if workers were spawned, false if they already existed
+    async fn ensure_workers_for_interface(
+        &mut self,
+        interface: &str,
+        is_pinned: bool,
+    ) -> Result<bool> {
+        if self.has_workers_for_interface(interface) {
+            return Ok(false);
+        }
+
+        // Get or create interface config (assigns fanout group ID)
+        let fanout_group_id = self.get_or_create_interface(interface, is_pinned);
+        let num_workers = self
+            .interfaces
+            .get(interface)
+            .map(|i| i.num_workers)
+            .unwrap_or(1);
+
         log_info!(
             self.logger,
             Facility::Supervisor,
-            &format!("Starting with {} data plane workers", self.num_cores)
+            &format!(
+                "Spawning {} worker(s) for interface '{}' (fanout_group_id={})",
+                num_workers, interface, fanout_group_id
+            )
         );
 
-        // Spawn data plane workers
-        for core_id in 0..self.num_cores as u32 {
-            self.spawn_data_plane(core_id).await?;
+        // Spawn workers for this interface
+        for core_id in 0..num_workers as u32 {
+            self.spawn_data_plane_for_interface(interface, core_id, fanout_group_id)
+                .await?;
+        }
+
+        Ok(true)
+    }
+
+    /// Spawn all initial data plane workers for the default interface
+    async fn spawn_all_initial_workers(&mut self) -> Result<()> {
+        let interface = self.default_interface.clone();
+        let num_workers = self.num_cores_per_interface;
+
+        log_info!(
+            self.logger,
+            Facility::Supervisor,
+            &format!(
+                "Starting with {} data plane workers for interface '{}'",
+                num_workers, interface
+            )
+        );
+
+        // Register the default interface as pinned (from CLI)
+        let fanout_group_id = self.get_or_create_interface(&interface, true);
+
+        // Spawn data plane workers for the default interface
+        for core_id in 0..num_workers as u32 {
+            self.spawn_data_plane_for_interface(&interface, core_id, fanout_group_id)
+                .await?;
         }
 
         Ok(())
@@ -774,18 +915,19 @@ impl WorkerManager {
         }
 
         // Restart the data plane worker
-        let WorkerType::DataPlane { core_id } = worker_type;
+        let WorkerType::DataPlane { interface, core_id } = worker_type;
+        let backoff_key = (interface.clone(), core_id);
         let backoff = self
             .backoff_counters
-            .entry(core_id + 1)
+            .entry(backoff_key)
             .or_insert(INITIAL_BACKOFF_MS);
         if status.success() {
             log_info!(
                 self.logger,
                 Facility::Supervisor,
                 &format!(
-                    "Data Plane worker (core {}) exited gracefully, restarting immediately",
-                    core_id
+                    "Data Plane worker (interface={}, core={}) exited gracefully, restarting immediately",
+                    interface, core_id
                 )
             );
             *backoff = INITIAL_BACKOFF_MS;
@@ -794,14 +936,23 @@ impl WorkerManager {
                 self.logger,
                 Facility::Supervisor,
                 &format!(
-                    "Data Plane worker (core {}) failed (status: {}), restarting after {}ms",
-                    core_id, status, *backoff
+                    "Data Plane worker (interface={}, core={}) failed (status: {}), restarting after {}ms",
+                    interface, core_id, status, *backoff
                 )
             );
             sleep(Duration::from_millis(*backoff)).await;
             *backoff = (*backoff * 2).min(MAX_BACKOFF_MS);
         }
-        self.spawn_data_plane(core_id).await?;
+
+        // Get the fanout group ID for this interface (should exist since worker was running)
+        let fanout_group_id = self
+            .interfaces
+            .get(&interface)
+            .map(|i| i.fanout_group_id)
+            .unwrap_or(0);
+
+        self.spawn_data_plane_for_interface(&interface, core_id, fanout_group_id)
+            .await?;
         Ok(Some((pid, true)))
     }
 
@@ -985,7 +1136,10 @@ impl WorkerManager {
         self.workers
             .values()
             .map(|w| {
-                let WorkerType::DataPlane { core_id } = &w.worker_type;
+                let WorkerType::DataPlane {
+                    interface: _,
+                    core_id,
+                } = &w.worker_type;
                 crate::WorkerInfo {
                     pid: w.pid,
                     worker_type: "DataPlane".to_string(),
@@ -1122,7 +1276,10 @@ async fn handle_client(
     );
 
     // Log ruleset hash for drift detection if rules changed
-    if matches!(action, CommandAction::BroadcastToDataPlane(_)) {
+    if matches!(
+        action,
+        CommandAction::BroadcastToDataPlane(_) | CommandAction::EnsureWorkersAndBroadcast { .. }
+    ) {
         let ruleset_hash = {
             let rules = master_rules.lock().unwrap();
             crate::compute_ruleset_hash(rules.values())
@@ -1233,6 +1390,57 @@ async fn handle_client(
                         let _ = framed.send(cmd_bytes_clone.into()).await;
                     });
                 }
+            }
+        }
+        CommandAction::EnsureWorkersAndBroadcast {
+            interface,
+            is_pinned,
+            command,
+        } => {
+            // First, ensure workers exist for the interface
+            {
+                let manager = worker_manager.lock().unwrap();
+                if !manager.has_workers_for_interface(&interface) {
+                    // Drop lock before async operation
+                    drop(manager);
+
+                    // Re-acquire lock and spawn workers
+                    let mut manager = worker_manager.lock().unwrap();
+                    if let Err(e) = manager
+                        .ensure_workers_for_interface(&interface, is_pinned)
+                        .await
+                    {
+                        error!(
+                            "Failed to spawn workers for interface '{}': {}",
+                            interface, e
+                        );
+                    }
+                }
+            }
+
+            // Now broadcast the command to all workers
+            let cmd_bytes = serde_json::to_vec(&command)?;
+            let stream_pairs = {
+                let manager = worker_manager.lock().unwrap();
+                manager.get_all_dp_cmd_streams()
+            };
+
+            for (ingress_stream, egress_stream) in stream_pairs {
+                // Send to ingress
+                let cmd_bytes_clone = cmd_bytes.clone();
+                tokio::spawn(async move {
+                    let mut stream = ingress_stream.lock().await;
+                    let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
+                    let _ = framed.send(cmd_bytes_clone.into()).await;
+                });
+
+                // Send to egress
+                let cmd_bytes_clone = cmd_bytes.clone();
+                tokio::spawn(async move {
+                    let mut stream = egress_stream.lock().await;
+                    let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
+                    let _ = framed.send(cmd_bytes_clone.into()).await;
+                });
             }
         }
     }
@@ -1783,7 +1991,10 @@ mod tests {
         );
 
         assert!(matches!(response, crate::Response::Success(_)));
-        assert!(matches!(action, CommandAction::BroadcastToDataPlane(_)));
+        assert!(matches!(
+            action,
+            CommandAction::EnsureWorkersAndBroadcast { .. }
+        ));
         assert_eq!(master_rules.lock().unwrap().len(), 1);
     }
 
@@ -2304,10 +2515,13 @@ mod tests {
             _ => panic!("Expected Success response, got {:?}", response),
         }
 
-        // Should broadcast to data plane
+        // Should ensure workers and broadcast to data plane
         match action {
-            CommandAction::BroadcastToDataPlane(_) => {}
-            _ => panic!("Expected BroadcastToDataPlane action, got {:?}", action),
+            CommandAction::EnsureWorkersAndBroadcast { .. } => {}
+            _ => panic!(
+                "Expected EnsureWorkersAndBroadcast action, got {:?}",
+                action
+            ),
         }
 
         // Verify rule was added
