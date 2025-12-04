@@ -711,7 +711,14 @@ async fn main() -> anyhow::Result<()> {
 
     let verbose = !args.quiet;
     let generator = TrafficGenerator::new(config.clone())?;
-    let stats = generator.run(verbose)?;
+
+    // Run based on mode - async mode runs directly, others use spawn_blocking
+    let stats = match config.mode {
+        RateLimitMode::Async => generator.run_async(verbose).await?,
+        _ => tokio::task::spawn_blocking(move || generator.run(verbose))
+            .await
+            .map_err(|e| anyhow::anyhow!("Task join error: {}", e))??,
+    };
 
     // Final statistics
     if verbose {
