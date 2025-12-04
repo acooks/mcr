@@ -556,7 +556,9 @@ impl WorkerManager {
             )
             .await?;
 
-        let pid = child.id().unwrap();
+        let pid = child
+            .id()
+            .ok_or_else(|| anyhow::anyhow!("Worker process exited immediately after spawn"))?;
         let ingress_cmd_stream_arc = Arc::new(tokio::sync::Mutex::new(ingress_cmd_stream));
         let egress_cmd_stream_arc = Arc::new(tokio::sync::Mutex::new(egress_cmd_stream));
 
@@ -632,8 +634,14 @@ impl WorkerManager {
         // Handle the first exited worker
         let (pid, worker_type, status) = exited_workers.remove(0);
 
-        // Remove from workers map
-        let _worker = self.workers.remove(&pid).unwrap();
+        // Remove from workers map (should always exist, but handle gracefully)
+        if self.workers.remove(&pid).is_none() {
+            log_warning!(
+                self.logger,
+                Facility::Supervisor,
+                &format!("Worker {} not found in workers map during restart", pid)
+            );
+        }
 
         // Restart the data plane worker
         let WorkerType::DataPlane { core_id } = worker_type;
