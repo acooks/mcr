@@ -23,7 +23,7 @@ mod privileged {
         }
     }
 
-    /// Helper to send multicast packets using traffic_generator
+    /// Helper to send multicast packets using mcrgen
     /// Uses count as rate for faster scaling tests
     fn send_packets(source_ip: &str, dest_group: &str, dest_port: u16, count: u32) -> Result<()> {
         crate::common::traffic::send_packets_with_options(

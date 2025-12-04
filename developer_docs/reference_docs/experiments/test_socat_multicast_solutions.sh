@@ -79,7 +79,7 @@ sleep 1
 # Send 5 test packets
 echo "Sending 5 test packets..."
 for i in {1..5}; do
-    ip netns exec "$NETNS" /home/acooks/mcr/target/release/traffic_generator \
+    ip netns exec "$NETNS" /home/acooks/mcr/target/release/mcrgen \
         --interface 10.0.0.10 --group 239.1.1.1 --port 5001 \
         --rate 10 --size 1024 --count 1 2>/dev/null || true
     sleep 0.1
@@ -130,7 +130,7 @@ sleep 1
 # Send 5 test packets
 echo "Sending 5 test packets..."
 for i in {1..5}; do
-    ip netns exec "$NETNS" /home/acooks/mcr/target/release/traffic_generator \
+    ip netns exec "$NETNS" /home/acooks/mcr/target/release/mcrgen \
         --interface 10.0.0.10 --group 239.1.1.1 --port 5001 \
         --rate 10 --size 1024 --count 1 2>/dev/null || true
     sleep 0.1

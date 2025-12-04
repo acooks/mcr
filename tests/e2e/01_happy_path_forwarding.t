@@ -2,7 +2,7 @@
 
 # End-to-End Test: Happy Path Forwarding
 #
-# Verifies that the multicast_relay can successfully receive, forward,
+# Verifies that mcrd can successfully receive, forward,
 # and retransmit a multicast stream according to a dynamically configured rule.
 
 set -e

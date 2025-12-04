@@ -23,7 +23,7 @@ mod privileged {
         }
     }
 
-    /// Helper to send multicast packets using traffic_generator with explicit rate
+    /// Helper to send multicast packets using mcrgen with explicit rate
     fn send_packets(
         source_ip: &str,
         dest_group: &str,

@@ -361,11 +361,11 @@ async fn test_get_stats_e2e() -> Result<()> {
     // 6. SEND TRAFFIC: Send 15,000 packets to trigger stats reporting (threshold is 10,000)
     println!("[TEST] Sending 15,000 test packets to trigger stats reporting...");
 
-    // Build path to traffic_generator binary
+    // Build path to mcrgen binary
     let mut traffic_gen_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     traffic_gen_path.push("target");
     traffic_gen_path.push("release");
-    traffic_gen_path.push("traffic_generator");
+    traffic_gen_path.push("mcrgen");
 
     let output = std::process::Command::new(&traffic_gen_path)
         .arg("--interface")

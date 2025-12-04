@@ -142,7 +142,7 @@ impl McrInstance {
     /// * `input` - Input multicast group and port (e.g., "239.1.1.1:5001")
     /// * `outputs` - Output destinations (e.g., vec!["239.2.2.2:5002:lo"])
     pub fn add_rule(&mut self, input: &str, outputs: Vec<&str>) -> Result<()> {
-        let control_bin = binary_path("control_client");
+        let control_bin = binary_path("mcrctl");
 
         // Parse input
         let input_parts: Vec<&str> = input.split(':').collect();
@@ -171,7 +171,7 @@ impl McrInstance {
             .arg("--outputs")
             .arg(outputs_str)
             .output()
-            .context("Failed to execute control_client")?;
+            .context("Failed to execute mcrctl")?;
 
         if !output.status.success() {
             bail!(
@@ -193,7 +193,7 @@ impl McrInstance {
     /// data plane workers. We need multiple successful pings to ensure workers
     /// have had time to initialize their event loops and process commands.
     pub fn wait_until_ready(&mut self, timeout_secs: u64) -> Result<()> {
-        let control_bin = binary_path("control_client");
+        let control_bin = binary_path("mcrctl");
         let start = std::time::Instant::now();
         let mut successful_pings = 0;
         const REQUIRED_PINGS: u32 = 3; // Need 3 consecutive successful pings

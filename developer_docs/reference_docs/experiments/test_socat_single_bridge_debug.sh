@@ -6,7 +6,7 @@ set -euo pipefail
 
 NETNS="test_single_bridge_dbg"
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-TRAFFIC_GEN="$PROJECT_ROOT/target/release/traffic_generator"
+TRAFFIC_GEN="$PROJECT_ROOT/target/release/mcrgen"
 
 cleanup() {
     echo "[Cleanup]"

@@ -90,7 +90,7 @@ sleep 2
 echo "=== Sending 3 test packets ==="
 for i in {1..3}; do
     echo "Packet $i..."
-    ip netns exec "$NETNS" /home/acooks/mcr/target/release/traffic_generator \
+    ip netns exec "$NETNS" /home/acooks/mcr/target/release/mcrgen \
         --interface 10.0.0.10 --group 239.1.1.1 --port 5001 \
         --rate 5 --size 1024 --count 1 >/dev/null 2>&1 || true
     sleep 0.5
