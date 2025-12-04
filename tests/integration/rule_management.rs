@@ -288,3 +288,198 @@ async fn test_max_workers_spawning() -> Result<()> {
     // Cleanup happens automatically when McrInstance is dropped
     Ok(())
 }
+
+/// Test: Rule removal during active traffic flow
+///
+/// Verifies that removing a rule while traffic is flowing doesn't cause
+/// crashes or data corruption. The system should handle this gracefully.
+#[tokio::test]
+async fn test_rule_removal_during_traffic() -> Result<()> {
+    require_root!();
+
+    // Enter isolated network namespace
+    let _ns = NetworkNamespace::enter()?;
+    _ns.enable_loopback().await?;
+
+    // Create veth pair
+    let _veth = VethPair::create("veth0", "veth0p")
+        .await?
+        .set_addr("veth0", "10.0.0.1/24")
+        .await?
+        .set_addr("veth0p", "10.0.0.2/24")
+        .await?
+        .up()
+        .await?;
+
+    // Start supervisor with async API for rule management
+    let mcr = McrInstance::builder()
+        .num_workers(2)
+        .start_async()
+        .await
+        .context("Failed to start supervisor")?;
+
+    let client = ControlClient::new(mcr.control_socket());
+
+    sleep(Duration::from_millis(500)).await;
+
+    // Add forwarding rule
+    let rule = ForwardingRule {
+        rule_id: "traffic-test-rule".to_string(),
+        name: Some("traffic-flow".to_string()),
+        input_interface: "lo".to_string(),
+        input_group: "239.1.1.1".parse()?,
+        input_port: 5001,
+        outputs: vec![],
+    };
+    client.add_rule(rule).await?;
+
+    // Verify rule exists
+    let rules = client.list_rules().await?;
+    assert_eq!(rules.len(), 1, "Should have 1 rule");
+
+    // Start sending traffic in background using spawn_blocking
+    // Send 10000 packets at 1000 pps (10 seconds of traffic)
+    let traffic_handle = tokio::task::spawn_blocking(|| {
+        let mut traffic_gen_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        traffic_gen_path.push("target/release/mcrgen");
+
+        std::process::Command::new(&traffic_gen_path)
+            .arg("--interface")
+            .arg("127.0.0.1")
+            .arg("--group")
+            .arg("239.1.1.1")
+            .arg("--port")
+            .arg("5001")
+            .arg("--count")
+            .arg("10000")
+            .arg("--size")
+            .arg("100")
+            .arg("--rate")
+            .arg("1000")
+            .output()
+    });
+
+    // Wait a bit for traffic to start flowing
+    sleep(Duration::from_secs(2)).await;
+
+    // Remove the rule while traffic is flowing
+    println!("[TEST] Removing rule while traffic is flowing...");
+    client.remove_rule("traffic-test-rule").await?;
+
+    // Verify rule was removed
+    let rules_after = client.list_rules().await?;
+    assert!(
+        rules_after.is_empty(),
+        "Rule should be removed even during traffic"
+    );
+
+    // Wait for traffic generator to finish
+    let output = traffic_handle.await??;
+    assert!(
+        output.status.success(),
+        "Traffic generator should complete without crashing"
+    );
+
+    // Verify supervisor is still healthy
+    let workers = client.list_workers().await?;
+    assert!(!workers.is_empty(), "Workers should still be running");
+
+    // Add a new rule to verify system is still functional
+    let new_rule = ForwardingRule {
+        rule_id: "post-removal-rule".to_string(),
+        name: None,
+        input_interface: "lo".to_string(),
+        input_group: "239.2.2.2".parse()?,
+        input_port: 5002,
+        outputs: vec![],
+    };
+    client.add_rule(new_rule).await?;
+
+    let final_rules = client.list_rules().await?;
+    assert_eq!(final_rules.len(), 1, "Should have new rule");
+    assert_eq!(final_rules[0].rule_id, "post-removal-rule");
+
+    println!("[TEST] Rule removal during traffic PASSED");
+
+    Ok(())
+}
+
+/// Test: Concurrent rule modifications from multiple tasks
+///
+/// Verifies that concurrent add/remove operations don't cause
+/// race conditions or data corruption.
+#[tokio::test]
+async fn test_concurrent_rule_modifications() -> Result<()> {
+    require_root!();
+
+    let mcr = McrInstance::builder()
+        .num_workers(2)
+        .start_async()
+        .await
+        .context("Failed to start supervisor")?;
+
+    let client = ControlClient::new(mcr.control_socket());
+
+    sleep(Duration::from_millis(500)).await;
+
+    // Spawn multiple tasks that add rules concurrently
+    let mut handles = Vec::new();
+    for i in 0..5 {
+        let socket_path = mcr.control_socket().to_path_buf();
+        let handle = tokio::spawn(async move {
+            let client = ControlClient::new(&socket_path);
+            let rule = ForwardingRule {
+                rule_id: format!("concurrent-rule-{}", i),
+                name: Some(format!("concurrent-{}", i)),
+                input_interface: "lo".to_string(),
+                input_group: format!("239.1.1.{}", i + 1).parse().unwrap(),
+                input_port: 5000 + i as u16,
+                outputs: vec![],
+            };
+            client.add_rule(rule).await
+        });
+        handles.push(handle);
+    }
+
+    // Wait for all adds to complete
+    for handle in handles {
+        handle.await??;
+    }
+
+    // Verify all rules were added
+    let rules = client.list_rules().await?;
+    assert_eq!(
+        rules.len(),
+        5,
+        "All 5 concurrent rules should be added, got {}",
+        rules.len()
+    );
+
+    // Now remove them concurrently
+    let mut handles = Vec::new();
+    for i in 0..5 {
+        let socket_path = mcr.control_socket().to_path_buf();
+        let handle = tokio::spawn(async move {
+            let client = ControlClient::new(&socket_path);
+            client.remove_rule(&format!("concurrent-rule-{}", i)).await
+        });
+        handles.push(handle);
+    }
+
+    // Wait for all removes to complete
+    for handle in handles {
+        handle.await??;
+    }
+
+    // Verify all rules were removed
+    let rules_after = client.list_rules().await?;
+    assert!(
+        rules_after.is_empty(),
+        "All rules should be removed, got {}",
+        rules_after.len()
+    );
+
+    println!("[TEST] Concurrent rule modifications PASSED");
+
+    Ok(())
+}
