@@ -201,7 +201,6 @@ impl UnifiedDataPlane {
     /// * `cmd_stream_fd` - FD for receiving commands from supervisor
     /// * `af_packet_fd` - Pre-configured AF_PACKET socket FD from supervisor
     /// * `logger` - Logger instance
-    #[allow(dead_code)] // Used by data_plane_integrated.rs
     pub fn new_with_socket(
         _interface_name: &str,
         config: UnifiedConfig,
@@ -222,124 +221,7 @@ impl UnifiedDataPlane {
         Self::new_internal(config, buffer_pool, cmd_stream_fd, recv_socket, logger)
     }
 
-    /// Create a new UnifiedDataPlane, creating the AF_PACKET socket internally.
-    ///
-    /// **DEPRECATED**: This constructor requires CAP_NET_RAW privileges in the worker.
-    /// Use `new_with_socket` with privilege separation instead.
-    ///
-    /// Kept for backward compatibility with tests that run as root.
-    #[allow(dead_code)] // May be used by tests
-    pub fn new(
-        interface_name: &str,
-        config: UnifiedConfig,
-        buffer_pool: std::sync::Arc<BufferPool>,
-        cmd_stream_fd: OwnedFd,
-        fanout_group_id: u16,
-        logger: Logger,
-    ) -> Result<Self> {
-        logger.info(
-            Facility::DataPlane,
-            "Creating unified data plane loop (legacy mode - creating socket internally)",
-        );
-
-        // Create AF_PACKET socket for receiving (requires CAP_NET_RAW)
-        let recv_socket = Socket::new(Domain::PACKET, Type::RAW, Some(Protocol::from(0x0003)))
-            .context("Failed to create AF_PACKET socket")?;
-
-        // Set large receive buffer to prevent drops during traffic bursts.
-        // Default system buffer (~212KB) can only hold ~150 packets at 1400 bytes each.
-        // At 100k pps, that's only 1.5ms of buffering - not enough for io_uring latency.
-        // We request 16MB which gives ~11k packets / ~110ms of burst tolerance.
-        // Note: Actual size may be limited by net.core.rmem_max sysctl.
-        const RECV_BUFFER_SIZE: i32 = 16 * 1024 * 1024; // 16MB
-        unsafe {
-            let ret = libc::setsockopt(
-                recv_socket.as_raw_fd(),
-                libc::SOL_SOCKET,
-                libc::SO_RCVBUF,
-                &RECV_BUFFER_SIZE as *const _ as *const _,
-                std::mem::size_of::<i32>() as libc::socklen_t,
-            );
-            if ret < 0 {
-                // Log warning but don't fail - system may have lower limits
-                logger.warning(
-                    Facility::DataPlane,
-                    &format!(
-                        "Failed to set SO_RCVBUF to {}MB, using system default",
-                        RECV_BUFFER_SIZE / 1024 / 1024
-                    ),
-                );
-            } else {
-                // Read back actual size (kernel may have adjusted it)
-                let mut actual_size: i32 = 0;
-                let mut len: libc::socklen_t = std::mem::size_of::<i32>() as libc::socklen_t;
-                libc::getsockopt(
-                    recv_socket.as_raw_fd(),
-                    libc::SOL_SOCKET,
-                    libc::SO_RCVBUF,
-                    &mut actual_size as *mut _ as *mut _,
-                    &mut len,
-                );
-                logger.info(
-                    Facility::DataPlane,
-                    &format!(
-                        "AF_PACKET SO_RCVBUF set to {}KB (requested {}MB)",
-                        actual_size / 1024,
-                        RECV_BUFFER_SIZE / 1024 / 1024
-                    ),
-                );
-            }
-        }
-
-        // Get interface index
-        let iface_index = get_interface_index(interface_name)?;
-
-        // Bind to interface using raw libc bind
-        unsafe {
-            let sockaddr_ll = libc::sockaddr_ll {
-                sll_family: libc::AF_PACKET as u16,
-                sll_protocol: (libc::ETH_P_ALL as u16).to_be(),
-                sll_ifindex: iface_index,
-                sll_hatype: 0,
-                sll_pkttype: 0,
-                sll_halen: 0,
-                sll_addr: [0; 8],
-            };
-            let ret = libc::bind(
-                recv_socket.as_raw_fd(),
-                &sockaddr_ll as *const _ as *const libc::sockaddr,
-                std::mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t,
-            );
-            if ret < 0 {
-                return Err(anyhow::anyhow!("Failed to bind AF_PACKET socket"));
-            }
-        }
-
-        // Configure PACKET_FANOUT if fanout_group_id is non-zero
-        if fanout_group_id > 0 {
-            let fanout_arg: u32 = (fanout_group_id as u32) | (libc::PACKET_FANOUT_CPU << 16);
-
-            unsafe {
-                if libc::setsockopt(
-                    recv_socket.as_raw_fd(),
-                    libc::SOL_PACKET,
-                    libc::PACKET_FANOUT,
-                    &fanout_arg as *const _ as *const _,
-                    std::mem::size_of::<u32>() as _,
-                ) < 0
-                {
-                    return Err(anyhow::anyhow!("PACKET_FANOUT failed"));
-                }
-            }
-        }
-
-        // Set non-blocking
-        recv_socket.set_nonblocking(true)?;
-
-        Self::new_internal(config, buffer_pool, cmd_stream_fd, recv_socket, logger)
-    }
-
-    /// Internal constructor used by both `new` and `new_with_socket`.
+    /// Internal constructor.
     fn new_internal(
         config: UnifiedConfig,
         buffer_pool: std::sync::Arc<BufferPool>,
@@ -1118,15 +1000,6 @@ impl UnifiedDataPlane {
 }
 
 // Helper functions
-
-fn get_interface_index(interface_name: &str) -> Result<i32> {
-    for iface in pnet::datalink::interfaces() {
-        if iface.name == interface_name {
-            return Ok(iface.index as i32);
-        }
-    }
-    Err(anyhow::anyhow!("Interface not found: {}", interface_name))
-}
 
 fn get_interface_ip(interface_name: &str) -> Result<Ipv4Addr> {
     for iface in pnet::datalink::interfaces() {

@@ -99,9 +99,9 @@ struct Worker {
     // Data plane workers have TWO command streams (ingress + egress)
     ingress_cmd_stream: Option<Arc<tokio::sync::Mutex<UnixStream>>>,
     egress_cmd_stream: Option<Arc<tokio::sync::Mutex<UnixStream>>>,
-    #[allow(dead_code)] // Used in production only (not with feature="testing")
+    #[cfg_attr(feature = "testing", allow(dead_code))]
     log_pipe: Option<std::os::unix::io::OwnedFd>, // Pipe for reading worker's stderr (JSON logs)
-    #[allow(dead_code)] // Used in production only (not with feature="testing")
+    #[cfg_attr(feature = "testing", allow(dead_code))]
     stats_pipe: Option<std::os::unix::io::OwnedFd>, // Pipe for reading worker's stats (JSON)
 }
 
@@ -111,9 +111,6 @@ struct InterfaceWorkers {
     num_workers: usize,
     /// Fanout group ID for this interface (auto-assigned, unique per interface)
     fanout_group_id: u16,
-    /// Whether this interface was from startup config (pinned) or dynamic
-    #[allow(dead_code)] // Will be used for dynamic worker lifecycle management
-    is_pinned: bool,
     /// Specific core IDs to pin workers to (from config pinning section)
     /// If None, workers use sequential core IDs starting from 0
     pinned_cores: Option<Vec<u32>>,
@@ -769,7 +766,6 @@ impl WorkerManager {
             InterfaceWorkers {
                 num_workers,
                 fanout_group_id,
-                is_pinned,
                 pinned_cores: pinned_cores.clone(),
             },
         );
@@ -788,8 +784,8 @@ impl WorkerManager {
                 self.logger,
                 Facility::Supervisor,
                 &format!(
-                    "Registered interface '{}' with fanout_group_id={}, workers={}, pinned={}",
-                    interface, fanout_group_id, num_workers, is_pinned
+                    "Registered interface '{}' with fanout_group_id={}, workers={}",
+                    interface, fanout_group_id, num_workers
                 )
             );
         }
@@ -802,17 +798,6 @@ impl WorkerManager {
         self.workers.values().any(|w| {
             matches!(&w.worker_type, WorkerType::DataPlane { interface: iface, .. } if iface == interface)
         })
-    }
-
-    /// Get the number of workers for a given interface
-    #[allow(dead_code)] // Will be used for worker management features
-    fn worker_count_for_interface(&self, interface: &str) -> usize {
-        self.workers
-            .values()
-            .filter(|w| {
-                matches!(&w.worker_type, WorkerType::DataPlane { interface: iface, .. } if iface == interface)
-            })
-            .count()
     }
 
     /// Spawn a data plane worker for the given interface and core
