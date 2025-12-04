@@ -15,10 +15,10 @@ Last updated: December 2025
 
 ### Privilege Separation (AF_PACKET FD Passing)
 
-**Location:** `src/worker/mod.rs:275-289`
+**Location:** `src/worker/mod.rs:201-215` (TODO comment)
 **Issue:** Workers run with more privileges than necessary
 
-Supervisor should create AF_PACKET socket and pass FD via SCM_RIGHTS, allowing workers to drop all privileges after receiving the FD.
+Supervisor should create AF_PACKET socket and pass FD via SCM_RIGHTS, allowing workers to drop all privileges after receiving the FD. This is a prerequisite for the multi-interface architecture.
 
 **Effort:** 1-2 days
 
@@ -26,21 +26,26 @@ Supervisor should create AF_PACKET socket and pass FD via SCM_RIGHTS, allowing w
 
 ## 🟡 High Priority
 
+### Multi-Interface Architecture
+
+**Design:** `developer_docs/plans/MULTI_INTERFACE_DESIGN.md`
+
+Single mcrd daemon managing workers for multiple interfaces with:
+
+- JSON5 config file support
+- Two-state config model (running/startup)
+- Dynamic worker spawning
+- Unified CLI (mcrd/mcrctl/mcrgen)
+
+**Effort:** 2-3 weeks
+
 ### Network State Reconciliation
 
-**Location:** `src/supervisor/network_monitor.rs` (stubbed)
+**Status:** Not implemented (stubbed code was removed)
 
 Use `rtnetlink` crate to subscribe to RTNLGRP_LINK events. Detect interface up/down and address changes, trigger rule reconciliation.
 
 **Effort:** 3-5 days
-
-### Rule Hashing to Workers
-
-**Location:** `src/supervisor.rs:987-988`
-
-Currently all workers receive all rules. Implement `rule_hash(group, port) % num_workers` to distribute rules to specific cores.
-
-**Effort:** 2-3 days
 
 ### Automated Drift Recovery
 
@@ -54,15 +59,33 @@ Phase 1 (detection) complete. Phase 2 needs: workers report ruleset hash, superv
 
 ### Test Coverage Gaps
 
-- `tests/integration/supervisor_resilience.rs` - namespace test (`#[ignore]`, needs root)
+- `tests/integration/supervisor_resilience.rs:406` - namespace test (`#[ignore]`, needs root)
 
 **Effort:** 2-3 days
 
-### Buffer Size / PACKET_MMAP [REJECTED]
+### Binary Renaming
 
-Proposal to use `PACKET_MMAP` for zero-copy ingress has been **rejected** due to architectural complexity and head-of-line blocking risks. See `developer_docs/decisions/001_buffer_management_strategy.md`.
+Rename binaries to conventional names:
 
-Current strategy: Continue using `io_uring` with copy-based ingress and `Arc` fan-out.
+- `multicast_relay` → `mcrd` (daemon)
+- `control_client` → `mcrctl` (control CLI)
+- `traffic_generator` → `mcrgen` (testing tool)
+
+**Effort:** 1 day (part of multi-interface work)
+
+### Buffer Size for Jumbo Frames
+
+**Issue:** Current buffer pool is undersized for jumbo frames (9000+ bytes).
+
+The fixed buffer sizes in the buffer pool don't accommodate jumbo frames. Need to either:
+
+- Add a jumbo buffer tier to the pool
+- Make buffer sizes configurable
+- Detect MTU at startup and size accordingly
+
+**Related:** PACKET_MMAP proposal was **rejected** (see `developer_docs/decisions/001_buffer_management_strategy.md`). Current strategy continues using `io_uring` with copy-based ingress.
+
+**Effort:** 1-2 days
 
 ---
 
@@ -82,7 +105,7 @@ Create `user_docs/TROUBLESHOOTING.md` with common errors, permission issues, buf
 
 ### Benchmark Implementations
 
-**Location:** `tests/benchmarks/forwarding_rate.rs:49-151` (skeleton only)
+**Location:** `tests/benchmarks/forwarding_rate.rs` (skeleton with TODOs)
 
 **Effort:** 1 week
 
@@ -94,11 +117,11 @@ Node.js dependencies removed but history bloated (6,044 files). Recommend docume
 
 ## Roadmap
 
-**Near-term:** Test coverage gaps
+**Near-term:** Multi-interface architecture, AF_PACKET FD passing
 
-**Medium-term:** AF_PACKET FD passing, Rule hashing, Network reconciliation
+**Medium-term:** Network reconciliation, Drift recovery
 
-**Long-term:** Drift recovery, Packet tracing, Benchmarks
+**Long-term:** Packet tracing, Benchmarks
 
 ---
 
@@ -106,6 +129,11 @@ Node.js dependencies removed but history bloated (6,044 files). Recommend docume
 
 **December 2025:**
 
+- Control plane worker removal (vestigial code from earlier design)
+- Dead code cleanup: `ipc.rs`, `data_plane.rs`, `stats.rs` modules removed
+- Flaky `log_level_control` test fix (TOCTOU race with shared socket)
+- Dead Intel RSS link removal from documentation
+- Misleading `#[allow(dead_code)]` annotations fixed
 - **REJECTED:** PACKET_MMAP / Zero-Copy Ingress (ADR 001)
 - Data Plane Fan-Out (`Arc<[u8]>` based zero-copy sharing)
 - Protocol versioning (`PROTOCOL_VERSION`, `GetVersion` command)
