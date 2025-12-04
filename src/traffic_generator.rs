@@ -587,18 +587,15 @@ impl TrafficGenerator {
 
     /// Run in async mode (tokio timers)
     ///
-    /// For high rates (>10k pps), uses adaptive batching to reduce timer overhead:
-    /// - Sends multiple packets per timer tick
-    /// - Timer frequency capped at 1000 Hz to reduce async overhead
+    /// For high rates (>1k pps), uses adaptive batching to reduce overhead:
+    /// - Timer frequency capped at 1000 Hz
+    /// - Multiple packets sent per tick using sendmmsg (Linux) for efficiency
     /// - This improves rate accuracy on busy systems (like CI) without high CPU usage
+    #[cfg(target_os = "linux")]
     async fn run_async(&self, verbose: bool) -> anyhow::Result<TrafficGeneratorStats> {
         use std::net::SocketAddrV4;
+        use std::os::unix::io::AsRawFd;
         use tokio::time::{self, Duration};
-
-        // Clone socket for async use
-        let socket = self.socket.try_clone()?;
-        socket.set_nonblocking(true)?;
-        let socket = tokio::net::UdpSocket::from_std(socket)?;
 
         let dest_addr = SocketAddrV4::new(self.config.group, self.config.port);
 
@@ -607,15 +604,18 @@ impl TrafficGenerator {
         // At 100k pps: 100 packets per tick at 1000 Hz
         // At 1k pps: 1 packet per tick at 1000 Hz
         const MAX_TIMER_HZ: u64 = 1000;
-        let packets_per_tick = self.config.rate.div_ceil(MAX_TIMER_HZ);
-        let actual_timer_hz = self.config.rate.div_ceil(packets_per_tick);
+        let packets_per_tick = self.config.rate.div_ceil(MAX_TIMER_HZ) as usize;
+        let actual_timer_hz = self.config.rate.div_ceil(packets_per_tick as u64);
         let interval = Duration::from_secs_f64(1.0 / actual_timer_hz as f64);
         let mut interval_timer = time::interval(interval);
 
+        // Use sendmmsg for batched sending (more efficient than individual send_to calls)
+        let use_sendmmsg = packets_per_tick > 1;
+
         if verbose {
-            if packets_per_tick > 1 {
+            if use_sendmmsg {
                 println!(
-                    "Async mode: sending to {}:{} from {} at {} pps ({} packets/tick @ {} Hz)",
+                    "Async mode: sending to {}:{} from {} at {} pps ({} packets/tick @ {} Hz, sendmmsg)",
                     self.config.group,
                     self.config.port,
                     self.config.interface,
@@ -637,10 +637,134 @@ impl TrafficGenerator {
         let mut last_report = start_time;
         let mut last_report_count: u64 = 0;
 
+        if use_sendmmsg {
+            // Use sendmmsg for batched sending
+            // Clone fd and packet to avoid holding raw pointers across await
+            let fd = self.socket.as_raw_fd();
+            let packet = self.packet.clone();
+            let dest_ip = *dest_addr.ip();
+            let dest_port = dest_addr.port();
+
+            loop {
+                interval_timer.tick().await;
+
+                let to_send = if self.config.count > 0 {
+                    ((self.config.count - packets_sent) as usize).min(packets_per_tick)
+                } else {
+                    packets_per_tick
+                };
+
+                // Create sendmmsg structures fresh each iteration (avoids Send issues)
+                // This is still efficient because sendmmsg amortizes the syscall cost
+                let sent = send_batch_sendmmsg(fd, dest_ip, dest_port, &packet, to_send);
+
+                if sent < 0 {
+                    errors += to_send as u64;
+                } else {
+                    packets_sent += sent as u64;
+                    if (sent as usize) < to_send {
+                        errors += (to_send - sent as usize) as u64;
+                    }
+                }
+
+                if verbose {
+                    let now = std::time::Instant::now();
+                    if now.duration_since(last_report).as_secs() >= 1 {
+                        self.report_progress(
+                            packets_sent,
+                            errors,
+                            &mut last_report,
+                            &mut last_report_count,
+                        );
+                    }
+                }
+
+                if self.config.count > 0 && packets_sent >= self.config.count {
+                    break;
+                }
+            }
+        } else {
+            // Single packet per tick - use async send
+            let socket = self.socket.try_clone()?;
+            socket.set_nonblocking(true)?;
+            let socket = tokio::net::UdpSocket::from_std(socket)?;
+
+            loop {
+                interval_timer.tick().await;
+
+                if let Err(_e) = socket.send_to(&self.packet, dest_addr).await {
+                    errors += 1;
+                }
+                packets_sent += 1;
+
+                if verbose {
+                    let now = std::time::Instant::now();
+                    if now.duration_since(last_report).as_secs() >= 1 {
+                        self.report_progress(
+                            packets_sent,
+                            errors,
+                            &mut last_report,
+                            &mut last_report_count,
+                        );
+                    }
+                }
+
+                if self.config.count > 0 && packets_sent >= self.config.count {
+                    break;
+                }
+            }
+        }
+
+        let elapsed_secs = start_time.elapsed().as_secs_f64();
+
+        Ok(TrafficGeneratorStats {
+            packets_sent,
+            errors,
+            elapsed_secs,
+            target_rate: self.config.rate,
+            packet_size: self.config.size,
+        })
+    }
+
+    /// Run in async mode (tokio timers) - non-Linux fallback
+    #[cfg(not(target_os = "linux"))]
+    async fn run_async(&self, verbose: bool) -> anyhow::Result<TrafficGeneratorStats> {
+        use std::net::SocketAddrV4;
+        use tokio::time::{self, Duration};
+
+        let socket = self.socket.try_clone()?;
+        socket.set_nonblocking(true)?;
+        let socket = tokio::net::UdpSocket::from_std(socket)?;
+
+        let dest_addr = SocketAddrV4::new(self.config.group, self.config.port);
+
+        const MAX_TIMER_HZ: u64 = 1000;
+        let packets_per_tick = self.config.rate.div_ceil(MAX_TIMER_HZ);
+        let actual_timer_hz = self.config.rate.div_ceil(packets_per_tick);
+        let interval = Duration::from_secs_f64(1.0 / actual_timer_hz as f64);
+        let mut interval_timer = time::interval(interval);
+
+        if verbose {
+            println!(
+                "Async mode: sending to {}:{} from {} at {} pps ({} packets/tick @ {} Hz)",
+                self.config.group,
+                self.config.port,
+                self.config.interface,
+                self.config.rate,
+                packets_per_tick,
+                actual_timer_hz
+            );
+        }
+
+        let mut packets_sent: u64 = 0;
+        let mut errors: u64 = 0;
+        let start_time = std::time::Instant::now();
+        let mut last_report = start_time;
+        let mut last_report_count: u64 = 0;
+
         loop {
             interval_timer.tick().await;
 
-            // Send batch of packets
             for _ in 0..packets_per_tick {
                 if let Err(_e) = socket.send_to(&self.packet, dest_addr).await {
                     errors += 1;
@@ -701,6 +825,51 @@ impl TrafficGenerator {
         *last_report = now;
         *last_report_count = packets_sent;
     }
+}
+
+/// Helper function for sendmmsg that doesn't hold non-Send types across await points
+#[cfg(target_os = "linux")]
+fn send_batch_sendmmsg(
+    fd: std::os::unix::io::RawFd,
+    dest_ip: std::net::Ipv4Addr,
+    dest_port: u16,
+    packet: &[u8],
+    count: usize,
+) -> i32 {
+    let sockaddr = libc::sockaddr_in {
+        sin_family: libc::AF_INET as libc::sa_family_t,
+        sin_port: dest_port.to_be(),
+        sin_addr: libc::in_addr {
+            s_addr: u32::from_ne_bytes(dest_ip.octets()),
+        },
+        sin_zero: [0; 8],
+    };
+    let sockaddr_len = std::mem::size_of::<libc::sockaddr_in>();
+
+    let mut iovecs: Vec<libc::iovec> = (0..count)
+        .map(|_| libc::iovec {
+            iov_base: packet.as_ptr() as *mut libc::c_void,
+            iov_len: packet.len(),
+        })
+        .collect();
+
+    let mut msghdrs: Vec<libc::mmsghdr> = (0..count)
+        .map(|i| libc::mmsghdr {
+            msg_hdr: libc::msghdr {
+                msg_name: &sockaddr as *const _ as *mut libc::c_void,
+                msg_namelen: sockaddr_len as libc::socklen_t,
+                msg_iov: &mut iovecs[i] as *mut libc::iovec,
+                msg_iovlen: 1,
+                msg_control: std::ptr::null_mut(),
+                msg_controllen: 0,
+                msg_flags: 0,
+            },
+            msg_len: 0,
+        })
+        .collect();
+
+    // SAFETY: sendmmsg with properly initialized structures
+    unsafe { libc::sendmmsg(fd, msghdrs.as_mut_ptr(), count as libc::c_uint, 0) }
 }
 
 /// Legacy async function for backward compatibility with existing tests
