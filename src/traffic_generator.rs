@@ -16,12 +16,12 @@ use std::net::Ipv4Addr;
 /// Rate limiting strategy for packet transmission
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
 pub enum RateLimitMode {
-    /// Use tokio async timers (good for rates < 100k pps)
+    /// Use tokio async timers (good for rates < 100k pps, low CPU usage)
     #[default]
     Async,
-    /// Use busy-wait spin loop (accurate for high rates, uses CPU)
+    /// Use busy-wait spin loop (accurate for high rates, 100% CPU on one core)
     Spin,
-    /// No rate limiting - send as fast as possible
+    /// No rate limiting - maximum throughput (100% CPU on one core)
     Burst,
 }
 
@@ -66,7 +66,7 @@ struct Args {
     #[arg(long)]
     payload: Option<String>,
 
-    /// Rate limiting mode
+    /// Rate limiting mode (spin/burst use 100% CPU - avoid in CI)
     #[arg(long, value_enum, default_value_t = RateLimitMode::Async)]
     mode: RateLimitMode,
 
