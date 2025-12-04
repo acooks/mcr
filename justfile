@@ -92,8 +92,8 @@ build-release:
 
 # Run unit tests only (no root needed)
 test-unit:
-    @echo "--- Running unit tests ---"
-    cargo test --lib --features integration_test
+    @echo "--- Running unit tests (lib + bins) ---"
+    cargo test --lib --bins --features integration_test
 
 # Run integration tests (calls sudo internally)
 test-integration: build-release
@@ -161,8 +161,8 @@ coverage:
     cargo build --release --all-targets
 
     echo ""
-    echo "Running unit tests..."
-    cargo test --release --lib
+    echo "Running unit tests (lib + bins)..."
+    cargo test --release --lib --bins
 
     echo ""
     echo "Running integration tests..."
