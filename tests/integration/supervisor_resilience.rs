@@ -125,6 +125,7 @@ mod control_client {
         pub async fn add_rule(&self, rule: ForwardingRule) -> Result<()> {
             match self.send_command(SupervisorCommand::AddRule {
                 rule_id: rule.rule_id,
+                name: None,
                 input_interface: rule.input_interface,
                 input_group: rule.input_group,
                 input_port: rule.input_port,

@@ -143,6 +143,7 @@ pub fn build_command(cli_command: CliCommand) -> Result<multicast_relay::Supervi
             outputs,
         } => multicast_relay::SupervisorCommand::AddRule {
             rule_id: rule_id.unwrap_or_default(),
+            name: None, // TODO: Add --name option to CLI
             input_interface,
             input_group,
             input_port,

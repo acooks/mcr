@@ -103,6 +103,7 @@ impl ControlClient {
         match self
             .send_command(SupervisorCommand::AddRule {
                 rule_id,
+                name: None,
                 input_interface: rule.input_interface,
                 input_group: rule.input_group,
                 input_port: rule.input_port,

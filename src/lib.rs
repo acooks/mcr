@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 use clap::Parser;
+pub mod config;
 pub mod logging;
 
 use serde::{Deserialize, Serialize};
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use uuid::Uuid;
+
+pub use config::{Config, ConfigRule, InputSpec, OutputSpec};
 
 /// Protocol version for supervisor-client communication.
 /// Increment when making breaking changes to SupervisorCommand or Response.
@@ -32,6 +35,11 @@ pub struct Args {
 pub enum Command {
     /// Run the supervisor process
     Supervisor {
+        /// Path to JSON5 configuration file.
+        /// If provided, loads startup config from this file.
+        #[arg(long)]
+        config: Option<PathBuf>,
+
         /// Path to the Unix socket for worker command and control.
         #[clap(long, default_value = "/tmp/mcr_relay_commands.sock")]
         relay_command_socket_path: PathBuf,
@@ -105,6 +113,9 @@ pub enum SupervisorCommand {
     AddRule {
         #[serde(default = "default_rule_id")]
         rule_id: String,
+        /// Optional human-friendly name for the rule
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
         input_interface: String,
         input_group: Ipv4Addr,
         input_port: u16,
@@ -112,6 +123,10 @@ pub enum SupervisorCommand {
     },
     RemoveRule {
         rule_id: String,
+    },
+    /// Remove a rule by its human-friendly name
+    RemoveRuleByName {
+        name: String,
     },
     ListRules,
     GetStats,
@@ -131,6 +146,23 @@ pub enum SupervisorCommand {
     GetLogLevels,
     /// Get protocol version for compatibility checking
     GetVersion,
+    /// Get the full running configuration (for `mcrctl show`)
+    GetConfig,
+    /// Load configuration from provided config (for `mcrctl load`)
+    LoadConfig {
+        config: Config,
+        /// If true, replace all existing rules; if false, merge with existing
+        replace: bool,
+    },
+    /// Save running configuration to a file (for `mcrctl save`)
+    SaveConfig {
+        /// Path to save to; None means use startup config path
+        path: Option<PathBuf>,
+    },
+    /// Validate a configuration without loading it (for `mcrctl check`)
+    CheckConfig {
+        config: Config,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -146,6 +178,13 @@ pub enum Response {
     },
     Version {
         protocol_version: u32,
+    },
+    /// Running configuration response (for `mcrctl show`)
+    Config(Config),
+    /// Configuration validation result
+    ConfigValidation {
+        valid: bool,
+        errors: Vec<String>,
     },
 }
 
@@ -225,6 +264,7 @@ mod tests {
     fn test_supervisor_command_serialization() {
         let add_command = SupervisorCommand::AddRule {
             rule_id: "test-uuid".to_string(),
+            name: None,
             input_interface: "eth0".to_string(),
             input_group: "224.0.0.1".parse().unwrap(),
             input_port: 5000,

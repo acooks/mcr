@@ -164,6 +164,7 @@ pub fn handle_supervisor_command(
 
         SupervisorCommand::AddRule {
             rule_id,
+            name: _, // TODO: Store name in ForwardingRule for display
             input_interface,
             input_group,
             input_port,
@@ -346,6 +347,135 @@ pub fn handle_supervisor_command(
                 Response::Success("pong".to_string()),
                 CommandAction::BroadcastToDataPlane(RelayCommand::Ping),
             )
+        }
+
+        SupervisorCommand::RemoveRuleByName { name } => {
+            // Find rule by name and remove it
+            // Note: Names are optional and not currently stored in ForwardingRule
+            // This is a placeholder that will need ForwardingRule to be extended
+            let rules = master_rules.lock().unwrap();
+            // For now, return an error since names aren't stored yet
+            drop(rules);
+            (
+                Response::Error(format!(
+                    "RemoveRuleByName not yet implemented (rule name: {}). Use --id instead.",
+                    name
+                )),
+                CommandAction::None,
+            )
+        }
+
+        SupervisorCommand::GetConfig => {
+            // Return current running configuration
+            let rules = master_rules.lock().unwrap();
+            let rules_vec: Vec<crate::ForwardingRule> = rules.values().cloned().collect();
+            let config = crate::Config::from_forwarding_rules(&rules_vec);
+            (Response::Config(config), CommandAction::None)
+        }
+
+        SupervisorCommand::LoadConfig { config, replace } => {
+            // Validate the config first
+            if let Err(e) = config.validate() {
+                return (
+                    Response::Error(format!("Invalid configuration: {}", e)),
+                    CommandAction::None,
+                );
+            }
+
+            let new_rules = config.to_forwarding_rules();
+
+            if replace {
+                // Replace all existing rules
+                let mut rules = master_rules.lock().unwrap();
+                rules.clear();
+                for rule in new_rules {
+                    rules.insert(rule.rule_id.clone(), rule);
+                }
+                let rules_for_sync: Vec<crate::ForwardingRule> = rules.values().cloned().collect();
+                drop(rules);
+                (
+                    Response::Success(format!(
+                        "Configuration loaded ({} rules, replaced existing)",
+                        rules_for_sync.len()
+                    )),
+                    CommandAction::BroadcastToDataPlane(RelayCommand::SyncRules(rules_for_sync)),
+                )
+            } else {
+                // Merge: add new rules that don't conflict
+                let mut rules = master_rules.lock().unwrap();
+                let mut added = 0;
+                let mut skipped = 0;
+                for new_rule in new_rules {
+                    // Check for duplicate input tuple
+                    let exists = rules.values().any(|r| {
+                        r.input_interface == new_rule.input_interface
+                            && r.input_group == new_rule.input_group
+                            && r.input_port == new_rule.input_port
+                    });
+                    if exists {
+                        skipped += 1;
+                    } else {
+                        rules.insert(new_rule.rule_id.clone(), new_rule);
+                        added += 1;
+                    }
+                }
+                let rules_for_sync: Vec<crate::ForwardingRule> = rules.values().cloned().collect();
+                drop(rules);
+                (
+                    Response::Success(format!(
+                        "Configuration merged ({} rules added, {} skipped as duplicates)",
+                        added, skipped
+                    )),
+                    CommandAction::BroadcastToDataPlane(RelayCommand::SyncRules(rules_for_sync)),
+                )
+            }
+        }
+
+        SupervisorCommand::SaveConfig { path } => {
+            // Save running config to a file
+            let rules = master_rules.lock().unwrap();
+            let rules_vec: Vec<crate::ForwardingRule> = rules.values().cloned().collect();
+            let config = crate::Config::from_forwarding_rules(&rules_vec);
+            drop(rules);
+
+            match path {
+                Some(p) => match config.save_to_file(&p) {
+                    Ok(()) => (
+                        Response::Success(format!("Configuration saved to {}", p.display())),
+                        CommandAction::None,
+                    ),
+                    Err(e) => (
+                        Response::Error(format!("Failed to save configuration: {}", e)),
+                        CommandAction::None,
+                    ),
+                },
+                None => (
+                    Response::Error(
+                        "No path specified and no startup config path available".to_string(),
+                    ),
+                    CommandAction::None,
+                ),
+            }
+        }
+
+        SupervisorCommand::CheckConfig { config } => {
+            // Validate configuration without loading
+            match config.validate() {
+                Ok(()) => (
+                    Response::ConfigValidation {
+                        valid: true,
+                        errors: vec![],
+                    },
+                    CommandAction::None,
+                ),
+                Err(e) => (
+                    Response::ConfigValidation {
+                        valid: false,
+                        errors: vec![e.to_string()],
+                    },
+                    CommandAction::None,
+                ),
+            }
         }
     }
 }
@@ -1639,6 +1769,7 @@ mod tests {
         let (response, action) = handle_supervisor_command(
             crate::SupervisorCommand::AddRule {
                 rule_id: "test-rule".to_string(),
+                name: None,
                 input_interface: "lo".to_string(),
                 input_group: "224.0.0.1".parse().unwrap(),
                 input_port: 5000,
@@ -2102,6 +2233,7 @@ mod tests {
         let (response, action) = handle_supervisor_command(
             crate::SupervisorCommand::AddRule {
                 rule_id: "bad-loop".to_string(),
+                name: None,
                 input_interface: "eth0".to_string(),
                 input_group: "239.1.1.1".parse().unwrap(),
                 input_port: 5000,
@@ -2146,6 +2278,7 @@ mod tests {
         let (response, action) = handle_supervisor_command(
             crate::SupervisorCommand::AddRule {
                 rule_id: "valid-rule".to_string(),
+                name: None,
                 input_interface: "eth0".to_string(),
                 input_group: "239.1.1.1".parse().unwrap(),
                 input_port: 5000,
@@ -2194,6 +2327,7 @@ mod tests {
         let (response, _action) = handle_supervisor_command(
             crate::SupervisorCommand::AddRule {
                 rule_id: "loopback-rule".to_string(),
+                name: None,
                 input_interface: "eth0".to_string(),
                 input_group: "239.1.1.1".parse().unwrap(),
                 input_port: 5000,
@@ -2314,6 +2448,7 @@ mod tests {
         let (response, _) = handle_supervisor_command(
             crate::SupervisorCommand::AddRule {
                 rule_id: "test-rule".to_string(),
+                name: None,
                 input_interface: "this_interface_name_is_way_too_long".to_string(),
                 input_group: "224.0.0.1".parse().unwrap(),
                 input_port: 5000,
@@ -2351,6 +2486,7 @@ mod tests {
         let (response, _) = handle_supervisor_command(
             crate::SupervisorCommand::AddRule {
                 rule_id: "test-rule".to_string(),
+                name: None,
                 input_interface: "eth0".to_string(),
                 input_group: "224.0.0.1".parse().unwrap(),
                 input_port: 5000,
@@ -2408,6 +2544,7 @@ mod tests {
         let (response, _) = handle_supervisor_command(
             crate::SupervisorCommand::AddRule {
                 rule_id: "test-rule".to_string(),
+                name: None,
                 input_interface: "eth0".to_string(),
                 input_group: "224.0.0.1".parse().unwrap(),
                 input_port: 0, // Invalid
@@ -2445,6 +2582,7 @@ mod tests {
         let (response, _) = handle_supervisor_command(
             crate::SupervisorCommand::AddRule {
                 rule_id: "test-rule".to_string(),
+                name: None,
                 input_interface: "eth0".to_string(),
                 input_group: "224.0.0.1".parse().unwrap(),
                 input_port: 5000,

@@ -10,6 +10,7 @@ fn main() -> Result<()> {
 
     match args.command {
         Command::Supervisor {
+            config: _, // TODO: Load startup config from file
             relay_command_socket_path,
             control_socket_path,
             interface,
@@ -120,6 +121,7 @@ mod tests {
         assert_eq!(
             args.command,
             Command::Supervisor {
+                config: None,
                 relay_command_socket_path: PathBuf::from("/tmp/mcr_relay_commands.sock"),
                 control_socket_path: PathBuf::from("/tmp/mcrd_control.sock"),
                 interface: "lo".to_string(),
