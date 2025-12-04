@@ -65,27 +65,21 @@ echo ""
 echo "Starting MCR-1..."
 "$RELAY_BINARY" supervisor \
     --control-socket-path "$MCR1_SOCKET" \
-    --num-workers 1 \
-    --user "$SUDO_USER" \
-    --group "$SUDO_USER" > /tmp/mcr1.log 2>&1 &
+    --num-workers 1 > /tmp/mcr1.log 2>&1 &
 MCR1_PID=$!
 
 # Start MCR-2
 echo "Starting MCR-2..."
 "$RELAY_BINARY" supervisor \
     --control-socket-path "$MCR2_SOCKET" \
-    --num-workers 1 \
-    --user "$SUDO_USER" \
-    --group "$SUDO_USER" > /tmp/mcr2.log 2>&1 &
+    --num-workers 1 > /tmp/mcr2.log 2>&1 &
 MCR2_PID=$!
 
 # Start MCR-3
 echo "Starting MCR-3..."
 "$RELAY_BINARY" supervisor \
     --control-socket-path "$MCR3_SOCKET" \
-    --num-workers 1 \
-    --user "$SUDO_USER" \
-    --group "$SUDO_USER" > /tmp/mcr3.log 2>&1 &
+    --num-workers 1 > /tmp/mcr3.log 2>&1 &
 MCR3_PID=$!
 
 # Wait for all sockets

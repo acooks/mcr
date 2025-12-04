@@ -35,10 +35,6 @@ mod tests {
             .arg(control_socket_path.as_os_str())
             .arg("--relay-command-socket-path")
             .arg(relay_socket_path.as_os_str())
-            .arg("--user")
-            .arg(std::env::var("USER").unwrap_or_else(|_| "nobody".to_string()))
-            .arg("--group")
-            .arg(std::env::var("USER").unwrap_or_else(|_| "nogroup".to_string()))
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
 

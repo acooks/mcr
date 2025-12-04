@@ -28,10 +28,6 @@ async fn test_main_worker_data_plane_command() -> Result<()> {
 
     let mut child = TokioCommand::new(env!("CARGO_BIN_EXE_multicast_relay"))
         .arg("worker")
-        .arg("--user")
-        .arg("nobody")
-        .arg("--group")
-        .arg("nobody")
         .arg("--relay-command-socket-path")
         .arg("/tmp/test_main_dp.sock")
         .arg("--data-plane")
