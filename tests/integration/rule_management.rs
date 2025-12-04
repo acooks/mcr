@@ -244,6 +244,7 @@ async fn test_add_and_remove_rule_e2e() -> Result<()> {
     // 3. ADD RULE: Add a new forwarding rule via the supervisor.
     let rule = ForwardingRule {
         rule_id: "test-rule-e2e".to_string(),
+        name: None,
         input_interface: "lo".to_string(),
         input_group: "239.1.1.1".parse()?,
         input_port: 5001,
@@ -343,6 +344,7 @@ async fn test_get_stats_e2e() -> Result<()> {
     // self-loop validation that prevents input and output on the same interface.
     let rule = ForwardingRule {
         rule_id: "test-stats-rule".to_string(),
+        name: None,
         input_interface: "lo".to_string(),
         input_group: "239.1.1.1".parse()?,
         input_port: 5002,
@@ -524,6 +526,7 @@ async fn test_max_workers_spawning() -> Result<()> {
     // Verify we can add a rule (tests that workers are functional)
     let rule = ForwardingRule {
         rule_id: "test-max-workers".to_string(),
+        name: None,
         input_interface: "lo".to_string(),
         input_group: "239.1.1.1".parse()?,
         input_port: 5555,

@@ -111,7 +111,7 @@ graph TD
         end
     end
 
-    subgraph Kernel Space / Network
+    subgraph "Kernel Space / Network"
         NetIn["Inbound Multicast Traffic"] --> D1;
         NetIn --> D2;
         NetIn --> DN;

@@ -18,6 +18,7 @@ use tokio::net::UnixStream;
 use tokio::process::{Child, Command};
 use tokio::time::{sleep, Duration};
 
+use crate::config::Config;
 use crate::logging::{AsyncConsumer, Facility, Logger, MPSCRingBuffer};
 use crate::{log_info, log_warning, ForwardingRule, RelayCommand, Response};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
@@ -113,6 +114,9 @@ struct InterfaceWorkers {
     /// Whether this interface was from startup config (pinned) or dynamic
     #[allow(dead_code)] // Will be used for dynamic worker lifecycle management
     is_pinned: bool,
+    /// Specific core IDs to pin workers to (from config pinning section)
+    /// If None, workers use sequential core IDs starting from 0
+    pinned_cores: Option<Vec<u32>>,
 }
 
 /// Centralized manager for all worker lifecycle operations
@@ -122,6 +126,8 @@ struct WorkerManager {
     relay_command_socket_path: PathBuf,
     num_cores_per_interface: usize, // Default workers per interface
     logger: Logger,
+    /// Core pinning configuration from startup config (interface -> core list)
+    pinning: HashMap<String, Vec<u32>>,
 
     // Per-interface state
     interfaces: HashMap<String, InterfaceWorkers>,
@@ -173,6 +179,7 @@ pub fn handle_supervisor_command(
         HashMap<crate::logging::Facility, crate::logging::Severity>,
     >,
     worker_stats: &Mutex<HashMap<u32, Vec<crate::FlowStats>>>,
+    startup_config_path: Option<&PathBuf>,
 ) -> (crate::Response, CommandAction) {
     use crate::{Response, SupervisorCommand};
     use std::sync::atomic::Ordering;
@@ -185,7 +192,7 @@ pub fn handle_supervisor_command(
 
         SupervisorCommand::AddRule {
             rule_id,
-            name: _, // TODO: Store name in ForwardingRule for display
+            name,
             input_interface,
             input_group,
             input_port,
@@ -231,6 +238,7 @@ pub fn handle_supervisor_command(
 
             let rule = ForwardingRule {
                 rule_id,
+                name,
                 input_interface,
                 input_group,
                 input_port,
@@ -387,18 +395,33 @@ pub fn handle_supervisor_command(
 
         SupervisorCommand::RemoveRuleByName { name } => {
             // Find rule by name and remove it
-            // Note: Names are optional and not currently stored in ForwardingRule
-            // This is a placeholder that will need ForwardingRule to be extended
-            let rules = master_rules.lock().unwrap();
-            // For now, return an error since names aren't stored yet
-            drop(rules);
-            (
-                Response::Error(format!(
-                    "RemoveRuleByName not yet implemented (rule name: {}). Use --id instead.",
-                    name
-                )),
-                CommandAction::None,
-            )
+            let mut rules = master_rules.lock().unwrap();
+
+            // Find the rule ID by matching the name
+            let rule_id = rules
+                .values()
+                .find(|r| r.name.as_ref() == Some(&name))
+                .map(|r| r.rule_id.clone());
+
+            match rule_id {
+                Some(id) => {
+                    // Remove the rule
+                    rules.remove(&id);
+                    (
+                        Response::Success(format!("Removed rule '{}' (id: {})", name, id)),
+                        CommandAction::BroadcastToDataPlane(RelayCommand::RemoveRule {
+                            rule_id: id,
+                        }),
+                    )
+                }
+                None => (
+                    Response::Error(format!(
+                        "No rule found with name '{}'. Use 'mcrctl list' to see available rules.",
+                        name
+                    )),
+                    CommandAction::None,
+                ),
+            }
         }
 
         SupervisorCommand::GetConfig => {
@@ -474,8 +497,11 @@ pub fn handle_supervisor_command(
             let config = crate::Config::from_forwarding_rules(&rules_vec);
             drop(rules);
 
-            match path {
-                Some(p) => match config.save_to_file(&p) {
+            // Use explicit path, or fall back to startup config path
+            let save_path = path.as_ref().or(startup_config_path);
+
+            match save_path {
+                Some(p) => match config.save_to_file(p) {
                     Ok(()) => (
                         Response::Success(format!("Configuration saved to {}", p.display())),
                         CommandAction::None,
@@ -487,7 +513,7 @@ pub fn handle_supervisor_command(
                 },
                 None => (
                     Response::Error(
-                        "No path specified and no startup config path available".to_string(),
+                        "No path specified and mcrd was not started with --config".to_string(),
                     ),
                     CommandAction::None,
                 ),
@@ -697,12 +723,14 @@ impl WorkerManager {
         num_cores_per_interface: usize,
         logger: Logger,
         initial_fanout_group_id: u16,
+        pinning: HashMap<String, Vec<u32>>,
     ) -> Self {
         Self {
             default_interface,
             relay_command_socket_path,
             num_cores_per_interface,
             logger,
+            pinning,
             interfaces: HashMap::new(),
             next_fanout_group_id: initial_fanout_group_id,
             workers: HashMap::new(),
@@ -721,8 +749,16 @@ impl WorkerManager {
         let fanout_group_id = self.next_fanout_group_id;
         self.next_fanout_group_id = self.next_fanout_group_id.wrapping_add(1);
 
-        // Determine number of workers (for now, use default; pinning support added later)
-        let num_workers = if is_pinned {
+        // Check for pinning configuration for this interface
+        let pinned_cores = self.pinning.get(interface).cloned();
+
+        // Determine number of workers:
+        // 1. If pinning config exists, use the number of specified cores
+        // 2. If pinned (from startup config) but no pinning config, use default num_cores
+        // 3. If dynamic (runtime AddRule), use 1 worker
+        let num_workers = if let Some(ref cores) = pinned_cores {
+            cores.len()
+        } else if is_pinned {
             self.num_cores_per_interface
         } else {
             1 // Dynamic interfaces get 1 worker by default
@@ -734,17 +770,29 @@ impl WorkerManager {
                 num_workers,
                 fanout_group_id,
                 is_pinned,
+                pinned_cores: pinned_cores.clone(),
             },
         );
 
-        log_info!(
-            self.logger,
-            Facility::Supervisor,
-            &format!(
-                "Registered interface '{}' with fanout_group_id={}, workers={}, pinned={}",
-                interface, fanout_group_id, num_workers, is_pinned
-            )
-        );
+        if let Some(ref cores) = pinned_cores {
+            log_info!(
+                self.logger,
+                Facility::Supervisor,
+                &format!(
+                    "Registered interface '{}' with fanout_group_id={}, pinned to cores {:?}",
+                    interface, fanout_group_id, cores
+                )
+            );
+        } else {
+            log_info!(
+                self.logger,
+                Facility::Supervisor,
+                &format!(
+                    "Registered interface '{}' with fanout_group_id={}, workers={}, pinned={}",
+                    interface, fanout_group_id, num_workers, is_pinned
+                )
+            );
+        }
 
         fanout_group_id
     }
@@ -839,25 +887,42 @@ impl WorkerManager {
 
         // Get or create interface config (assigns fanout group ID)
         let fanout_group_id = self.get_or_create_interface(interface, is_pinned);
-        let num_workers = self
+
+        // Get interface config to determine worker count and pinned cores
+        let (num_workers, pinned_cores) = self
             .interfaces
             .get(interface)
-            .map(|i| i.num_workers)
-            .unwrap_or(1);
+            .map(|i| (i.num_workers, i.pinned_cores.clone()))
+            .unwrap_or((1, None));
 
         log_info!(
             self.logger,
             Facility::Supervisor,
             &format!(
-                "Spawning {} worker(s) for interface '{}' (fanout_group_id={})",
-                num_workers, interface, fanout_group_id
+                "Spawning {} worker(s) for interface '{}' (fanout_group_id={}{})",
+                num_workers,
+                interface,
+                fanout_group_id,
+                if pinned_cores.is_some() {
+                    ", pinned"
+                } else {
+                    ""
+                }
             )
         );
 
-        // Spawn workers for this interface
-        for core_id in 0..num_workers as u32 {
-            self.spawn_data_plane_for_interface(interface, core_id, fanout_group_id)
-                .await?;
+        // Spawn workers for this interface using pinned cores if specified,
+        // otherwise use sequential core IDs starting from 0
+        if let Some(ref cores) = pinned_cores {
+            for &core_id in cores {
+                self.spawn_data_plane_for_interface(interface, core_id, fanout_group_id)
+                    .await?;
+            }
+        } else {
+            for core_id in 0..num_workers as u32 {
+                self.spawn_data_plane_for_interface(interface, core_id, fanout_group_id)
+                    .await?;
+            }
         }
 
         Ok(true)
@@ -1249,6 +1314,7 @@ async fn handle_client(
             std::collections::HashMap<crate::logging::Facility, crate::logging::Severity>,
         >,
     >,
+    startup_config_path: Option<PathBuf>,
 ) -> Result<()> {
     use crate::SupervisorCommand;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1280,6 +1346,7 @@ async fn handle_client(
         &global_min_level,
         &facility_min_levels,
         &worker_stats_arc,
+        startup_config_path.as_ref(),
     );
 
     // Log ruleset hash for drift detection if rules changed
@@ -1468,6 +1535,8 @@ pub async fn run(
     control_socket_path: PathBuf,
     master_rules: Arc<Mutex<HashMap<String, ForwardingRule>>>,
     num_workers: Option<usize>,
+    startup_config: Option<Config>,
+    startup_config_path: Option<PathBuf>,
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<()> {
     // Determine number of cores to use
@@ -1559,6 +1628,12 @@ pub async fn run(
         0
     };
 
+    // Extract pinning configuration from startup config (if provided)
+    let pinning = startup_config
+        .as_ref()
+        .map(|c| c.pinning.clone())
+        .unwrap_or_default();
+
     // Initialize WorkerManager and wrap it in Arc<Mutex<>>
     let worker_manager = {
         let mut manager = WorkerManager::new(
@@ -1567,10 +1642,34 @@ pub async fn run(
             num_cores,
             supervisor_logger.clone(),
             fanout_group_id,
+            pinning,
         );
 
-        // Spawn all initial workers
-        manager.spawn_all_initial_workers().await?;
+        // Spawn workers for all interfaces from config (if provided)
+        // Otherwise fall back to default interface from CLI
+        if let Some(ref config) = startup_config {
+            let interfaces = config.get_interfaces();
+            if !interfaces.is_empty() {
+                log_info!(
+                    supervisor_logger,
+                    Facility::Supervisor,
+                    &format!(
+                        "Starting workers for {} interface(s) from config: {:?}",
+                        interfaces.len(),
+                        interfaces
+                    )
+                );
+                for iface in interfaces {
+                    manager.ensure_workers_for_interface(&iface, true).await?;
+                }
+            } else {
+                // Config provided but no rules - spawn default interface workers
+                manager.spawn_all_initial_workers().await?;
+            }
+        } else {
+            // No config - spawn workers for default interface (backward compat)
+            manager.spawn_all_initial_workers().await?;
+        }
 
         // Send initial ruleset sync to all data plane workers
         // This ensures workers start with the same ruleset as the supervisor
@@ -1634,6 +1733,7 @@ pub async fn run(
                     Arc::clone(&master_rules),
                     Arc::clone(&global_min_level),
                     Arc::clone(&facility_min_levels),
+                    startup_config_path.clone(),
                 )
                 .await
                 {
@@ -1965,6 +2065,7 @@ mod tests {
             &global_min_level,
             &facility_min_levels,
             &worker_stats,
+            None,
         );
 
         assert!(matches!(response, crate::Response::Workers(workers) if workers.len() == 1));
@@ -1995,6 +2096,7 @@ mod tests {
             &global_min_level,
             &facility_min_levels,
             &worker_stats,
+            None,
         );
 
         assert!(matches!(response, crate::Response::Success(_)));
@@ -2012,6 +2114,7 @@ mod tests {
             "test-rule".to_string(),
             ForwardingRule {
                 rule_id: "test-rule".to_string(),
+                name: None,
                 input_interface: "lo".to_string(),
                 input_group: "224.0.0.1".parse().unwrap(),
                 input_port: 5000,
@@ -2034,6 +2137,7 @@ mod tests {
             &global_min_level,
             &facility_min_levels,
             &worker_stats,
+            None,
         );
 
         assert!(matches!(response, crate::Response::Success(_)));
@@ -2059,6 +2163,7 @@ mod tests {
             &global_min_level,
             &facility_min_levels,
             &worker_stats,
+            None,
         );
 
         assert!(matches!(response, crate::Response::Error(_)));
@@ -2072,6 +2177,7 @@ mod tests {
             "test-rule".to_string(),
             ForwardingRule {
                 rule_id: "test-rule".to_string(),
+                name: None,
                 input_interface: "lo".to_string(),
                 input_group: "224.0.0.1".parse().unwrap(),
                 input_port: 5000,
@@ -2092,6 +2198,7 @@ mod tests {
             &global_min_level,
             &facility_min_levels,
             &worker_stats,
+            None,
         );
 
         assert!(matches!(response, crate::Response::Rules(rules) if rules.len() == 1));
@@ -2115,6 +2222,7 @@ mod tests {
             &global_min_level,
             &facility_min_levels,
             &worker_stats,
+            None,
         );
 
         assert!(matches!(response, crate::Response::Stats(_)));
@@ -2142,6 +2250,7 @@ mod tests {
             &global_min_level,
             &facility_min_levels,
             &worker_stats,
+            None,
         );
 
         assert!(matches!(response, crate::Response::Success(_)));
@@ -2172,6 +2281,7 @@ mod tests {
             &global_min_level,
             &facility_min_levels,
             &worker_stats,
+            None,
         );
 
         assert!(matches!(response, crate::Response::Success(_)));
@@ -2206,6 +2316,7 @@ mod tests {
             &global_min_level,
             &facility_min_levels,
             &worker_stats,
+            None,
         );
 
         match response {
@@ -2240,6 +2351,7 @@ mod tests {
             &global_min_level,
             &facility_min_levels,
             &worker_stats,
+            None,
         );
 
         match response {
@@ -2310,6 +2422,7 @@ mod tests {
             &global_min_level,
             &facility_min_levels,
             &worker_stats,
+            None,
         );
 
         match response {
@@ -2406,6 +2519,7 @@ mod tests {
             &global_min_level,
             &facility_min_levels,
             &worker_stats,
+            None,
         );
 
         match response {
@@ -2466,6 +2580,7 @@ mod tests {
             &global_min_level,
             &facility_min_levels,
             &worker_stats,
+            None,
         );
 
         // Should reject with error
@@ -2511,6 +2626,7 @@ mod tests {
             &global_min_level,
             &facility_min_levels,
             &worker_stats,
+            None,
         );
 
         // Should succeed
@@ -2563,6 +2679,7 @@ mod tests {
             &global_min_level,
             &facility_min_levels,
             &worker_stats,
+            None,
         );
 
         // Should succeed (loopback allowed, just warned)
@@ -2684,6 +2801,7 @@ mod tests {
             &global_min_level,
             &facility_min_levels,
             &worker_stats,
+            None,
         );
 
         match response {
@@ -2722,6 +2840,7 @@ mod tests {
             &global_min_level,
             &facility_min_levels,
             &worker_stats,
+            None,
         );
 
         match response {
@@ -2780,6 +2899,7 @@ mod tests {
             &global_min_level,
             &facility_min_levels,
             &worker_stats,
+            None,
         );
 
         match response {
@@ -2818,6 +2938,7 @@ mod tests {
             &global_min_level,
             &facility_min_levels,
             &worker_stats,
+            None,
         );
 
         match response {

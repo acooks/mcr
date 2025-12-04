@@ -25,6 +25,15 @@ Phase 1 (detection) complete. Phase 2 needs: workers report ruleset hash, superv
 
 ## MEDIUM Priority
 
+### Dynamic Worker Idle Cleanup
+
+Design spec: dynamic workers should exit after grace period of inactivity.
+
+- Track last rule timestamp per dynamic interface
+- Check in periodic sync loop (300s interval)
+- Gracefully shut down workers with no rules after configurable timeout
+- **Test:** `test_dynamic_worker_cleanup_after_idle`
+
 ### Buffer Size for Jumbo Frames
 
 Current buffer pool is undersized for jumbo frames (9000+ bytes). Options: add jumbo buffer tier, make sizes configurable, or detect MTU at startup.
@@ -37,6 +46,27 @@ Two tests in `tests/integration/supervisor_resilience.rs` are disabled:
 
 - Line 270: `test_supervisor_applies_exponential_backoff` - needs `run_generic` function or rewrite
 - Line 407: `test_supervisor_in_namespace` - unimplemented skeleton, requires root
+
+### Multi-Interface Test Coverage
+
+Remaining tests needed:
+
+- `test_config_load_merge_vs_replace` - Verify `--replace` flag behavior
+
+**Implemented** (in `tests/integration/multi_interface.rs`):
+
+- `test_config_startup_spawns_workers_for_interface`
+- `test_dynamic_worker_spawn_on_add_rule`
+- `test_multiple_rules_same_interface`
+- `test_remove_rule_by_name`
+- `test_remove_rule_by_name_not_found`
+- `test_config_preserves_rule_names`
+- `test_multiple_ingress_interfaces` - Tests config with rules for 2 different input interfaces (veth pairs)
+- `test_dynamic_spawn_for_new_interface` - Tests dynamic worker spawn when adding rule for new interface
+
+### CLI Missing Features
+
+The `--name` option for `mcrctl add` is not yet implemented (TODO in `src/control_client.rs:178`). Rules can have names via JSON5 config but not via CLI.
 
 ---
 
@@ -66,7 +96,16 @@ Location: `tests/benchmarks/forwarding_rate.rs` (skeleton with TODOs)
 
 ## Completed (December 2025)
 
-- **Multi-Interface Architecture**: JSON5 config file support (`--config`), mcrctl config commands (show/load/save/check), multi-interface worker management, dynamic worker spawning
+- **Multi-Interface Architecture (Complete)**:
+  - JSON5 config file support (`--config`)
+  - Interfaces derived from rules in config
+  - Workers spawned per interface at startup
+  - Per-interface fanout_group_id assignment
+  - Dynamic worker spawning for runtime AddRule
+  - `mcrctl config show/load/check/save` commands
+  - Startup config path tracking for `mcrctl save` without args
+  - Pinning configuration applied from config (workers spawn on specified cores)
+  - Rule naming: `name` field in ForwardingRule, `RemoveRuleByName` implemented
 - **Binary renaming**: `multicast_relay` → `mcrd`, `control_client` → `mcrctl`, `traffic_generator` → `mcrgen`
 - **Hash-based rule IDs**: Computed from input tuple (interface, group, port) for stability across reloads
 - **AF_PACKET FD Passing & Privilege Separation**: Workers drop to nobody:nobody (uid=65534)

@@ -191,6 +191,9 @@ pub enum Response {
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Hash)]
 pub struct ForwardingRule {
     pub rule_id: String,
+    /// Optional human-friendly name for display/logging
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub input_interface: String,
     pub input_group: Ipv4Addr,
     pub input_port: u16,
@@ -322,6 +325,7 @@ mod tests {
 
         let rule = ForwardingRule {
             rule_id: "test-uuid".to_string(),
+            name: None,
             input_interface: "eth0".to_string(),
             input_group: "224.0.0.1".parse().unwrap(),
             input_port: 5000,
@@ -350,6 +354,7 @@ mod tests {
     fn test_forwarding_rule_serialization() {
         let rule = ForwardingRule {
             rule_id: "test-uuid".to_string(),
+            name: None,
             input_interface: "eth0".to_string(),
             input_group: "224.0.0.1".parse().unwrap(),
             input_port: 5000,

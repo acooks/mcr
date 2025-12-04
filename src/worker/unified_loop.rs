@@ -1173,6 +1173,7 @@ mod tests {
     fn create_test_rule(rule_id: &str, input_group: &str, input_port: u16) -> ForwardingRule {
         ForwardingRule {
             rule_id: rule_id.to_string(),
+            name: None,
             input_interface: "lo".to_string(),
             input_group: input_group.parse().unwrap(),
             input_port,

@@ -203,6 +203,7 @@ impl ConfigRule {
     pub fn to_forwarding_rule(&self) -> ForwardingRule {
         ForwardingRule {
             rule_id: self.generate_rule_id(),
+            name: self.name.clone(),
             input_interface: self.input.interface.clone(),
             input_group: self.input.group,
             input_port: self.input.port,
@@ -221,7 +222,7 @@ impl ConfigRule {
     /// Create from an existing ForwardingRule
     pub fn from_forwarding_rule(rule: &ForwardingRule) -> Self {
         ConfigRule {
-            name: None, // Names are not persisted in ForwardingRule
+            name: rule.name.clone(),
             input: InputSpec {
                 interface: rule.input_interface.clone(),
                 group: rule.input_group,

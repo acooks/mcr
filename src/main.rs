@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
-use multicast_relay::{supervisor, worker, Args, Command};
+use multicast_relay::{config::Config, supervisor, worker, Args, Command};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -10,12 +10,54 @@ fn main() -> Result<()> {
 
     match args.command {
         Command::Supervisor {
-            config: _, // TODO: Load startup config from file
+            config: config_path,
             relay_command_socket_path,
             control_socket_path,
             interface,
             num_workers,
         } => {
+            // Load and validate config file if provided
+            let startup_config = if let Some(ref path) = config_path {
+                let config = Config::load_from_file(path)
+                    .with_context(|| format!("Failed to load config from {:?}", path))?;
+                config
+                    .validate()
+                    .with_context(|| format!("Invalid config in {:?}", path))?;
+                eprintln!(
+                    "[Supervisor] Loaded config from {:?} ({} rules)",
+                    path,
+                    config.rules.len()
+                );
+                Some(config)
+            } else {
+                None
+            };
+
+            // Determine which interface to use:
+            // - If config provided with rules, use first input interface from config
+            // - Otherwise, use CLI --interface (default: lo)
+            let effective_interface = if let Some(ref config) = startup_config {
+                if let Some(first_rule) = config.rules.first() {
+                    first_rule.input.interface.clone()
+                } else {
+                    interface.clone()
+                }
+            } else {
+                interface.clone()
+            };
+            // Pre-populate master_rules from config if provided
+            let master_rules: Arc<Mutex<HashMap<String, multicast_relay::ForwardingRule>>> =
+                if let Some(ref config) = startup_config {
+                    let rules: HashMap<_, _> = config
+                        .to_forwarding_rules()
+                        .into_iter()
+                        .map(|r| (r.rule_id.clone(), r))
+                        .collect();
+                    Arc::new(Mutex::new(rules))
+                } else {
+                    Arc::new(Mutex::new(HashMap::new()))
+                };
+
             // Create oneshot channel for graceful shutdown
             let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
 
@@ -44,11 +86,13 @@ fn main() -> Result<()> {
 
                 // Run supervisor - it will exit when shutdown_rx is triggered
                 let result = supervisor::run(
-                    &interface,
+                    &effective_interface,
                     relay_command_socket_path.clone(),
                     control_socket_path,
-                    Arc::new(Mutex::new(HashMap::new())),
+                    master_rules,
                     num_workers,
+                    startup_config,
+                    config_path.clone(),
                     shutdown_rx,
                 )
                 .await;

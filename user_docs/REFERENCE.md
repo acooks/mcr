@@ -192,7 +192,9 @@ sudo mcrd supervisor [OPTIONS]
 
 | Option | Default | Description |
 | :----- | :------ | :---------- |
+| `--config <PATH>` | None | Load rules from JSON5 configuration file at startup |
 | `--num-workers <N>` | Number of CPU cores | Number of worker processes to spawn |
+| `--interface <NAME>` | `lo` | Network interface for PACKET_FANOUT_CPU |
 | `--control-socket-path <PATH>` | `/tmp/mcrd_control.sock` | Unix socket for mcrctl connections |
 
 ### Examples
@@ -201,8 +203,11 @@ sudo mcrd supervisor [OPTIONS]
 # Basic start with defaults
 sudo mcrd supervisor
 
-# Custom worker count
-sudo mcrd supervisor --num-workers 4
+# With configuration file
+sudo mcrd supervisor --config /etc/mcr/rules.json5
+
+# Custom worker count and interface
+sudo mcrd supervisor --interface eth0 --num-workers 4
 ```
 
 All forwarding rules are managed at runtime via `mcrctl`.
@@ -299,6 +304,60 @@ mcrctl log-level set --facility DataPlane --level debug  # Per-facility
 ```
 
 Levels: `emergency`, `alert`, `critical`, `error`, `warning`, `notice`, `info`, `debug`
+
+### 5.6. Configuration Management
+
+MCR supports JSON5 configuration files for persistent rule sets.
+
+```bash
+mcrctl config show              # Show running config as JSON5
+mcrctl config save <file>       # Save running config to file
+mcrctl config load <file>       # Load rules from file (merges with running)
+mcrctl config check <file>      # Validate file without loading
+```
+
+**Example JSON5 configuration:**
+
+```json5
+{
+  // MCR configuration
+  rules: [
+    {
+      name: "video-feed",  // Optional human-friendly name
+      input: { interface: "eth0", group: "239.1.1.1", port: 5000 },
+      outputs: [
+        { group: "239.2.2.2", port: 6000, interface: "eth1" }
+      ]
+    },
+    {
+      name: "audio-feed",
+      input: { interface: "eth0", group: "239.1.1.2", port: 5001 },
+      outputs: [
+        { group: "239.2.2.3", port: 6001, interface: "eth1" },
+        { group: "239.2.2.4", port: 6002, interface: "eth2" }  // Fan-out
+      ]
+    }
+  ],
+
+  // Optional: Pin workers to specific CPU cores per interface
+  pinning: {
+    "eth0": [0, 1, 2, 3],  // 4 workers on cores 0-3
+    "eth1": [4, 5]         // 2 workers on cores 4-5
+  }
+}
+```
+
+**Configuration fields:**
+
+| Field | Required | Description |
+| :---- | :------- | :---------- |
+| `rules` | Yes | Array of forwarding rules |
+| `rules[].name` | No | Human-friendly name for the rule (for display and `RemoveRuleByName`) |
+| `rules[].input` | Yes | Input specification: `interface`, `group`, `port` |
+| `rules[].outputs` | Yes | Array of output destinations |
+| `pinning` | No | Map of interface name to CPU core list |
+
+**Note:** The `pinning` configuration controls how many workers spawn per interface and which CPU cores they use. If not specified, workers use the `--num-workers` default.
 
 ---
 
