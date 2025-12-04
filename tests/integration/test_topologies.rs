@@ -16,13 +16,6 @@ mod privileged {
     use std::thread;
     use std::time::Duration;
 
-    /// All privileged tests must call this setup function.
-    fn setup() {
-        if !nix::unistd::geteuid().is_root() {
-            panic!("SKIPPED: This test must be run with root privileges.");
-        }
-    }
-
     /// Helper to send multicast packets using mcrgen with explicit rate
     fn send_packets(
         source_ip: &str,
@@ -38,7 +31,7 @@ mod privileged {
 
     #[tokio::test]
     async fn test_baseline_2hop_100k_packets() -> Result<()> {
-        setup();
+        require_root!();
         println!("\n=== Baseline: 2-hop forwarding with 100k packets ===\n");
 
         let _ns = NetworkNamespace::enter()?;
@@ -68,8 +61,8 @@ mod privileged {
         println!("Network setup complete");
 
         // Start MCR instances on separate cores
-        let mut mcr1 = McrInstance::start("veth0p", Some(0))?;
-        let mut mcr2 = McrInstance::start("veth1b", Some(1))?;
+        let mut mcr1 = McrInstance::builder().interface("veth0p").core(0).start()?;
+        let mut mcr2 = McrInstance::builder().interface("veth1b").core(1).start()?;
         println!("MCR instances started");
 
         // Configure forwarding rules
@@ -189,7 +182,7 @@ mod privileged {
 
     #[tokio::test]
     async fn test_chain_3hop() -> Result<()> {
-        setup();
+        require_root!();
         println!("\n=== 3-Hop Chain Topology Test ===\n");
 
         let _ns = NetworkNamespace::enter()?;
@@ -229,9 +222,9 @@ mod privileged {
         println!("Network setup complete");
 
         // Start 3 MCR instances on separate cores
-        let mut mcr1 = McrInstance::start("veth0p", Some(0))?;
-        let mut mcr2 = McrInstance::start("veth1b", Some(1))?;
-        let mut mcr3 = McrInstance::start("veth2b", Some(2))?;
+        let mut mcr1 = McrInstance::builder().interface("veth0p").core(0).start()?;
+        let mut mcr2 = McrInstance::builder().interface("veth1b").core(1).start()?;
+        let mut mcr3 = McrInstance::builder().interface("veth2b").core(2).start()?;
         println!("MCR instances started");
 
         // Configure forwarding rules
@@ -345,7 +338,7 @@ mod privileged {
 
     #[tokio::test]
     async fn test_tree_fanout_1_to_3() -> Result<()> {
-        setup();
+        require_root!();
         println!("\n=== Tree Topology: 1:3 Fanout (Head-End Replication) ===\n");
 
         let _ns = NetworkNamespace::enter()?;
@@ -395,10 +388,10 @@ mod privileged {
         println!("Network setup complete");
 
         // Start MCR instances on separate cores
-        let mut mcr1 = McrInstance::start("veth0p", Some(0))?;
-        let mut mcr2 = McrInstance::start("veth1b", Some(1))?;
-        let mut mcr3 = McrInstance::start("veth2b", Some(2))?;
-        let mut mcr4 = McrInstance::start("veth3b", Some(3))?;
+        let mut mcr1 = McrInstance::builder().interface("veth0p").core(0).start()?;
+        let mut mcr2 = McrInstance::builder().interface("veth1b").core(1).start()?;
+        let mut mcr3 = McrInstance::builder().interface("veth2b").core(2).start()?;
+        let mut mcr4 = McrInstance::builder().interface("veth3b").core(3).start()?;
         println!("MCR instances started");
 
         // Configure forwarding rules

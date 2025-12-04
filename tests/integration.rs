@@ -5,23 +5,9 @@
 //! discoverable by cargo and tarpaulin. Without this file, tests in subdirectories
 //! are not compiled or run.
 
-// Test utilities - shared with integration test modules
-// Note: These are duplicated from tests/lib.rs because integration test crates
-// cannot import from each other. This is the standard Rust pattern.
-mod tests {
-    use std::path::PathBuf;
-    use uuid::Uuid;
-
-    pub fn unique_socket_path_with_prefix(prefix: &str) -> PathBuf {
-        PathBuf::from(format!("/tmp/test_{}_{}.sock", prefix, Uuid::new_v4()))
-    }
-
-    pub fn cleanup_socket(socket_path: &PathBuf) {
-        let _ = std::fs::remove_file(socket_path);
-    }
-}
-
 // Include common utilities for integration tests
+// The require_root! macro is exported from this module and available crate-wide
+#[macro_use]
 #[path = "integration/common/mod.rs"]
 mod common;
 

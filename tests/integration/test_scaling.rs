@@ -16,13 +16,6 @@ mod privileged {
     use std::thread;
     use std::time::Duration;
 
-    /// All privileged tests must call this setup function.
-    fn setup() {
-        if !nix::unistd::geteuid().is_root() {
-            panic!("SKIPPED: This test must be run with root privileges.");
-        }
-    }
-
     /// Helper to send multicast packets using mcrgen
     /// Uses count as rate for faster scaling tests
     fn send_packets(source_ip: &str, dest_group: &str, dest_port: u16, count: u32) -> Result<()> {
@@ -33,7 +26,7 @@ mod privileged {
 
     #[tokio::test]
     async fn test_scale_1000_packets() -> Result<()> {
-        setup();
+        require_root!();
         println!("\n=== Scaling Test: 1,000 packets ===\n");
 
         let _ns = NetworkNamespace::enter()?;
@@ -48,7 +41,7 @@ mod privileged {
             .up()
             .await?;
 
-        let mut mcr = McrInstance::start("veth0p", Some(0))?;
+        let mut mcr = McrInstance::builder().interface("veth0p").core(0).start()?;
         mcr.add_rule("239.1.1.1:5001", vec!["239.2.2.2:5002:lo"])?;
 
         send_packets("10.0.0.1", "239.1.1.1", 5001, 1000)?;
@@ -107,7 +100,7 @@ mod privileged {
 
     #[tokio::test]
     async fn test_scale_10000_packets() -> Result<()> {
-        setup();
+        require_root!();
         println!("\n=== Scaling Test: 10,000 packets ===\n");
 
         let _ns = NetworkNamespace::enter()?;
@@ -122,7 +115,7 @@ mod privileged {
             .up()
             .await?;
 
-        let mut mcr = McrInstance::start("veth0p", Some(0))?;
+        let mut mcr = McrInstance::builder().interface("veth0p").core(0).start()?;
         mcr.add_rule("239.1.1.1:5001", vec!["239.2.2.2:5002:lo"])?;
 
         send_packets("10.0.0.1", "239.1.1.1", 5001, 10000)?;
@@ -181,7 +174,7 @@ mod privileged {
 
     #[tokio::test]
     async fn test_scale_1m_packets() -> Result<()> {
-        setup();
+        require_root!();
         println!("\n=== Scaling Test: 1,000,000 packets ===\n");
 
         let _ns = NetworkNamespace::enter()?;
@@ -196,7 +189,7 @@ mod privileged {
             .up()
             .await?;
 
-        let mut mcr = McrInstance::start("veth0p", Some(0))?;
+        let mut mcr = McrInstance::builder().interface("veth0p").core(0).start()?;
         mcr.add_rule("239.1.1.1:5001", vec!["239.2.2.2:5002:lo"])?;
 
         // Send at 50k pps for 1M packets = 20 seconds send + 5 seconds drain

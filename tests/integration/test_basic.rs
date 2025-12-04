@@ -9,16 +9,9 @@ mod privileged {
     use std::thread;
     use std::time::Duration;
 
-    /// All privileged tests must call this setup function.
-    fn setup() {
-        if !nix::unistd::geteuid().is_root() {
-            panic!("SKIPPED: This test must be run with root privileges.");
-        }
-    }
-
     #[tokio::test]
     async fn test_single_hop_1000_packets() -> Result<()> {
-        setup();
+        require_root!();
         println!("\n=== Test: Single-hop forwarding with 1000 packets ===\n");
 
         // Enter isolated network namespace
@@ -38,7 +31,7 @@ mod privileged {
         println!("Network setup complete");
 
         // Start MCR instance
-        let mut mcr = McrInstance::start("veth0p", Some(0))?;
+        let mut mcr = McrInstance::builder().interface("veth0p").core(0).start()?;
         println!("MCR started, log: {:?}", mcr.log_path());
 
         // Add forwarding rule: 239.1.1.1:5001 -> 239.2.2.2:5002:lo
@@ -124,7 +117,7 @@ mod privileged {
 
     #[tokio::test]
     async fn test_minimal_10_packets() -> Result<()> {
-        setup();
+        require_root!();
         println!("\n=== Test: Minimal 10 packet test ===\n");
 
         let _ns = NetworkNamespace::enter()?;
@@ -139,7 +132,7 @@ mod privileged {
             .up()
             .await?;
 
-        let mut mcr = McrInstance::start("veth0p", None)?;
+        let mut mcr = McrInstance::builder().interface("veth0p").start()?;
         mcr.add_rule("239.1.1.1:5001", vec!["239.2.2.2:5002:lo"])?;
 
         crate::common::traffic::send_packets("10.0.0.1", "239.1.1.1", 5001, 10)?;
