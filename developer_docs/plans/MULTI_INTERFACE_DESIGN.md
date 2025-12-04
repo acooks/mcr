@@ -164,9 +164,9 @@ Like network equipment (Cisco, nftables), mcrd maintains two configurations:
 ```text
 mcrd [--config /etc/mcr.json5]       # optional startup config
      [--socket /var/run/mcrd.sock]   # control socket path
-     [--user nobody]                  # privilege drop target
-     [--group daemon]
 ```
+
+Note: Workers automatically drop privileges to `nobody:nobody` (uid=65534) after receiving AF_PACKET sockets via SCM_RIGHTS from the supervisor.
 
 If `--config` is omitted, mcrd starts with no rules and no pinning. Rules can be added at runtime via `mcrctl add`.
 
@@ -394,5 +394,5 @@ struct WorkerId {
 
 ## Related Documents
 
-- [ARCHITECTURE.md](../ARCHITECTURE.md) - Overall system architecture
-- [IMPROVEMENT_PLAN.md](../IMPROVEMENT_PLAN.md) - Privilege separation (AF_PACKET FD passing)
+- [ARCHITECTURE.md](../ARCHITECTURE.md) - Overall system architecture (includes privilege separation details)
+- [IMPROVEMENT_PLAN.md](../IMPROVEMENT_PLAN.md) - Project roadmap and completed items

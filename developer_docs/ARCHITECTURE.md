@@ -32,6 +32,7 @@ This document describes both **current implementation** and **target architectur
 - Worker process monitoring and restart with rule resynchronization
 - Periodic health checks (250ms with auto-restart + SyncRules)
 - Protocol versioning (PROTOCOL_VERSION, GetVersion command)
+- Data plane worker privilege dropping (AF_PACKET FD passing via SCM_RIGHTS)
 
 **⚠️ Partially Implemented:**
 
@@ -43,7 +44,6 @@ This document describes both **current implementation** and **target architectur
 - Automated drift detection and recovery (Phase 2 - detection complete, recovery pending)
 - Network state reconciliation via Netlink
 - On-demand packet tracing
-- Data plane worker privilege dropping (AF_PACKET FD passing)
 
 ## 2. Architectural Principles
 
@@ -356,23 +356,26 @@ stateDiagram-v2
 
 ## 10. Security and Privilege Model
 
-### Current Implementation vs. Target Architecture
+### Privilege Separation Architecture
 
-**Current Multi-Process Architecture:**
+**Multi-Process Architecture:**
 
 The application uses a **multi-process architecture** where components run as separate OS processes:
 
-- **Supervisor Process**: Main tokio-based async process that spawns and monitors workers, handles control socket
-- **Data Plane Workers**: Separate processes, one per CPU core
+- **Supervisor Process**: Main tokio-based async process that spawns and monitors workers, handles control socket. Runs as root.
+- **Data Plane Workers**: Separate processes, one per CPU core. Run as `nobody` (uid=65534, gid=65534).
 
 Each worker is spawned as a separate OS process with its own PID using `tokio::process::Command`.
 
-**Privilege Separation Status:**
+**✅ Privilege Separation (Implemented):**
 
-⚠️ **Data Plane Workers**: Currently **do NOT drop privileges** and run as root. This is a known limitation documented in the code (see `src/worker/mod.rs`). Data plane workers require `CAP_NET_RAW` to create `AF_PACKET` sockets, and the ambient capabilities workaround doesn't survive `setuid()`.
+Data plane workers drop all privileges and run as `nobody:nobody` immediately after startup. This is achieved through **AF_PACKET FD passing**:
 
-**Target Architecture (Future Work):**
+1. **Supervisor creates sockets**: The supervisor creates fully-configured `AF_PACKET` sockets with `PACKET_FANOUT_CPU` enabled while running as root.
+2. **FD passing via SCM_RIGHTS**: The supervisor passes the socket file descriptor to each worker via Unix domain socket using `SCM_RIGHTS` ancillary data.
+3. **Worker drops privileges**: After receiving the pre-configured socket, each worker drops all privileges to `nobody:nobody` (uid=65534, gid=65534) with no retained capabilities.
+4. **Unprivileged operation**: Workers can continue using the inherited socket FD for packet processing without requiring any privileges.
 
-The goal is to implement file descriptor passing so the Supervisor creates `AF_PACKET` sockets and passes them to data plane workers via `SCM_RIGHTS`. This would allow data plane workers to drop ALL privileges completely while still being able to use the pre-created sockets. This is a **high-priority future work item**.
+This architecture ensures that any vulnerability in the high-performance data plane code (which processes untrusted network data) cannot lead to root compromise.
 
 - **DDoS Amplification Risk (Trusted Network & QoS Mitigation):** The risk of DDoS amplification from external, malicious actors is considered mitigated by the operational requirement that the relay's ingress interfaces are connected only to physically secured, trusted network segments. The risk of accidental overload of a unicast destination due to misconfiguration is fully mitigated by the existing advanced QoS design, which allows for the classification and rate-limiting/prioritized dropping of high-bandwidth flows. No additional security-specific mechanisms are required for this threat vector.

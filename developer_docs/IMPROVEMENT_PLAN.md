@@ -13,14 +13,7 @@ Last updated: December 2025
 
 ## 🔴 Critical
 
-### Privilege Separation (AF_PACKET FD Passing)
-
-**Location:** `src/worker/mod.rs:201-215` (TODO comment)
-**Issue:** Workers run with more privileges than necessary
-
-Supervisor should create AF_PACKET socket and pass FD via SCM_RIGHTS, allowing workers to drop all privileges after receiving the FD. This is a prerequisite for the multi-interface architecture.
-
-**Effort:** 1-2 days
+*No critical issues currently.*
 
 ---
 
@@ -129,6 +122,7 @@ Node.js dependencies removed but history bloated (6,044 files). Recommend docume
 
 **December 2025:**
 
+- **AF_PACKET FD Passing & Privilege Separation** - Supervisor creates AF_PACKET sockets with PACKET_FANOUT_CPU, passes via SCM_RIGHTS; workers drop to nobody:nobody (uid=65534)
 - Control plane worker removal (vestigial code from earlier design)
 - Dead code cleanup: `ipc.rs`, `data_plane.rs`, `stats.rs` modules removed
 - Flaky `log_level_control` test fix (TOCTOU race with shared socket)
