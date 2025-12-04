@@ -6,7 +6,6 @@ This directory serves as a repository for historical documents, completed plans,
 
 - **`archive/`:** Contains older versions of documents, previous investigations, and historical test reports.
 - **`completed/`:** Holds reports on completed phases of work and session summaries.
-- **`experiments/`:** Stores documentation related to small, standalone prototypes and in-depth investigations into specific technical challenges.
 - **`plans/`:** Contains historical or superseded development plans and work items.
 - **`reference/`:** May contain older general reference guides.
 
