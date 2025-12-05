@@ -109,11 +109,21 @@ jobs:
         echo "Commit: ${{ github.sha }}" >> nightly-summary.txt
         echo "" >> nightly-summary.txt
 
+        # Debug: Show artifact structure
+        echo "=== Downloaded artifacts structure ===" >> nightly-summary.txt
+        find all-metrics -type f -name '*.txt' 2>/dev/null >> nightly-summary.txt || echo "No txt files found"
+        echo "" >> nightly-summary.txt
+
         # Aggregate all test results
         for dir in all-metrics/topology-metrics-*/; do
           if [ -d "$dir" ]; then
             echo "=== $(basename $dir) ===" >> nightly-summary.txt
-            cat "$dir"/metrics-*.txt >> nightly-summary.txt
+            # Use find to recursively locate metrics files (handles nested dirs)
+            if find "$dir" -name 'metrics-*.txt' -type f 2>/dev/null | grep -q .; then
+              find "$dir" -name 'metrics-*.txt' -type f -exec cat {} \; >> nightly-summary.txt
+            else
+              echo "No metrics file found in $dir" >> nightly-summary.txt
+            fi
             echo "" >> nightly-summary.txt
           fi
         done
