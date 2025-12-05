@@ -52,7 +52,7 @@ jobs:
 
     - name: Run topology test - ${{ matrix.test }}
       run: |
-        sudo bash ${{ matrix.script }}
+        sudo -E bash ${{ matrix.script }}
 
     - name: Extract performance metrics
       if: always()
