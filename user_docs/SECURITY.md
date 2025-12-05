@@ -54,9 +54,8 @@ The supervisor process runs with elevated privileges and is responsible for:
 
 1. **Creating AF_PACKET sockets** - Requires `CAP_NET_RAW`
 2. **Spawning worker processes** - Creates child processes
-3. **Changing socket ownership** - Requires `CAP_CHOWN` to change relay socket to nobody
-4. **Dropping worker privileges** - Requires `CAP_SETUID` and `CAP_SETGID`
-5. **Managing the control socket** - Accepts administrative commands
+3. **Dropping worker privileges** - Requires `CAP_SETUID` and `CAP_SETGID`
+4. **Managing the control socket** - Accepts administrative commands
 
 The supervisor never processes network traffic directly.
 
@@ -66,7 +65,7 @@ Worker processes run as `nobody:nobody` and handle all packet forwarding:
 
 1. **Receive packets** - Using inherited AF_PACKET socket
 2. **Forward packets** - Using io_uring for zero-copy transmission
-3. **Report statistics** - Via the relay socket
+3. **Report statistics** - Via FD passed from supervisor
 
 Workers cannot:
 
@@ -82,7 +81,6 @@ MCR requires the following Linux capabilities:
 | Capability | Purpose | Used By |
 |------------|---------|---------|
 | `CAP_NET_RAW` | Create AF_PACKET sockets for raw packet access | Supervisor (at startup) |
-| `CAP_CHOWN` | Change relay socket ownership to nobody | Supervisor (at startup) |
 | `CAP_SETUID` | Drop worker process to nobody UID | Supervisor (when spawning workers) |
 | `CAP_SETGID` | Drop worker process to nobody GID | Supervisor (when spawning workers) |
 
@@ -91,7 +89,7 @@ MCR requires the following Linux capabilities:
 **File capabilities (one-time setup):**
 
 ```bash
-sudo setcap 'cap_net_raw,cap_chown,cap_setuid,cap_setgid=eip' /usr/local/bin/mcrd
+sudo setcap 'cap_net_raw,cap_setuid,cap_setgid=eip' /usr/local/bin/mcrd
 ```
 
 **Systemd ambient capabilities (recommended for production):**
@@ -100,13 +98,13 @@ sudo setcap 'cap_net_raw,cap_chown,cap_setuid,cap_setgid=eip' /usr/local/bin/mcr
 [Service]
 User=mcr
 Group=mcr
-AmbientCapabilities=CAP_NET_RAW CAP_CHOWN CAP_SETUID CAP_SETGID
-CapabilityBoundingSet=CAP_NET_RAW CAP_CHOWN CAP_SETUID CAP_SETGID
+AmbientCapabilities=CAP_NET_RAW CAP_SETUID CAP_SETGID
+CapabilityBoundingSet=CAP_NET_RAW CAP_SETUID CAP_SETGID
 ```
 
 ## Socket Security
 
-MCR uses two Unix domain sockets:
+MCR uses a Unix domain socket for administrative commands:
 
 ### Control Socket
 
@@ -117,14 +115,13 @@ MCR uses two Unix domain sockets:
 
 **Protection:** Only users in the mcr group can send commands.
 
-### Relay Socket
+### Worker Communication
 
-- **Purpose:** Worker-supervisor communication
-- **Default path:** `/tmp/mcr_relay_commands.sock`
-- **Ownership:** nobody:nobody
-- **Permissions:** 0660
+Workers communicate with the supervisor using file descriptors passed via `SCM_RIGHTS` at spawn time. This approach is more secure than filesystem sockets because:
 
-**Protection:** The relay socket is owned by nobody so workers (running as nobody) can communicate with the supervisor. The supervisor validates all messages and only accepts known command types.
+- No filesystem socket that could be accessed by other processes
+- Communication channels are private between supervisor and each worker
+- No need for CAP_CHOWN to change socket ownership
 
 ## Deployment Recommendations
 
@@ -152,7 +149,7 @@ mcrd supervisor --config config.json5
 When running in containers, add required capabilities:
 
 ```bash
-docker run --cap-add=NET_RAW --cap-add=CHOWN --cap-add=SETUID --cap-add=SETGID mcr
+docker run --cap-add=NET_RAW --cap-add=SETUID --cap-add=SETGID mcr
 ```
 
 Or in docker-compose.yml:
@@ -163,7 +160,6 @@ services:
     image: mcr
     cap_add:
       - NET_RAW
-      - CHOWN
       - SETUID
       - SETGID
 ```
@@ -194,7 +190,7 @@ MCR does not protect against:
 
 2. **io_uring** - Workers use io_uring for performance. While io_uring has had security vulnerabilities in the past, MCR uses a minimal subset of operations.
 
-3. **Relay socket** - The relay socket allows workers to communicate with the supervisor. Commands are validated, but a compromised worker could send malformed messages.
+3. **Worker communication** - Workers communicate with the supervisor via inherited file descriptors (passed via SCM_RIGHTS at spawn). These channels are private and cannot be accessed by other processes.
 
 ## Reporting Security Issues
 

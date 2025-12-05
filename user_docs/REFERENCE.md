@@ -222,7 +222,6 @@ approach for production deployments.
 | Capability | Purpose |
 | :--------- | :------ |
 | `CAP_NET_RAW` | Create AF_PACKET sockets |
-| `CAP_CHOWN` | Change socket ownership |
 | `CAP_SETUID` | Drop privileges to nobody |
 | `CAP_SETGID` | Drop privileges to nobody |
 
@@ -230,7 +229,7 @@ approach for production deployments.
 
 ```bash
 # One-time setup (requires root)
-sudo setcap 'cap_net_raw,cap_chown,cap_setuid,cap_setgid=eip' /usr/local/bin/mcrd
+sudo setcap 'cap_net_raw,cap_setuid,cap_setgid=eip' /usr/local/bin/mcrd
 
 # Verify
 getcap /usr/local/bin/mcrd

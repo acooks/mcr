@@ -68,14 +68,13 @@ The recommended approach is to run MCR as a non-root user with Linux capabilitie
 **Required capabilities:**
 
 - `CAP_NET_RAW` - Create AF_PACKET sockets for packet capture
-- `CAP_CHOWN` - Change ownership of relay socket to worker user
 - `CAP_SETUID` / `CAP_SETGID` - Drop worker privileges to nobody:nobody
 
 **One-time setup (requires root):**
 
 ```bash
 # Using setcap directly
-sudo setcap 'cap_net_raw,cap_chown,cap_setuid,cap_setgid=eip' /usr/local/bin/mcrd
+sudo setcap 'cap_net_raw,cap_setuid,cap_setgid=eip' /usr/local/bin/mcrd
 
 # Or using the justfile helper
 just set-caps
@@ -98,9 +97,6 @@ mcrctl list
 ```bash
 # Check capabilities are set
 getcap /usr/local/bin/mcrd
-
-# Verify relay socket ownership (should be nobody:nobody)
-ls -la /tmp/mcr_relay_commands.sock
 ```
 
 ### Systemd Service Deployment

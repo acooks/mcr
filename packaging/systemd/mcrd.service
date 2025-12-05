@@ -10,8 +10,8 @@ User=mcr
 Group=mcr
 
 # Grant only the required capabilities
-AmbientCapabilities=CAP_NET_RAW CAP_CHOWN CAP_SETUID CAP_SETGID
-CapabilityBoundingSet=CAP_NET_RAW CAP_CHOWN CAP_SETUID CAP_SETGID
+AmbientCapabilities=CAP_NET_RAW CAP_SETUID CAP_SETGID
+CapabilityBoundingSet=CAP_NET_RAW CAP_SETUID CAP_SETGID
 
 # Hardening
 NoNewPrivileges=no

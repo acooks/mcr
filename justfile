@@ -285,7 +285,7 @@ setup-kernel:
 # Set capabilities on release binary (one-time setup)
 set-caps: build-release
     @echo "--- Setting capabilities on mcrd ---"
-    sudo setcap 'cap_net_raw,cap_chown,cap_setuid,cap_setgid=eip' ./target/release/mcrd
+    sudo setcap 'cap_net_raw,cap_setuid,cap_setgid=eip' ./target/release/mcrd
     @getcap ./target/release/mcrd
 
 # Clear capabilities from binary

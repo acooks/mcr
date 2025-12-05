@@ -8,7 +8,6 @@ use log::error;
 use nix::sys::socket::{
     sendmsg, socketpair, AddressFamily, ControlMessage, MsgFlags, SockFlag, SockType,
 };
-use nix::unistd::{Gid, Uid};
 use std::collections::HashMap;
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use std::path::PathBuf;
@@ -119,7 +118,6 @@ struct InterfaceWorkers {
 /// Centralized manager for all worker lifecycle operations
 struct WorkerManager {
     // Configuration
-    relay_command_socket_path: PathBuf,
     num_cores_per_interface: usize, // Default workers per interface
     logger: Logger,
     /// Core pinning configuration from startup config (interface -> core list)
@@ -541,7 +539,6 @@ pub fn handle_supervisor_command(
 pub async fn spawn_data_plane_worker(
     core_id: u32,
     interface: String,
-    relay_command_socket_path: PathBuf,
     fanout_group_id: u16,
     logger: &crate::logging::Logger,
 ) -> Result<(
@@ -594,8 +591,6 @@ pub async fn spawn_data_plane_worker(
         .arg("--core-id")
         .arg(core_id.to_string())
         .arg("--data-plane")
-        .arg("--relay-command-socket-path")
-        .arg(relay_command_socket_path)
         .arg("--input-interface-name")
         .arg(&interface)
         .arg("--fanout-group-id")
@@ -713,14 +708,12 @@ pub async fn spawn_data_plane_worker(
 impl WorkerManager {
     /// Create a new WorkerManager with the given configuration
     fn new(
-        relay_command_socket_path: PathBuf,
         num_cores_per_interface: usize,
         logger: Logger,
         initial_fanout_group_id: u16,
         pinning: HashMap<String, Vec<u32>>,
     ) -> Self {
         Self {
-            relay_command_socket_path,
             num_cores_per_interface,
             logger,
             pinning,
@@ -807,7 +800,6 @@ impl WorkerManager {
             spawn_data_plane_worker(
                 core_id,
                 interface.to_string(),
-                self.relay_command_socket_path.clone(),
                 fanout_group_id,
                 &self.logger,
             )
@@ -1486,7 +1478,6 @@ async fn handle_client(
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     _interface: &str, // Unused: workers spawn lazily when rules are added
-    relay_command_socket_path: PathBuf,
     control_socket_path: PathBuf,
     master_rules: Arc<Mutex<HashMap<String, ForwardingRule>>>,
     num_workers: Option<usize>,
@@ -1529,24 +1520,6 @@ pub async fn run(
             detected_cores, num_cores
         )
     );
-
-    // Create the relay command socket (not currently used but keep for compatibility)
-    if relay_command_socket_path.exists() {
-        std::fs::remove_file(&relay_command_socket_path)?;
-    }
-    let _relay_command_listener = {
-        let std_listener = std::os::unix::net::UnixListener::bind(&relay_command_socket_path)?;
-        std_listener.set_nonblocking(true)?;
-        tokio::net::UnixListener::from_std(std_listener)?
-    };
-    // Workers run as nobody:nobody, so chown the socket to match
-    const NOBODY_UID: u32 = 65534;
-    const NOBODY_GID: u32 = 65534;
-    nix::unistd::chown(
-        &relay_command_socket_path,
-        Some(Uid::from_raw(NOBODY_UID)),
-        Some(Gid::from_raw(NOBODY_GID)),
-    )?;
 
     // Set up control socket for client connections
     if control_socket_path.exists() {
@@ -1595,7 +1568,6 @@ pub async fn run(
     // Initialize WorkerManager and wrap it in Arc<Mutex<>>
     let worker_manager = {
         let mut manager = WorkerManager::new(
-            relay_command_socket_path,
             num_cores,
             supervisor_logger.clone(),
             fanout_group_id,

@@ -8,7 +8,7 @@
 ///
 /// Integration tests require root privileges for creating network namespaces
 /// and veth pairs (CAP_SYS_ADMIN). This is different from mcrd runtime which
-/// only needs CAP_NET_RAW, CAP_CHOWN, CAP_SETUID, CAP_SETGID.
+/// only needs CAP_NET_RAW, CAP_SETUID, CAP_SETGID.
 ///
 /// Use this macro at the start of every test function:
 ///
@@ -28,7 +28,7 @@ macro_rules! require_root {
                  Run with: sudo -E cargo test --test integration\n\
                  \n\
                  Note: The mcrd binary itself can run without root using capabilities:\n\
-                 sudo setcap 'cap_net_raw,cap_chown,cap_setuid,cap_setgid=eip' mcrd"
+                 sudo setcap 'cap_net_raw,cap_setuid,cap_setgid=eip' mcrd"
             );
         }
     };
