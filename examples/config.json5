@@ -1,0 +1,53 @@
+{
+  // MCR Example Configuration
+  //
+  // This file demonstrates the JSON5 configuration format.
+  // Copy to /etc/mcr/rules.json5 and customize for your environment.
+
+  // CPU core pinning for high-performance deployments
+  // Workers for each interface will be pinned to these cores
+  pinning: {
+    // "eth0": [0, 1, 2, 3],  // 4 workers on cores 0-3
+    // "eth1": [4, 5, 6, 7],  // 4 workers on cores 4-7
+  },
+
+  // Forwarding rules
+  rules: [
+    // Example: Forward multicast from eth0 to eth1
+    // {
+    //   name: "market-data-feed",
+    //   input: { interface: "eth0", group: "239.1.1.1", port: 5001 },
+    //   outputs: [
+    //     { interface: "eth1", group: "239.2.2.2", port: 5002 }
+    //   ]
+    // },
+
+    // Example: Fan-out to multiple destinations
+    // {
+    //   name: "video-distribution",
+    //   input: { interface: "eth0", group: "239.1.1.2", port: 5000 },
+    //   outputs: [
+    //     { interface: "eth1", group: "239.2.2.2", port: 5000 },
+    //     { interface: "eth2", group: "239.3.3.3", port: 5000 }
+    //   ]
+    // },
+
+    // Example: Multicast-to-unicast conversion
+    // {
+    //   name: "legacy-system",
+    //   input: { interface: "eth0", group: "239.1.1.3", port: 5003 },
+    //   outputs: [
+    //     { interface: "eth1", group: "10.0.0.100", port: 6003 }  // unicast
+    //   ]
+    // },
+
+    // Example: Unicast-to-multicast (tunnel endpoint)
+    // {
+    //   name: "tunnel-receiver",
+    //   input: { interface: "eth1", group: "10.0.0.50", port: 5002 },  // unicast
+    //   outputs: [
+    //     { interface: "eth0", group: "239.1.1.3", port: 5002 }  // multicast
+    //   ]
+    // }
+  ]
+}

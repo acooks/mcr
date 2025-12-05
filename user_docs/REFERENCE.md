@@ -212,6 +212,46 @@ sudo mcrd supervisor --interface eth0 --num-workers 4
 
 All forwarding rules are managed at runtime via `mcrctl`.
 
+### Running Without Root (Linux Capabilities)
+
+MCR can run without root by using Linux capabilities. This is the recommended
+approach for production deployments.
+
+#### Required Capabilities
+
+| Capability | Purpose |
+| :--------- | :------ |
+| `CAP_NET_RAW` | Create AF_PACKET sockets |
+| `CAP_CHOWN` | Change socket ownership |
+| `CAP_SETUID` | Drop privileges to nobody |
+| `CAP_SETGID` | Drop privileges to nobody |
+
+#### Option 1: File Capabilities (setcap)
+
+```bash
+# One-time setup (requires root)
+sudo setcap 'cap_net_raw,cap_chown,cap_setuid,cap_setgid=eip' /usr/local/bin/mcrd
+
+# Verify
+getcap /usr/local/bin/mcrd
+
+# Run without sudo
+mcrd supervisor --config /etc/mcr/rules.json5
+```
+
+**Note:** Capabilities are stored in filesystem extended attributes and must be
+re-applied after each binary update.
+
+#### Option 2: Systemd (Recommended for Production)
+
+Use the provided systemd service file which grants capabilities at runtime:
+
+```bash
+sudo systemctl enable --now mcrd
+```
+
+See `packaging/systemd/mcrd.service` for details.
+
 ---
 
 ## 5. `mcrctl` - Control Client
