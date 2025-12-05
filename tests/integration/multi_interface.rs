@@ -68,7 +68,7 @@ async fn test_config_startup_spawns_workers_for_interface() -> Result<()> {
 async fn test_add_rule_same_interface_no_new_workers() -> Result<()> {
     require_root!();
 
-    // Start supervisor (default interface 'lo')
+    // Start supervisor (lazy spawning - no workers until rules are added)
     let mcr = McrInstance::builder()
         .num_workers(1)
         .start_async()
@@ -79,12 +79,29 @@ async fn test_add_rule_same_interface_no_new_workers() -> Result<()> {
 
     sleep(Duration::from_millis(500)).await;
 
-    // Get initial worker count
+    // First add a rule to trigger worker spawning for 'lo'
+    client
+        .add_rule_with_name(
+            "test-rule-0".to_string(),
+            None,
+            "lo".to_string(),
+            "239.0.0.1".parse()?,
+            4999,
+            vec![],
+        )
+        .await?;
+
+    sleep(Duration::from_millis(500)).await;
+
+    // Get initial worker count (after first rule triggers spawning)
     let initial_workers = client.list_workers().await?;
     let initial_count = initial_workers.len();
-    assert!(initial_count > 0, "Should have initial workers for 'lo'");
+    assert!(
+        initial_count > 0,
+        "Should have workers after first rule added"
+    );
 
-    // Add a rule for the same interface ('lo')
+    // Add another rule for the same interface ('lo')
     client
         .add_rule_with_name(
             "test-rule-1".to_string(),
@@ -98,9 +115,9 @@ async fn test_add_rule_same_interface_no_new_workers() -> Result<()> {
 
     sleep(Duration::from_millis(300)).await;
 
-    // Verify rule was added
+    // Verify both rules were added
     let rules = client.list_rules().await?;
-    assert_eq!(rules.len(), 1, "Should have 1 rule");
+    assert_eq!(rules.len(), 2, "Should have 2 rules");
 
     // Worker count should not have changed (same interface)
     let workers_after = client.list_workers().await?;

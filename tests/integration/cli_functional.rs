@@ -1279,14 +1279,14 @@ async fn test_cli_config_load_invalid() -> Result<()> {
 
     sleep(Duration::from_millis(300)).await;
 
-    // Create an invalid config file (non-multicast address)
+    // Create an invalid config file (port 0 is invalid)
     let mut temp = NamedTempFile::new()?;
     writeln!(
         temp,
         r#"{{
         rules: [
             {{
-                input: {{ interface: "eth0", group: "192.168.1.1", port: 5000 }},
+                input: {{ interface: "eth0", group: "239.1.1.1", port: 0 }},
                 outputs: []
             }}
         ]
@@ -1306,8 +1306,8 @@ async fn test_cli_config_load_invalid() -> Result<()> {
         output
     );
     assert!(
-        output.contains("multicast") && output.contains("192.168.1.1"),
-        "Expected validation error message, got: {}",
+        output.contains("port") && output.contains("0"),
+        "Expected validation error message about port, got: {}",
         output
     );
 

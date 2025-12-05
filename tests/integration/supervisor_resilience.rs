@@ -60,12 +60,26 @@ async fn test_supervisor_restarts_killed_worker() -> Result<()> {
 
     sleep(Duration::from_millis(500)).await;
 
+    // Add a rule first to trigger worker spawning (lazy spawn mode)
+    let rule = ForwardingRule {
+        rule_id: "restart-test-rule".to_string(),
+        name: Some("restart-test".to_string()),
+        input_interface: "lo".to_string(),
+        input_group: "239.0.0.1".parse()?,
+        input_port: 5000,
+        outputs: vec![],
+    };
+    client.add_rule(rule).await?;
+    println!("[TEST] Rule added to trigger worker spawning");
+
+    sleep(Duration::from_millis(500)).await;
+
     // Get a data plane worker PID
     let workers = client.list_workers().await?;
     let dp_worker = workers
         .iter()
         .find(|w| w.worker_type == "DataPlane")
-        .ok_or_else(|| anyhow::anyhow!("No data plane worker found"))?;
+        .ok_or_else(|| anyhow::anyhow!("No data plane worker found (lazy spawn requires rules)"))?;
     let original_pid = dp_worker.pid;
     println!("[TEST] Original data plane worker PID: {}", original_pid);
 
@@ -208,6 +222,20 @@ async fn test_supervisor_handles_multiple_worker_failures() -> Result<()> {
         .context("Failed to start supervisor")?;
 
     let client = ControlClient::new(mcr.control_socket());
+
+    sleep(Duration::from_millis(500)).await;
+
+    // Add a rule first to trigger worker spawning (lazy spawn mode)
+    let rule = ForwardingRule {
+        rule_id: "multi-failure-test-rule".to_string(),
+        name: Some("multi-failure-test".to_string()),
+        input_interface: "lo".to_string(),
+        input_group: "239.0.0.1".parse()?,
+        input_port: 5000,
+        outputs: vec![],
+    };
+    client.add_rule(rule).await?;
+    println!("[TEST] Rule added to trigger worker spawning");
 
     sleep(Duration::from_millis(500)).await;
 
