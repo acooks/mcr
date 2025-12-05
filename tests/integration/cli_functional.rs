@@ -692,9 +692,9 @@ async fn test_cli_config_check_invalid_json() -> Result<()> {
     Ok(())
 }
 
-/// Test: mcrctl config check rejects non-multicast input address
+/// Test: mcrctl config check accepts unicast input address (unicast-to-multicast conversion)
 #[tokio::test]
-async fn test_cli_config_check_non_multicast_input() -> Result<()> {
+async fn test_cli_config_check_unicast_input_allowed() -> Result<()> {
     require_root!();
 
     let mcr = McrInstance::builder()
@@ -712,27 +712,22 @@ async fn test_cli_config_check_non_multicast_input() -> Result<()> {
         rules: [
             {{
                 input: {{ interface: "eth0", group: "192.168.1.1", port: 5000 }},
-                outputs: []
+                outputs: [{{ interface: "eth1", group: "239.1.1.1", port: 6000 }}]
             }}
         ]
     }}"#
     )?;
     temp.flush()?;
 
-    // config check returns success with validation result in JSON
+    // Unicast input addresses are allowed for unicast-to-multicast conversion
     let output = run_mcrctl(
         mcr.control_socket(),
         &["config", "check", "--file", temp.path().to_str().unwrap()],
     )?;
 
     assert!(
-        output.contains("\"valid\": false") || output.contains("\"valid\":false"),
-        "Expected valid: false in response, got: {}",
-        output
-    );
-    assert!(
-        output.contains("multicast") && output.contains("192.168.1.1"),
-        "Expected multicast address error, got: {}",
+        output.contains("\"valid\": true") || output.contains("\"valid\":true"),
+        "Expected valid: true for unicast input, got: {}",
         output
     );
 
@@ -881,9 +876,9 @@ async fn test_cli_config_check_invalid_port() -> Result<()> {
     Ok(())
 }
 
-/// Test: mcrctl config check rejects non-multicast output address
+/// Test: mcrctl config check accepts unicast output address (multicast-to-unicast conversion)
 #[tokio::test]
-async fn test_cli_config_check_non_multicast_output() -> Result<()> {
+async fn test_cli_config_check_unicast_output_allowed() -> Result<()> {
     require_root!();
 
     let mcr = McrInstance::builder()
@@ -913,14 +908,10 @@ async fn test_cli_config_check_non_multicast_output() -> Result<()> {
         &["config", "check", "--file", temp.path().to_str().unwrap()],
     )?;
 
+    // Unicast output addresses are allowed for multicast-to-unicast conversion
     assert!(
-        output.contains("\"valid\": false") || output.contains("\"valid\":false"),
-        "Expected valid: false in response, got: {}",
-        output
-    );
-    assert!(
-        output.contains("multicast") && output.contains("10.0.0.1"),
-        "Expected multicast address error for output, got: {}",
+        output.contains("\"valid\": true") || output.contains("\"valid\":true"),
+        "Expected valid: true for unicast output, got: {}",
         output
     );
 
