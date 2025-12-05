@@ -404,12 +404,12 @@ ip link add veth0 type veth peer name veth1
 #### "Timeout waiting for socket"
 
 - Check `/tmp/mcrN.log` for startup errors
-- Verify binaries are built: `ls -la target/release/multicast_relay`
+- Verify binaries are built: `ls -la target/release/mcrd`
 - Ensure loopback is enabled: `ip link set lo up`
 
 #### "No stats found"
 
-- Check MCR instance is running: `ps aux | grep multicast_relay`
+- Check MCR instance is running: `ps aux | grep mcrd`
 - Verify traffic generator completed: check its exit code
 - Look for errors in logs: `grep ERROR /tmp/mcr1.log`
 

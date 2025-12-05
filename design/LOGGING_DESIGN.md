@@ -114,7 +114,7 @@ Data Plane Worker Process                 Supervisor Process
 
 - Additional output sinks (file, syslog) - infrastructure exists, not yet configured
 - Metrics extraction from logs
-- Log streaming to control_client (see INTERACTIVE_CLI_DESIGN.md)
+- Log streaming to mcrctl (see INTERACTIVE_CLI_DESIGN.md)
 - Runtime log level control via control socket (commands defined, not yet wired up)
 
 ## Quick Start Example
@@ -122,7 +122,7 @@ Data Plane Worker Process                 Supervisor Process
 ### Supervisor Process (Async Context)
 
 ```rust
-use multicast_relay::logging::*;
+use mcrd::logging::*;
 
 // 1. Initialize supervisor logging (MPSC ring buffers)
 let logging = SupervisorLogging::new();
@@ -139,7 +139,7 @@ logging.shutdown().await;
 ### Data Plane Worker (Lock-Free Shared Memory)
 
 ```rust
-use multicast_relay::logging::*;
+use mcrd::logging::*;
 
 // 1. Supervisor creates shared memory for worker
 let manager = SharedMemoryLogManager::create_for_worker(core_id, capacity)?;
@@ -525,7 +525,7 @@ if severity <= Severity::Alert {
 ### CLI Flags
 
 ```bash
-multicast_relay \
+mcrd \
   --log-level=info \                          # Global minimum level
   --log-facility-level="Ingress=debug" \      # Per-facility override
   --log-output=stdout \                       # Output destination

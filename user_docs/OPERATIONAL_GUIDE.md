@@ -98,4 +98,4 @@ By comparing the Ingress and Egress stats, you can quickly diagnose the health o
 **Interpretation:**
 
 - **`matched = 0` and `no_match > 0`**: This is a configuration issue. Packets are arriving at the MCR host, but their destination multicast group and/or port do not match any of the forwarding rules you have configured.
-- **Action:** Use the `control_client list` command to verify your rules and compare them against the source traffic.
+- **Action:** Use the `mcrctl list` command to verify your rules and compare them against the source traffic.

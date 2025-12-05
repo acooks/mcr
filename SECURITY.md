@@ -25,7 +25,7 @@ security model is designed around privilege separation:
 
 ### Control Socket Access
 
-The control socket (`/tmp/multicast_relay_control.sock`) does not implement
+The control socket (`/tmp/mcrd_control.sock`) does not implement
 authentication. Any local user with access to the socket can add, remove, or
 list forwarding rules. Restrict socket access using file permissions or deploy
 MCR in environments where local access is trusted.
@@ -80,14 +80,14 @@ non-existent interfaces will fail at runtime when workers attempt to bind.
    directory and set appropriate permissions.
 
    ```bash
-   sudo ./multicast_relay supervisor \
+   sudo ./mcrd supervisor \
        --control-socket-path /var/run/mcr/control.sock
    ```
 
 2. **Run workers as unprivileged user**: Use `--user` and `--group` flags.
 
    ```bash
-   sudo ./multicast_relay supervisor --user mcr --group mcr
+   sudo ./mcrd supervisor --user mcr --group mcr
    ```
 
 3. **Network segmentation**: Deploy MCR on a dedicated multicast network

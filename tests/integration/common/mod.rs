@@ -4,11 +4,34 @@
 // This module provides abstractions for integration testing of the multicast relay.
 // All tests require root privileges to create network namespaces and veth interfaces.
 
+/// Check if running as root; if not, fail the test with a clear message.
+///
+/// All integration tests require root privileges. Use this macro at the start
+/// of every test function:
+///
+/// ```rust,ignore
+/// #[test]
+/// fn test_something() -> Result<()> {
+///     require_root!();
+///     // ... test code
+/// }
+/// ```
+#[macro_export]
+macro_rules! require_root {
+    () => {
+        if !nix::unistd::geteuid().is_root() {
+            panic!("This test requires root. Run with: sudo -E cargo test --test integration");
+        }
+    };
+}
+
+pub mod control_client;
 pub mod mcr;
 pub mod network;
 pub mod stats;
 pub mod traffic;
 
+pub use control_client::ControlClient;
 pub use mcr::McrInstance;
 pub use network::{NetworkNamespace, VethPair};
 pub use stats::Stats;

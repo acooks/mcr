@@ -175,7 +175,7 @@ fi
 #############################################
 log_section 'Test 4: Remove Rule During Traffic'
 
-# Note: This test depends on the control_client supporting rule removal
+# Note: This test depends on the mcrctl supporting rule removal
 # If not implemented, we'll just verify the rule can be listed
 
 log_info "Checking rule listing functionality..."

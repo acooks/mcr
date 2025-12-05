@@ -9,7 +9,8 @@ use tokio::time::sleep;
 /// **Passing Test:** Verifies the supervisor command runs without error.
 #[tokio::test]
 async fn test_main_supervisor_command() -> Result<()> {
-    let mut child = TokioCommand::new(env!("CARGO_BIN_EXE_multicast_relay"))
+    require_root!();
+    let mut child = TokioCommand::new(env!("CARGO_BIN_EXE_mcrd"))
         .arg("supervisor")
         .spawn()?;
 
@@ -21,12 +22,9 @@ async fn test_main_supervisor_command() -> Result<()> {
 /// **Passing Test:** Verifies the data plane worker command runs without error.
 #[tokio::test]
 async fn test_main_worker_data_plane_command() -> Result<()> {
-    if unsafe { libc::getuid() } != 0 {
-        println!("Skipping test_main_worker_data_plane_command: requires root privileges to create AF_PACKET socket and drop to 'nobody'.");
-        return Ok(());
-    }
+    require_root!();
 
-    let mut child = TokioCommand::new(env!("CARGO_BIN_EXE_multicast_relay"))
+    let mut child = TokioCommand::new(env!("CARGO_BIN_EXE_mcrd"))
         .arg("worker")
         .arg("--relay-command-socket-path")
         .arg("/tmp/test_main_dp.sock")

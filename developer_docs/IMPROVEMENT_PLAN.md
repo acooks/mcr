@@ -4,148 +4,118 @@ Last updated: December 2025
 
 ## Priority Legend
 
-- 🔴 **CRITICAL** - Security or correctness issues
-- 🟡 **HIGH** - Significant impact on maintainability or performance
-- 🟢 **MEDIUM** - Quality improvements, technical debt
-- 🔵 **LOW** - Nice-to-have, future enhancements
+- **CRITICAL** - Security or correctness issues
+- **HIGH** - Significant impact on maintainability or performance
+- **MEDIUM** - Quality improvements, technical debt
+- **LOW** - Nice-to-have, future enhancements
 
 ---
 
-## 🔴 Critical
-
-*No critical issues currently.*
-
----
-
-## 🟡 High Priority
-
-### Multi-Interface Architecture
-
-**Design:** `developer_docs/plans/MULTI_INTERFACE_DESIGN.md`
-
-Single mcrd daemon managing workers for multiple interfaces with:
-
-- JSON5 config file support
-- Two-state config model (running/startup)
-- Dynamic worker spawning
-- Unified CLI (mcrd/mcrctl/mcrgen)
-
-**Effort:** 2-3 weeks
+## HIGH Priority
 
 ### Network State Reconciliation
 
-**Status:** Not implemented (stubbed code was removed)
-
 Use `rtnetlink` crate to subscribe to RTNLGRP_LINK events. Detect interface up/down and address changes, trigger rule reconciliation.
-
-**Effort:** 3-5 days
 
 ### Automated Drift Recovery
 
 Phase 1 (detection) complete. Phase 2 needs: workers report ruleset hash, supervisor compares and triggers sync/restart on mismatch.
 
-**Effort:** 1 week
-
 ---
 
-## 🟢 Medium Priority
+## MEDIUM Priority
 
-### Test Coverage Gaps
+### Dynamic Worker Idle Cleanup
 
-- `tests/integration/supervisor_resilience.rs:406` - namespace test (`#[ignore]`, needs root)
+Design spec: dynamic workers should exit after grace period of inactivity.
 
-**Effort:** 2-3 days
-
-### Binary Renaming
-
-Rename binaries to conventional names:
-
-- `multicast_relay` → `mcrd` (daemon)
-- `control_client` → `mcrctl` (control CLI)
-- `traffic_generator` → `mcrgen` (testing tool)
-
-**Effort:** 1 day (part of multi-interface work)
+- Track last rule timestamp per dynamic interface
+- Check in periodic sync loop (300s interval)
+- Gracefully shut down workers with no rules after configurable timeout
+- **Test:** `test_dynamic_worker_cleanup_after_idle`
 
 ### Buffer Size for Jumbo Frames
 
-**Issue:** Current buffer pool is undersized for jumbo frames (9000+ bytes).
+Current buffer pool is undersized for jumbo frames (9000+ bytes). Options: add jumbo buffer tier, make sizes configurable, or detect MTU at startup.
 
-The fixed buffer sizes in the buffer pool don't accommodate jumbo frames. Need to either:
+**Related:** PACKET_MMAP proposal was **rejected** (see `developer_docs/decisions/001_buffer_management_strategy.md`).
 
-- Add a jumbo buffer tier to the pool
-- Make buffer sizes configurable
-- Detect MTU at startup and size accordingly
+### Multi-Interface Test Coverage
 
-**Related:** PACKET_MMAP proposal was **rejected** (see `developer_docs/decisions/001_buffer_management_strategy.md`). Current strategy continues using `io_uring` with copy-based ingress.
+Remaining tests needed:
 
-**Effort:** 1-2 days
+- `test_config_load_merge_vs_replace` - Verify `--replace` flag behavior
+
+**Implemented** (in `tests/integration/multi_interface.rs`):
+
+- `test_config_startup_spawns_workers_for_interface`
+- `test_dynamic_worker_spawn_on_add_rule`
+- `test_multiple_rules_same_interface`
+- `test_remove_rule_by_name`
+- `test_remove_rule_by_name_not_found`
+- `test_config_preserves_rule_names`
+- `test_multiple_ingress_interfaces` - Tests config with rules for 2 different input interfaces (veth pairs)
+- `test_dynamic_spawn_for_new_interface` - Tests dynamic worker spawn when adding rule for new interface
+
+### CLI Missing Features
+
+The `--name` option for `mcrctl add` is not yet implemented (TODO in `src/control_client.rs:178`). Rules can have names via JSON5 config but not via CLI.
 
 ---
 
-## 🔵 Low Priority
+## LOW Priority
 
 ### On-Demand Packet Tracing
 
 EnableTrace/DisableTrace/GetTrace commands for per-rule debugging.
 
-**Effort:** 5-7 days
-
 ### Troubleshooting Guide
 
 Create `user_docs/TROUBLESHOOTING.md` with common errors, permission issues, buffer exhaustion symptoms, performance tuning.
 
-**Effort:** 1-2 days
-
 ### Benchmark Implementations
 
-**Location:** `tests/benchmarks/forwarding_rate.rs` (skeleton with TODOs)
-
-**Effort:** 1 week
-
-### Git History Cleanup (Optional)
-
-Node.js dependencies removed but history bloated (6,044 files). Recommend documenting rather than rewriting history.
+Location: `tests/benchmarks/forwarding_rate.rs` (skeleton with TODOs)
 
 ---
 
 ## Roadmap
 
-**Near-term:** Multi-interface architecture, AF_PACKET FD passing
-
-**Medium-term:** Network reconciliation, Drift recovery
+**Near-term:** Network reconciliation, Drift recovery
 
 **Long-term:** Packet tracing, Benchmarks
 
 ---
 
-## Completed (Archived)
+## Completed (December 2025)
 
-**December 2025:**
-
-- **AF_PACKET FD Passing & Privilege Separation** - Supervisor creates AF_PACKET sockets with PACKET_FANOUT_CPU, passes via SCM_RIGHTS; workers drop to nobody:nobody (uid=65534)
-- Control plane worker removal (vestigial code from earlier design)
-- Dead code cleanup: `ipc.rs`, `data_plane.rs`, `stats.rs` modules removed
-- Flaky `log_level_control` test fix (TOCTOU race with shared socket)
-- Dead Intel RSS link removal from documentation
-- Misleading `#[allow(dead_code)]` annotations fixed
+- **Multi-Interface Architecture (Complete)**:
+  - JSON5 config file support (`--config`)
+  - Interfaces derived from rules in config
+  - Workers spawned per interface at startup
+  - Per-interface fanout_group_id assignment
+  - Dynamic worker spawning for runtime AddRule
+  - `mcrctl config show/load/check/save` commands
+  - Startup config path tracking for `mcrctl save` without args
+  - Pinning configuration applied from config (workers spawn on specified cores)
+  - Rule naming: `name` field in ForwardingRule, `RemoveRuleByName` implemented
+- **Binary renaming**: `multicast_relay` → `mcrd`, `control_client` → `mcrctl`, `traffic_generator` → `mcrgen`
+- **Hash-based rule IDs**: Computed from input tuple (interface, group, port) for stability across reloads
+- **AF_PACKET FD Passing & Privilege Separation**: Workers drop to nobody:nobody (uid=65534)
+- Test cleanup: Removed 26 redundant/broken test files
+- Documentation consolidation
+- Control plane worker removal
+- Dead code cleanup (`ipc.rs`, `data_plane.rs`, `stats.rs`)
+- Flaky `log_level_control` test fix
 - **REJECTED:** PACKET_MMAP / Zero-Copy Ingress (ADR 001)
-- Data Plane Fan-Out (`Arc<[u8]>` based zero-copy sharing)
-- Protocol versioning (`PROTOCOL_VERSION`, `GetVersion` command)
-- Consistent logging in stats.rs (replaced `eprintln!` with Logger)
+- Data Plane Fan-Out (`Arc<[u8]>` zero-copy)
+- Protocol versioning (`GetVersion` command)
 
-**November 2025:**
+## Completed (November 2025)
 
 - Legacy two-thread data plane removal (1,814 lines deleted)
-- Dead code cleanup
-- Global interface parameter documentation
 - Real-time statistics collection (pipe-based IPC)
-- Kernel version requirements documentation
-- Rule ID lifecycle documentation
 - Hash-based drift detection (Phase 1)
-- RemoveRule implementation in data plane
-- Ruleset sync on worker startup (SyncRules command)
-- Periodic ruleset sync (every 5 minutes)
-- GetWorkerRules command removal
-- Log level control integration tests
-- Periodic health checks (250ms with auto-restart + SyncRules)
-- Test verification discipline (pre-commit hook)
+- RemoveRule implementation
+- SyncRules on worker startup
+- Periodic health checks (250ms with auto-restart)

@@ -18,6 +18,7 @@ use tokio::net::UnixStream;
 use tokio::process::{Child, Command};
 use tokio::time::{sleep, Duration};
 
+use crate::config::Config;
 use crate::logging::{AsyncConsumer, Facility, Logger, MPSCRingBuffer};
 use crate::{log_info, log_warning, ForwardingRule, RelayCommand, Response};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
@@ -87,7 +88,7 @@ fn validate_port(port: u16, context: &str) -> Result<(), String> {
 /// Differentiates worker types for unified handling
 #[derive(Debug, Clone, PartialEq)]
 enum WorkerType {
-    DataPlane { core_id: u32 },
+    DataPlane { interface: String, core_id: u32 },
 }
 
 /// Holds all information about a single worker process
@@ -98,24 +99,40 @@ struct Worker {
     // Data plane workers have TWO command streams (ingress + egress)
     ingress_cmd_stream: Option<Arc<tokio::sync::Mutex<UnixStream>>>,
     egress_cmd_stream: Option<Arc<tokio::sync::Mutex<UnixStream>>>,
-    #[allow(dead_code)] // Used in production only (not with feature="testing")
+    #[cfg_attr(feature = "testing", allow(dead_code))]
     log_pipe: Option<std::os::unix::io::OwnedFd>, // Pipe for reading worker's stderr (JSON logs)
-    #[allow(dead_code)] // Used in production only (not with feature="testing")
+    #[cfg_attr(feature = "testing", allow(dead_code))]
     stats_pipe: Option<std::os::unix::io::OwnedFd>, // Pipe for reading worker's stats (JSON)
+}
+
+/// Per-interface worker configuration and state
+struct InterfaceWorkers {
+    /// Number of workers for this interface (from pinning config or default 1)
+    num_workers: usize,
+    /// Fanout group ID for this interface (auto-assigned, unique per interface)
+    fanout_group_id: u16,
+    /// Specific core IDs to pin workers to (from config pinning section)
+    /// If None, workers use sequential core IDs starting from 0
+    pinned_cores: Option<Vec<u32>>,
 }
 
 /// Centralized manager for all worker lifecycle operations
 struct WorkerManager {
     // Configuration
-    interface: String,
+    default_interface: String, // CLI --interface (for backward compat)
     relay_command_socket_path: PathBuf,
-    num_cores: usize,
+    num_cores_per_interface: usize, // Default workers per interface
     logger: Logger,
-    fanout_group_id: u16,
+    /// Core pinning configuration from startup config (interface -> core list)
+    pinning: HashMap<String, Vec<u32>>,
+
+    // Per-interface state
+    interfaces: HashMap<String, InterfaceWorkers>,
+    next_fanout_group_id: u16, // Auto-increment for new interfaces
 
     // Worker state
-    workers: HashMap<u32, Worker>,       // keyed by PID
-    backoff_counters: HashMap<u32, u64>, // keyed by core_id (0 for CP, 1+ for DP)
+    workers: HashMap<u32, Worker>,                 // keyed by PID
+    backoff_counters: HashMap<(String, u32), u64>, // keyed by (interface, core_id)
     worker_stats: Arc<Mutex<HashMap<u32, Vec<crate::FlowStats>>>>, // Stats from data plane workers (keyed by PID)
 }
 
@@ -126,6 +143,13 @@ pub enum CommandAction {
     None,
     /// Broadcast a relay command to all data plane workers
     BroadcastToDataPlane(RelayCommand),
+    /// Ensure workers exist for interface, then broadcast command
+    /// (interface, is_pinned, command)
+    EnsureWorkersAndBroadcast {
+        interface: String,
+        is_pinned: bool,
+        command: RelayCommand,
+    },
 }
 
 /// Handle a supervisor command by updating state and returning a response + action.
@@ -152,6 +176,7 @@ pub fn handle_supervisor_command(
         HashMap<crate::logging::Facility, crate::logging::Severity>,
     >,
     worker_stats: &Mutex<HashMap<u32, Vec<crate::FlowStats>>>,
+    startup_config_path: Option<&PathBuf>,
 ) -> (crate::Response, CommandAction) {
     use crate::{Response, SupervisorCommand};
     use std::sync::atomic::Ordering;
@@ -164,6 +189,7 @@ pub fn handle_supervisor_command(
 
         SupervisorCommand::AddRule {
             rule_id,
+            name,
             input_interface,
             input_group,
             input_port,
@@ -200,8 +226,16 @@ pub fn handle_supervisor_command(
                 }
             }
 
+            // Generate stable rule ID if not provided
+            let rule_id = if rule_id.is_empty() {
+                crate::generate_rule_id(&input_interface, input_group, input_port)
+            } else {
+                rule_id
+            };
+
             let rule = ForwardingRule {
                 rule_id,
+                name,
                 input_interface,
                 input_group,
                 input_port,
@@ -238,13 +272,21 @@ pub fn handle_supervisor_command(
                 );
             }
 
+            // Extract input_interface before inserting
+            let input_interface = rule.input_interface.clone();
+
             master_rules
                 .lock()
                 .unwrap()
                 .insert(rule.rule_id.clone(), rule.clone());
 
             let response = Response::Success(format!("Rule {} added", rule.rule_id));
-            let action = CommandAction::BroadcastToDataPlane(RelayCommand::AddRule(rule));
+            // Use EnsureWorkersAndBroadcast to dynamically spawn workers for new interfaces
+            let action = CommandAction::EnsureWorkersAndBroadcast {
+                interface: input_interface,
+                is_pinned: false, // Runtime rules create dynamic (non-pinned) workers
+                command: RelayCommand::AddRule(rule),
+            };
             (response, action)
         }
 
@@ -346,6 +388,153 @@ pub fn handle_supervisor_command(
                 Response::Success("pong".to_string()),
                 CommandAction::BroadcastToDataPlane(RelayCommand::Ping),
             )
+        }
+
+        SupervisorCommand::RemoveRuleByName { name } => {
+            // Find rule by name and remove it
+            let mut rules = master_rules.lock().unwrap();
+
+            // Find the rule ID by matching the name
+            let rule_id = rules
+                .values()
+                .find(|r| r.name.as_ref() == Some(&name))
+                .map(|r| r.rule_id.clone());
+
+            match rule_id {
+                Some(id) => {
+                    // Remove the rule
+                    rules.remove(&id);
+                    (
+                        Response::Success(format!("Removed rule '{}' (id: {})", name, id)),
+                        CommandAction::BroadcastToDataPlane(RelayCommand::RemoveRule {
+                            rule_id: id,
+                        }),
+                    )
+                }
+                None => (
+                    Response::Error(format!(
+                        "No rule found with name '{}'. Use 'mcrctl list' to see available rules.",
+                        name
+                    )),
+                    CommandAction::None,
+                ),
+            }
+        }
+
+        SupervisorCommand::GetConfig => {
+            // Return current running configuration
+            let rules = master_rules.lock().unwrap();
+            let rules_vec: Vec<crate::ForwardingRule> = rules.values().cloned().collect();
+            let config = crate::Config::from_forwarding_rules(&rules_vec);
+            (Response::Config(config), CommandAction::None)
+        }
+
+        SupervisorCommand::LoadConfig { config, replace } => {
+            // Validate the config first
+            if let Err(e) = config.validate() {
+                return (
+                    Response::Error(format!("Invalid configuration: {}", e)),
+                    CommandAction::None,
+                );
+            }
+
+            let new_rules = config.to_forwarding_rules();
+
+            if replace {
+                // Replace all existing rules
+                let mut rules = master_rules.lock().unwrap();
+                rules.clear();
+                for rule in new_rules {
+                    rules.insert(rule.rule_id.clone(), rule);
+                }
+                let rules_for_sync: Vec<crate::ForwardingRule> = rules.values().cloned().collect();
+                drop(rules);
+                (
+                    Response::Success(format!(
+                        "Configuration loaded ({} rules, replaced existing)",
+                        rules_for_sync.len()
+                    )),
+                    CommandAction::BroadcastToDataPlane(RelayCommand::SyncRules(rules_for_sync)),
+                )
+            } else {
+                // Merge: add new rules that don't conflict
+                let mut rules = master_rules.lock().unwrap();
+                let mut added = 0;
+                let mut skipped = 0;
+                for new_rule in new_rules {
+                    // Check for duplicate input tuple
+                    let exists = rules.values().any(|r| {
+                        r.input_interface == new_rule.input_interface
+                            && r.input_group == new_rule.input_group
+                            && r.input_port == new_rule.input_port
+                    });
+                    if exists {
+                        skipped += 1;
+                    } else {
+                        rules.insert(new_rule.rule_id.clone(), new_rule);
+                        added += 1;
+                    }
+                }
+                let rules_for_sync: Vec<crate::ForwardingRule> = rules.values().cloned().collect();
+                drop(rules);
+                (
+                    Response::Success(format!(
+                        "Configuration merged ({} rules added, {} skipped as duplicates)",
+                        added, skipped
+                    )),
+                    CommandAction::BroadcastToDataPlane(RelayCommand::SyncRules(rules_for_sync)),
+                )
+            }
+        }
+
+        SupervisorCommand::SaveConfig { path } => {
+            // Save running config to a file
+            let rules = master_rules.lock().unwrap();
+            let rules_vec: Vec<crate::ForwardingRule> = rules.values().cloned().collect();
+            let config = crate::Config::from_forwarding_rules(&rules_vec);
+            drop(rules);
+
+            // Use explicit path, or fall back to startup config path
+            let save_path = path.as_ref().or(startup_config_path);
+
+            match save_path {
+                Some(p) => match config.save_to_file(p) {
+                    Ok(()) => (
+                        Response::Success(format!("Configuration saved to {}", p.display())),
+                        CommandAction::None,
+                    ),
+                    Err(e) => (
+                        Response::Error(format!("Failed to save configuration: {}", e)),
+                        CommandAction::None,
+                    ),
+                },
+                None => (
+                    Response::Error(
+                        "No path specified and mcrd was not started with --config".to_string(),
+                    ),
+                    CommandAction::None,
+                ),
+            }
+        }
+
+        SupervisorCommand::CheckConfig { config } => {
+            // Validate configuration without loading
+            match config.validate() {
+                Ok(()) => (
+                    Response::ConfigValidation {
+                        valid: true,
+                        errors: vec![],
+                    },
+                    CommandAction::None,
+                ),
+                Err(e) => (
+                    Response::ConfigValidation {
+                        valid: false,
+                        errors: vec![e.to_string()],
+                    },
+                    CommandAction::None,
+                ),
+            }
         }
     }
 }
@@ -526,32 +715,104 @@ impl WorkerManager {
     /// Create a new WorkerManager with the given configuration
     #[allow(clippy::too_many_arguments)]
     fn new(
-        interface: String,
+        default_interface: String,
         relay_command_socket_path: PathBuf,
-        num_cores: usize,
+        num_cores_per_interface: usize,
         logger: Logger,
-        fanout_group_id: u16,
+        initial_fanout_group_id: u16,
+        pinning: HashMap<String, Vec<u32>>,
     ) -> Self {
         Self {
-            interface,
+            default_interface,
             relay_command_socket_path,
-            num_cores,
+            num_cores_per_interface,
             logger,
-            fanout_group_id,
+            pinning,
+            interfaces: HashMap::new(),
+            next_fanout_group_id: initial_fanout_group_id,
             workers: HashMap::new(),
             backoff_counters: HashMap::new(),
             worker_stats: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    /// Spawn a data plane worker for the given core
-    async fn spawn_data_plane(&mut self, core_id: u32) -> Result<()> {
+    /// Get or create fanout group ID for an interface
+    fn get_or_create_interface(&mut self, interface: &str, is_pinned: bool) -> u16 {
+        if let Some(iface_workers) = self.interfaces.get(interface) {
+            return iface_workers.fanout_group_id;
+        }
+
+        // Allocate new fanout group ID
+        let fanout_group_id = self.next_fanout_group_id;
+        self.next_fanout_group_id = self.next_fanout_group_id.wrapping_add(1);
+
+        // Check for pinning configuration for this interface
+        let pinned_cores = self.pinning.get(interface).cloned();
+
+        // Determine number of workers:
+        // 1. If pinning config exists, use the number of specified cores
+        // 2. If pinned (from startup config) but no pinning config, use default num_cores
+        // 3. If dynamic (runtime AddRule), use 1 worker
+        let num_workers = if let Some(ref cores) = pinned_cores {
+            cores.len()
+        } else if is_pinned {
+            self.num_cores_per_interface
+        } else {
+            1 // Dynamic interfaces get 1 worker by default
+        };
+
+        self.interfaces.insert(
+            interface.to_string(),
+            InterfaceWorkers {
+                num_workers,
+                fanout_group_id,
+                pinned_cores: pinned_cores.clone(),
+            },
+        );
+
+        if let Some(ref cores) = pinned_cores {
+            log_info!(
+                self.logger,
+                Facility::Supervisor,
+                &format!(
+                    "Registered interface '{}' with fanout_group_id={}, pinned to cores {:?}",
+                    interface, fanout_group_id, cores
+                )
+            );
+        } else {
+            log_info!(
+                self.logger,
+                Facility::Supervisor,
+                &format!(
+                    "Registered interface '{}' with fanout_group_id={}, workers={}",
+                    interface, fanout_group_id, num_workers
+                )
+            );
+        }
+
+        fanout_group_id
+    }
+
+    /// Check if workers exist for a given interface
+    fn has_workers_for_interface(&self, interface: &str) -> bool {
+        self.workers.values().any(|w| {
+            matches!(&w.worker_type, WorkerType::DataPlane { interface: iface, .. } if iface == interface)
+        })
+    }
+
+    /// Spawn a data plane worker for the given interface and core
+    async fn spawn_data_plane_for_interface(
+        &mut self,
+        interface: &str,
+        core_id: u32,
+        fanout_group_id: u16,
+    ) -> Result<()> {
         let (child, ingress_cmd_stream, egress_cmd_stream, log_pipe, stats_pipe) =
             spawn_data_plane_worker(
                 core_id,
-                self.interface.clone(),
+                interface.to_string(),
                 self.relay_command_socket_path.clone(),
-                self.fanout_group_id,
+                fanout_group_id,
                 &self.logger,
             )
             .await?;
@@ -567,7 +828,10 @@ impl WorkerManager {
             pid,
             Worker {
                 pid,
-                worker_type: WorkerType::DataPlane { core_id },
+                worker_type: WorkerType::DataPlane {
+                    interface: interface.to_string(),
+                    core_id,
+                },
                 child,
                 ingress_cmd_stream: Some(ingress_cmd_stream_arc),
                 egress_cmd_stream: Some(egress_cmd_stream_arc),
@@ -576,9 +840,9 @@ impl WorkerManager {
             },
         );
 
-        // Initialize backoff counter
+        // Initialize backoff counter - key by (interface, core_id) tuple
         self.backoff_counters
-            .insert(core_id + 1, INITIAL_BACKOFF_MS);
+            .insert((interface.to_string(), core_id), INITIAL_BACKOFF_MS);
 
         // Spawn log consumer task for this worker
         #[cfg(not(feature = "testing"))]
@@ -595,17 +859,81 @@ impl WorkerManager {
         Ok(())
     }
 
-    /// Spawn all initial data plane workers
-    async fn spawn_all_initial_workers(&mut self) -> Result<()> {
+    /// Spawn workers for an interface (if not already spawned)
+    /// Returns true if workers were spawned, false if they already existed
+    async fn ensure_workers_for_interface(
+        &mut self,
+        interface: &str,
+        is_pinned: bool,
+    ) -> Result<bool> {
+        if self.has_workers_for_interface(interface) {
+            return Ok(false);
+        }
+
+        // Get or create interface config (assigns fanout group ID)
+        let fanout_group_id = self.get_or_create_interface(interface, is_pinned);
+
+        // Get interface config to determine worker count and pinned cores
+        let (num_workers, pinned_cores) = self
+            .interfaces
+            .get(interface)
+            .map(|i| (i.num_workers, i.pinned_cores.clone()))
+            .unwrap_or((1, None));
+
         log_info!(
             self.logger,
             Facility::Supervisor,
-            &format!("Starting with {} data plane workers", self.num_cores)
+            &format!(
+                "Spawning {} worker(s) for interface '{}' (fanout_group_id={}{})",
+                num_workers,
+                interface,
+                fanout_group_id,
+                if pinned_cores.is_some() {
+                    ", pinned"
+                } else {
+                    ""
+                }
+            )
         );
 
-        // Spawn data plane workers
-        for core_id in 0..self.num_cores as u32 {
-            self.spawn_data_plane(core_id).await?;
+        // Spawn workers for this interface using pinned cores if specified,
+        // otherwise use sequential core IDs starting from 0
+        if let Some(ref cores) = pinned_cores {
+            for &core_id in cores {
+                self.spawn_data_plane_for_interface(interface, core_id, fanout_group_id)
+                    .await?;
+            }
+        } else {
+            for core_id in 0..num_workers as u32 {
+                self.spawn_data_plane_for_interface(interface, core_id, fanout_group_id)
+                    .await?;
+            }
+        }
+
+        Ok(true)
+    }
+
+    /// Spawn all initial data plane workers for the default interface
+    async fn spawn_all_initial_workers(&mut self) -> Result<()> {
+        let interface = self.default_interface.clone();
+        let num_workers = self.num_cores_per_interface;
+
+        log_info!(
+            self.logger,
+            Facility::Supervisor,
+            &format!(
+                "Starting with {} data plane workers for interface '{}'",
+                num_workers, interface
+            )
+        );
+
+        // Register the default interface as pinned (from CLI)
+        let fanout_group_id = self.get_or_create_interface(&interface, true);
+
+        // Spawn data plane workers for the default interface
+        for core_id in 0..num_workers as u32 {
+            self.spawn_data_plane_for_interface(&interface, core_id, fanout_group_id)
+                .await?;
         }
 
         Ok(())
@@ -644,18 +972,19 @@ impl WorkerManager {
         }
 
         // Restart the data plane worker
-        let WorkerType::DataPlane { core_id } = worker_type;
+        let WorkerType::DataPlane { interface, core_id } = worker_type;
+        let backoff_key = (interface.clone(), core_id);
         let backoff = self
             .backoff_counters
-            .entry(core_id + 1)
+            .entry(backoff_key)
             .or_insert(INITIAL_BACKOFF_MS);
         if status.success() {
             log_info!(
                 self.logger,
                 Facility::Supervisor,
                 &format!(
-                    "Data Plane worker (core {}) exited gracefully, restarting immediately",
-                    core_id
+                    "Data Plane worker (interface={}, core={}) exited gracefully, restarting immediately",
+                    interface, core_id
                 )
             );
             *backoff = INITIAL_BACKOFF_MS;
@@ -664,14 +993,23 @@ impl WorkerManager {
                 self.logger,
                 Facility::Supervisor,
                 &format!(
-                    "Data Plane worker (core {}) failed (status: {}), restarting after {}ms",
-                    core_id, status, *backoff
+                    "Data Plane worker (interface={}, core={}) failed (status: {}), restarting after {}ms",
+                    interface, core_id, status, *backoff
                 )
             );
             sleep(Duration::from_millis(*backoff)).await;
             *backoff = (*backoff * 2).min(MAX_BACKOFF_MS);
         }
-        self.spawn_data_plane(core_id).await?;
+
+        // Get the fanout group ID for this interface (should exist since worker was running)
+        let fanout_group_id = self
+            .interfaces
+            .get(&interface)
+            .map(|i| i.fanout_group_id)
+            .unwrap_or(0);
+
+        self.spawn_data_plane_for_interface(&interface, core_id, fanout_group_id)
+            .await?;
         Ok(Some((pid, true)))
     }
 
@@ -855,7 +1193,10 @@ impl WorkerManager {
         self.workers
             .values()
             .map(|w| {
-                let WorkerType::DataPlane { core_id } = &w.worker_type;
+                let WorkerType::DataPlane {
+                    interface: _,
+                    core_id,
+                } = &w.worker_type;
                 crate::WorkerInfo {
                     pid: w.pid,
                     worker_type: "DataPlane".to_string(),
@@ -958,6 +1299,7 @@ async fn handle_client(
             std::collections::HashMap<crate::logging::Facility, crate::logging::Severity>,
         >,
     >,
+    startup_config_path: Option<PathBuf>,
 ) -> Result<()> {
     use crate::SupervisorCommand;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -989,10 +1331,14 @@ async fn handle_client(
         &global_min_level,
         &facility_min_levels,
         &worker_stats_arc,
+        startup_config_path.as_ref(),
     );
 
     // Log ruleset hash for drift detection if rules changed
-    if matches!(action, CommandAction::BroadcastToDataPlane(_)) {
+    if matches!(
+        action,
+        CommandAction::BroadcastToDataPlane(_) | CommandAction::EnsureWorkersAndBroadcast { .. }
+    ) {
         let ruleset_hash = {
             let rules = master_rules.lock().unwrap();
             crate::compute_ruleset_hash(rules.values())
@@ -1105,6 +1451,57 @@ async fn handle_client(
                 }
             }
         }
+        CommandAction::EnsureWorkersAndBroadcast {
+            interface,
+            is_pinned,
+            command,
+        } => {
+            // First, ensure workers exist for the interface
+            {
+                let manager = worker_manager.lock().unwrap();
+                if !manager.has_workers_for_interface(&interface) {
+                    // Drop lock before async operation
+                    drop(manager);
+
+                    // Re-acquire lock and spawn workers
+                    let mut manager = worker_manager.lock().unwrap();
+                    if let Err(e) = manager
+                        .ensure_workers_for_interface(&interface, is_pinned)
+                        .await
+                    {
+                        error!(
+                            "Failed to spawn workers for interface '{}': {}",
+                            interface, e
+                        );
+                    }
+                }
+            }
+
+            // Now broadcast the command to all workers
+            let cmd_bytes = serde_json::to_vec(&command)?;
+            let stream_pairs = {
+                let manager = worker_manager.lock().unwrap();
+                manager.get_all_dp_cmd_streams()
+            };
+
+            for (ingress_stream, egress_stream) in stream_pairs {
+                // Send to ingress
+                let cmd_bytes_clone = cmd_bytes.clone();
+                tokio::spawn(async move {
+                    let mut stream = ingress_stream.lock().await;
+                    let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
+                    let _ = framed.send(cmd_bytes_clone.into()).await;
+                });
+
+                // Send to egress
+                let cmd_bytes_clone = cmd_bytes.clone();
+                tokio::spawn(async move {
+                    let mut stream = egress_stream.lock().await;
+                    let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
+                    let _ = framed.send(cmd_bytes_clone.into()).await;
+                });
+            }
+        }
     }
 
     // Send final response to client
@@ -1123,6 +1520,8 @@ pub async fn run(
     control_socket_path: PathBuf,
     master_rules: Arc<Mutex<HashMap<String, ForwardingRule>>>,
     num_workers: Option<usize>,
+    startup_config: Option<Config>,
+    startup_config_path: Option<PathBuf>,
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<()> {
     // Determine number of cores to use
@@ -1214,6 +1613,12 @@ pub async fn run(
         0
     };
 
+    // Extract pinning configuration from startup config (if provided)
+    let pinning = startup_config
+        .as_ref()
+        .map(|c| c.pinning.clone())
+        .unwrap_or_default();
+
     // Initialize WorkerManager and wrap it in Arc<Mutex<>>
     let worker_manager = {
         let mut manager = WorkerManager::new(
@@ -1222,10 +1627,34 @@ pub async fn run(
             num_cores,
             supervisor_logger.clone(),
             fanout_group_id,
+            pinning,
         );
 
-        // Spawn all initial workers
-        manager.spawn_all_initial_workers().await?;
+        // Spawn workers for all interfaces from config (if provided)
+        // Otherwise fall back to default interface from CLI
+        if let Some(ref config) = startup_config {
+            let interfaces = config.get_interfaces();
+            if !interfaces.is_empty() {
+                log_info!(
+                    supervisor_logger,
+                    Facility::Supervisor,
+                    &format!(
+                        "Starting workers for {} interface(s) from config: {:?}",
+                        interfaces.len(),
+                        interfaces
+                    )
+                );
+                for iface in interfaces {
+                    manager.ensure_workers_for_interface(&iface, true).await?;
+                }
+            } else {
+                // Config provided but no rules - spawn default interface workers
+                manager.spawn_all_initial_workers().await?;
+            }
+        } else {
+            // No config - spawn workers for default interface (backward compat)
+            manager.spawn_all_initial_workers().await?;
+        }
 
         // Send initial ruleset sync to all data plane workers
         // This ensures workers start with the same ruleset as the supervisor
@@ -1268,6 +1697,13 @@ pub async fn run(
         Arc::new(Mutex::new(manager))
     };
 
+    // Create interval timers outside the loop so they persist across iterations
+    // Using tokio::time::interval instead of sleep ensures the timer isn't reset
+    // when other select! branches complete (critical bug fix!)
+    let mut health_check_interval = tokio::time::interval(Duration::from_millis(250));
+    let mut periodic_sync_interval =
+        tokio::time::interval(Duration::from_secs(PERIODIC_SYNC_INTERVAL_SECS));
+
     // Main supervisor loop
     loop {
         tokio::select! {
@@ -1289,6 +1725,7 @@ pub async fn run(
                     Arc::clone(&master_rules),
                     Arc::clone(&global_min_level),
                     Arc::clone(&facility_min_levels),
+                    startup_config_path.clone(),
                 )
                 .await
                 {
@@ -1297,7 +1734,7 @@ pub async fn run(
             }
 
             // Periodic worker health check (every 250ms)
-            _ = tokio::time::sleep(Duration::from_millis(250)) => {
+            _ = health_check_interval.tick() => {
                 // Check for crashed workers and restart them
                 let restart_result = {
                     let mut manager = worker_manager.lock().unwrap();
@@ -1344,7 +1781,7 @@ pub async fn run(
             // Periodic ruleset sync (every 5 minutes)
             // Part of Option C (Hybrid Approach) for fire-and-forget broadcast reliability
             // Recovers from any missed broadcasts due to transient failures
-            _ = tokio::time::sleep(Duration::from_secs(PERIODIC_SYNC_INTERVAL_SECS)) => {
+            _ = periodic_sync_interval.tick() => {
                 let rules_snapshot: Vec<ForwardingRule> = {
                     let rules = master_rules.lock().unwrap();
                     rules.values().cloned().collect()
@@ -1620,6 +2057,7 @@ mod tests {
             &global_min_level,
             &facility_min_levels,
             &worker_stats,
+            None,
         );
 
         assert!(matches!(response, crate::Response::Workers(workers) if workers.len() == 1));
@@ -1639,6 +2077,7 @@ mod tests {
         let (response, action) = handle_supervisor_command(
             crate::SupervisorCommand::AddRule {
                 rule_id: "test-rule".to_string(),
+                name: None,
                 input_interface: "lo".to_string(),
                 input_group: "224.0.0.1".parse().unwrap(),
                 input_port: 5000,
@@ -1649,10 +2088,14 @@ mod tests {
             &global_min_level,
             &facility_min_levels,
             &worker_stats,
+            None,
         );
 
         assert!(matches!(response, crate::Response::Success(_)));
-        assert!(matches!(action, CommandAction::BroadcastToDataPlane(_)));
+        assert!(matches!(
+            action,
+            CommandAction::EnsureWorkersAndBroadcast { .. }
+        ));
         assert_eq!(master_rules.lock().unwrap().len(), 1);
     }
 
@@ -1663,6 +2106,7 @@ mod tests {
             "test-rule".to_string(),
             ForwardingRule {
                 rule_id: "test-rule".to_string(),
+                name: None,
                 input_interface: "lo".to_string(),
                 input_group: "224.0.0.1".parse().unwrap(),
                 input_port: 5000,
@@ -1685,6 +2129,7 @@ mod tests {
             &global_min_level,
             &facility_min_levels,
             &worker_stats,
+            None,
         );
 
         assert!(matches!(response, crate::Response::Success(_)));
@@ -1710,6 +2155,7 @@ mod tests {
             &global_min_level,
             &facility_min_levels,
             &worker_stats,
+            None,
         );
 
         assert!(matches!(response, crate::Response::Error(_)));
@@ -1723,6 +2169,7 @@ mod tests {
             "test-rule".to_string(),
             ForwardingRule {
                 rule_id: "test-rule".to_string(),
+                name: None,
                 input_interface: "lo".to_string(),
                 input_group: "224.0.0.1".parse().unwrap(),
                 input_port: 5000,
@@ -1743,6 +2190,7 @@ mod tests {
             &global_min_level,
             &facility_min_levels,
             &worker_stats,
+            None,
         );
 
         assert!(matches!(response, crate::Response::Rules(rules) if rules.len() == 1));
@@ -1766,6 +2214,7 @@ mod tests {
             &global_min_level,
             &facility_min_levels,
             &worker_stats,
+            None,
         );
 
         assert!(matches!(response, crate::Response::Stats(_)));
@@ -1793,6 +2242,7 @@ mod tests {
             &global_min_level,
             &facility_min_levels,
             &worker_stats,
+            None,
         );
 
         assert!(matches!(response, crate::Response::Success(_)));
@@ -1823,6 +2273,7 @@ mod tests {
             &global_min_level,
             &facility_min_levels,
             &worker_stats,
+            None,
         );
 
         assert!(matches!(response, crate::Response::Success(_)));
@@ -1857,6 +2308,7 @@ mod tests {
             &global_min_level,
             &facility_min_levels,
             &worker_stats,
+            None,
         );
 
         match response {
@@ -1891,6 +2343,7 @@ mod tests {
             &global_min_level,
             &facility_min_levels,
             &worker_stats,
+            None,
         );
 
         match response {
@@ -1961,6 +2414,7 @@ mod tests {
             &global_min_level,
             &facility_min_levels,
             &worker_stats,
+            None,
         );
 
         match response {
@@ -2057,6 +2511,7 @@ mod tests {
             &global_min_level,
             &facility_min_levels,
             &worker_stats,
+            None,
         );
 
         match response {
@@ -2102,6 +2557,7 @@ mod tests {
         let (response, action) = handle_supervisor_command(
             crate::SupervisorCommand::AddRule {
                 rule_id: "bad-loop".to_string(),
+                name: None,
                 input_interface: "eth0".to_string(),
                 input_group: "239.1.1.1".parse().unwrap(),
                 input_port: 5000,
@@ -2116,6 +2572,7 @@ mod tests {
             &global_min_level,
             &facility_min_levels,
             &worker_stats,
+            None,
         );
 
         // Should reject with error
@@ -2146,6 +2603,7 @@ mod tests {
         let (response, action) = handle_supervisor_command(
             crate::SupervisorCommand::AddRule {
                 rule_id: "valid-rule".to_string(),
+                name: None,
                 input_interface: "eth0".to_string(),
                 input_group: "239.1.1.1".parse().unwrap(),
                 input_port: 5000,
@@ -2160,6 +2618,7 @@ mod tests {
             &global_min_level,
             &facility_min_levels,
             &worker_stats,
+            None,
         );
 
         // Should succeed
@@ -2171,10 +2630,13 @@ mod tests {
             _ => panic!("Expected Success response, got {:?}", response),
         }
 
-        // Should broadcast to data plane
+        // Should ensure workers and broadcast to data plane
         match action {
-            CommandAction::BroadcastToDataPlane(_) => {}
-            _ => panic!("Expected BroadcastToDataPlane action, got {:?}", action),
+            CommandAction::EnsureWorkersAndBroadcast { .. } => {}
+            _ => panic!(
+                "Expected EnsureWorkersAndBroadcast action, got {:?}",
+                action
+            ),
         }
 
         // Verify rule was added
@@ -2194,6 +2656,7 @@ mod tests {
         let (response, _action) = handle_supervisor_command(
             crate::SupervisorCommand::AddRule {
                 rule_id: "loopback-rule".to_string(),
+                name: None,
                 input_interface: "eth0".to_string(),
                 input_group: "239.1.1.1".parse().unwrap(),
                 input_port: 5000,
@@ -2208,6 +2671,7 @@ mod tests {
             &global_min_level,
             &facility_min_levels,
             &worker_stats,
+            None,
         );
 
         // Should succeed (loopback allowed, just warned)
@@ -2314,6 +2778,7 @@ mod tests {
         let (response, _) = handle_supervisor_command(
             crate::SupervisorCommand::AddRule {
                 rule_id: "test-rule".to_string(),
+                name: None,
                 input_interface: "this_interface_name_is_way_too_long".to_string(),
                 input_group: "224.0.0.1".parse().unwrap(),
                 input_port: 5000,
@@ -2328,6 +2793,7 @@ mod tests {
             &global_min_level,
             &facility_min_levels,
             &worker_stats,
+            None,
         );
 
         match response {
@@ -2351,6 +2817,7 @@ mod tests {
         let (response, _) = handle_supervisor_command(
             crate::SupervisorCommand::AddRule {
                 rule_id: "test-rule".to_string(),
+                name: None,
                 input_interface: "eth0".to_string(),
                 input_group: "224.0.0.1".parse().unwrap(),
                 input_port: 5000,
@@ -2365,6 +2832,7 @@ mod tests {
             &global_min_level,
             &facility_min_levels,
             &worker_stats,
+            None,
         );
 
         match response {
@@ -2408,6 +2876,7 @@ mod tests {
         let (response, _) = handle_supervisor_command(
             crate::SupervisorCommand::AddRule {
                 rule_id: "test-rule".to_string(),
+                name: None,
                 input_interface: "eth0".to_string(),
                 input_group: "224.0.0.1".parse().unwrap(),
                 input_port: 0, // Invalid
@@ -2422,6 +2891,7 @@ mod tests {
             &global_min_level,
             &facility_min_levels,
             &worker_stats,
+            None,
         );
 
         match response {
@@ -2445,6 +2915,7 @@ mod tests {
         let (response, _) = handle_supervisor_command(
             crate::SupervisorCommand::AddRule {
                 rule_id: "test-rule".to_string(),
+                name: None,
                 input_interface: "eth0".to_string(),
                 input_group: "224.0.0.1".parse().unwrap(),
                 input_port: 5000,
@@ -2459,6 +2930,7 @@ mod tests {
             &global_min_level,
             &facility_min_levels,
             &worker_stats,
+            None,
         );
 
         match response {

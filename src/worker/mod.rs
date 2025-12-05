@@ -374,6 +374,7 @@ mod tests {
 
         let command = RelayCommand::AddRule(ForwardingRule {
             rule_id: "test-rule-1".to_string(),
+            name: None,
             input_interface: "eth0".to_string(),
             input_group: "224.0.0.1".parse().unwrap(),
             input_port: 5000,
@@ -433,13 +434,7 @@ mod tests {
             }
         }
 
-        // Use current process uid/gid to avoid permission errors when not running as root
-        let current_uid = unsafe { libc::getuid() };
-        let current_gid = unsafe { libc::getgid() };
-
         let config = DataPlaneConfig {
-            uid: Some(current_uid),
-            gid: Some(current_gid),
             supervisor_pid: std::process::id(),
             core_id: Some(0),
             input_interface_name: Some("lo".to_string()),

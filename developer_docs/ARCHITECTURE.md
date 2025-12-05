@@ -1,15 +1,15 @@
 # Multicast Relay - Architecture
 
 **Status:** ✅ CURRENT
-**Last Updated:** 2025-11-18
+**Last Updated:** 2025-12-04
 
 ---
 
-This document describes the architecture of the `multicast_relay` application. It is the definitive, up-to-date guide to the system's design, components, and core technical decisions. As the project evolves, this document is updated to reflect the current state of the implementation.
+This document describes the architecture of the `mcrd` application. It is the definitive, up-to-date guide to the system's design, components, and core technical decisions. As the project evolves, this document is updated to reflect the current state of the implementation.
 
 ## 1. System Overview
 
-The `multicast_relay` is a high-performance userspace application designed to address the "unroutable source" problem for multicast traffic. It receives multicast UDP packets, which may originate from unroutable sources, and re-transmits them from a routable local interface.
+The `mcrd` is a high-performance userspace application designed to address the "unroutable source" problem for multicast traffic. It receives multicast UDP packets, which may originate from unroutable sources, and re-transmits them from a routable local interface.
 
 The architecture is designed around three core principles:
 
@@ -26,6 +26,9 @@ This document describes both **current implementation** and **target architectur
 - Multi-process architecture with supervisor and data plane worker processes
 - Unified io_uring-based data plane for packet forwarding
 - JSON-based control protocol (AddRule, RemoveRule, ListRules, ListWorkers)
+- JSON5 configuration file support (`mcrd supervisor --config`)
+- Configuration management via mcrctl (show, load, save, check)
+- Hash-based rule IDs (stable across config reloads)
 - Fire-and-forget command delivery to workers
 - Hash-based ruleset drift detection (manual, via logs)
 - Real-time statistics aggregation (pipe-based IPC from workers to supervisor)
@@ -95,7 +98,7 @@ The system is architected as a multi-process application to ensure robust privil
 ```mermaid
 graph TD
     subgraph User Space
-        A["User/Operator"] --> B{"control_client"};
+        A["User/Operator"] --> B{"mcrctl"};
     end
 
     subgraph MCR Application
@@ -108,7 +111,7 @@ graph TD
         end
     end
 
-    subgraph Kernel Space / Network
+    subgraph "Kernel Space / Network"
         NetIn["Inbound Multicast Traffic"] --> D1;
         NetIn --> D2;
         NetIn --> DN;
@@ -124,8 +127,8 @@ graph TD
     style DN fill:#bbf,stroke:#333,stroke-width:2px
 ```
 
-- **User/Operator:** Interacts with the system via the `control_client`.
-- **`control_client`:** A command-line tool that sends JSON commands to the supervisor over a Unix socket.
+- **User/Operator:** Interacts with the system via the `mcrctl`.
+- **`mcrctl`:** A command-line tool that sends JSON commands to the supervisor over a Unix socket.
 - **Supervisor Process:** The main process that manages workers, handles configuration commands, and centralizes logging and statistics. It runs with privileges but does not handle high-speed packet forwarding.
 - **Worker Processes:** High-performance data plane processes, each pinned to a specific CPU core. They receive, process, and re-transmit all multicast traffic.
 
@@ -205,7 +208,7 @@ The control interface provides runtime configuration and monitoring. The supervi
 - **Communication:** Listens on a Unix Domain Socket for local, secure communication.
 - **Protocol:** Uses a **JSON**-based protocol for commands and responses. This was chosen for ease of debugging, testing, and future interoperability over the negligible performance gains of a binary format for this interface.
 - **Protocol Versioning:** A `PROTOCOL_VERSION` constant is compiled into the application. The `GetVersion` command returns this version for client compatibility checks.
-- **Server-Side Idempotency:** The supervisor generates a unique ID for each new rule upon creation, and this ID is returned in the `AddRule` success response. The `ListRules` command is the primary mechanism for a client to reconcile its state after a disconnect or timeout.
+- **Server-Side Idempotency:** Rule IDs are computed as a hash of the input tuple (interface, group, port), making them stable across config reloads and restarts. The `ListRules` command is the primary mechanism for a client to reconcile its state after a disconnect or timeout.
 
 ### Rule Assignment
 
@@ -299,26 +302,20 @@ The statistics reporting system must respect critical fast path constraints to m
 - No synchronous I/O in packet processing loop
 - Periodic stats writes only (not per-packet)
 
-## 9. Memory Management
+## 10. Memory Management
 
 - **Core-Local Buffer Pools:** To avoid the performance penalty of dynamic memory allocation, the application uses a core-local buffer pool strategy. Each core-pinned data plane thread pre-allocates and manages its own independent set of fixed-size memory buffers. These buffers are organized into multiple pools based on common packet sizes (e.g., Small, Standard, Jumbo). Runtime "allocations" are fast, lock-free operations that acquire a buffer from the appropriate pool.
 
 - **Buffer Pool Observability:** The system is designed to handle buffer pool exhaustion by dropping packets rather than falling back to slow, dynamic allocation. To make this manageable, the monitoring system exposes detailed, per-core, per-pool metrics, including the total size of each pool, the current number of buffers in use, and a counter for exhaustion events.
 
-## 9. Reliability and Resilience
+## 11. Reliability and Resilience
 
-- **Supervisor Pattern for Resilience (PARTIALLY IMPLEMENTED):** The application implements a supervisor pattern. The main supervisor process is responsible for the lifecycle of the data plane worker processes.
+- **Supervisor Pattern for Resilience:** The application implements a supervisor pattern. The main supervisor process is responsible for the lifecycle of the data plane worker processes.
 
   **Current Implementation:**
-  - **Worker Process Monitoring:** The supervisor monitors child worker processes for crashes.
-  - **Worker Restart:** The supervisor can restart failed worker processes.
-  - **Exponential Backoff:** _(Status Unknown - needs verification)_ The exponential backoff strategy for restart may not be fully implemented.
-
-  **Critical Limitation - No Rule Resynchronization:**
-  - When a worker process is restarted, it starts with an **empty ruleset**.
-  - The supervisor **does not** automatically send existing rules to newly started workers.
-  - **Impact:** ~~A restarted worker will drop all traffic until new rules are explicitly added.~~ **RESOLVED:** Workers now receive `SyncRules` on restart.
-  - **Current Behavior:** When a worker restarts, the supervisor automatically sends a `SyncRules` command with the complete ruleset.
+  - **Worker Process Monitoring:** The supervisor monitors child worker processes for crashes via 250ms health checks.
+  - **Worker Restart:** The supervisor automatically restarts failed worker processes with exponential backoff.
+  - **Rule Resynchronization:** When a worker restarts, the supervisor automatically sends a `SyncRules` command with the complete ruleset.
 
 - **Worker Drift Detection (IMPLEMENTED):** Hash-based drift detection enables manual identification of workers with stale rulesets:
   - Each component (supervisor, data plane workers) logs a hash of its ruleset when rules change.
@@ -354,7 +351,7 @@ stateDiagram-v2
 - Crashed workers are restarted with exponential backoff
 - Restarted workers receive `SyncRules` with complete ruleset
 
-## 10. Security and Privilege Model
+## 12. Security and Privilege Model
 
 ### Privilege Separation Architecture
 

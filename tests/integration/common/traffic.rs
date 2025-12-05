@@ -4,7 +4,7 @@
 use anyhow::Result;
 use std::process::Command;
 
-/// Send multicast packets using the traffic_generator binary
+/// Send multicast packets using the mcrgen binary
 ///
 /// # Arguments
 /// * `source_ip` - Source IP address to bind to
@@ -26,7 +26,7 @@ pub fn send_packets_with_options(
     size: u32,
     rate: u32,
 ) -> Result<()> {
-    let traffic_bin = super::binary_path("traffic_generator");
+    let traffic_bin = super::binary_path("mcrgen");
 
     let output = Command::new(traffic_bin)
         .arg("--interface")

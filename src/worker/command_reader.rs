@@ -161,6 +161,7 @@ mod tests {
         let cmd1 = RelayCommand::Shutdown;
         let cmd2 = RelayCommand::AddRule(ForwardingRule {
             rule_id: "test_rule".to_string(),
+            name: None,
             input_interface: "eth0".to_string(),
             input_group: Ipv4Addr::new(239, 1, 1, 1),
             input_port: 5000,

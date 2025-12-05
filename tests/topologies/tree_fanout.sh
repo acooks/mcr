@@ -29,8 +29,15 @@ source "$SCRIPT_DIR/common.sh"
 
 # Test parameters
 PACKET_SIZE=1400
-PACKET_COUNT=500000   # Can handle more with proper CPU isolation
-SEND_RATE=300000      # Higher rate now that cores don't compete
+
+# CI runners have limited virtualized networking - use conservative rates
+if [ "${CI:-}" = "true" ]; then
+    PACKET_COUNT=50000    # 50k packets for CI
+    SEND_RATE=50000       # 50k pps for CI
+else
+    PACKET_COUNT=500000   # 500k packets for realistic validation
+    SEND_RATE=300000      # Higher rate now that cores don't compete
+fi
 
 # --- Check for root ---
 if [ "$EUID" -ne 0 ]; then
@@ -98,7 +105,7 @@ log_section 'Configuring Forwarding Rules'
 # MCR-1: Receive on veth0p (239.1.1.1:5001) → Forward to 3 destinations (HEAD-END REPLICATION)
 log_info 'MCR-1: Configuring 1:3 head-end replication (single rule, multiple outputs)'
 
-# Use control_client directly to add single rule with multiple outputs
+# Use mcrctl directly to add single rule with multiple outputs
 \$CONTROL_CLIENT_BINARY --socket-path /tmp/mcr1.sock add \
     --input-interface veth0p \
     --input-group 239.1.1.1 \
@@ -130,6 +137,14 @@ print_final_stats \
 
 log_section 'Validating Results'
 
+# Calculate thresholds based on packet count
+# MCR-1 ingress: ~10% of packets (conservative for CI)
+# Leaf nodes: ~8% of packets each (lower due to hop)
+MCR1_MIN_INGRESS=\$(($PACKET_COUNT * 10 / 100))
+LEAF_MIN_INGRESS=\$(($PACKET_COUNT * 8 / 100))
+
+log_info \"Validation thresholds: MCR-1 ingress min=\$MCR1_MIN_INGRESS, Leaf ingress min=\$LEAF_MIN_INGRESS\"
+
 # Validate MCR-1 (head-end replication: 1 ingress → 3 egress outputs)
 VALIDATION_PASSED=0
 
@@ -138,7 +153,7 @@ MCR1_INGRESS=\$(extract_stat /tmp/mcr1.log 'STATS:Ingress' 'matched')
 MCR1_EGRESS=\$(extract_stat /tmp/mcr1.log 'STATS:Egress' 'sent')
 
 # Minimum ingress threshold (sanity check - should process some packets)
-validate_stat /tmp/mcr1.log 'STATS:Ingress' 'matched' 50000 'MCR-1 ingress matched' || VALIDATION_PASSED=1
+validate_stat /tmp/mcr1.log 'STATS:Ingress' 'matched' \$MCR1_MIN_INGRESS 'MCR-1 ingress matched' || VALIDATION_PASSED=1
 
 # Key invariant: egress should be ~3x ingress (1:3 replication)
 # Allow 10% tolerance for timing/flush variations
@@ -147,9 +162,9 @@ validate_values_match \$MCR1_EGRESS \$EXPECTED_EGRESS 10 'MCR-1 egress ≈ 3× i
 
 # Validate MCR-2, MCR-3, MCR-4 (each leaf should receive ~1/3 of egress)
 # Allow lower threshold since veth pairs can drop packets under load
-validate_stat /tmp/mcr2.log 'STATS:Ingress' 'matched' 40000 'MCR-2 ingress matched' || VALIDATION_PASSED=1
-validate_stat /tmp/mcr3.log 'STATS:Ingress' 'matched' 40000 'MCR-3 ingress matched' || VALIDATION_PASSED=1
-validate_stat /tmp/mcr4.log 'STATS:Ingress' 'matched' 40000 'MCR-4 ingress matched' || VALIDATION_PASSED=1
+validate_stat /tmp/mcr2.log 'STATS:Ingress' 'matched' \$LEAF_MIN_INGRESS 'MCR-2 ingress matched' || VALIDATION_PASSED=1
+validate_stat /tmp/mcr3.log 'STATS:Ingress' 'matched' \$LEAF_MIN_INGRESS 'MCR-3 ingress matched' || VALIDATION_PASSED=1
+validate_stat /tmp/mcr4.log 'STATS:Ingress' 'matched' \$LEAF_MIN_INGRESS 'MCR-4 ingress matched' || VALIDATION_PASSED=1
 
 log_section 'Test Complete'
 

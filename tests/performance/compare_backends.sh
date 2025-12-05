@@ -17,7 +17,7 @@ echo ""
 
 # Cleanup
 cleanup() {
-    sudo pkill -9 multicast_relay 2>/dev/null || true
+    sudo pkill -9 mcrd 2>/dev/null || true
     sudo rm -f /tmp/mcr_perf_*.sock /dev/shm/mcr_* 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -47,7 +47,7 @@ run_test() {
     # Start supervisor
     echo "[2/5] Starting supervisor..."
     cleanup
-    sudo ./target/release/multicast_relay supervisor \
+    sudo ./target/release/mcrd supervisor \
         --control-socket-path "$SOCKET" \
         --num-workers 1 \
         --interface lo \
@@ -82,7 +82,7 @@ run_test() {
     echo "[4/5] Running traffic test (${TEST_PACKETS} packets)..."
 
     # Add forwarding rule
-    ./target/release/control_client --socket-path "$SOCKET" add \
+    ./target/release/mcrctl --socket-path "$SOCKET" add \
         --input-interface lo \
         --input-group 239.1.1.1 \
         --input-port 5001 \
@@ -90,11 +90,11 @@ run_test() {
         2>&1 > /dev/null
 
     # Get initial stats
-    STATS_BEFORE=$(./target/release/control_client --socket-path "$SOCKET" stats 2>/dev/null | grep -oP 'packets_relayed:\s*\K\d+' || echo "0")
+    STATS_BEFORE=$(./target/release/mcrctl --socket-path "$SOCKET" stats 2>/dev/null | grep -oP 'packets_relayed:\s*\K\d+' || echo "0")
 
     # Send traffic
     START_TIME=$(date +%s.%N)
-    ./target/release/traffic_generator \
+    ./target/release/mcrgen \
         --interface 127.0.0.1 \
         --group 239.1.1.1 \
         --port 5001 \
@@ -106,7 +106,7 @@ run_test() {
 
     # Get final stats and calculate throughput
     sleep 1
-    STATS_AFTER=$(./target/release/control_client --socket-path "$SOCKET" stats 2>/dev/null | grep -oP 'packets_relayed:\s*\K\d+' || echo "0")
+    STATS_AFTER=$(./target/release/mcrctl --socket-path "$SOCKET" stats 2>/dev/null | grep -oP 'packets_relayed:\s*\K\d+' || echo "0")
     PACKETS_RELAYED=$((STATS_AFTER - STATS_BEFORE))
     DURATION=$(echo "$END_TIME - $START_TIME" | bc)
     THROUGHPUT=$(echo "scale=2; $PACKETS_RELAYED / $DURATION" | bc)

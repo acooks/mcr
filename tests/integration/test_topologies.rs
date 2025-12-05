@@ -16,14 +16,7 @@ mod privileged {
     use std::thread;
     use std::time::Duration;
 
-    /// All privileged tests must call this setup function.
-    fn setup() {
-        if !nix::unistd::geteuid().is_root() {
-            panic!("SKIPPED: This test must be run with root privileges.");
-        }
-    }
-
-    /// Helper to send multicast packets using traffic_generator with explicit rate
+    /// Helper to send multicast packets using mcrgen with explicit rate
     fn send_packets(
         source_ip: &str,
         dest_group: &str,
@@ -38,7 +31,7 @@ mod privileged {
 
     #[tokio::test]
     async fn test_baseline_2hop_100k_packets() -> Result<()> {
-        setup();
+        require_root!();
         println!("\n=== Baseline: 2-hop forwarding with 100k packets ===\n");
 
         let _ns = NetworkNamespace::enter()?;
@@ -68,8 +61,8 @@ mod privileged {
         println!("Network setup complete");
 
         // Start MCR instances on separate cores
-        let mut mcr1 = McrInstance::start("veth0p", Some(0))?;
-        let mut mcr2 = McrInstance::start("veth1b", Some(1))?;
+        let mut mcr1 = McrInstance::builder().interface("veth0p").core(0).start()?;
+        let mut mcr2 = McrInstance::builder().interface("veth1b").core(1).start()?;
         println!("MCR instances started");
 
         // Configure forwarding rules
@@ -189,7 +182,7 @@ mod privileged {
 
     #[tokio::test]
     async fn test_chain_3hop() -> Result<()> {
-        setup();
+        require_root!();
         println!("\n=== 3-Hop Chain Topology Test ===\n");
 
         let _ns = NetworkNamespace::enter()?;
@@ -229,9 +222,9 @@ mod privileged {
         println!("Network setup complete");
 
         // Start 3 MCR instances on separate cores
-        let mut mcr1 = McrInstance::start("veth0p", Some(0))?;
-        let mut mcr2 = McrInstance::start("veth1b", Some(1))?;
-        let mut mcr3 = McrInstance::start("veth2b", Some(2))?;
+        let mut mcr1 = McrInstance::builder().interface("veth0p").core(0).start()?;
+        let mut mcr2 = McrInstance::builder().interface("veth1b").core(1).start()?;
+        let mut mcr3 = McrInstance::builder().interface("veth2b").core(2).start()?;
         println!("MCR instances started");
 
         // Configure forwarding rules
@@ -345,7 +338,7 @@ mod privileged {
 
     #[tokio::test]
     async fn test_tree_fanout_1_to_3() -> Result<()> {
-        setup();
+        require_root!();
         println!("\n=== Tree Topology: 1:3 Fanout (Head-End Replication) ===\n");
 
         let _ns = NetworkNamespace::enter()?;
@@ -395,10 +388,10 @@ mod privileged {
         println!("Network setup complete");
 
         // Start MCR instances on separate cores
-        let mut mcr1 = McrInstance::start("veth0p", Some(0))?;
-        let mut mcr2 = McrInstance::start("veth1b", Some(1))?;
-        let mut mcr3 = McrInstance::start("veth2b", Some(2))?;
-        let mut mcr4 = McrInstance::start("veth3b", Some(3))?;
+        let mut mcr1 = McrInstance::builder().interface("veth0p").core(0).start()?;
+        let mut mcr2 = McrInstance::builder().interface("veth1b").core(1).start()?;
+        let mut mcr3 = McrInstance::builder().interface("veth2b").core(2).start()?;
+        let mut mcr4 = McrInstance::builder().interface("veth3b").core(3).start()?;
         println!("MCR instances started");
 
         // Configure forwarding rules
@@ -470,16 +463,27 @@ mod privileged {
         // Validate MCR-1: Should replicate 1 → 3 (3x egress)
         assert!(stats1.ingress.matched > 0, "MCR-1 should match packets");
 
-        // Critical assertion: egress should be ~3x ingress due to replication
-        let expected_egress = stats1.ingress.matched * 3;
-        let egress_tolerance = expected_egress / 10; // 10% tolerance
-        assert!(
-            stats1.egress.sent >= expected_egress - egress_tolerance
-                && stats1.egress.sent <= expected_egress + egress_tolerance,
-            "MCR-1 should send ~3x packets (matched={}, sent={}, expected={})",
+        // Ingress should enqueue 3x packets (one per output destination)
+        assert_eq!(
+            stats1.ingress.egr_sent,
+            stats1.ingress.matched * 3,
+            "MCR-1 ingress should enqueue 3x packets for 1:3 fanout (matched={}, egr_sent={})",
             stats1.ingress.matched,
-            stats1.egress.sent,
-            expected_egress
+            stats1.ingress.egr_sent
+        );
+
+        // Egress should receive exactly what ingress sent
+        assert_eq!(
+            stats1.egress.ch_recv, stats1.ingress.egr_sent,
+            "MCR-1 egress should receive all enqueued packets (ch_recv={}, egr_sent={})",
+            stats1.egress.ch_recv, stats1.ingress.egr_sent
+        );
+
+        // Egress should send all received packets
+        assert_eq!(
+            stats1.egress.sent, stats1.egress.ch_recv,
+            "MCR-1 egress should send all received packets (sent={}, ch_recv={})",
+            stats1.egress.sent, stats1.egress.ch_recv
         );
 
         // Each leaf should receive roughly equal share
@@ -496,6 +500,167 @@ mod privileged {
         assert_eq!(stats1.egress.errors, 0);
 
         println!("\n=== ✅ Test passed: 1:3 fanout with head-end replication ===\n");
+        Ok(())
+    }
+
+    /// Test: Convergence topology (3:1 - multiple sources to single destination)
+    ///
+    /// Three independent MCR instances each forward traffic to a single
+    /// aggregation point. This tests that multiple independent flows can
+    /// be correctly aggregated.
+    #[tokio::test]
+    async fn test_convergence_3_to_1() -> Result<()> {
+        require_root!();
+        println!("\n=== Convergence Topology: 3:1 (Multiple Sources → Single Sink) ===\n");
+
+        let _ns = NetworkNamespace::enter()?;
+        _ns.enable_loopback().await?;
+
+        // Create veth pairs for convergence topology
+        // Traffic Gen 1 → veth1 → veth1p (MCR-1 ingress)
+        // Traffic Gen 2 → veth2 → veth2p (MCR-2 ingress)
+        // Traffic Gen 3 → veth3 → veth3p (MCR-3 ingress)
+        // All MCRs → veth0a → veth0b (MCR-sink ingress)
+        let _veth0 = VethPair::create("veth0a", "veth0b")
+            .await?
+            .set_addr("veth0a", "10.0.0.1/24")
+            .await?
+            .set_addr("veth0b", "10.0.0.2/24")
+            .await?
+            .up()
+            .await?;
+
+        let _veth1 = VethPair::create("veth1", "veth1p")
+            .await?
+            .set_addr("veth1", "10.0.1.1/24")
+            .await?
+            .set_addr("veth1p", "10.0.1.2/24")
+            .await?
+            .up()
+            .await?;
+
+        let _veth2 = VethPair::create("veth2", "veth2p")
+            .await?
+            .set_addr("veth2", "10.0.2.1/24")
+            .await?
+            .set_addr("veth2p", "10.0.2.2/24")
+            .await?
+            .up()
+            .await?;
+
+        let _veth3 = VethPair::create("veth3", "veth3p")
+            .await?
+            .set_addr("veth3", "10.0.3.1/24")
+            .await?
+            .set_addr("veth3p", "10.0.3.2/24")
+            .await?
+            .up()
+            .await?;
+
+        println!("Network setup complete");
+
+        // Start MCR instances
+        // MCR-1, MCR-2, MCR-3: Source forwarders
+        // MCR-sink: Aggregation point
+        let mut mcr1 = McrInstance::builder().interface("veth1p").core(0).start()?;
+        let mut mcr2 = McrInstance::builder().interface("veth2p").core(1).start()?;
+        let mut mcr3 = McrInstance::builder().interface("veth3p").core(2).start()?;
+        let mut mcr_sink = McrInstance::builder().interface("veth0b").core(3).start()?;
+        println!("MCR instances started");
+
+        // Configure forwarding rules - all converge to same destination
+        mcr1.add_rule("239.1.1.1:5001", vec!["239.9.9.9:5099:veth0a"])?;
+        mcr2.add_rule("239.2.2.2:5002", vec!["239.9.9.9:5099:veth0a"])?;
+        mcr3.add_rule("239.3.3.3:5003", vec!["239.9.9.9:5099:veth0a"])?;
+
+        // Sink receives aggregated traffic and forwards to loopback
+        mcr_sink.add_rule("239.9.9.9:5099", vec!["239.8.8.8:5088:lo"])?;
+
+        println!("Rules configured");
+
+        // Send 1000 packets from each source (3000 total)
+        println!("Sending 1000 packets from each of 3 sources...");
+        send_packets("10.0.1.1", "239.1.1.1", 5001, 1000, 1000)?;
+        send_packets("10.0.2.1", "239.2.2.2", 5002, 1000, 1000)?;
+        send_packets("10.0.3.1", "239.3.3.3", 5003, 1000, 1000)?;
+
+        println!("Waiting for pipeline to drain...");
+        thread::sleep(Duration::from_secs(5));
+
+        // Shutdown and get stats
+        println!("Shutting down MCR instances...");
+        let stats1 = mcr1.shutdown_and_get_stats()?;
+        let stats2 = mcr2.shutdown_and_get_stats()?;
+        let stats3 = mcr3.shutdown_and_get_stats()?;
+        let stats_sink = mcr_sink.shutdown_and_get_stats()?;
+
+        // Print results
+        println!("\n=== MCR-1 Results (Source 1) ===");
+        println!(
+            "Ingress: matched={} egr_sent={}",
+            stats1.ingress.matched, stats1.ingress.egr_sent
+        );
+
+        println!("\n=== MCR-2 Results (Source 2) ===");
+        println!(
+            "Ingress: matched={} egr_sent={}",
+            stats2.ingress.matched, stats2.ingress.egr_sent
+        );
+
+        println!("\n=== MCR-3 Results (Source 3) ===");
+        println!(
+            "Ingress: matched={} egr_sent={}",
+            stats3.ingress.matched, stats3.ingress.egr_sent
+        );
+
+        println!("\n=== MCR-sink Results (Aggregator) ===");
+        println!(
+            "Ingress: matched={} egr_sent={}",
+            stats_sink.ingress.matched, stats_sink.ingress.egr_sent
+        );
+        println!(
+            "Egress: sent={} ch_recv={}",
+            stats_sink.egress.sent, stats_sink.egress.ch_recv
+        );
+
+        // Validate each source forwarded its packets
+        assert!(stats1.ingress.matched > 0, "MCR-1 should match packets");
+        assert!(stats2.ingress.matched > 0, "MCR-2 should match packets");
+        assert!(stats3.ingress.matched > 0, "MCR-3 should match packets");
+
+        // Validate 1:1 forwarding for each source
+        assert_eq!(stats1.ingress.matched, stats1.ingress.egr_sent);
+        assert_eq!(stats2.ingress.matched, stats2.ingress.egr_sent);
+        assert_eq!(stats3.ingress.matched, stats3.ingress.egr_sent);
+
+        // Sink should receive aggregated traffic from all sources
+        let total_sent = stats1.egress.sent + stats2.egress.sent + stats3.egress.sent;
+        assert!(
+            stats_sink.ingress.matched > 0,
+            "Sink should receive aggregated traffic"
+        );
+
+        // Sink's matched should be close to total sent by sources
+        // (some loss is acceptable due to timing, but should get most)
+        assert!(
+            stats_sink.ingress.matched >= total_sent * 8 / 10,
+            "Sink should receive at least 80% of aggregated traffic (got {}, expected ~{})",
+            stats_sink.ingress.matched,
+            total_sent
+        );
+
+        // Validate sink's 1:1 forwarding
+        assert_eq!(stats_sink.ingress.matched, stats_sink.ingress.egr_sent);
+        assert_eq!(stats_sink.egress.ch_recv, stats_sink.ingress.egr_sent);
+        assert_eq!(stats_sink.egress.sent, stats_sink.egress.ch_recv);
+
+        // No errors on any node
+        assert_eq!(stats1.egress.errors, 0);
+        assert_eq!(stats2.egress.errors, 0);
+        assert_eq!(stats3.egress.errors, 0);
+        assert_eq!(stats_sink.egress.errors, 0);
+
+        println!("\n=== ✅ Test passed: 3:1 convergence topology ===\n");
         Ok(())
     }
 }

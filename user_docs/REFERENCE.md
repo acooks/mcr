@@ -1,11 +1,16 @@
-# MCR Configuration Guide
+# MCR Reference Manual
 
-**Status:** ✅ CURRENT
-**Last Updated:** 2025-11-27
+This document provides the complete reference for configuring and operating MCR.
 
----
+## Binaries
 
-This document provides a central reference for configuring the Multicast Relay (MCR) application. Configuration is managed through a combination of kernel tuning, environment variables, and runtime commands.
+MCR provides three binaries:
+
+| Binary | Purpose |
+| :----- | :------ |
+| `mcrd` | The daemon (supervisor + workers) |
+| `mcrctl` | Control client for managing rules at runtime |
+| `mcrgen` | Traffic generator for testing |
 
 ## 1. Kernel Version Requirements
 
@@ -116,10 +121,10 @@ After verifying your kernel version, test MCR:
 ./scripts/build_all.sh
 
 # Run a simple forwarding test
-sudo ./target/release/multicast_relay supervisor --interface lo --num-workers 1
+sudo ./target/release/mcrd supervisor --interface lo --num-workers 1
 
 # In another terminal
-./target/release/control_client add \
+./target/release/mcrctl add \
   --input-interface lo --input-group 239.1.1.1 --input-port 5000 \
   --outputs 239.2.2.2:6000:lo
 ```
@@ -170,309 +175,206 @@ These environment variables can be used to fine-tune the data plane's performanc
 
 ```bash
 # Run MCR with an 8 MB socket buffer and 4 worker threads
-MCR_SOCKET_SNDBUF=8388608 sudo ./target/release/multicast_relay supervisor --num-workers 4
+MCR_SOCKET_SNDBUF=8388608 sudo ./target/release/mcrd supervisor --num-workers 4
 ```
 
 ---
 
-## 4. `multicast_relay` Supervisor
+## 4. `mcrd` - The Daemon
 
-The main `multicast_relay` application is the supervisor. Start it with the `supervisor` subcommand:
+Start the MCR daemon:
 
 ```bash
-sudo ./target/release/multicast_relay supervisor [OPTIONS]
+sudo mcrd supervisor [OPTIONS]
 ```
 
-### Supervisor Options
+### Options
 
-| Option                        | Default                                 | Description                                             |
-| :---------------------------- | :-------------------------------------- | :------------------------------------------------------ |
-| `--num-workers <N>`           | Number of CPU cores                     | Override the number of worker processes to spawn.       |
-| `--user <USER>`               | `nobody`                                | User to run worker processes as (privilege separation). |
-| `--group <GROUP>`             | `daemon`                                | Group to run worker processes as.                       |
-| `--interface <IFACE>`         | `lo`                                    | Network interface for data plane workers (deprecated).  |
-| `--control-socket-path <PATH>`| `/tmp/multicast_relay_control.sock`     | Unix socket path for control_client connections.        |
-| `--relay-command-socket-path` | `/tmp/mcr_relay_commands.sock`          | Unix socket path for supervisor-to-worker commands.     |
-
-**Note:** The `--interface` parameter is deprecated and will be removed. Per the architecture design, interfaces should be specified per-rule via `control_client add --input-interface`, not globally.
+| Option | Default | Description |
+| :----- | :------ | :---------- |
+| `--config <PATH>` | None | Load rules from JSON5 configuration file at startup |
+| `--num-workers <N>` | Number of CPU cores | Number of worker processes to spawn |
+| `--interface <NAME>` | `lo` | Network interface for PACKET_FANOUT_CPU |
+| `--control-socket-path <PATH>` | `/tmp/mcrd_control.sock` | Unix socket for mcrctl connections |
 
 ### Examples
 
 ```bash
 # Basic start with defaults
-sudo ./target/release/multicast_relay supervisor
+sudo mcrd supervisor
 
-# Custom worker count and user
-sudo ./target/release/multicast_relay supervisor --num-workers 4 --user mcr --group mcr
+# With configuration file
+sudo mcrd supervisor --config /etc/mcr/rules.json5
 
-# Custom socket paths (useful for testing)
-sudo ./target/release/multicast_relay supervisor \
-    --control-socket-path /var/run/mcr_control.sock \
-    --relay-command-socket-path /var/run/mcr_relay.sock
+# Custom worker count and interface
+sudo mcrd supervisor --interface eth0 --num-workers 4
 ```
 
-All forwarding rules are managed dynamically at runtime via the `control_client`.
+All forwarding rules are managed at runtime via `mcrctl`.
 
 ---
 
-## 5. `control_client` Commands
+## 5. `mcrctl` - Control Client
 
-The `control_client` is the command-line tool for managing the MCR supervisor at runtime.
+The control client manages the MCR daemon at runtime.
 
 ### 5.1. Add a Forwarding Rule
 
-Adds a new rule to forward an input stream to one or more outputs.
-
 ```bash
-./target/release/control_client add \
+mcrctl add \
     --input-interface <iface> \
     --input-group <ip> \
     --input-port <port> \
-    --outputs <group>:<port>:<interface>[,<group>:<port>:<interface>...]
+    --outputs <group>:<port>:<interface>[,...]
 ```
-
-**⚠️ Interface Configuration Warnings:**
-
-- **Self-loops are rejected**: If `input-interface` and an output `interface` are the same, the rule will be rejected. This prevents packet feedback loops where transmitted packets are immediately received again, causing exponential packet multiplication and invalid statistics.
-
-- **Loopback interface (`lo`) not recommended**: While allowed, using the loopback interface can cause packet reflection artifacts in testing. AF_PACKET sockets on loopback may receive their own transmitted packets, leading to inflated statistics. Use veth pairs or real network interfaces (eth0, eth1) for accurate testing and production use.
 
 **Arguments:**
 
-| Argument            | Description                                                                                     |
-| :------------------ | :---------------------------------------------------------------------------------------------- |
-| `--input-interface` | Network interface name for the input stream (e.g., `eth0`, `lo`).                               |
-| `--input-group`     | Input multicast group IP address.                                                               |
-| `--input-port`      | Input multicast UDP port.                                                                       |
-| `--outputs`         | Comma-separated list in format `group:port:interface` where `interface` is a network interface name (e.g., `eth0`). |
-| `--rule-id`         | (Optional) Custom rule ID. If omitted, a UUID will be auto-generated.                           |
+| Argument | Description |
+| :------- | :---------- |
+| `--input-interface` | Network interface for input (e.g., `eth0`) |
+| `--input-group` | Input multicast group IP |
+| `--input-port` | Input UDP port |
+| `--outputs` | Output specs: `group:port:interface` (comma-separated for fan-out) |
+| `--rule-id` | (Optional) Custom rule ID |
+
+**Constraints:**
+
+- Input and output interfaces must be different (self-loops rejected)
+- Loopback (`lo`) is allowed but not recommended for production
 
 **Examples:**
 
 ```bash
-# Single output
-control_client add --input-interface eth0 --input-group 239.1.1.1 \
+# Forward from eth0 to eth1
+mcrctl add --input-interface eth0 --input-group 239.1.1.1 \
     --input-port 5000 --outputs 239.2.2.2:6000:eth1
 
-# Fan-out to multiple outputs
-control_client add --input-interface eth0 --input-group 239.1.1.1 \
+# Fan-out to multiple destinations
+mcrctl add --input-interface eth0 --input-group 239.1.1.1 \
     --input-port 5000 --outputs 239.2.2.2:6000:eth1,239.3.3.3:7000:eth2
 
 # With custom rule ID
-control_client add --rule-id my-stream --input-interface eth0 \
+mcrctl add --rule-id my-stream --input-interface eth0 \
     --input-group 239.1.1.1 --input-port 5000 --outputs 239.2.2.2:6000:eth1
 ```
 
----
+### 5.2. Rule IDs
 
-## Rule ID Lifecycle
+Every rule has a unique ID for management.
 
-Every forwarding rule has a unique **rule ID** that identifies it throughout its lifecycle. Understanding how rule IDs work is essential for managing rules at runtime.
+**Auto-generated (default):** A stable hash computed from (interface, group, port). The same input always produces the same ID, making rules stable across config reloads.
 
-### How Rule IDs Are Generated
-
-1. **Auto-Generated (Default):**
-   - If you don't specify `--rule-id` when adding a rule, MCR automatically generates a UUID v4
-   - Example: `a3f8c2b5-7d4e-4a1b-9c6f-2e8d5b1a7c3d`
-   - Generated by `uuid::Uuid::new_v4()` in the supervisor
-
-2. **Custom (User-Provided):**
-   - You can provide a custom rule ID via the `--rule-id` flag
-   - Must be unique across all active rules
-   - Useful for predictable rule management in scripts or automation
-   - Example: `--rule-id production-stream-1`
-
-### Finding Rule IDs
-
-Use the `list` command to see all active rules and their IDs:
+**Custom:** Use `--rule-id my-name` for predictable management in scripts.
 
 ```bash
-./target/release/control_client list
+# Find rule IDs
+mcrctl list
+
+# Remove by ID
+mcrctl remove --rule-id <id>
 ```
 
-**Example output:**
+### 5.3. Other Commands
 
-```json
+```bash
+mcrctl list              # List all rules
+mcrctl list-workers      # List worker processes
+mcrctl stats             # Get forwarding statistics
+mcrctl ping              # Health check
+mcrctl remove --rule-id <id>  # Remove a rule
+```
+
+### 5.4. Statistics
+
+```bash
+mcrctl stats
+```
+
+Returns JSON with per-flow metrics: `packets_relayed`, `bytes_relayed`, `packets_per_second`, `bits_per_second`.
+
+Statistics are aggregated across all workers and reported every 10,000 packets.
+
+### 5.5. Log Levels
+
+```bash
+mcrctl log-level get                              # Show current levels
+mcrctl log-level set --global info                # Set global level
+mcrctl log-level set --facility DataPlane --level debug  # Per-facility
+```
+
+Levels: `emergency`, `alert`, `critical`, `error`, `warning`, `notice`, `info`, `debug`
+
+### 5.6. Configuration Management
+
+MCR supports JSON5 configuration files for persistent rule sets.
+
+```bash
+mcrctl config show              # Show running config as JSON5
+mcrctl config save <file>       # Save running config to file
+mcrctl config load <file>       # Load rules from file (merges with running)
+mcrctl config check <file>      # Validate file without loading
+```
+
+**Example JSON5 configuration:**
+
+```json5
 {
-  "Rules": [
+  // MCR configuration
+  rules: [
     {
-      "rule_id": "a3f8c2b5-7d4e-4a1b-9c6f-2e8d5b1a7c3d",
-      "input_interface": "eth0",
-      "input_group": "239.1.1.1",
-      "input_port": 5000,
-      "outputs": [...]
-    }
-  ]
-}
-```
-
-### Rule ID Persistence
-
-**Important:** Rule IDs are **not persistent** across supervisor restarts.
-
-- Rule IDs exist only in the supervisor's in-memory state (`master_rules` HashMap)
-- When the supervisor restarts, all rules are lost
-- You must re-add rules after a restart (or use a configuration management tool)
-
-**Implications:**
-
-- Auto-generated UUIDs will be **different** after a restart
-- If you use custom rule IDs, you can re-create rules with the same IDs
-- For production deployments, consider using custom IDs in your automation scripts
-
-### Best Practices
-
-1. **For Manual Testing:**
-   - Auto-generated UUIDs are fine
-   - Use `list` to find the ID before removing
-
-2. **For Automation/Scripts:**
-   - Use custom rule IDs with meaningful names
-   - Example: `--rule-id camera-01-to-studio`
-   - Makes scripts more readable and debuggable
-
-3. **For Production:**
-   - Use custom rule IDs in infrastructure-as-code tools
-   - Document your rule ID naming convention
-   - Consider prefixing by function: `prod-`, `test-`, etc.
-
-**Example with custom ID:**
-
-```bash
-# Add with custom ID
-control_client add --rule-id my-stream \
-    --input-interface eth0 --input-group 239.1.1.1 \
-    --input-port 5000 --outputs 239.2.2.2:6000:eth1
-
-# Remove using the same ID
-control_client remove --rule-id my-stream
-```
-
----
-
-### 5.2. Remove a Forwarding Rule
-
-Removes an existing rule, identified by its rule ID.
-
-```bash
-./target/release/control_client remove \
-    --rule-id <rule_id>
-```
-
-**Note:** Use the `list` command to see all rules and their IDs (see "Rule ID Lifecycle" section above for details).
-
-### 5.3. List Rules
-
-Displays all currently active forwarding rules.
-
-```bash
-./target/release/control_client list
-```
-
-### 5.4. Get Statistics
-
-Retrieves and displays aggregated performance statistics from all data plane workers.
-
-```bash
-./target/release/control_client stats
-```
-
-#### Output Format
-
-The `stats` command returns JSON with performance metrics for each active flow:
-
-```json
-{
-  "Stats": [
+      name: "video-feed",  // Optional human-friendly name
+      input: { interface: "eth0", group: "239.1.1.1", port: 5000 },
+      outputs: [
+        { group: "239.2.2.2", port: 6000, interface: "eth1" }
+      ]
+    },
     {
-      "input_group": "239.1.1.1",
-      "input_port": 5000,
-      "packets_relayed": 30000,
-      "bytes_relayed": 30720000,
-      "packets_per_second": 2903.5920589974367,
-      "bits_per_second": 23786226.147307
+      name: "audio-feed",
+      input: { interface: "eth0", group: "239.1.1.2", port: 5001 },
+      outputs: [
+        { group: "239.2.2.3", port: 6001, interface: "eth1" },
+        { group: "239.2.2.4", port: 6002, interface: "eth2" }  // Fan-out
+      ]
     }
-  ]
+  ],
+
+  // Optional: Pin workers to specific CPU cores per interface
+  pinning: {
+    "eth0": [0, 1, 2, 3],  // 4 workers on cores 0-3
+    "eth1": [4, 5]         // 2 workers on cores 4-5
+  }
 }
 ```
 
-#### Field Descriptions
+**Configuration fields:**
 
-| Field                | Type   | Description                                                                 |
-| :------------------- | :----- | :-------------------------------------------------------------------------- |
-| `input_group`        | String | The multicast group IP address for this flow.                               |
-| `input_port`         | Number | The UDP port for this flow.                                                 |
-| `packets_relayed`    | Number | Total number of packets forwarded (aggregated across all workers).          |
-| `bytes_relayed`      | Number | Total number of bytes forwarded (aggregated across all workers).            |
-| `packets_per_second` | Number | Current packet rate (aggregated across all workers).                        |
-| `bits_per_second`    | Number | Current throughput in bits per second (aggregated across all workers).      |
+| Field | Required | Description |
+| :---- | :------- | :---------- |
+| `rules` | Yes | Array of forwarding rules |
+| `rules[].name` | No | Human-friendly name for the rule (for display and `RemoveRuleByName`) |
+| `rules[].input` | Yes | Input specification: `interface`, `group`, `port` |
+| `rules[].outputs` | Yes | Array of output destinations |
+| `pinning` | No | Map of interface name to CPU core list |
 
-#### Multi-Worker Aggregation
-
-When running with multiple data plane workers (`--num-workers`), the supervisor automatically aggregates statistics from all workers:
-
-- **Counters** (`packets_relayed`, `bytes_relayed`): Summed across all workers
-- **Rates** (`packets_per_second`, `bits_per_second`): Summed across all workers
-
-**Example:** If Worker 1 reports 10,000 packets at 1000 pps and Worker 2 reports 20,000 packets at 2000 pps for the same flow, the aggregated stats will show 30,000 packets at 3000 pps.
-
-#### Reporting Frequency
-
-Statistics are reported from data plane workers every 10,000 packets processed. This threshold is intentional to minimize overhead on the high-performance data plane. As a result, `packets_relayed` values will typically be multiples of 10,000.
-
-For flows with lower traffic rates, stats may not appear immediately until the 10,000-packet threshold is reached on at least one worker.
-
-#### Empty Stats
-
-If no traffic has been processed, or if no flows have reached the 10,000-packet reporting threshold, the command returns an empty array:
-
-```json
-{
-  "Stats": []
-}
-```
-
-### 5.5. Manage Log Levels
-
-Controls the verbosity of MCR's logging at runtime.
-
-```bash
-# Get current levels
-./target/release/control_client log-level get
-
-# Set a global level
-./target/release/control_client log-level set --global <level>
-
-# Set a facility-specific level
-./target/release/control_client log-level set --facility <facility> --level <level>
-```
-
-- **Levels:** `emergency`, `alert`, `critical`, `error`, `warning`, `notice`, `info`, `debug`
-- **Facilities:** `Supervisor`, `RuleDispatch`, `ControlSocket`, `DataPlane`, `Ingress`, `Egress`, `BufferPool`, `PacketParser`, `Stats`, `Security`, `Network`, `Test`
+**Note:** The `pinning` configuration controls how many workers spawn per interface and which CPU cores they use. If not specified, workers use the `--num-workers` default.
 
 ---
 
-## 6. `traffic_generator`
+## 6. `mcrgen` - Traffic Generator
 
-A utility for sending test multicast traffic.
+Generate test multicast traffic:
 
 ```bash
-./target/release/traffic_generator \
-    --interface <ip> \
-    --group <ip> \
-    --port <port> \
-    --rate <pps> \
-    --size <bytes>
+mcrgen --interface <ip> --group <ip> --port <port> --rate <pps> --size <bytes>
 ```
 
-**Arguments:**
+| Argument | Description |
+| :------- | :---------- |
+| `--interface` | Source IP address to send from |
+| `--group` | Destination multicast group |
+| `--port` | Destination UDP port |
+| `--rate` | Packets per second |
+| `--size` | UDP payload size in bytes |
 
-| Argument      | Description                                          |
-| :------------ | :--------------------------------------------------- |
-| `--interface` | The source IP address of the interface to send from. |
-| `--group`     | The destination multicast group IP address.          |
-| `--port`      | The destination multicast UDP port.                  |
-| `--rate`      | The target send rate in packets per second.          |
-| `--size`      | The size of the UDP payload in bytes.                |
-
-**Note:** Unlike `control_client` which uses network interface names (e.g., `eth0`), the `traffic_generator` `--interface` parameter expects an IP address (e.g., `10.0.0.1`).
+**Note:** `--interface` expects an IP address (e.g., `10.0.0.1`), not an interface name.

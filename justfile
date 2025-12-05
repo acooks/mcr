@@ -92,8 +92,8 @@ build-release:
 
 # Run unit tests only (no root needed)
 test-unit:
-    @echo "--- Running unit tests ---"
-    cargo test --lib --features integration_test
+    @echo "--- Running unit tests (lib + bins) ---"
+    cargo test --lib --bins --features integration_test
 
 # Run integration tests (calls sudo internally)
 test-integration: build-release
@@ -154,15 +154,20 @@ coverage:
     cargo llvm-cov clean --workspace 2>/dev/null || true
 
     # Use /tmp so privilege-dropped workers can write profile data
-    export LLVM_PROFILE_FILE="/tmp/mcr-cov-%p-%m.profraw"
-    rm -f /tmp/mcr-cov-*.profraw 2>/dev/null || true
+    # IMPORTANT: Use the same filename pattern as cargo llvm-cov (mcr-%p-%m.profraw)
+    # The pattern must match what 'cargo llvm-cov show-env' outputs, otherwise
+    # cargo llvm-cov report won't find the worker profraw files!
+    export LLVM_PROFILE_FILE="/tmp/mcr-%p-%m.profraw"
+    # Clean up profraw files from previous runs (need sudo for root/nobody-owned files)
+    sudo rm -f /tmp/mcr-*.profraw 2>/dev/null || true
+    sudo rm -f target/mcr-*.profraw 2>/dev/null || true
 
     echo "Building instrumented binaries..."
     cargo build --release --all-targets
 
     echo ""
-    echo "Running unit tests..."
-    cargo test --release --lib
+    echo "Running unit tests (lib + bins)..."
+    cargo test --release --lib --bins
 
     echo ""
     echo "Running integration tests..."
@@ -180,11 +185,13 @@ coverage:
         sudo -E LLVM_PROFILE_FILE="$LLVM_PROFILE_FILE" bash "$test" || exit 1
     done
 
-    # Collect profile data
+    # Collect profile data from /tmp (where workers wrote them)
+    # Need sudo because files are owned by root (supervisor) and nobody (workers)
     echo ""
     echo "Collecting profile data..."
-    cp /tmp/mcr-cov-*.profraw target/ 2>/dev/null || true
-    rm -f /tmp/mcr-cov-*.profraw 2>/dev/null || true
+    sudo cp /tmp/mcr-*.profraw target/ 2>/dev/null || true
+    sudo chown "$(whoami):$(whoami)" target/mcr-*.profraw 2>/dev/null || true
+    sudo rm -f /tmp/mcr-*.profraw 2>/dev/null || true
 
     # Remove corrupt profile files (from killed processes that didn't flush)
     # Find llvm-profdata from rustup toolchain or system PATH
@@ -193,7 +200,7 @@ coverage:
 
     if [ -n "$LLVM_PROFDATA" ]; then
         echo "Validating profile data..."
-        for prof in target/mcr-cov-*.profraw; do
+        for prof in target/mcr-*.profraw; do
             [ -f "$prof" ] || continue
             if ! "$LLVM_PROFDATA" show "$prof" >/dev/null 2>&1; then
                 echo "  Removing corrupt profile: $(basename "$prof")"
@@ -206,11 +213,12 @@ coverage:
 
     echo ""
     echo "Generating report..."
-    cargo llvm-cov report --release --html --output-dir target/coverage
+    # Exclude experiments/ directory from coverage (not part of the test suite)
+    cargo llvm-cov report --release --html --output-dir target/coverage --ignore-filename-regex 'experiments/'
 
     echo ""
     echo "=== Coverage Summary ==="
-    cargo llvm-cov report --release
+    cargo llvm-cov report --release --ignore-filename-regex 'experiments/'
 
     echo ""
     echo "Report: target/coverage/html/index.html"
@@ -219,7 +227,7 @@ coverage:
 coverage-quick:
     #!/usr/bin/env bash
     set -euxo pipefail
-    cargo llvm-cov --lib --html --output-dir target/coverage
+    cargo llvm-cov --lib --html --output-dir target/coverage --ignore-filename-regex 'experiments/'
     echo "Report: target/coverage/html/index.html"
 
 # =============================================================================

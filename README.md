@@ -40,44 +40,36 @@ This combination of technologies allows MCR to operate at speeds approaching lin
 
 ## Quick Start
 
-### 1. Prerequisites
+### Prerequisites
 
-**Required:**
-
-- **Linux kernel 5.6+** (minimum for `io_uring` socket operations)
-  - 5.6+: `IORING_OP_RECV`/`IORING_OP_SEND` support
-  - 3.1+: `PACKET_FANOUT_CPU` for multi-worker scaling
-  - **Recommended: 5.10+** (LTS kernel with stable io_uring)
+- **Linux kernel 5.6+** (recommended: 5.10+ LTS)
 - Rust toolchain (latest stable)
 
-```bash
-# On Debian/Ubuntu
-sudo apt-get update
-sudo apt-get install -y build-essential
-
-# Check your kernel version
-uname -r
-```
-
-**Optional (Recommended):**
-
-- `just` - Simplified build and test workflows
-- `cargo-llvm-cov` - Code coverage
+### Build
 
 ```bash
-cargo install just cargo-llvm-cov
+cargo build --release
 ```
 
-### 2. Build and Test
+### Run
 
 ```bash
-just dev    # Format, lint, build, unit tests (no root needed)
-just test   # Full test suite with coverage (handles sudo internally)
+# Start the daemon
+sudo ./target/release/mcrd supervisor
+
+# Add a forwarding rule (in another terminal)
+./target/release/mcrctl add \
+    --input-interface eth0 \
+    --input-group 239.1.1.1 \
+    --input-port 5000 \
+    --outputs 239.2.2.2:6000:eth1
+
+# Check status
+./target/release/mcrctl list
+./target/release/mcrctl stats
 ```
 
-### 3. Run the Relay
-
-A full usage guide is available in the [User Guide](./user_docs/GUIDE.md).
+For detailed usage, see the [User Guide](./user_docs/GUIDE.md).
 
 ---
 

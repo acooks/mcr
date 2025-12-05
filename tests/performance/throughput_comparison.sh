@@ -14,7 +14,7 @@ echo ""
 
 # Cleanup
 cleanup() {
-    sudo pkill -9 multicast_relay 2>/dev/null || true
+    sudo pkill -9 mcrd 2>/dev/null || true
     sudo rm -f /tmp/mcr_throughput_*.sock /dev/shm/mcr_* 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -48,7 +48,7 @@ run_test() {
 
     # Start supervisor
     cleanup
-    sudo ./target/release/multicast_relay supervisor \
+    sudo ./target/release/mcrd supervisor \
         --control-socket-path "$SOCKET" \
         --num-workers 1 \
         --interface lo \
@@ -69,7 +69,7 @@ run_test() {
     sleep 1
 
     # Add forwarding rule
-    ./target/release/control_client --socket-path "$SOCKET" add \
+    ./target/release/mcrctl --socket-path "$SOCKET" add \
         --input-interface lo \
         --input-group 239.1.1.1 \
         --input-port 5001 \
@@ -79,7 +79,7 @@ run_test() {
     # Send traffic
     echo "Sending ${PACKET_COUNT} packets at ${RATE} pps..."
     START_TIME=$(date +%s.%N)
-    ./target/release/traffic_generator \
+    ./target/release/mcrgen \
         --interface 127.0.0.1 \
         --group 239.1.1.1 \
         --port 5001 \
