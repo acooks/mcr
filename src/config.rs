@@ -450,7 +450,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_invalid_interface_name() {
+    fn test_validate_invalid_interface_name_empty() {
         let config = Config {
             pinning: HashMap::new(),
             rules: vec![ConfigRule {
@@ -472,7 +472,105 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_invalid_port() {
+    fn test_validate_invalid_interface_name_too_long() {
+        let config = Config {
+            pinning: HashMap::new(),
+            rules: vec![ConfigRule {
+                name: None,
+                input: InputSpec {
+                    interface: "thisinterfaceistoolong".to_string(), // > 15 chars
+                    group: "239.1.1.1".parse().unwrap(),
+                    port: 5000,
+                },
+                outputs: vec![],
+            }],
+        };
+
+        let result = config.validate();
+        match result {
+            Err(ConfigError::InvalidInterfaceName { reason, .. }) => {
+                assert!(reason.contains("too long"));
+            }
+            _ => panic!("Expected InvalidInterfaceName error for too long name"),
+        }
+    }
+
+    #[test]
+    fn test_validate_invalid_interface_name_invalid_chars() {
+        let config = Config {
+            pinning: HashMap::new(),
+            rules: vec![ConfigRule {
+                name: None,
+                input: InputSpec {
+                    interface: "eth0/bad".to_string(), // contains '/'
+                    group: "239.1.1.1".parse().unwrap(),
+                    port: 5000,
+                },
+                outputs: vec![],
+            }],
+        };
+
+        let result = config.validate();
+        match result {
+            Err(ConfigError::InvalidInterfaceName { reason, .. }) => {
+                assert!(reason.contains("invalid characters"));
+            }
+            _ => panic!("Expected InvalidInterfaceName error for invalid chars"),
+        }
+    }
+
+    #[test]
+    fn test_validate_invalid_interface_name_starts_with_digit() {
+        let config = Config {
+            pinning: HashMap::new(),
+            rules: vec![ConfigRule {
+                name: None,
+                input: InputSpec {
+                    interface: "0eth".to_string(), // starts with digit
+                    group: "239.1.1.1".parse().unwrap(),
+                    port: 5000,
+                },
+                outputs: vec![],
+            }],
+        };
+
+        let result = config.validate();
+        match result {
+            Err(ConfigError::InvalidInterfaceName { reason, .. }) => {
+                assert!(reason.contains("cannot start with a digit"));
+            }
+            _ => panic!("Expected InvalidInterfaceName error for digit start"),
+        }
+    }
+
+    #[test]
+    fn test_validate_invalid_output_interface() {
+        let config = Config {
+            pinning: HashMap::new(),
+            rules: vec![ConfigRule {
+                name: None,
+                input: InputSpec {
+                    interface: "eth0".to_string(),
+                    group: "239.1.1.1".parse().unwrap(),
+                    port: 5000,
+                },
+                outputs: vec![OutputSpec {
+                    group: "239.2.2.2".parse().unwrap(),
+                    port: 5001,
+                    interface: "".to_string(), // Invalid empty output interface
+                }],
+            }],
+        };
+
+        let result = config.validate();
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidInterfaceName { .. })
+        ));
+    }
+
+    #[test]
+    fn test_validate_invalid_input_port() {
         let config = Config {
             pinning: HashMap::new(),
             rules: vec![ConfigRule {
@@ -491,7 +589,36 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_non_multicast_address() {
+    fn test_validate_invalid_output_port() {
+        let config = Config {
+            pinning: HashMap::new(),
+            rules: vec![ConfigRule {
+                name: None,
+                input: InputSpec {
+                    interface: "eth0".to_string(),
+                    group: "239.1.1.1".parse().unwrap(),
+                    port: 5000,
+                },
+                outputs: vec![OutputSpec {
+                    group: "239.2.2.2".parse().unwrap(),
+                    port: 0, // Invalid port
+                    interface: "eth1".to_string(),
+                }],
+            }],
+        };
+
+        let result = config.validate();
+        match result {
+            Err(ConfigError::InvalidPort { port, context }) => {
+                assert_eq!(port, 0);
+                assert!(context.contains("output"));
+            }
+            _ => panic!("Expected InvalidPort error for output"),
+        }
+    }
+
+    #[test]
+    fn test_validate_non_multicast_input_address() {
         let config = Config {
             pinning: HashMap::new(),
             rules: vec![ConfigRule {
@@ -509,6 +636,65 @@ mod tests {
         assert!(matches!(
             result,
             Err(ConfigError::InvalidMulticastAddress { .. })
+        ));
+    }
+
+    #[test]
+    fn test_validate_non_multicast_output_address() {
+        let config = Config {
+            pinning: HashMap::new(),
+            rules: vec![ConfigRule {
+                name: None,
+                input: InputSpec {
+                    interface: "eth0".to_string(),
+                    group: "239.1.1.1".parse().unwrap(),
+                    port: 5000,
+                },
+                outputs: vec![OutputSpec {
+                    group: "10.0.0.1".parse().unwrap(), // Not multicast
+                    port: 5001,
+                    interface: "eth1".to_string(),
+                }],
+            }],
+        };
+
+        let result = config.validate();
+        match result {
+            Err(ConfigError::InvalidMulticastAddress { address, context }) => {
+                assert_eq!(address, "10.0.0.1".parse::<Ipv4Addr>().unwrap());
+                assert!(context.contains("output"));
+            }
+            _ => panic!("Expected InvalidMulticastAddress error for output"),
+        }
+    }
+
+    #[test]
+    fn test_validate_empty_pinning() {
+        let config = Config {
+            pinning: [("eth0".to_string(), vec![])].into_iter().collect(), // Empty cores
+            rules: vec![],
+        };
+
+        let result = config.validate();
+        match result {
+            Err(ConfigError::EmptyPinning { interface }) => {
+                assert_eq!(interface, "eth0");
+            }
+            _ => panic!("Expected EmptyPinning error"),
+        }
+    }
+
+    #[test]
+    fn test_validate_invalid_pinning_interface() {
+        let config = Config {
+            pinning: [("".to_string(), vec![0, 1])].into_iter().collect(), // Empty interface name
+            rules: vec![],
+        };
+
+        let result = config.validate();
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidInterfaceName { .. })
         ));
     }
 
