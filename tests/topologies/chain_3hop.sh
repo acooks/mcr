@@ -27,8 +27,15 @@ source "$SCRIPT_DIR/common.sh"
 
 # Test parameters
 PACKET_SIZE=1400
-PACKET_COUNT=500000   # 500k packets for realistic validation
-SEND_RATE=250000      # 250k pps target (matches single-worker capacity)
+
+# CI runners have limited virtualized networking - use conservative rates
+if [ "${CI:-}" = "true" ]; then
+    PACKET_COUNT=50000    # 50k packets for CI
+    SEND_RATE=50000       # 50k pps for CI
+else
+    PACKET_COUNT=500000   # 500k packets for realistic validation
+    SEND_RATE=250000      # 250k pps target (matches single-worker capacity)
+fi
 
 # --- Check for root ---
 if [ "$EUID" -ne 0 ]; then
@@ -107,17 +114,24 @@ print_final_stats \
 
 log_section 'Validating Results'
 
-# Validate MCR-1 (expect ~40% of sent packets due to kernel drops on CI runners)
+# Calculate thresholds based on packet count (~40% for MCR-1, ~30% for MCR-2/3)
+MCR1_THRESHOLD=\$((PACKET_COUNT * 40 / 100))
+MCR2_THRESHOLD=\$((PACKET_COUNT * 30 / 100))
+MCR3_THRESHOLD=\$((PACKET_COUNT * 30 / 100))
+
+log_info \"Validation thresholds: MCR-1=\$MCR1_THRESHOLD, MCR-2=\$MCR2_THRESHOLD, MCR-3=\$MCR3_THRESHOLD\"
+
+# Validate MCR-1 (expect ~40% of sent packets due to kernel drops)
 VALIDATION_PASSED=0
-validate_stat /tmp/mcr1.log 'STATS:Ingress' 'matched' 200000 'MCR-1 ingress matched' || VALIDATION_PASSED=1
-validate_stat /tmp/mcr1.log 'STATS:Egress' 'sent' 200000 'MCR-1 egress sent' || VALIDATION_PASSED=1
+validate_stat /tmp/mcr1.log 'STATS:Ingress' 'matched' \$MCR1_THRESHOLD 'MCR-1 ingress matched' || VALIDATION_PASSED=1
+validate_stat /tmp/mcr1.log 'STATS:Egress' 'sent' \$MCR1_THRESHOLD 'MCR-1 egress sent' || VALIDATION_PASSED=1
 
 # Validate MCR-2 (receives from MCR-1, similar loss pattern hop-to-hop)
-validate_stat /tmp/mcr2.log 'STATS:Ingress' 'matched' 150000 'MCR-2 ingress matched' || VALIDATION_PASSED=1
-validate_stat /tmp/mcr2.log 'STATS:Egress' 'sent' 150000 'MCR-2 egress sent' || VALIDATION_PASSED=1
+validate_stat /tmp/mcr2.log 'STATS:Ingress' 'matched' \$MCR2_THRESHOLD 'MCR-2 ingress matched' || VALIDATION_PASSED=1
+validate_stat /tmp/mcr2.log 'STATS:Egress' 'sent' \$MCR2_THRESHOLD 'MCR-2 egress sent' || VALIDATION_PASSED=1
 
 # Validate MCR-3 (receives from MCR-2, similar loss pattern)
-validate_stat /tmp/mcr3.log 'STATS:Ingress' 'matched' 150000 'MCR-3 ingress matched' || VALIDATION_PASSED=1
+validate_stat /tmp/mcr3.log 'STATS:Ingress' 'matched' \$MCR3_THRESHOLD 'MCR-3 ingress matched' || VALIDATION_PASSED=1
 
 log_section 'Test Complete'
 
