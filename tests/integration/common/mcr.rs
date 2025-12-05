@@ -385,6 +385,11 @@ impl McrInstance {
         &self.log_file
     }
 
+    /// Get the config file path (if started with config_content)
+    pub fn config_path(&self) -> Option<&Path> {
+        self.config_file.as_ref().map(|f| f.path())
+    }
+
     /// Add a forwarding rule
     ///
     /// # Arguments

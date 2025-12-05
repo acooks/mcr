@@ -1322,3 +1322,177 @@ async fn test_cli_config_load_invalid() -> Result<()> {
 
     Ok(())
 }
+
+/// Test: mcrctl remove with existing rule succeeds
+///
+/// Add a rule then remove it via CLI, verify the rule is actually gone.
+#[tokio::test]
+async fn test_cli_remove_existing_rule() -> Result<()> {
+    require_root!();
+
+    let mcr = McrInstance::builder()
+        .num_workers(1)
+        .start_async()
+        .await
+        .context("Failed to start supervisor")?;
+
+    sleep(Duration::from_millis(300)).await;
+
+    // Add a rule first
+    let add_output = run_mcrctl(
+        mcr.control_socket(),
+        &[
+            "add",
+            "--input-interface",
+            "lo",
+            "--input-group",
+            "239.99.99.1",
+            "--input-port",
+            "5099",
+        ],
+    )?;
+    assert!(
+        add_output.contains("Success") || add_output.contains("added"),
+        "Expected success response for add, got: {}",
+        add_output
+    );
+
+    // Wait for rule to be fully propagated
+    sleep(Duration::from_millis(200)).await;
+
+    // Extract rule_id from the list response
+    let list_output = run_mcrctl(mcr.control_socket(), &["list"])?;
+    assert!(
+        list_output.contains("239.99.99.1"),
+        "Rule should exist after add"
+    );
+
+    // Parse rule_id from JSON output - find the line with rule_id
+    // The rule_id is in format "rule_id": "lo:239.99.99.1:5099"
+    let rule_id = list_output
+        .lines()
+        .find(|line| line.contains("rule_id"))
+        .and_then(|line| {
+            // Extract the value: "rule_id": "lo:239.99.99.1:5099"
+            line.split('"').nth(3)
+        })
+        .expect("Should find rule_id in list output");
+
+    // Remove the rule
+    let remove_output = run_mcrctl(mcr.control_socket(), &["remove", "--rule-id", rule_id])?;
+    assert!(
+        remove_output.contains("Success") || remove_output.contains("removed"),
+        "Expected success response for remove, got: {}",
+        remove_output
+    );
+
+    // Verify rule is gone
+    let final_list = run_mcrctl(mcr.control_socket(), &["list"])?;
+    assert!(
+        !final_list.contains("239.99.99.1"),
+        "Rule should be removed, but found: {}",
+        final_list
+    );
+
+    Ok(())
+}
+
+/// Test: mcrctl config save with startup config path fallback
+///
+/// Start mcrd with --config, then call `config save` without explicit path.
+/// It should save to the original config file path.
+#[tokio::test]
+async fn test_cli_config_save_to_startup_path() -> Result<()> {
+    require_root!();
+
+    // Define initial config content
+    let config_content = r#"{
+        rules: [
+            {
+                name: "startup-rule",
+                input: { interface: "lo", group: "239.88.88.1", port: 5088 },
+                outputs: []
+            }
+        ]
+    }"#;
+
+    // Start mcrd with this config (creates a temp file internally)
+    let mcr = McrInstance::builder()
+        .config_content(config_content)
+        .num_workers(1)
+        .start_async()
+        .await
+        .context("Failed to start supervisor")?;
+
+    sleep(Duration::from_millis(500)).await;
+
+    // Get the config file path for verification later
+    let config_path = mcr.config_path().expect("config_path should exist");
+    let config_path_owned = config_path.to_path_buf();
+
+    // Add a new rule via CLI
+    let _ = run_mcrctl(
+        mcr.control_socket(),
+        &[
+            "add",
+            "--input-interface",
+            "lo",
+            "--input-group",
+            "239.88.88.2",
+            "--input-port",
+            "5089",
+        ],
+    )?;
+
+    sleep(Duration::from_millis(200)).await;
+
+    // Save config WITHOUT specifying --file (should use startup path)
+    let save_output = run_mcrctl(mcr.control_socket(), &["config", "save"])?;
+
+    // Should succeed and mention the original path
+    assert!(
+        save_output.contains("Success") || save_output.contains("saved"),
+        "Expected success response, got: {}",
+        save_output
+    );
+
+    // Read the file and verify it has both rules
+    let saved_content = std::fs::read_to_string(&config_path_owned)?;
+    assert!(
+        saved_content.contains("239.88.88.1") && saved_content.contains("239.88.88.2"),
+        "Saved config should contain both rules, got: {}",
+        saved_content
+    );
+
+    Ok(())
+}
+
+/// Test: mcrctl config save without startup path returns error
+///
+/// Start mcrd without --config, then call `config save` without explicit path.
+/// It should return an error about no path specified.
+#[tokio::test]
+async fn test_cli_config_save_no_path_error() -> Result<()> {
+    require_root!();
+
+    // Start mcrd WITHOUT a config file
+    let mcr = McrInstance::builder()
+        .num_workers(1)
+        .start_async()
+        .await
+        .context("Failed to start supervisor")?;
+
+    sleep(Duration::from_millis(300)).await;
+
+    // Try to save config without specifying --file
+    let save_output = run_mcrctl(mcr.control_socket(), &["config", "save"])?;
+
+    // Should return error about no path
+    assert!(
+        save_output.contains("Error") || save_output.contains("No path"),
+        "Expected error about no path specified, got: {}",
+        save_output
+    );
+
+    Ok(())
+}
