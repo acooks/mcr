@@ -277,3 +277,31 @@ setup-hooks:
 setup-kernel:
     @echo "--- Setting up kernel tuning ---"
     @sudo bash scripts/setup_kernel_tuning.sh
+
+# =============================================================================
+# CAPABILITIES (Run without root)
+# =============================================================================
+
+# Set capabilities on release binary (one-time setup)
+set-caps: build-release
+    @echo "--- Setting capabilities on mcrd ---"
+    sudo setcap 'cap_net_raw,cap_setuid,cap_setgid=eip' ./target/release/mcrd
+    @getcap ./target/release/mcrd
+
+# Clear capabilities from binary
+clear-caps:
+    @echo "--- Clearing capabilities ---"
+    @sudo setcap -r ./target/release/mcrd 2>/dev/null || true
+    @getcap ./target/release/mcrd || echo "(no capabilities set)"
+
+# Build and set capabilities
+build-with-caps: build-release set-caps
+    @echo "✅ Binary ready to run without sudo"
+
+# Run supervisor with capabilities (no sudo needed after set-caps)
+run-caps *ARGS:
+    ./target/release/mcrd supervisor {{ARGS}}
+
+# Test that capabilities work (run after set-caps, no sudo needed)
+test-caps:
+    @./tests/capabilities_test.sh

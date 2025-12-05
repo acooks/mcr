@@ -40,10 +40,6 @@ pub enum Command {
         #[arg(long)]
         config: Option<PathBuf>,
 
-        /// Path to the Unix socket for worker command and control.
-        #[clap(long, default_value = "/tmp/mcr_relay_commands.sock")]
-        relay_command_socket_path: PathBuf,
-
         /// Path to the Unix socket for client command and control.
         #[clap(long, default_value = "/tmp/mcrd_control.sock")]
         control_socket_path: PathBuf,
@@ -63,8 +59,6 @@ pub enum Command {
     },
     /// Run the worker process (intended to be called by the supervisor)
     Worker {
-        #[arg(long)]
-        relay_command_socket_path: PathBuf,
         #[arg(long)]
         data_plane: bool,
         #[arg(long)]

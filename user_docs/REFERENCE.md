@@ -212,6 +212,45 @@ sudo mcrd supervisor --interface eth0 --num-workers 4
 
 All forwarding rules are managed at runtime via `mcrctl`.
 
+### Running Without Root (Linux Capabilities)
+
+MCR can run without root by using Linux capabilities. This is the recommended
+approach for production deployments.
+
+#### Required Capabilities
+
+| Capability | Purpose |
+| :--------- | :------ |
+| `CAP_NET_RAW` | Create AF_PACKET sockets |
+| `CAP_SETUID` | Drop privileges to nobody |
+| `CAP_SETGID` | Drop privileges to nobody |
+
+#### Option 1: File Capabilities (setcap)
+
+```bash
+# One-time setup (requires root)
+sudo setcap 'cap_net_raw,cap_setuid,cap_setgid=eip' /usr/local/bin/mcrd
+
+# Verify
+getcap /usr/local/bin/mcrd
+
+# Run without sudo
+mcrd supervisor --config /etc/mcr/rules.json5
+```
+
+**Note:** Capabilities are stored in filesystem extended attributes and must be
+re-applied after each binary update.
+
+#### Option 2: Systemd (Recommended for Production)
+
+Use the provided systemd service file which grants capabilities at runtime:
+
+```bash
+sudo systemctl enable --now mcrd
+```
+
+See `packaging/systemd/mcrd.service` for details.
+
 ---
 
 ## 5. `mcrctl` - Control Client
@@ -257,6 +296,49 @@ mcrctl add --input-interface eth0 --input-group 239.1.1.1 \
 # With custom rule ID
 mcrctl add --rule-id my-stream --input-interface eth0 \
     --input-group 239.1.1.1 --input-port 5000 --outputs 239.2.2.2:6000:eth1
+```
+
+#### Flexible Address Support
+
+MCR supports any combination of unicast and multicast addresses for both input and output:
+
+| Scenario | Input | Output | Use Case |
+| :------- | :---- | :----- | :------- |
+| Standard relay | Multicast | Multicast | Bridge multicast across network segments |
+| Multicast-to-unicast | Multicast | Unicast | Deliver to legacy systems or cloud VPCs |
+| Unicast-to-multicast | Unicast | Multicast | Inject from unicast tunnel into multicast |
+| Unicast-to-unicast | Unicast | Unicast | General packet forwarding |
+
+**Multicast-to-Unicast Example:**
+
+```bash
+# Forward multicast 239.1.1.1:5000 to unicast host 10.0.0.100:6000
+mcrctl add --input-interface eth0 --input-group 239.1.1.1 \
+    --input-port 5000 --outputs 10.0.0.100:6000:eth1
+```
+
+**Unicast-to-Multicast Example (tunnel endpoint):**
+
+```bash
+# Receive unicast from tunnel and re-inject to multicast
+mcrctl add --input-interface eth0 --input-group 10.0.0.50 \
+    --input-port 5000 --outputs 239.1.1.1:5000:eth1
+```
+
+**Hybrid Fan-Out:**
+
+```bash
+# Fan-out to both multicast group and specific unicast host
+mcrctl add --input-interface eth0 --input-group 239.1.1.1 \
+    --input-port 5000 --outputs 239.2.2.2:6000:eth1,10.0.0.100:6000:eth1
+```
+
+This flexibility enables complete multicast tunneling chains:
+
+```text
+[Network A]              [Routed Network]           [Network B]
+Multicast 239.x  ──→  Unicast tunnel  ──→  Multicast 239.x
+    (MCR #1)             (IP routing)          (MCR #2)
 ```
 
 ### 5.2. Rule IDs
@@ -335,6 +417,20 @@ mcrctl config check <file>      # Validate file without loading
       outputs: [
         { group: "239.2.2.3", port: 6001, interface: "eth1" },
         { group: "239.2.2.4", port: 6002, interface: "eth2" }  // Fan-out
+      ]
+    },
+    {
+      name: "legacy-unicast",  // Multicast-to-unicast conversion
+      input: { interface: "eth0", group: "239.1.1.3", port: 5002 },
+      outputs: [
+        { group: "10.0.0.100", port: 6003, interface: "eth1" }  // Unicast output
+      ]
+    },
+    {
+      name: "tunnel-endpoint",  // Unicast-to-multicast (tunnel receiver)
+      input: { interface: "eth1", group: "10.0.0.50", port: 5002 },  // Unicast input
+      outputs: [
+        { group: "239.1.1.3", port: 5002, interface: "eth0" }  // Re-inject to multicast
       ]
     }
   ],

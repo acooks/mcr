@@ -11,7 +11,6 @@ fn main() -> Result<()> {
     match args.command {
         Command::Supervisor {
             config: config_path,
-            relay_command_socket_path,
             control_socket_path,
             interface,
             num_workers,
@@ -87,7 +86,6 @@ fn main() -> Result<()> {
                 // Run supervisor - it will exit when shutdown_rx is triggered
                 let result = supervisor::run(
                     &effective_interface,
-                    relay_command_socket_path.clone(),
                     control_socket_path,
                     master_rules,
                     num_workers,
@@ -109,7 +107,6 @@ fn main() -> Result<()> {
             });
         }
         Command::Worker {
-            relay_command_socket_path,
             data_plane,
             core_id,
             input_interface_name,
@@ -122,7 +119,7 @@ fn main() -> Result<()> {
             fanout_group_id,
         } => {
             // All workers are now data plane workers
-            let _ = (data_plane, relay_command_socket_path); // Silence unused variable warnings
+            let _ = data_plane; // Silence unused variable warning
 
             // Get parent process ID (supervisor PID) for shared memory paths
             let supervisor_pid = std::os::unix::process::parent_id();
@@ -166,7 +163,6 @@ mod tests {
             args.command,
             Command::Supervisor {
                 config: None,
-                relay_command_socket_path: PathBuf::from("/tmp/mcr_relay_commands.sock"),
                 control_socket_path: PathBuf::from("/tmp/mcrd_control.sock"),
                 interface: "lo".to_string(),
                 num_workers: None,
@@ -176,8 +172,6 @@ mod tests {
         let args = Args::parse_from([
             "mcrd",
             "worker",
-            "--relay-command-socket-path",
-            "/tmp/worker_relay.sock",
             "--data-plane",
             "--core-id",
             "0",
@@ -199,7 +193,6 @@ mod tests {
         assert_eq!(
             args.command,
             Command::Worker {
-                relay_command_socket_path: PathBuf::from("/tmp/worker_relay.sock"),
                 data_plane: true,
                 core_id: Some(0),
                 input_interface_name: Some("eth0".to_string()),
@@ -213,16 +206,10 @@ mod tests {
             }
         );
 
-        let args = Args::parse_from([
-            "mcrd",
-            "worker",
-            "--relay-command-socket-path",
-            "/tmp/worker_relay.sock",
-        ]);
+        let args = Args::parse_from(["mcrd", "worker"]);
         assert_eq!(
             args.command,
             Command::Worker {
-                relay_command_socket_path: PathBuf::from("/tmp/worker_relay.sock"),
                 data_plane: false,
                 core_id: None,
                 input_interface_name: None,

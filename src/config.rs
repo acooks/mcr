@@ -135,21 +135,12 @@ impl Config {
                 }
             }
 
-            // Validate multicast addresses
-            if !rule.input.group.is_multicast() {
-                return Err(ConfigError::InvalidMulticastAddress {
-                    address: rule.input.group,
-                    context: format!("rule {} input", idx),
-                });
-            }
-            for output in &rule.outputs {
-                if !output.group.is_multicast() {
-                    return Err(ConfigError::InvalidMulticastAddress {
-                        address: output.group,
-                        context: format!("rule {} output", idx),
-                    });
-                }
-            }
+            // Both input and output addresses can be unicast or multicast.
+            // This enables flexible forwarding scenarios:
+            // - Multicast → Multicast (standard relay)
+            // - Multicast → Unicast (conversion for legacy/cloud systems)
+            // - Unicast → Multicast (injection from unicast tunnel)
+            // - Unicast → Unicast (general packet forwarding)
         }
 
         // Validate pinning configuration
@@ -300,10 +291,6 @@ pub enum ConfigError {
         port: u16,
         context: String,
     },
-    InvalidMulticastAddress {
-        address: Ipv4Addr,
-        context: String,
-    },
     EmptyPinning {
         interface: String,
     },
@@ -336,9 +323,6 @@ impl std::fmt::Display for ConfigError {
             }
             ConfigError::InvalidPort { port, context } => {
                 write!(f, "invalid port {} in {}", port, context)
-            }
-            ConfigError::InvalidMulticastAddress { address, context } => {
-                write!(f, "invalid multicast address {} in {}", address, context)
             }
             ConfigError::EmptyPinning { interface } => {
                 write!(f, "empty core list for pinned interface '{}'", interface)
@@ -618,29 +602,33 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_non_multicast_input_address() {
+    fn test_unicast_input_address_allowed() {
+        // Unicast input addresses are allowed for unicast-to-multicast conversion
+        // (e.g., receiving from a unicast tunnel and forwarding to multicast)
         let config = Config {
             pinning: HashMap::new(),
             rules: vec![ConfigRule {
                 name: None,
                 input: InputSpec {
                     interface: "eth0".to_string(),
-                    group: "192.168.1.1".parse().unwrap(), // Not multicast
+                    group: "192.168.1.1".parse().unwrap(), // Unicast input is allowed
                     port: 5000,
                 },
-                outputs: vec![],
+                outputs: vec![OutputSpec {
+                    group: "239.1.1.1".parse().unwrap(), // Multicast output
+                    port: 5001,
+                    interface: "eth1".to_string(),
+                }],
             }],
         };
 
         let result = config.validate();
-        assert!(matches!(
-            result,
-            Err(ConfigError::InvalidMulticastAddress { .. })
-        ));
+        assert!(result.is_ok(), "Unicast input addresses should be allowed");
     }
 
     #[test]
-    fn test_validate_non_multicast_output_address() {
+    fn test_unicast_output_address_allowed() {
+        // Unicast output addresses are allowed for multicast-to-unicast conversion
         let config = Config {
             pinning: HashMap::new(),
             rules: vec![ConfigRule {
@@ -651,7 +639,7 @@ mod tests {
                     port: 5000,
                 },
                 outputs: vec![OutputSpec {
-                    group: "10.0.0.1".parse().unwrap(), // Not multicast
+                    group: "10.0.0.1".parse().unwrap(), // Unicast is allowed
                     port: 5001,
                     interface: "eth1".to_string(),
                 }],
@@ -659,13 +647,7 @@ mod tests {
         };
 
         let result = config.validate();
-        match result {
-            Err(ConfigError::InvalidMulticastAddress { address, context }) => {
-                assert_eq!(address, "10.0.0.1".parse::<Ipv4Addr>().unwrap());
-                assert!(context.contains("output"));
-            }
-            _ => panic!("Expected InvalidMulticastAddress error for output"),
-        }
+        assert!(result.is_ok(), "Unicast output addresses should be allowed");
     }
 
     #[test]

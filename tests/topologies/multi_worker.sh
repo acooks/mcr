@@ -124,25 +124,24 @@ else
     VALIDATION_PASSED=1
 fi
 
-# Check PACKET_FANOUT status
+# Check PACKET_FANOUT status (informational only - not a failure condition)
 # Note: In network namespaces, MCR may only see 1 CPU core and disable PACKET_FANOUT
+# With lazy worker spawning, we may only spawn one worker if there's one rule for one interface
 if grep -q "PACKET_FANOUT group ID" /tmp/mcr.log; then
     FANOUT_INFO=$(grep "PACKET_FANOUT group ID" /tmp/mcr.log | head -1)
     log_info "PACKET_FANOUT enabled: $FANOUT_INFO"
-elif grep -q "PACKET_FANOUT disabled (single worker)" /tmp/mcr.log; then
-    # This is expected in network namespaces with limited CPU visibility
-    log_info "PACKET_FANOUT disabled - namespace likely sees only 1 CPU (this is expected in isolated namespaces)"
+elif grep -q "PACKET_FANOUT disabled" /tmp/mcr.log; then
+    log_info "PACKET_FANOUT disabled - expected with single worker per interface"
 else
-    log_error "Could not determine PACKET_FANOUT status"
-    VALIDATION_PASSED=1
+    log_info "PACKET_FANOUT status not logged (likely single worker mode)"
 fi
 
-# Check how many workers actually started
-WORKER_COUNT=$(grep -c "Data plane worker started on core" /tmp/mcr.log || echo "0")
-DETECTED_CORES=$(grep "Detected.*CPU cores" /tmp/mcr.log | grep -oP "Detected \K[0-9]+" || echo "unknown")
-log_info "MCR detected $DETECTED_CORES CPU cores, started $WORKER_COUNT data plane worker(s)"
+# Check how many workers actually ran by looking for unique Worker PIDs in log
+# Workers are spawned lazily when rules are added, and log as [Worker PID]
+WORKER_COUNT=$(grep -oP "\[Worker \K[0-9]+" /tmp/mcr.log | sort -u | wc -l)
+log_info "MCR ran $WORKER_COUNT data plane worker(s)"
 
-# The test passes if workers started (even if fewer than requested due to CPU detection)
+# The test passes if at least one worker started
 if [ "$WORKER_COUNT" -ge 1 ]; then
     log_info "Worker startup successful"
 else

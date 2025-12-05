@@ -1,0 +1,43 @@
+[Unit]
+Description=Multicast Relay Daemon
+Documentation=https://github.com/acooks/mcr
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mcr
+Group=mcr
+
+# Grant only the required capabilities
+AmbientCapabilities=CAP_NET_RAW CAP_SETUID CAP_SETGID
+CapabilityBoundingSet=CAP_NET_RAW CAP_SETUID CAP_SETGID
+
+# Hardening
+NoNewPrivileges=no
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+MemoryDenyWriteExecute=yes
+LockPersonality=yes
+
+# Runtime
+RuntimeDirectory=mcr
+StateDirectory=mcr
+ConfigurationDirectory=mcr
+ExecStart=/usr/bin/mcrd supervisor --config /etc/mcr/rules.json5 --control-socket-path /run/mcr/mcrd.sock
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Restart policy
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

@@ -8,7 +8,6 @@ use log::error;
 use nix::sys::socket::{
     sendmsg, socketpair, AddressFamily, ControlMessage, MsgFlags, SockFlag, SockType,
 };
-use nix::unistd::{Gid, Uid};
 use std::collections::HashMap;
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use std::path::PathBuf;
@@ -20,7 +19,7 @@ use tokio::time::{sleep, Duration};
 
 use crate::config::Config;
 use crate::logging::{AsyncConsumer, Facility, Logger, MPSCRingBuffer};
-use crate::{log_info, log_warning, ForwardingRule, RelayCommand, Response};
+use crate::{log_debug, log_info, log_warning, ForwardingRule, RelayCommand, Response};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 const INITIAL_BACKOFF_MS: u64 = 250;
@@ -119,8 +118,6 @@ struct InterfaceWorkers {
 /// Centralized manager for all worker lifecycle operations
 struct WorkerManager {
     // Configuration
-    default_interface: String, // CLI --interface (for backward compat)
-    relay_command_socket_path: PathBuf,
     num_cores_per_interface: usize, // Default workers per interface
     logger: Logger,
     /// Core pinning configuration from startup config (interface -> core list)
@@ -542,7 +539,6 @@ pub fn handle_supervisor_command(
 pub async fn spawn_data_plane_worker(
     core_id: u32,
     interface: String,
-    relay_command_socket_path: PathBuf,
     fanout_group_id: u16,
     logger: &crate::logging::Logger,
 ) -> Result<(
@@ -552,9 +548,9 @@ pub async fn spawn_data_plane_worker(
     Option<std::os::unix::io::OwnedFd>, // log_pipe
     Option<std::os::unix::io::OwnedFd>, // stats_pipe
 )> {
-    logger.info(
+    logger.debug(
         Facility::Supervisor,
-        &format!("Spawning Data Plane worker for core {}", core_id),
+        &format!("Spawning worker for core {}", core_id),
     );
 
     // Create pipe for worker stderr (for JSON logging)
@@ -595,8 +591,6 @@ pub async fn spawn_data_plane_worker(
         .arg("--core-id")
         .arg(core_id.to_string())
         .arg("--data-plane")
-        .arg("--relay-command-socket-path")
-        .arg(relay_command_socket_path)
         .arg("--input-interface-name")
         .arg(&interface)
         .arg("--fanout-group-id")
@@ -713,18 +707,13 @@ pub async fn spawn_data_plane_worker(
 
 impl WorkerManager {
     /// Create a new WorkerManager with the given configuration
-    #[allow(clippy::too_many_arguments)]
     fn new(
-        default_interface: String,
-        relay_command_socket_path: PathBuf,
         num_cores_per_interface: usize,
         logger: Logger,
         initial_fanout_group_id: u16,
         pinning: HashMap<String, Vec<u32>>,
     ) -> Self {
         Self {
-            default_interface,
-            relay_command_socket_path,
             num_cores_per_interface,
             logger,
             pinning,
@@ -771,7 +760,7 @@ impl WorkerManager {
         );
 
         if let Some(ref cores) = pinned_cores {
-            log_info!(
+            log_debug!(
                 self.logger,
                 Facility::Supervisor,
                 &format!(
@@ -780,7 +769,7 @@ impl WorkerManager {
                 )
             );
         } else {
-            log_info!(
+            log_debug!(
                 self.logger,
                 Facility::Supervisor,
                 &format!(
@@ -811,7 +800,6 @@ impl WorkerManager {
             spawn_data_plane_worker(
                 core_id,
                 interface.to_string(),
-                self.relay_command_socket_path.clone(),
                 fanout_group_id,
                 &self.logger,
             )
@@ -880,7 +868,7 @@ impl WorkerManager {
             .map(|i| (i.num_workers, i.pinned_cores.clone()))
             .unwrap_or((1, None));
 
-        log_info!(
+        log_debug!(
             self.logger,
             Facility::Supervisor,
             &format!(
@@ -911,32 +899,6 @@ impl WorkerManager {
         }
 
         Ok(true)
-    }
-
-    /// Spawn all initial data plane workers for the default interface
-    async fn spawn_all_initial_workers(&mut self) -> Result<()> {
-        let interface = self.default_interface.clone();
-        let num_workers = self.num_cores_per_interface;
-
-        log_info!(
-            self.logger,
-            Facility::Supervisor,
-            &format!(
-                "Starting with {} data plane workers for interface '{}'",
-                num_workers, interface
-            )
-        );
-
-        // Register the default interface as pinned (from CLI)
-        let fanout_group_id = self.get_or_create_interface(&interface, true);
-
-        // Spawn data plane workers for the default interface
-        for core_id in 0..num_workers as u32 {
-            self.spawn_data_plane_for_interface(&interface, core_id, fanout_group_id)
-                .await?;
-        }
-
-        Ok(())
     }
 
     /// Check for exited workers and restart them with exponential backoff
@@ -1515,8 +1477,7 @@ async fn handle_client(
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
-    interface: &str,
-    relay_command_socket_path: PathBuf,
+    _interface: &str, // Unused: workers spawn lazily when rules are added
     control_socket_path: PathBuf,
     master_rules: Arc<Mutex<HashMap<String, ForwardingRule>>>,
     num_workers: Option<usize>,
@@ -1551,32 +1512,14 @@ pub async fn run(
         AsyncConsumer::stderr(ringbuffers_for_consumer).run().await;
     });
 
-    log_info!(
+    log_debug!(
         supervisor_logger,
         Facility::Supervisor,
         &format!(
-            "Detected {} CPU cores, using {} data plane workers",
+            "Detected {} CPU cores, {} workers per interface",
             detected_cores, num_cores
         )
     );
-
-    // Create the relay command socket (not currently used but keep for compatibility)
-    if relay_command_socket_path.exists() {
-        std::fs::remove_file(&relay_command_socket_path)?;
-    }
-    let _relay_command_listener = {
-        let std_listener = std::os::unix::net::UnixListener::bind(&relay_command_socket_path)?;
-        std_listener.set_nonblocking(true)?;
-        tokio::net::UnixListener::from_std(std_listener)?
-    };
-    // Workers run as nobody:nobody, so chown the socket to match
-    const NOBODY_UID: u32 = 65534;
-    const NOBODY_GID: u32 = 65534;
-    nix::unistd::chown(
-        &relay_command_socket_path,
-        Some(Uid::from_raw(NOBODY_UID)),
-        Some(Gid::from_raw(NOBODY_GID)),
-    )?;
 
     // Set up control socket for client connections
     if control_socket_path.exists() {
@@ -1598,17 +1541,20 @@ pub async fn run(
     // With a single worker, PACKET_FANOUT is not needed and can cause issues
     let fanout_group_id = if num_cores > 1 {
         let id = (std::process::id() & 0xFFFF) as u16;
-        log_info!(
+        log_debug!(
             supervisor_logger,
             Facility::Supervisor,
-            &format!("PACKET_FANOUT group ID: {} ({} workers)", id, num_cores)
+            &format!(
+                "PACKET_FANOUT group ID: {} (up to {} workers per interface)",
+                id, num_cores
+            )
         );
         id
     } else {
-        log_info!(
+        log_debug!(
             supervisor_logger,
             Facility::Supervisor,
-            "PACKET_FANOUT disabled (single worker)"
+            "PACKET_FANOUT disabled (single worker mode)"
         );
         0
     };
@@ -1622,8 +1568,6 @@ pub async fn run(
     // Initialize WorkerManager and wrap it in Arc<Mutex<>>
     let worker_manager = {
         let mut manager = WorkerManager::new(
-            interface.to_string(),
-            relay_command_socket_path,
             num_cores,
             supervisor_logger.clone(),
             fanout_group_id,
@@ -1648,12 +1592,20 @@ pub async fn run(
                     manager.ensure_workers_for_interface(&iface, true).await?;
                 }
             } else {
-                // Config provided but no rules - spawn default interface workers
-                manager.spawn_all_initial_workers().await?;
+                // Config provided but no rules - wait for rules to be added dynamically
+                log_info!(
+                    supervisor_logger,
+                    Facility::Supervisor,
+                    "No rules in config, workers will spawn when rules are added"
+                );
             }
         } else {
-            // No config - spawn workers for default interface (backward compat)
-            manager.spawn_all_initial_workers().await?;
+            // No config - wait for rules to be added dynamically
+            log_info!(
+                supervisor_logger,
+                Facility::Supervisor,
+                "No config provided, workers will spawn when rules are added"
+            );
         }
 
         // Send initial ruleset sync to all data plane workers
@@ -1846,7 +1798,7 @@ fn create_af_packet_socket(
 ) -> Result<std::os::fd::OwnedFd> {
     use socket2::{Domain, Protocol, Socket, Type};
 
-    logger.info(
+    logger.debug(
         Facility::Supervisor,
         &format!(
             "Creating AF_PACKET socket for interface {} (fanout_group_id={})",
@@ -1892,7 +1844,7 @@ fn create_af_packet_socket(
                 &mut actual_size as *mut _ as *mut _,
                 &mut len,
             );
-            logger.info(
+            logger.debug(
                 Facility::Supervisor,
                 &format!(
                     "AF_PACKET SO_RCVBUF set to {}KB (requested {}MB)",
@@ -1951,7 +1903,7 @@ fn create_af_packet_socket(
                 ));
             }
         }
-        logger.info(
+        logger.debug(
             Facility::Supervisor,
             &format!(
                 "PACKET_FANOUT configured for {} (group_id={}, mode=CPU)",
@@ -1962,14 +1914,6 @@ fn create_af_packet_socket(
 
     // Set non-blocking
     recv_socket.set_nonblocking(true)?;
-
-    logger.info(
-        Facility::Supervisor,
-        &format!(
-            "AF_PACKET socket created successfully for interface {}",
-            interface_name
-        ),
-    );
 
     // Convert to OwnedFd
     Ok(std::os::fd::OwnedFd::from(recv_socket))

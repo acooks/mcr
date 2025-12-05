@@ -100,7 +100,6 @@ impl McrInstanceBuilder {
 pub struct McrInstance {
     process: Child,
     control_socket: PathBuf,
-    relay_socket: PathBuf,
     log_file: PathBuf,
     interface: Option<String>,
     #[allow(dead_code)]
@@ -118,12 +117,10 @@ impl McrInstance {
         let instance_id = INSTANCE_COUNTER.fetch_add(1, Ordering::SeqCst);
         let pid = std::process::id();
 
-        let relay_socket = PathBuf::from(format!("/tmp/test_relay_{}_{}.sock", pid, instance_id));
         let control_socket = PathBuf::from(format!("/tmp/test_mcr_{}_{}.sock", pid, instance_id));
         let log_file = PathBuf::from(format!("/tmp/test_mcr_{}_{}.log", pid, instance_id));
 
         // Clean up any existing files
-        let _ = std::fs::remove_file(&relay_socket);
         let _ = std::fs::remove_file(&control_socket);
         let _ = std::fs::remove_file(&log_file);
 
@@ -150,8 +147,6 @@ impl McrInstance {
         };
 
         cmd.arg("supervisor")
-            .arg("--relay-command-socket-path")
-            .arg(&relay_socket)
             .arg("--control-socket-path")
             .arg(&control_socket);
 
@@ -237,7 +232,6 @@ impl McrInstance {
         Ok(Self {
             process: child,
             control_socket,
-            relay_socket,
             log_file,
             interface: builder.interface,
             config_file,
@@ -249,12 +243,10 @@ impl McrInstance {
         let instance_id = INSTANCE_COUNTER.fetch_add(1, Ordering::SeqCst);
         let pid = std::process::id();
 
-        let relay_socket = PathBuf::from(format!("/tmp/test_relay_{}_{}.sock", pid, instance_id));
         let control_socket = PathBuf::from(format!("/tmp/test_mcr_{}_{}.sock", pid, instance_id));
         let log_file = PathBuf::from(format!("/tmp/test_mcr_{}_{}.log", pid, instance_id));
 
         // Clean up any existing files
-        let _ = std::fs::remove_file(&relay_socket);
         let _ = std::fs::remove_file(&control_socket);
         let _ = std::fs::remove_file(&log_file);
 
@@ -281,8 +273,6 @@ impl McrInstance {
         };
 
         cmd.arg("supervisor")
-            .arg("--relay-command-socket-path")
-            .arg(&relay_socket)
             .arg("--control-socket-path")
             .arg(&control_socket);
 
@@ -368,7 +358,6 @@ impl McrInstance {
         Ok(Self {
             process: child,
             control_socket,
-            relay_socket,
             log_file,
             interface: builder.interface,
             config_file,
@@ -540,6 +529,5 @@ impl Drop for McrInstance {
 
         // Clean up sockets
         let _ = std::fs::remove_file(&self.control_socket);
-        let _ = std::fs::remove_file(&self.relay_socket);
     }
 }

@@ -19,15 +19,18 @@ async fn test_main_supervisor_command() -> Result<()> {
     Ok(())
 }
 
-/// **Passing Test:** Verifies the data plane worker command runs without error.
+/// **Passing Test:** Verifies the worker command rejects direct invocation.
+///
+/// Workers are spawned by the supervisor via FD passing, not invoked directly.
+/// This test confirms the worker subcommand exists but requires supervisor context.
 #[tokio::test]
 async fn test_main_worker_data_plane_command() -> Result<()> {
     require_root!();
 
+    // Workers receive their command socket via FD passing from the supervisor.
+    // Direct invocation should fail or exit quickly without proper context.
     let mut child = TokioCommand::new(env!("CARGO_BIN_EXE_mcrd"))
         .arg("worker")
-        .arg("--relay-command-socket-path")
-        .arg("/tmp/test_main_dp.sock")
         .arg("--data-plane")
         .arg("--input-interface-name")
         .arg("lo")
