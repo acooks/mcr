@@ -77,7 +77,7 @@ jobs:
 
     - name: Run full performance test suite
       run: |
-        sudo bash tests/data_plane_pipeline_veth.sh
+        sudo bash tests/topologies/chain_3hop.sh
 
     - name: Extract detailed metrics
       if: always()

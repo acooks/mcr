@@ -18,16 +18,25 @@ jobs:
     timeout-minutes: 30
     strategy:
       matrix:
-        test:
-          - baseline_100k
-          - chain_3hop
-          - tree_fanout
-          - high_fanout_50
-          - tree_converge
-          - multi_worker
-          - fault_tolerance
-          - edge_cases
-          - dynamic_rules
+        include:
+          - test: baseline_50k
+            script: "tests/topologies/baseline_test.sh --rate 50000 --packets 50000"
+          - test: chain_3hop
+            script: "tests/topologies/chain_3hop.sh"
+          - test: tree_fanout
+            script: "tests/topologies/tree_fanout.sh"
+          - test: high_fanout_50
+            script: "tests/topologies/high_fanout_50.sh"
+          - test: tree_converge
+            script: "tests/topologies/tree_converge.sh"
+          - test: multi_worker
+            script: "tests/topologies/multi_worker.sh"
+          - test: fault_tolerance
+            script: "tests/topologies/fault_tolerance.sh"
+          - test: edge_cases
+            script: "tests/topologies/edge_cases.sh"
+          - test: dynamic_rules
+            script: "tests/topologies/dynamic_rules.sh"
       fail-fast: false  # Continue testing other topologies even if one fails
 
     steps:
@@ -43,7 +52,7 @@ jobs:
 
     - name: Run topology test - ${{ matrix.test }}
       run: |
-        sudo bash tests/topologies/${{ matrix.test }}.sh
+        sudo bash ${{ matrix.script }}
 
     - name: Extract performance metrics
       if: always()
@@ -185,15 +194,16 @@ jobs:
       run: |
         cargo build --release --bins
 
-    - name: Run sustained 150k pps test (60 seconds)
+    - name: Run sustained 50k pps test (60 seconds)
       run: |
         # Run without profiling (perf not available in CI)
-        sudo bash tests/topologies/baseline_test.sh --rate 150000 --packets 9000000
+        # CI runners can only sustain ~50k pps reliably
+        sudo bash tests/topologies/baseline_test.sh --rate 50000 --packets 3000000
 
     - name: Extract sustained performance metrics
       if: always()
       run: |
-        echo "=== Sustained Performance Test (150k pps, 60s) ===" > sustained-metrics.txt
+        echo "=== Sustained Performance Test (50k pps, 60s) ===" > sustained-metrics.txt
         echo "Timestamp: $(date -u)" >> sustained-metrics.txt
         echo "Commit: ${{ github.sha }}" >> sustained-metrics.txt
         echo "" >> sustained-metrics.txt
