@@ -238,28 +238,21 @@ async fn test_max_workers_spawning() -> Result<()> {
 
     let startup_duration = start_time.elapsed();
     println!(
-        "[TEST] Supervisor started in {:?} with {} workers",
-        startup_duration, num_cpus
+        "[TEST] Supervisor started in {:?} (lazy spawn mode)",
+        startup_duration
     );
-
-    // Wait for supervisor to fully initialize all workers
-    sleep(Duration::from_secs(2)).await;
 
     // Verify we can communicate with the supervisor
     let client = ControlClient::new(mcr.control_socket());
 
-    // Query workers to verify they all spawned successfully
-    let workers = client.list_workers().await?;
-    println!("[TEST] ListWorkers returned {} worker(s)", workers.len());
-
-    // We expect at least the data plane workers (num_cpus) + control plane (1)
-    assert!(
-        !workers.is_empty(),
-        "Should have spawned at least some workers"
+    // Workers spawn lazily when rules are added - verify no workers initially
+    let workers_before = client.list_workers().await?;
+    println!(
+        "[TEST] ListWorkers before adding rule: {} worker(s) (expected: 0 with lazy spawning)",
+        workers_before.len()
     );
 
-    // Verify we can add a rule (tests that workers are functional)
-    // Use empty outputs since this test is about worker spawning, not data plane
+    // Add a rule to trigger worker spawning
     let rule = ForwardingRule {
         rule_id: "test-max-workers".to_string(),
         name: None,
@@ -270,9 +263,22 @@ async fn test_max_workers_spawning() -> Result<()> {
     };
 
     client.add_rule(rule.clone()).await?;
+    println!("[TEST] Rule added, workers should now spawn for interface 'lo'");
+
+    // Wait for workers to spawn
+    sleep(Duration::from_secs(2)).await;
+
+    // Query workers to verify they spawned after adding the rule
+    let workers = client.list_workers().await?;
     println!(
-        "[TEST] Successfully added rule with {} workers active",
-        num_cpus
+        "[TEST] ListWorkers after adding rule: {} worker(s)",
+        workers.len()
+    );
+
+    // With lazy spawning, workers are created when rules are added
+    assert!(
+        !workers.is_empty(),
+        "Should have spawned workers after adding a rule"
     );
 
     // Verify the rule was added
@@ -281,8 +287,8 @@ async fn test_max_workers_spawning() -> Result<()> {
     assert_eq!(rules[0].rule_id, "test-max-workers");
 
     println!(
-        "[TEST] Max workers test PASSED: {} workers spawned and operational",
-        num_cpus
+        "[TEST] Max workers test PASSED: {} workers spawned after rule added",
+        workers.len()
     );
 
     // Cleanup happens automatically when McrInstance is dropped

@@ -89,13 +89,8 @@ fn drop_privileges(uid: Uid, gid: Gid, caps_to_keep: Option<&HashSet<Capability>
     // In this case, we're not actually dropping privileges, so don't try to set capabilities
     // (which requires root privileges)
     if current_uid == uid && current_gid == gid {
-        // Note: Can't use logging here as we may not have initialized it yet
-        eprintln!("[Worker] Already running as nobody, skipping privilege drop");
         return Ok(());
     }
-
-    // Note: Can't use logging here as we may not have initialized it yet
-    eprintln!("[Worker] Dropping privileges to nobody");
 
     // Get the username for initgroups
     let user = nix::unistd::User::from_uid(uid)?
@@ -120,16 +115,10 @@ fn drop_privileges(uid: Uid, gid: Gid, caps_to_keep: Option<&HashSet<Capability>
             caps::raise(None, CapSet::Ambient, *cap)
                 .with_context(|| format!("Failed to raise {:?} in Ambient set", cap))?;
         }
-        // Note: Can't use logging here as we may not have initialized it yet
-        eprintln!(
-            "[Worker] Successfully set capabilities (including Ambient for thread inheritance)"
-        );
     }
 
     // Set the UID last (irreversible)
     nix::unistd::setuid(uid).context("Failed to set UID")?;
-    // Note: Can't use logging here as we may not have initialized it yet
-    eprintln!("[Worker] Successfully dropped privileges");
     Ok(())
 }
 
@@ -216,29 +205,13 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
     // This allows workers to drop ALL privileges after receiving the pre-configured socket.
     // Privilege dropping happens after we receive all FDs from the supervisor.
 
-    // Note: Can't use logging yet as it's not initialized
-    eprintln!(
-        "[DataPlane] Worker process started (will drop privileges after receiving AF_PACKET FD)"
-    );
-
     if let Some(core_id) = config.core_id {
         lifecycle.set_cpu_affinity(core_id as usize)?;
-        // Note: Can't use logging yet as it's not initialized
-        eprintln!(
-            "[DataPlane] Successfully set CPU affinity to core {}",
-            core_id
-        );
     }
 
-    // Phase 2: Pipe-based JSON logging to stderr (shared memory deleted!)
-    let core_id = config.core_id.ok_or_else(|| {
-        eprintln!("[DataPlane] FATAL: core_id is None!");
-        anyhow::anyhow!("Data plane worker requires core_id")
-    })?;
-
-    // Create a simple logger that writes JSON to stderr
-    // (stderr is redirected to pipe by supervisor)
-    use std::io::Write;
+    let core_id = config
+        .core_id
+        .ok_or_else(|| anyhow::anyhow!("Data plane worker requires core_id"))?;
 
     // For testing, use MPSC ring buffer logging
     #[cfg(feature = "testing")]
@@ -255,27 +228,10 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
     #[cfg(not(feature = "testing"))]
     let logger = Logger::stderr_json();
 
-    // Log startup message
-    let log_msg = serde_json::json!({
-        "timestamp": chrono::Utc::now().to_rfc3339(),
-        "level": "INFO",
-        "facility": "DataPlane",
-        "message": format!("Data plane worker started on core {}", core_id),
-        "core_id": core_id
-    });
-    eprintln!("{}", log_msg);
-    std::io::stderr().flush().ok();
-
-    logger.info(
+    logger.debug(
         Facility::DataPlane,
-        &format!("Data plane worker started on core {}", core_id),
+        &format!("Worker started on core {}", core_id),
     );
-
-    eprintln!("[DataPlane] Logged startup message");
-    std::io::stderr().flush().ok();
-
-    eprintln!("[DataPlane] Getting FD 3 from supervisor...");
-    std::io::stderr().flush().ok();
 
     // Get FD 3 from supervisor and set it to non-blocking before wrapping in tokio UnixStream
     let supervisor_sock = unsafe {
@@ -284,23 +240,10 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
         UnixStream::from_std(std_sock)?
     };
 
-    eprintln!("[DataPlane] Receiving ingress command FD...");
-    std::io::stderr().flush().ok();
-
+    // Receive FDs from supervisor
     let ingress_cmd_fd = recv_fd(&supervisor_sock).await?;
-
-    eprintln!("[DataPlane] Receiving egress command FD...");
-    std::io::stderr().flush().ok();
-
     let egress_cmd_fd = recv_fd(&supervisor_sock).await?;
-
-    eprintln!("[DataPlane] Receiving AF_PACKET socket FD...");
-    std::io::stderr().flush().ok();
-
     let af_packet_fd = recv_fd(&supervisor_sock).await?;
-
-    eprintln!("[DataPlane] Got all FDs from supervisor (ingress_cmd, egress_cmd, af_packet)");
-    std::io::stderr().flush().ok();
 
     // Now that we have the pre-configured AF_PACKET socket from the supervisor,
     // we can safely drop all privileges. The socket is already bound to the
@@ -311,8 +254,6 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
     const NOBODY_UID: u32 = 65534;
     const NOBODY_GID: u32 = 65534;
 
-    logger.info(Facility::DataPlane, "Dropping privileges to nobody");
-
     // Drop privileges completely - no capabilities needed since we have the socket FD
     lifecycle.drop_privileges(
         Uid::from_raw(NOBODY_UID),
@@ -320,7 +261,7 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
         None, // No capabilities needed - we have the pre-configured AF_PACKET socket
     )?;
 
-    logger.info(Facility::DataPlane, "Privileges dropped successfully");
+    logger.debug(Facility::DataPlane, "Privileges dropped");
 
     // Create shutdown eventfd for egress (data path wakeup from ingress)
     let egress_shutdown_event_fd = EventFd::from_value_and_flags(0, EfdFlags::EFD_NONBLOCK)
@@ -342,13 +283,7 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
         shutdown_event_fd: egress_shutdown_event_fd,
     };
 
-    eprintln!(
-        "[DataPlane] Channel sets created, calling run_data_plane_task directly (no bridge)..."
-    );
-    std::io::stderr().flush().ok();
-
-    // Call run_data_plane_task directly - no more tokio bridge, no more async wrapper!
-    // This function is synchronous and blocking, which is correct for our io_uring-based design.
+    // Call run_data_plane_task directly - synchronous and blocking (io_uring-based design)
     lifecycle.run_data_plane_task(config, ingress_channels, egress_channels, logger)
 }
 

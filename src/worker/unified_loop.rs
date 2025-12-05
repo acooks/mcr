@@ -209,11 +209,6 @@ impl UnifiedDataPlane {
         af_packet_fd: OwnedFd,
         logger: Logger,
     ) -> Result<Self> {
-        logger.info(
-            Facility::DataPlane,
-            "Creating unified data plane loop with pre-configured AF_PACKET socket",
-        );
-
         // Convert the pre-configured AF_PACKET FD to a Socket
         // SAFETY: The supervisor created and configured this socket, we're taking ownership
         let recv_socket = unsafe { Socket::from_raw_fd(af_packet_fd.into_raw_fd()) };
@@ -383,12 +378,9 @@ impl UnifiedDataPlane {
 
     /// Main event loop
     pub fn run(&mut self) -> Result<()> {
-        self.logger
-            .info(Facility::DataPlane, "Starting unified event loop");
-
         // Pre-post receive buffers
         let initial_recv_count = self.submit_recv_buffers()?;
-        self.logger.info(
+        self.logger.debug(
             Facility::DataPlane,
             &format!("Pre-posted {} recv buffers", initial_recv_count),
         );
@@ -398,7 +390,7 @@ impl UnifiedDataPlane {
             // Check shutdown
             if self.shutdown_requested {
                 self.logger
-                    .info(Facility::DataPlane, "Shutdown requested, draining");
+                    .debug(Facility::DataPlane, "Shutdown requested, draining");
 
                 // Drain send queue
                 while !self.send_queue.is_empty() {
@@ -463,7 +455,7 @@ impl UnifiedDataPlane {
         }
 
         if !completions.is_empty() && self.stats.packets_received < 5 {
-            self.logger.info(
+            self.logger.debug(
                 Facility::DataPlane,
                 &format!("Processing {} completions", completions.len()),
             );
@@ -499,12 +491,12 @@ impl UnifiedDataPlane {
                 match command {
                     crate::RelayCommand::Shutdown => {
                         self.logger
-                            .info(Facility::DataPlane, "Shutdown command received");
+                            .debug(Facility::DataPlane, "Shutdown command received");
                         self.shutdown_requested = true;
                         return Ok(());
                     }
                     crate::RelayCommand::AddRule(rule) => {
-                        self.logger.info(
+                        self.logger.debug(
                             Facility::DataPlane,
                             &format!(
                                 "Adding rule: input={}:{} outputs={}",
@@ -517,7 +509,7 @@ impl UnifiedDataPlane {
 
                         // Log ruleset hash for drift detection
                         let ruleset_hash = crate::compute_ruleset_hash(self.rules.values());
-                        self.logger.info(
+                        self.logger.debug(
                             Facility::DataPlane,
                             &format!(
                                 "Ruleset updated: hash={:016x} rule_count={}",
@@ -528,18 +520,18 @@ impl UnifiedDataPlane {
                     }
                     crate::RelayCommand::RemoveRule { rule_id } => {
                         self.logger
-                            .info(Facility::DataPlane, &format!("Removing rule: {}", rule_id));
+                            .debug(Facility::DataPlane, &format!("Removing rule: {}", rule_id));
 
                         match self.remove_rule(&rule_id) {
                             Ok(()) => {
-                                self.logger.info(
+                                self.logger.debug(
                                     Facility::DataPlane,
                                     &format!("Rule removed successfully: {}", rule_id),
                                 );
 
                                 // Log ruleset hash for drift detection
                                 let ruleset_hash = crate::compute_ruleset_hash(self.rules.values());
-                                self.logger.info(
+                                self.logger.debug(
                                     Facility::DataPlane,
                                     &format!(
                                         "Ruleset updated: hash={:016x} rule_count={}",
@@ -557,7 +549,7 @@ impl UnifiedDataPlane {
                         }
                     }
                     crate::RelayCommand::SyncRules(rules) => {
-                        self.logger.info(
+                        self.logger.debug(
                             Facility::DataPlane,
                             &format!("Synchronizing ruleset with {} rules", rules.len()),
                         );
@@ -566,7 +558,7 @@ impl UnifiedDataPlane {
                             Ok(()) => {
                                 // Log ruleset hash for drift detection
                                 let ruleset_hash = crate::compute_ruleset_hash(self.rules.values());
-                                self.logger.info(
+                                self.logger.debug(
                                     Facility::DataPlane,
                                     &format!(
                                         "Ruleset synchronized: hash={:016x} rule_count={}",
@@ -596,7 +588,7 @@ impl UnifiedDataPlane {
             self.submit_command_read()?;
         } else if result == 0 {
             self.logger
-                .info(Facility::DataPlane, "Command stream closed");
+                .debug(Facility::DataPlane, "Command stream closed");
             self.shutdown_requested = true;
         } else {
             self.logger.error(

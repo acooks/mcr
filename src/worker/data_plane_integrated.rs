@@ -12,7 +12,6 @@ use crate::worker::{
 };
 use crate::DataPlaneConfig;
 use anyhow::Result;
-use std::io::Write;
 
 /// Run unified single-threaded data plane
 ///
@@ -24,11 +23,6 @@ pub fn run_unified_data_plane(
     _egress_channels: EgressChannelSet, // Not used in unified mode
     logger: Logger,
 ) -> Result<()> {
-    eprintln!("[run_unified_data_plane] Entry point reached");
-    std::io::stderr().flush().ok();
-
-    logger.info(Facility::DataPlane, "Unified data plane starting");
-
     // Extract FDs from channel sets
     let cmd_stream_fd = ingress_channels.cmd_stream_fd;
     let af_packet_fd = ingress_channels.af_packet_fd;
@@ -59,11 +53,6 @@ pub fn run_unified_data_plane(
     // Create unified data plane configuration
     let unified_config = UnifiedConfig::default();
 
-    eprintln!(
-        "[run_unified_data_plane] Creating UnifiedDataPlane with pre-configured AF_PACKET socket"
-    );
-    std::io::stderr().flush().ok();
-
     // Create and run unified data plane using the pre-configured AF_PACKET socket
     // from the supervisor (privilege separation - worker doesn't need CAP_NET_RAW)
     let mut unified = UnifiedDataPlane::new_with_socket(
@@ -75,10 +64,7 @@ pub fn run_unified_data_plane(
         logger.clone(),
     )?;
 
-    eprintln!("[run_unified_data_plane] Starting event loop");
-    std::io::stderr().flush().ok();
-
-    logger.info(Facility::DataPlane, "Unified event loop starting");
+    logger.debug(Facility::DataPlane, "Event loop starting");
 
     unified.run()
 }
