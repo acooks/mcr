@@ -140,8 +140,8 @@ log_section 'Validating Results'
 # Calculate thresholds based on packet count
 # MCR-1 ingress: ~10% of packets (conservative for CI)
 # Leaf nodes: ~8% of packets each (lower due to hop)
-MCR1_MIN_INGRESS=\$((PACKET_COUNT * 10 / 100))
-LEAF_MIN_INGRESS=\$((PACKET_COUNT * 8 / 100))
+MCR1_MIN_INGRESS=\$(($PACKET_COUNT * 10 / 100))
+LEAF_MIN_INGRESS=\$(($PACKET_COUNT * 8 / 100))
 
 log_info \"Validation thresholds: MCR-1 ingress min=\$MCR1_MIN_INGRESS, Leaf ingress min=\$LEAF_MIN_INGRESS\"
 

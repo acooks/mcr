@@ -115,9 +115,9 @@ print_final_stats \
 log_section 'Validating Results'
 
 # Calculate thresholds based on packet count (~40% for MCR-1, ~30% for MCR-2/3)
-MCR1_THRESHOLD=\$((PACKET_COUNT * 40 / 100))
-MCR2_THRESHOLD=\$((PACKET_COUNT * 30 / 100))
-MCR3_THRESHOLD=\$((PACKET_COUNT * 30 / 100))
+MCR1_THRESHOLD=\$(($PACKET_COUNT * 40 / 100))
+MCR2_THRESHOLD=\$(($PACKET_COUNT * 30 / 100))
+MCR3_THRESHOLD=\$(($PACKET_COUNT * 30 / 100))
 
 log_info \"Validation thresholds: MCR-1=\$MCR1_THRESHOLD, MCR-2=\$MCR2_THRESHOLD, MCR-3=\$MCR3_THRESHOLD\"
 
