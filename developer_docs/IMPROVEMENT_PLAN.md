@@ -11,7 +11,30 @@ Last updated: December 2025
 
 ---
 
-## HIGH Priority
+## Documentation Improvements
+
+### HIGH Priority
+
+- **Create `user_docs/TROUBLESHOOTING.md`**:
+  - Centralize troubleshooting steps currently scattered across `GUIDE.md`, `OPERATIONAL_GUIDE.md`, and `QUICK_TEST.md`.
+  - Covers: Permission issues (Capabilities), Buffer exhaustion (`buf_exhaust`), Kernel tuning verification, firewall issues.
+- **Document CLI Limitations**:
+  - Explicitly note that `mcrctl add` does not yet support the `--name` flag.
+  - Direct users to use the JSON5 configuration file for named rules.
+
+### MEDIUM Priority
+
+- **Consolidate `user_docs/QUICK_TEST.md`**:
+  - This file is currently an orphan and points to developer scripts.
+  - Action: Merge relevant content into `user_docs/GUIDE.md` under a "Verification" section or move to `developer_docs/testing/`.
+- **Enhance Developer Docs Navigation**:
+  - Update `developer_docs/README.md` to provide better visibility and links to the `developer_docs/testing/` subdirectory.
+- **JSON5 Configuration Reference**:
+  - Create a dedicated section in `REFERENCE.md` defining the full JSON5 schema, including optional fields like `pinning` and `name`, which are currently only shown in examples.
+
+---
+
+## HIGH Priority (Code)
 
 ### Network State Reconciliation
 
@@ -23,7 +46,7 @@ Phase 1 (detection) complete. Phase 2 needs: workers report ruleset hash, superv
 
 ---
 
-## MEDIUM Priority
+## MEDIUM Priority (Code)
 
 ### Dynamic Worker Idle Cleanup
 
@@ -69,9 +92,9 @@ The `--name` option for `mcrctl add` is not yet implemented (TODO in `src/contro
 
 EnableTrace/DisableTrace/GetTrace commands for per-rule debugging.
 
-### Troubleshooting Guide
+### Troubleshooting Guide (See Documentation Section)
 
-Create `user_docs/TROUBLESHOOTING.md` with common errors, permission issues, buffer exhaustion symptoms, performance tuning.
+*Moved to Documentation Improvements section.*
 
 ### Benchmark Implementations
 
@@ -81,7 +104,7 @@ Location: `tests/benchmarks/forwarding_rate.rs` (skeleton with TODOs)
 
 ## Roadmap
 
-**Near-term:** Network reconciliation, Drift recovery
+**Near-term:** Network reconciliation, Drift recovery, Documentation consolidation
 
 **Long-term:** Packet tracing, Benchmarks
 
@@ -89,6 +112,11 @@ Location: `tests/benchmarks/forwarding_rate.rs` (skeleton with TODOs)
 
 ## Completed (December 2025)
 
+- **Documentation Overhaul**:
+  - Restructured User Guide (Prerequisites, Deployment Options).
+  - Clarified "Hybrid Architecture" and VPN support in Reference/Architecture docs.
+  - Added "Log Management" to Operational Guide.
+  - Fixed Markdown linting issues.
 - **Multi-Interface Architecture (Complete)**:
   - JSON5 config file support (`--config`)
   - Interfaces derived from rules in config
