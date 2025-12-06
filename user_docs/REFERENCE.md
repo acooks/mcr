@@ -267,6 +267,15 @@ mcrctl add \
     --outputs <group>:<port>:<interface>[,...]
 ```
 
+**Architecture Note (Republishing vs. Forwarding):**
+Technically, MCR does not "forward" packets in the sense of a router or bridge. Instead, it **republishes** them.
+
+1. **Ingress:** It captures the raw packet from the wire using `AF_PACKET`.
+2. **Process:** It extracts the UDP payload.
+3. **Egress:** It sends a *new* UDP datagram using a standard `AF_INET` socket.
+
+This means the **Linux Kernel handles all routing and encapsulation** for the egress packet. Consequently, MCR supports any output interface the kernel supports, including **VPN tunnels (WireGuard, OpenVPN)**, **VLANs**, and **Unicast destinations**.
+
 **Arguments:**
 
 | Argument | Description |
@@ -298,7 +307,7 @@ mcrctl add --rule-id my-stream --input-interface eth0 \
     --input-group 239.1.1.1 --input-port 5000 --outputs 239.2.2.2:6000:eth1
 ```
 
-#### Flexible Address Support
+#### Flexible Address Support (Unicast & VPNs)
 
 MCR supports any combination of unicast and multicast addresses for both input and output:
 
@@ -307,17 +316,18 @@ MCR supports any combination of unicast and multicast addresses for both input a
 | Standard relay | Multicast | Multicast | Bridge multicast across network segments |
 | Multicast-to-unicast | Multicast | Unicast | Deliver to legacy systems or cloud VPCs |
 | Unicast-to-multicast | Unicast | Multicast | Inject from unicast tunnel into multicast |
-| Unicast-to-unicast | Unicast | Unicast | General packet forwarding |
+| Unicast-to-unicast | Unicast | Unicast | General packet forwarding / UDP Tunnel |
 
-**Multicast-to-Unicast Example:**
+**Multicast-to-Unicast (VPN Injection) Example:**
 
 ```bash
-# Forward multicast 239.1.1.1:5000 to unicast host 10.0.0.100:6000
+# Relay multicast stream into a WireGuard tunnel (wg0)
+# The kernel handles the encryption and routing to the peer (10.100.0.2).
 mcrctl add --input-interface eth0 --input-group 239.1.1.1 \
-    --input-port 5000 --outputs 10.0.0.100:6000:eth1
+    --input-port 5000 --outputs 10.100.0.2:6000:wg0
 ```
 
-**Unicast-to-Multicast Example (tunnel endpoint):**
+**Unicast-to-Multicast (VPN Exit) Example:**
 
 ```bash
 # Receive unicast from tunnel and re-inject to multicast

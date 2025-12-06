@@ -132,11 +132,17 @@ graph TD
 - **Supervisor Process:** The main process that manages workers, handles configuration commands, and centralizes logging and statistics. It runs with privileges but does not handle high-speed packet forwarding.
 - **Worker Processes:** High-performance data plane processes, each pinned to a specific CPU core. They receive, process, and re-transmit all multicast traffic.
 
-## 4. The Data Plane: A Unified, Single-Threaded Architecture
+## 4. The Data Plane: A Unified, Hybrid Architecture
 
-The MCR data plane uses a **single-threaded, unified event loop model**. This eliminates the complexity and performance issues of inter-thread communication. All data plane logic for a given CPU core runs within a single OS thread.
+The MCR data plane uses a **single-threaded, unified event loop model** with a **hybrid networking architecture**. This hybrid approach combines the power of raw sockets for ingress with the flexibility of standard sockets for egress.
 
 **Implementation:** `run_unified_data_plane()` in `src/worker/data_plane_integrated.rs`
+
+- **Hybrid I/O Strategy (Asymmetrical Pipeline):**
+  - **Ingress (Layer 2 - `AF_PACKET`):** Workers indiscriminately capture multicast traffic using raw `AF_PACKET` sockets. This occurs at Layer 2, effectively "sniffing" the wire before the kernel's IP stack can process the packet. This allows MCR to bypass the kernel's Reverse Path Forwarding (RPF) checks, which would otherwise drop traffic from unroutable sources.
+  - **Egress (Layer 3/4 - `AF_INET`/UDP):** Workers transmit packets using standard `SOCK_DGRAM` (UDP) sockets. MCR "republishes" the payload as a new UDP datagram. This allows the application to rely entirely on the Linux kernel for Layer 3 routing, Layer 2 encapsulation (ARP/Neighbor Discovery), and IP fragmentation.
+
+  **Why this matters:** Because the egress path is standard UDP, MCR is fully compatible with any interface the Linux kernel supports, including **VPNs (WireGuard, OpenVPN)**, **Tun/Tap interfaces**, and **cellular/satellite links**, provided the routing table is configured correctly.
 
 - **Core Affinity:** The supervisor spawns one data plane worker process per designated CPU core, and this worker process is pinned to that core.
 

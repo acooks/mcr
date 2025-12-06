@@ -20,14 +20,16 @@ You have a server with two interfaces: `eth0` is on the Media Network, and `eth1
 
 When the server's `eth0` receives the multicast packet, the kernel's RPF check fails. The camera's source IP (`10.10.1.100`) is not routable from `eth1`. The packet is dropped.
 
-## MCR's Solution: Bypassing RPF in Userspace
+## MCR's Solution: Capture and Republish
 
-MCR solves this problem by acting as a userspace relay. It operates at a low level, bypassing the kernel's routing and RPF checks.
+MCR solves this problem by acting as a high-performance **userspace relay**. It uses a hybrid architecture to combine the power of raw sockets with the flexibility of the Linux kernel's routing stack.
 
-1. **Bypasses RPF:** MCR uses a low-level `AF_PACKET` socket to receive raw Ethernet frames directly from the network interface. This occurs _before_ the kernel's IP stack can process them and apply the RPF check. By intervening at Layer 2, MCR ensures packets are not dropped due to routing limitations.
-2. **Re-Transmits Cleanly:** MCR then takes the UDP payload from the packet and re-transmits it as a brand new multicast packet from a different interface. Because MCR originates this new packet, the kernel treats it as legitimate local traffic, and the RPF check does not apply to the re-transmitted packet.
+1. **Ingress (Bypass RPF):** MCR uses a low-level `AF_PACKET` socket to capture raw Ethernet frames directly from the network interface. This "wire-sniffing" occurs _before_ the kernel's IP stack can process the packet and apply the RPF check. By intervening at Layer 2, MCR ensures packets are not dropped due to routing limitations.
+2. **Egress (Republish Cleanly):** MCR extracts the UDP payload and **republishes** it as a new UDP datagram using a standard `AF_INET` socket. Because MCR originates this new packet, the kernel treats it as legitimate local traffic.
 
-This allows MCR to create a clean, one-way bridge for multicast traffic between isolated networks without compromising their security posture. The entire process is optimized for efficiency through the use of Linux's `io_uring` asynchronous I/O interface, minimizing syscall overhead and maximizing throughput.
+**Key Benefit:** By using standard sockets for egress, MCR allows the **Linux kernel to handle all routing, ARP resolution, and encapsulation**. This means MCR can forward multicast traffic into **VPN tunnels (WireGuard, OpenVPN)**, across **VLANs**, or to **unicast destinations**, provided the host's routing table is configured correctly.
+
+This allows MCR to create a clean, one-way bridge for multicast traffic between isolated networks without compromising their security posture. The entire process is optimized for efficiency through the use of Linux's `io_uring` asynchronous I/O interface.
 
 ## Userspace Relay: The Practical Solution
 
@@ -47,6 +49,6 @@ MCR is the superior solution when you need:
 - **High Throughput:** Designed for scenarios demanding high packet rates.
 - **High Density:** To manage dozens or hundreds of concurrent multicast streams efficiently.
 - **Dynamic Reconfiguration:** To add, remove, and manage forwarding rules at runtime without service interruption.
-- **Transparent Operation:** Operates at Layer 2, bypassing complex routing tables and RPF checks.
+- **Protocol Flexibility:** Capable of bridging between raw L2 ingress and standard L3/L4 egress, enabling VPN and unicast support.
 
 For a detailed, technical comparison of the two tools, see the [**MCR vs. socat comparison document**](../developer_docs/comparisons/MCR_vs_socat.md).

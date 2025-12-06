@@ -10,6 +10,16 @@ It is built for engineers who face challenges with kernel-level multicast forwar
 
 ---
 
+## Key Features
+
+- **High Performance:** Built on `io_uring` for asynchronous I/O and zero-copy forwarding, achieving near line-rate speeds.
+- **Bypass RPF Checks:** Captures raw Ethernet frames (`AF_PACKET`) to sidestep kernel routing restrictions.
+- **Flexible Forwarding:** Supports 1-to-1, 1-to-many (fan-out), and multicast-to-unicast (tunneling) scenarios.
+- **Dynamic Control:** Add or remove forwarding rules at runtime via a CLI or JSON5 API without restarting the daemon.
+- **Observability:** specialized "at-a-glance" statistics for monitoring high-throughput flows.
+
+---
+
 ## The Problem MCR Solves
 
 In many modern network environments—such as broadcast media facilities, financial data centers, or complex cloud VPCs—multicast traffic needs to traverse network boundaries that are not cleanly routable. Attempting to forward this traffic with standard routers often fails due to the kernel's strict RPF check, which drops packets that arrive on an interface other than the one the kernel would use to route back to the source.
