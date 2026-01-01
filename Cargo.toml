@@ -35,7 +35,7 @@ tempfile = "3.24.0"
 uuid = { version = "1.19.0", features = ["v4"] }
 wait-timeout = "0.2.1"
 regex = "1.10"
-rtnetlink = "0.19"
+rtnetlink = "0.20"
 futures-util = "0.3"
 mcr-test-macros = { path = "mcr-test-macros" }
 [features]
