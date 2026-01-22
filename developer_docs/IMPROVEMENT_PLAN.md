@@ -13,6 +13,17 @@ Last updated: January 2026
 
 ## Recently Completed
 
+### ✅ Logging Subsystem Cleanup (January 2026)
+
+Removed ~600 lines of dead code and fixed critical log level propagation bug:
+
+- **Dead Code Removal:** Deleted unused `SPSCRingBuffer`, `SharedSPSCRingBuffer`, `BlockingConsumer`, and `SharedBlockingConsumer` types
+- **Log Level Propagation:** Added `RelayCommand::SetLogLevel` to propagate log level changes from supervisor to workers
+- **Logger API:** Added `set_global_level()`, `set_facility_level()`, and `clear_facility_level()` methods to `Logger`
+- **Documentation:** Updated REFERENCE.md with logging facilities table
+
+**Implementation:** `src/logging/`, `src/lib.rs`, `src/supervisor.rs`, `src/worker/unified_loop.rs`
+
 ### ✅ PIM-SM and IGMP Protocol Support (January 2026)
 
 Implemented multicast routing protocol support:
@@ -27,71 +38,15 @@ Implemented multicast routing protocol support:
 
 ---
 
-## CRITICAL: Architectural Defects
-
-### Dynamic Log Levels do not propagate to Workers
-
-**Issue:** The `mcrctl log-level set` command updates the Supervisor's log level configuration, but this state is **not** propagated to the Data Plane workers. Workers run as separate processes with their own isolated `Logger` instances initialized with default levels (Info).
-
-**Impact:** Users cannot debug data plane issues (e.g., packet parsing errors) by raising the log level at runtime.
-
-**Implementation Plan:**
-
-1. Update IPC Protocol (`src/lib.rs`):
-   - Add a new variant to `RelayCommand` enum:
-
-     ```rust
-     SetLogLevel {
-         facility: logging::Facility,
-         level: logging::Severity,
-     }
-     ```
-
-2. Update Supervisor (`src/supervisor.rs`):
-   - In `handle_set_facility_log_level` and `handle_set_global_log_level`, iterate over all active worker channels.
-   - Serialize and send the new `RelayCommand::SetLogLevel` to each worker.
-
-3. Update Worker Loop (`src/worker/unified_loop.rs`):
-   - In `handle_command_completion`, add a match arm for `RelayCommand::SetLogLevel`.
-   - Implement logic to update the worker's local `Logger` instance:
-
-     ```rust
-     // In UnifiedDataPlane struct
-     fn set_log_level(&mut self, facility: Facility, level: Severity) {
-         self.logger.set_facility_level(facility, level);
-     }
-     ```
-
----
-
 ## HIGH: Code Simplification & Performance
 
-### Delete Massive Logging Dead Code
+### Implement Async io_uring Logging (Deferred)
 
-**Analysis:** ~80% of the `src/logging/` module consists of complex, lock-free shared memory ring buffers (`SPSCRingBuffer`, `MPSCRingBuffer`, `SharedSPSCRingBuffer`) that are **never used in production**.
+**Status:** Deferred - not needed for current use cases.
 
-**Implementation Plan:**
+**Rationale:** The worker's hot packet processing path does NOT log. Logging is strategically excluded from performance-critical code. The current `StderrJsonLogger` using `eprintln!()` is acceptable because it's only called during command processing and error handling, not during normal packet forwarding.
 
-1. **Delete Files:**
-   - `src/logging/ringbuffer.rs`
-   - `src/logging/consumer.rs`
-
-2. **Clean up `src/logging/mod.rs`:**
-   - Remove `pub mod ringbuffer;` and `pub mod consumer;`.
-   - Remove re-exports of `SPSCRingBuffer`, `MPSCRingBuffer`, etc.
-
-3. **Update `src/logging/logger.rs`:**
-   - Remove `RingBuffer` trait implementations for the deleted types.
-   - Remove `from_spsc`, `from_mpsc`, `from_shared` constructors.
-   - Keep `Logger`, `LogRegistry` (simplified), and `StderrJsonLogger`.
-
-4. **Fix Tests:**
-   - Remove tests that rely on the deleted ring buffers.
-   - Ensure `examples/logging_demo.rs` is updated or deleted.
-
-### Implement Async io_uring Logging
-
-**Issue:** The current `StderrJsonLogger` uses `eprintln!`, which locks stderr and performs blocking I/O syscalls in the hot data path.
+**Original Issue:** The current `StderrJsonLogger` uses `eprintln!`, which locks stderr and performs blocking I/O syscalls in the hot data path.
 
 **Implementation Plan:**
 
@@ -131,7 +86,7 @@ Implemented multicast routing protocol support:
 
 1. **Update `user_docs/REFERENCE.md`:**
    - **Config Load:** Add documentation for `mcrctl config load <file> --replace`.
-   - **Facilities:** Add a table listing all 12 logging facilities.
+   - ~~**Facilities:** Add a table listing all 12 logging facilities.~~ ✅ Done (January 2026)
    - **Pinning:** Add a formal definition of the `pinning` JSON object.
 
 ### HIGH: User Experience & Troubleshooting

@@ -395,7 +395,27 @@ mcrctl log-level set --global info                # Set global level
 mcrctl log-level set --facility DataPlane --level debug  # Per-facility
 ```
 
-Levels: `emergency`, `alert`, `critical`, `error`, `warning`, `notice`, `info`, `debug`
+**Severity Levels** (from most to least severe):
+`emergency`, `alert`, `critical`, `error`, `warning`, `notice`, `info`, `debug`, `trace`
+
+**Log Level Propagation**: When you change log levels via `mcrctl`, the changes are automatically propagated to all data plane workers. This allows runtime debugging without restarting the service.
+
+**Logging Facilities**:
+
+| Facility | Description |
+|----------|-------------|
+| `Supervisor` | Supervisor core logic, worker lifecycle management |
+| `RuleDispatch` | Rule distribution to workers |
+| `ControlSocket` | Unix domain socket control interface |
+| `DataPlane` | Data plane coordinator/integration |
+| `Ingress` | AF_PACKET receive, packet parsing |
+| `Egress` | UDP transmit via io_uring |
+| `BufferPool` | Buffer allocation/deallocation |
+| `PacketParser` | Packet header parsing |
+| `Stats` | Metrics and monitoring |
+| `Security` | Capabilities, privilege drop, FD passing |
+| `Network` | Socket operations, interface queries |
+| `Test` | Test harness and fixtures |
 
 ### 5.6. Configuration Management
 

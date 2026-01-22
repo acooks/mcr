@@ -1903,7 +1903,10 @@ pub fn handle_supervisor_command(
             global_min_level.store(level as u8, Ordering::Relaxed);
             (
                 Response::Success(format!("Global log level set to {}", level)),
-                CommandAction::None,
+                CommandAction::BroadcastToDataPlane(RelayCommand::SetLogLevel {
+                    facility: None,
+                    level,
+                }),
             )
         }
 
@@ -1911,7 +1914,10 @@ pub fn handle_supervisor_command(
             facility_min_levels.write().unwrap().insert(facility, level);
             (
                 Response::Success(format!("Log level for {} set to {}", facility, level)),
-                CommandAction::None,
+                CommandAction::BroadcastToDataPlane(RelayCommand::SetLogLevel {
+                    facility: Some(facility),
+                    level,
+                }),
             )
         }
 
@@ -4114,7 +4120,13 @@ mod tests {
         );
 
         assert!(matches!(response, crate::Response::Success(_)));
-        assert_eq!(action, CommandAction::None);
+        assert!(matches!(
+            action,
+            CommandAction::BroadcastToDataPlane(RelayCommand::SetLogLevel {
+                facility: None,
+                level: crate::logging::Severity::Debug,
+            })
+        ));
         assert_eq!(
             global_min_level.load(Ordering::Relaxed),
             crate::logging::Severity::Debug as u8
@@ -4145,7 +4157,13 @@ mod tests {
         );
 
         assert!(matches!(response, crate::Response::Success(_)));
-        assert_eq!(action, CommandAction::None);
+        assert!(matches!(
+            action,
+            CommandAction::BroadcastToDataPlane(RelayCommand::SetLogLevel {
+                facility: Some(crate::logging::Facility::Ingress),
+                level: crate::logging::Severity::Debug,
+            })
+        ));
         assert_eq!(
             facility_min_levels
                 .read()

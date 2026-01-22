@@ -594,6 +594,22 @@ impl UnifiedDataPlane {
                         // No action needed - fire-and-forget health check
                         // Worker readiness is indicated by processing this command
                     }
+                    crate::RelayCommand::SetLogLevel { facility, level } => match facility {
+                        None => {
+                            self.logger.set_global_level(level);
+                            self.logger.info(
+                                Facility::DataPlane,
+                                &format!("Global log level set to {:?}", level),
+                            );
+                        }
+                        Some(f) => {
+                            self.logger.set_facility_level(f, level);
+                            self.logger.info(
+                                Facility::DataPlane,
+                                &format!("Log level for {:?} set to {:?}", f, level),
+                            );
+                        }
+                    },
                 }
             }
 

@@ -379,6 +379,12 @@ pub enum RelayCommand {
     Shutdown,
     /// Ping command for readiness check - workers should respond when fully initialized
     Ping,
+    /// Set log level for workers - sent from supervisor when log levels are changed
+    SetLogLevel {
+        /// If None, set global level. If Some(facility), set facility-specific level.
+        facility: Option<logging::Facility>,
+        level: logging::Severity,
+    },
 }
 
 impl RelayCommand {
@@ -389,6 +395,7 @@ impl RelayCommand {
             RelayCommand::SyncRules(_) => None,
             RelayCommand::Shutdown => None,
             RelayCommand::Ping => None,
+            RelayCommand::SetLogLevel { .. } => None,
         }
     }
 }

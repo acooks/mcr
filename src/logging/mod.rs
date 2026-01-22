@@ -14,13 +14,11 @@ mod ringbuffer;
 mod severity;
 
 // Public exports
-pub use consumer::{
-    AsyncConsumer, BlockingConsumer, LogSink, SharedBlockingConsumer, StderrSink, StdoutSink,
-};
+pub use consumer::{AsyncConsumer, LogSink, StderrSink, StdoutSink};
 pub use entry::{KeyValue, LogEntry};
 pub use facility::Facility;
 pub use logger::{LogRegistry, Logger};
-pub use ringbuffer::{MPSCRingBuffer, SPSCRingBuffer};
+pub use ringbuffer::MPSCRingBuffer;
 pub use severity::Severity;
 
 /// Test logging system using MPSC ring buffers

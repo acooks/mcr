@@ -2,7 +2,7 @@
 // Logger and LogRegistry for managing ring buffers
 
 use super::entry::LogEntry;
-use super::ringbuffer::{MPSCRingBuffer, SPSCRingBuffer, SharedSPSCRingBuffer};
+use super::ringbuffer::MPSCRingBuffer;
 use super::{Facility, Severity};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
@@ -19,26 +19,14 @@ pub struct Logger {
     facility_min_levels: Arc<RwLock<std::collections::HashMap<Facility, Severity>>>,
 }
 
-/// Trait to abstract over SPSC and MPSC ring buffers
+/// Trait to abstract over different ring buffer types
 pub trait RingBuffer: Send + Sync {
     fn write(&self, entry: LogEntry);
-}
-
-impl RingBuffer for SPSCRingBuffer {
-    fn write(&self, entry: LogEntry) {
-        SPSCRingBuffer::write(self, entry);
-    }
 }
 
 impl RingBuffer for MPSCRingBuffer {
     fn write(&self, entry: LogEntry) {
         MPSCRingBuffer::write(self, entry);
-    }
-}
-
-impl RingBuffer for SharedSPSCRingBuffer {
-    fn write(&self, entry: LogEntry) {
-        SharedSPSCRingBuffer::write(self, entry);
     }
 }
 
@@ -59,44 +47,12 @@ impl RingBuffer for StderrJsonLogger {
 }
 
 impl Logger {
-    /// Create a new logger from an SPSC ring buffer
-    pub fn from_spsc(
-        ringbuffer: Arc<SPSCRingBuffer>,
-        global_min_level: Arc<AtomicU8>,
-        facility_min_levels: Arc<RwLock<std::collections::HashMap<Facility, Severity>>>,
-    ) -> Self {
-        Self {
-            ringbuffer: ringbuffer as Arc<dyn RingBuffer>,
-            global_min_level,
-            facility_min_levels,
-        }
-    }
-
     /// Create a new logger from an MPSC ring buffer
     pub fn from_mpsc(
         ringbuffer: Arc<MPSCRingBuffer>,
         global_min_level: Arc<AtomicU8>,
         facility_min_levels: Arc<RwLock<std::collections::HashMap<Facility, Severity>>>,
     ) -> Self {
-        Self {
-            ringbuffer: ringbuffer as Arc<dyn RingBuffer>,
-            global_min_level,
-            facility_min_levels,
-        }
-    }
-
-    /// Create a new logger from a shared SPSC ring buffer
-    ///
-    /// This is used for cross-process logging where the worker writes to
-    /// shared memory and the supervisor reads. Log level filtering is disabled
-    /// in this mode (all messages are written).
-    pub fn from_shared(ringbuffer: Arc<SharedSPSCRingBuffer>) -> Self {
-        // For cross-process logging, use Trace (lowest filtering)
-        // to ensure all messages are written to shared memory.
-        // The supervisor will handle filtering when reading.
-        let global_min_level = Arc::new(AtomicU8::new(Severity::Trace as u8));
-        let facility_min_levels = Arc::new(RwLock::new(std::collections::HashMap::new()));
-
         Self {
             ringbuffer: ringbuffer as Arc<dyn RingBuffer>,
             global_min_level,
@@ -221,6 +177,24 @@ impl Logger {
     pub fn trace(&self, facility: Facility, message: &str) {
         self.log(Severity::Trace, facility, message);
     }
+
+    /// Set the global minimum log level
+    pub fn set_global_level(&self, level: Severity) {
+        self.global_min_level.store(level as u8, Ordering::Relaxed);
+    }
+
+    /// Set the minimum log level for a specific facility
+    pub fn set_facility_level(&self, facility: Facility, level: Severity) {
+        self.facility_min_levels
+            .write()
+            .unwrap()
+            .insert(facility, level);
+    }
+
+    /// Clear the facility-specific log level (fall back to global)
+    pub fn clear_facility_level(&self, facility: Facility) {
+        self.facility_min_levels.write().unwrap().remove(&facility);
+    }
 }
 
 impl Clone for Logger {
@@ -245,8 +219,6 @@ pub struct LogRegistry {
     facility_min_levels: Arc<RwLock<std::collections::HashMap<Facility, Severity>>>,
     /// MPSC ring buffers (stored separately for export)
     mpsc_ringbuffers: Vec<(Facility, Arc<MPSCRingBuffer>)>,
-    /// SPSC ring buffers (stored separately for export)
-    spsc_ringbuffers: Vec<(Facility, Arc<SPSCRingBuffer>)>,
 }
 
 impl LogRegistry {
@@ -292,49 +264,6 @@ impl LogRegistry {
             global_min_level,
             facility_min_levels,
             mpsc_ringbuffers,
-            spsc_ringbuffers: Vec::new(),
-        }
-    }
-
-    /// Create a new LogRegistry with SPSC ring buffers for data plane
-    ///
-    /// Use this for data plane workers (single thread, single writer)
-    pub fn new_spsc(core_id: u8) -> Self {
-        let mut loggers = std::collections::HashMap::new();
-        let mut spsc_ringbuffers = Vec::new();
-
-        // Initialize shared filtering state (default: Info level = 6)
-        let global_min_level = Arc::new(AtomicU8::new(Severity::Info as u8));
-        let facility_min_levels = Arc::new(RwLock::new(std::collections::HashMap::new()));
-
-        // Create SPSC ring buffers for data plane facilities
-        for facility in [
-            Facility::DataPlane,
-            Facility::Ingress,
-            Facility::Egress,
-            Facility::BufferPool,
-            Facility::PacketParser,
-            Facility::Stats,
-            Facility::Network,
-            Facility::Test,
-        ] {
-            let capacity = facility.buffer_size();
-            let ringbuffer = Arc::new(SPSCRingBuffer::new(capacity, core_id));
-            let logger = Logger::from_spsc(
-                Arc::clone(&ringbuffer),
-                Arc::clone(&global_min_level),
-                Arc::clone(&facility_min_levels),
-            );
-            loggers.insert(facility, logger);
-            spsc_ringbuffers.push((facility, ringbuffer));
-        }
-
-        Self {
-            loggers,
-            global_min_level,
-            facility_min_levels,
-            mpsc_ringbuffers: Vec::new(),
-            spsc_ringbuffers,
         }
     }
 
@@ -409,24 +338,8 @@ impl LogRegistry {
     ///
     /// # Returns
     /// Vector of (Facility, Arc<MPSCRingBuffer>) pairs for consumption.
-    /// Returns an empty vector if this registry was created with new_spsc().
     pub fn export_mpsc_ringbuffers(&self) -> Vec<(Facility, Arc<MPSCRingBuffer>)> {
         self.mpsc_ringbuffers
-            .iter()
-            .map(|(facility, rb)| (*facility, Arc::clone(rb)))
-            .collect()
-    }
-
-    /// Export SPSC ring buffers for data plane workers
-    ///
-    /// This is used to pass data plane worker ring buffers to the
-    /// supervisor's central consumer.
-    ///
-    /// # Returns
-    /// Vector of (Facility, Arc<SPSCRingBuffer>) pairs for consumption.
-    /// Returns an empty vector if this registry was created with new_mpsc().
-    pub fn export_spsc_ringbuffers(&self) -> Vec<(Facility, Arc<SPSCRingBuffer>)> {
-        self.spsc_ringbuffers
             .iter()
             .map(|(facility, rb)| (*facility, Arc::clone(rb)))
             .collect()
@@ -480,14 +393,6 @@ mod tests {
 
         let logger = registry.get(Facility::Ingress).unwrap();
         logger.debug(Facility::Ingress, "Ingress debug");
-    }
-
-    #[test]
-    fn test_log_registry_spsc() {
-        let registry = LogRegistry::new_spsc(0);
-
-        let logger = registry.get(Facility::DataPlane).unwrap();
-        logger.info(Facility::DataPlane, "Data plane message");
     }
 
     #[test]
@@ -701,5 +606,72 @@ mod tests {
 
         // Should have 2 entries (Info and Notice, but not Debug)
         assert_eq!(count, 2, "Expected 2 log entries at and above Info level");
+    }
+
+    #[test]
+    fn test_logger_set_global_level() {
+        let ringbuffer = Arc::new(MPSCRingBuffer::new(16));
+        let global_min_level = Arc::new(AtomicU8::new(Severity::Info as u8));
+        let facility_min_levels = Arc::new(RwLock::new(std::collections::HashMap::new()));
+        let logger = Logger::from_mpsc(
+            Arc::clone(&ringbuffer),
+            global_min_level,
+            facility_min_levels,
+        );
+
+        // Initially Info level - debug should be filtered
+        logger.debug(Facility::Test, "Debug before level change");
+
+        // Change to Debug level
+        logger.set_global_level(Severity::Debug);
+
+        // Now debug should pass
+        logger.debug(Facility::Test, "Debug after level change");
+
+        let mut count = 0;
+        while ringbuffer.read().is_some() {
+            count += 1;
+        }
+
+        // Should have 1 entry (only the one after level change)
+        assert_eq!(count, 1, "Expected 1 log entry after level change");
+    }
+
+    #[test]
+    fn test_logger_set_facility_level() {
+        let ringbuffer = Arc::new(MPSCRingBuffer::new(16));
+        let global_min_level = Arc::new(AtomicU8::new(Severity::Warning as u8));
+        let facility_min_levels = Arc::new(RwLock::new(std::collections::HashMap::new()));
+        let logger = Logger::from_mpsc(
+            Arc::clone(&ringbuffer),
+            global_min_level,
+            facility_min_levels,
+        );
+
+        // Global is Warning - Info should be filtered
+        logger.info(Facility::Test, "Info before facility override");
+
+        // Set Test facility to Debug
+        logger.set_facility_level(Facility::Test, Severity::Debug);
+
+        // Now Info should pass for Test facility
+        logger.info(Facility::Test, "Info after facility override");
+
+        // Clear facility level
+        logger.clear_facility_level(Facility::Test);
+
+        // Info should be filtered again
+        logger.info(Facility::Test, "Info after clearing override");
+
+        let mut count = 0;
+        while ringbuffer.read().is_some() {
+            count += 1;
+        }
+
+        // Should have 1 entry (only the one with facility override active)
+        assert_eq!(
+            count, 1,
+            "Expected 1 log entry when facility override was active"
+        );
     }
 }
