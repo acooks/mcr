@@ -36,6 +36,19 @@ Implemented multicast routing protocol support:
 
 **Implementation:** `src/protocols/`, `src/mroute.rs`, protocol integration in `src/supervisor.rs`
 
+### ✅ IGMP-PIM Integration (January 2026)
+
+Completed the IGMP-MRIB integration to merge IGMP-learned interfaces into forwarding rules:
+
+- **Static Rule Merging:** IGMP-learned interfaces are added to static rule outputs for matching groups
+- **PIM Route Merging:** IGMP-learned interfaces are added as downstream interfaces on (*,G) and (S,G) routes
+- **Loop Prevention:** Input interfaces are not added as outputs; upstream interfaces are not added as downstream
+- **Duplicate Prevention:** Existing outputs are not duplicated when merging IGMP interfaces
+
+This enables automatic fanout: when hosts join a multicast group via IGMP, their interfaces are automatically added to the forwarding path.
+
+**Implementation:** `src/mroute.rs` (`compile_forwarding_rules()` method)
+
 ---
 
 ## HIGH: Code Simplification & Performance

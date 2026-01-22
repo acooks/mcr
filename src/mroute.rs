@@ -349,26 +349,77 @@ impl MulticastRib {
     pub fn compile_forwarding_rules(&self) -> Vec<ForwardingRule> {
         let mut rules = Vec::new();
 
-        // 1. Add all static rules (highest priority)
-        for rule in self.static_rules.values() {
-            rules.push(rule.clone());
+        // Build a map of group -> IGMP-learned interfaces for efficient lookup
+        let mut igmp_interfaces_by_group: HashMap<Ipv4Addr, HashSet<String>> = HashMap::new();
+        for (interface, groups) in &self.igmp_membership {
+            for group in groups.keys() {
+                igmp_interfaces_by_group
+                    .entry(*group)
+                    .or_default()
+                    .insert(interface.clone());
+            }
         }
 
-        // 2. Add PIM (S,G) routes
+        // 1. Add all static rules, merging IGMP interfaces into outputs
+        for rule in self.static_rules.values() {
+            let mut rule = rule.clone();
+
+            // Check if there are IGMP-learned interfaces for this group
+            if let Some(igmp_interfaces) = igmp_interfaces_by_group.get(&rule.input_group) {
+                // Add IGMP interfaces that aren't already in outputs
+                for igmp_iface in igmp_interfaces {
+                    // Don't add the input interface as an output (would create a loop)
+                    if igmp_iface == &rule.input_interface {
+                        continue;
+                    }
+
+                    // Check if this interface is already in outputs
+                    let already_present = rule
+                        .outputs
+                        .iter()
+                        .any(|o| &o.interface == igmp_iface && o.group == rule.input_group);
+
+                    if !already_present {
+                        rule.outputs.push(OutputDestination {
+                            group: rule.input_group,
+                            port: rule.input_port,
+                            interface: igmp_iface.clone(),
+                        });
+                    }
+                }
+            }
+
+            rules.push(rule);
+        }
+
+        // 2. Add PIM (S,G) routes, merging IGMP interfaces
         // These are source-specific and don't conflict with static rules
         // (static rules typically don't have input_source set)
         for sg_route in self.sg_routes.values() {
             // Use the upstream interface as input, if set
             if let Some(ref upstream) = sg_route.upstream_interface {
+                // Create a mutable copy to merge IGMP interfaces
+                let mut route = sg_route.clone();
+
+                // Add IGMP-learned interfaces for this group
+                if let Some(igmp_interfaces) = igmp_interfaces_by_group.get(&route.group) {
+                    for igmp_iface in igmp_interfaces {
+                        // Don't add the upstream interface as downstream
+                        if igmp_iface != upstream {
+                            route.downstream_interfaces.insert(igmp_iface.clone());
+                        }
+                    }
+                }
+
                 // For now, use port 0 as placeholder - will be refined when
                 // we integrate with actual PIM state machine
                 let port = 0;
-                let mut sg_rules = sg_route.to_forwarding_rules(upstream, port);
+                let mut sg_rules = route.to_forwarding_rules(upstream, port);
                 rules.append(&mut sg_rules);
             }
         }
 
-        // 3. Add PIM (*,G) routes where no static rule conflicts
+        // 3. Add PIM (*,G) routes where no static rule conflicts, merging IGMP interfaces
         for star_g_route in self.star_g_routes.values() {
             // Skip if there's a static rule for this group
             if self.has_static_rule_for_group(star_g_route.group) {
@@ -376,17 +427,30 @@ impl MulticastRib {
             }
 
             if let Some(ref upstream) = star_g_route.upstream_interface {
+                // Create a mutable copy to merge IGMP interfaces
+                let mut route = star_g_route.clone();
+
+                // Add IGMP-learned interfaces for this group
+                if let Some(igmp_interfaces) = igmp_interfaces_by_group.get(&route.group) {
+                    for igmp_iface in igmp_interfaces {
+                        // Don't add the upstream interface as downstream
+                        if igmp_iface != upstream {
+                            route.downstream_interfaces.insert(igmp_iface.clone());
+                        }
+                    }
+                }
+
                 let port = 0;
-                let mut star_g_rules = star_g_route.to_forwarding_rules(upstream, port);
+                let mut star_g_rules = route.to_forwarding_rules(upstream, port);
                 rules.append(&mut star_g_rules);
             }
         }
 
-        // 4. TODO: Merge IGMP membership with existing rules
-        // For each (interface, group) with IGMP membership:
-        // - If there's a static rule, add IGMP interface to outputs
-        // - If there's a PIM route, add IGMP interface to outputs
-        // - If neither, create a new rule (requires upstream configuration)
+        // Note: IGMP membership without a matching static rule or PIM route is not
+        // converted to forwarding rules here. Such "orphan" IGMP state would require
+        // upstream routing configuration (e.g., PIM join towards RP) to be useful,
+        // which is handled separately by the PIM state machine when it observes
+        // new IGMP memberships.
 
         rules
     }
@@ -724,5 +788,202 @@ mod tests {
         // Expired should be gone, valid should remain
         assert!(!mrib.igmp_membership.contains_key("eth0"));
         assert!(mrib.igmp_membership.contains_key("eth1"));
+    }
+
+    #[test]
+    fn test_igmp_merged_into_static_rule() {
+        let mut mrib = MulticastRib::new();
+
+        // Add a static rule for group 239.1.1.1 with output to eth1
+        mrib.add_static_rule(create_test_static_rule("rule1", "eth0", "239.1.1.1", 5000));
+
+        // Add IGMP membership for the same group on eth2
+        let membership = IgmpMembership {
+            group: "239.1.1.1".parse().unwrap(),
+            expires_at: Instant::now() + std::time::Duration::from_secs(260),
+            last_reporter: None,
+        };
+        mrib.add_igmp_membership("eth2", "239.1.1.1".parse().unwrap(), membership);
+
+        // Compile rules - should include eth2 in outputs
+        let rules = mrib.compile_forwarding_rules();
+        assert_eq!(rules.len(), 1);
+
+        let rule = &rules[0];
+        assert_eq!(rule.outputs.len(), 2); // eth1 (static) + eth2 (IGMP)
+
+        let output_interfaces: HashSet<&str> =
+            rule.outputs.iter().map(|o| o.interface.as_str()).collect();
+        assert!(output_interfaces.contains("eth1"));
+        assert!(output_interfaces.contains("eth2"));
+    }
+
+    #[test]
+    fn test_igmp_not_added_as_output_on_input_interface() {
+        let mut mrib = MulticastRib::new();
+
+        // Add a static rule for group 239.1.1.1 on eth0 -> eth1
+        mrib.add_static_rule(create_test_static_rule("rule1", "eth0", "239.1.1.1", 5000));
+
+        // Add IGMP membership on the INPUT interface (eth0) - should NOT be added as output
+        let membership = IgmpMembership {
+            group: "239.1.1.1".parse().unwrap(),
+            expires_at: Instant::now() + std::time::Duration::from_secs(260),
+            last_reporter: None,
+        };
+        mrib.add_igmp_membership("eth0", "239.1.1.1".parse().unwrap(), membership);
+
+        // Compile rules - eth0 should NOT be in outputs (would create loop)
+        let rules = mrib.compile_forwarding_rules();
+        assert_eq!(rules.len(), 1);
+
+        let rule = &rules[0];
+        assert_eq!(rule.outputs.len(), 1); // Only eth1, not eth0
+        assert_eq!(rule.outputs[0].interface, "eth1");
+    }
+
+    #[test]
+    fn test_igmp_not_duplicated_in_static_rule() {
+        let mut mrib = MulticastRib::new();
+
+        // Add a static rule that already outputs to eth1
+        mrib.add_static_rule(create_test_static_rule("rule1", "eth0", "239.1.1.1", 5000));
+
+        // Add IGMP membership on eth1 (same as existing output)
+        let membership = IgmpMembership {
+            group: "239.1.1.1".parse().unwrap(),
+            expires_at: Instant::now() + std::time::Duration::from_secs(260),
+            last_reporter: None,
+        };
+        mrib.add_igmp_membership("eth1", "239.1.1.1".parse().unwrap(), membership);
+
+        // Compile rules - should NOT duplicate eth1
+        let rules = mrib.compile_forwarding_rules();
+        assert_eq!(rules.len(), 1);
+
+        let rule = &rules[0];
+        assert_eq!(rule.outputs.len(), 1); // Still just one output
+        assert_eq!(rule.outputs[0].interface, "eth1");
+    }
+
+    #[test]
+    fn test_igmp_merged_into_star_g_route() {
+        let mut mrib = MulticastRib::new();
+
+        // Add a (*,G) route with eth1 as downstream
+        let mut route = StarGRoute::new("239.2.2.2".parse().unwrap(), "10.0.0.1".parse().unwrap());
+        route.upstream_interface = Some("eth0".to_string());
+        route.add_downstream("eth1");
+        mrib.add_star_g_route(route);
+
+        // Add IGMP membership on eth2
+        let membership = IgmpMembership {
+            group: "239.2.2.2".parse().unwrap(),
+            expires_at: Instant::now() + std::time::Duration::from_secs(260),
+            last_reporter: None,
+        };
+        mrib.add_igmp_membership("eth2", "239.2.2.2".parse().unwrap(), membership);
+
+        // Compile rules - should include both eth1 and eth2 as outputs
+        let rules = mrib.compile_forwarding_rules();
+        assert_eq!(rules.len(), 1);
+
+        let rule = &rules[0];
+        assert_eq!(rule.outputs.len(), 2);
+
+        let output_interfaces: HashSet<&str> =
+            rule.outputs.iter().map(|o| o.interface.as_str()).collect();
+        assert!(output_interfaces.contains("eth1"));
+        assert!(output_interfaces.contains("eth2"));
+    }
+
+    #[test]
+    fn test_igmp_merged_into_sg_route() {
+        let mut mrib = MulticastRib::new();
+
+        // Add an (S,G) route with eth1 as downstream
+        let mut route = SGRoute::new("10.0.0.5".parse().unwrap(), "239.3.3.3".parse().unwrap());
+        route.upstream_interface = Some("eth0".to_string());
+        route.add_downstream("eth1");
+        mrib.add_sg_route(route);
+
+        // Add IGMP membership on eth2
+        let membership = IgmpMembership {
+            group: "239.3.3.3".parse().unwrap(),
+            expires_at: Instant::now() + std::time::Duration::from_secs(260),
+            last_reporter: None,
+        };
+        mrib.add_igmp_membership("eth2", "239.3.3.3".parse().unwrap(), membership);
+
+        // Compile rules - should include both eth1 and eth2 as outputs
+        let rules = mrib.compile_forwarding_rules();
+        assert_eq!(rules.len(), 1);
+
+        let rule = &rules[0];
+        assert_eq!(rule.outputs.len(), 2);
+
+        let output_interfaces: HashSet<&str> =
+            rule.outputs.iter().map(|o| o.interface.as_str()).collect();
+        assert!(output_interfaces.contains("eth1"));
+        assert!(output_interfaces.contains("eth2"));
+    }
+
+    #[test]
+    fn test_igmp_not_added_to_upstream_interface() {
+        let mut mrib = MulticastRib::new();
+
+        // Add a (*,G) route with eth0 as upstream
+        let mut route = StarGRoute::new("239.2.2.2".parse().unwrap(), "10.0.0.1".parse().unwrap());
+        route.upstream_interface = Some("eth0".to_string());
+        route.add_downstream("eth1");
+        mrib.add_star_g_route(route);
+
+        // Add IGMP membership on upstream interface (eth0) - should NOT be added as downstream
+        let membership = IgmpMembership {
+            group: "239.2.2.2".parse().unwrap(),
+            expires_at: Instant::now() + std::time::Duration::from_secs(260),
+            last_reporter: None,
+        };
+        mrib.add_igmp_membership("eth0", "239.2.2.2".parse().unwrap(), membership);
+
+        // Compile rules - eth0 should NOT be in outputs
+        let rules = mrib.compile_forwarding_rules();
+        assert_eq!(rules.len(), 1);
+
+        let rule = &rules[0];
+        assert_eq!(rule.outputs.len(), 1); // Only eth1
+        assert_eq!(rule.outputs[0].interface, "eth1");
+    }
+
+    #[test]
+    fn test_igmp_multiple_interfaces_merged() {
+        let mut mrib = MulticastRib::new();
+
+        // Add a static rule
+        mrib.add_static_rule(create_test_static_rule("rule1", "eth0", "239.1.1.1", 5000));
+
+        // Add IGMP membership on multiple interfaces
+        for iface in ["eth2", "eth3", "eth4"] {
+            let membership = IgmpMembership {
+                group: "239.1.1.1".parse().unwrap(),
+                expires_at: Instant::now() + std::time::Duration::from_secs(260),
+                last_reporter: None,
+            };
+            mrib.add_igmp_membership(iface, "239.1.1.1".parse().unwrap(), membership);
+        }
+
+        // Compile rules - should have 4 outputs (eth1 static + eth2,eth3,eth4 from IGMP)
+        let rules = mrib.compile_forwarding_rules();
+        assert_eq!(rules.len(), 1);
+
+        let rule = &rules[0];
+        assert_eq!(rule.outputs.len(), 4);
+
+        let output_interfaces: HashSet<&str> =
+            rule.outputs.iter().map(|o| o.interface.as_str()).collect();
+        assert!(output_interfaces.contains("eth1"));
+        assert!(output_interfaces.contains("eth2"));
+        assert!(output_interfaces.contains("eth3"));
+        assert!(output_interfaces.contains("eth4"));
     }
 }
