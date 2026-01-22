@@ -16,7 +16,8 @@ It is built for engineers who face challenges with kernel-level multicast forwar
 - **Bypass RPF Checks:** Captures raw Ethernet frames (`AF_PACKET`) to sidestep kernel routing restrictions.
 - **Flexible Forwarding:** Supports 1-to-1, 1-to-many (fan-out), and multicast-to-unicast (tunneling) scenarios.
 - **Dynamic Control:** Add or remove forwarding rules at runtime via a CLI or JSON5 API without restarting the daemon.
-- **Observability:** specialized "at-a-glance" statistics for monitoring high-throughput flows.
+- **Protocol Support:** IGMPv2 querier for group membership tracking and PIM-SM for dynamic multicast routing.
+- **Observability:** Specialized "at-a-glance" statistics for monitoring high-throughput flows.
 
 ---
 
@@ -77,6 +78,11 @@ sudo ./target/release/mcrd supervisor
 # Check status
 ./target/release/mcrctl list
 ./target/release/mcrctl stats
+
+# View protocol state (when PIM/IGMP enabled)
+./target/release/mcrctl pim neighbors
+./target/release/mcrctl igmp groups
+./target/release/mcrctl mroute
 ```
 
 For detailed usage, see the [User Guide](./user_docs/GUIDE.md).

@@ -1,6 +1,6 @@
 # Project Improvement Plan
 
-Last updated: December 2025
+Last updated: January 2026
 
 ## Priority Legend
 
@@ -8,6 +8,22 @@ Last updated: December 2025
 - **HIGH** - Significant impact on maintainability or user experience
 - **MEDIUM** - Quality improvements, technical debt
 - **LOW** - Nice-to-have, future enhancements
+
+---
+
+## Recently Completed
+
+### ✅ PIM-SM and IGMP Protocol Support (January 2026)
+
+Implemented multicast routing protocol support:
+
+- **IGMPv2 Querier:** Querier election, group membership tracking, RFC 2236 timers
+- **PIM-SM:** Neighbor discovery, DR election, (*,G) and (S,G) state machines
+- **Multicast RIB:** Unified abstraction merging static rules with protocol-learned routes
+- **Per-interface Rule Filtering:** Rules synced to workers based on their interface
+- **CLI Commands:** `mcrctl pim neighbors`, `mcrctl igmp groups`, `mcrctl mroute`
+
+**Implementation:** `src/protocols/`, `src/mroute.rs`, protocol integration in `src/supervisor.rs`
 
 ---
 

@@ -36,6 +36,10 @@ This document describes both **current implementation** and **target architectur
 - Periodic health checks (250ms with auto-restart + SyncRules)
 - Protocol versioning (PROTOCOL_VERSION, GetVersion command)
 - Data plane worker privilege dropping (AF_PACKET FD passing via SCM_RIGHTS)
+- IGMPv2 querier with group membership tracking (RFC 2236)
+- PIM-SM state machine with neighbor discovery and DR election (RFC 7761 subset)
+- Multicast RIB merging static rules with protocol-learned routes
+- Per-interface rule filtering for data plane workers
 
 **⚠️ Partially Implemented:**
 
@@ -235,7 +239,107 @@ The control interface provides runtime configuration and monitoring. The supervi
   - **Rule Resynchronization:** When workers restart, the supervisor sends a `SyncRules` command with the complete ruleset. Periodic health checks (every 250ms) detect dead workers and trigger automatic restart with rule resync.
   - **Drift Detection:** Hash-based drift detection enables manual detection of workers with stale rulesets by comparing hash values in log output. Each component (supervisor, workers) logs a hash of its ruleset when rules change.
 
-## 6. Monitoring and Hotspot Strategy
+## 6. Protocol Subsystem (IGMP and PIM-SM)
+
+MCR includes optional support for multicast routing protocols, transforming it from a pure static relay into a multicast router capable of learning routes dynamically.
+
+### Design Principles
+
+- **State Machines in Supervisor:** IGMP and PIM state machines run in the supervisor process, not workers. This centralizes protocol state (neighbor tables, group membership, routing entries) while keeping workers as stateless relay engines.
+- **Raw Sockets for Protocol Packets:** The supervisor uses raw IP sockets (protocol 2 for IGMP, protocol 103 for PIM) to send and receive control plane packets.
+- **Unified Multicast RIB:** A `MulticastRib` abstraction merges static rules (from config/CLI) with protocol-learned routes (from IGMP/PIM). This ensures both coexist with union semantics.
+
+### Architecture
+
+```text
+┌─────────────────────────────────────────────────────────────┐
+│                      Supervisor                              │
+│  ┌─────────────┐  ┌─────────────┐  ┌──────────────────────┐ │
+│  │ IGMP FSM    │  │ PIM-SM FSM  │  │ Multicast RIB        │ │
+│  │ (per-iface) │  │ (global)    │  │ (*,G) and (S,G)      │ │
+│  └──────┬──────┘  └──────┬──────┘  └──────────┬───────────┘ │
+│         │                │                    │              │
+│         └────────────────┴────────────────────┘              │
+│                          │                                   │
+│              ┌───────────▼───────────┐                       │
+│              │  Forwarding Rules     │                       │
+│              │  (per-interface sync) │                       │
+│              └───────────────────────┘                       │
+└──────────────────────────┬──────────────────────────────────┘
+                           │ IPC (RelayCommand::SyncRules)
+         ┌─────────────────┼─────────────────┐
+         ▼                 ▼                 ▼
+    ┌─────────┐       ┌─────────┐       ┌─────────┐
+    │ Worker 0│       │ Worker 1│       │ Worker N│
+    │ (relay) │       │ (relay) │       │ (relay) │
+    └─────────┘       └─────────┘       └─────────┘
+```
+
+### IGMP Querier (RFC 2236)
+
+When configured, MCR acts as an IGMPv2 querier on specified interfaces:
+
+- **Querier Election:** Lower IP address wins. MCR tracks other queriers and yields if a lower-IP querier is detected.
+- **Group Membership Tracking:** Maintains per-interface group membership with RFC-compliant timers.
+- **Timer Defaults:** Query interval 125s, query response interval 10s, robustness 2.
+
+### PIM-SM (RFC 7761 Subset)
+
+MCR implements a subset of PIM Sparse Mode for dynamic multicast routing:
+
+- **Neighbor Discovery:** Sends periodic Hello messages (30s interval) and maintains neighbor table.
+- **DR Election:** Highest priority wins, then highest IP as tiebreaker.
+- **(*,G) Shared Trees:** Tracks shared tree state with upstream/downstream interfaces.
+- **(S,G) Shortest-Path Trees:** Tracks source-specific tree state for SPT switchover.
+- **Static RP Only:** RP address is statically configured; BSR/Auto-RP not implemented.
+
+### Rule Merging (Union Semantics)
+
+Static rules and protocol-learned routes are merged using union semantics:
+
+| Scenario | Resolution |
+|----------|------------|
+| Static rule + IGMP membership | Union: Static outputs + IGMP-joined interfaces |
+| Static rule + PIM (*,G) | Union: Static outputs + PIM downstream interfaces |
+| PIM (*,G) + (S,G) | (S,G) is more specific for that source |
+
+### Configuration
+
+Protocol support is configured in JSON5:
+
+```json5
+{
+  rules: [...],  // Static forwarding rules
+
+  pim: {
+    enabled: true,
+    router_id: "10.0.0.1",
+    interfaces: [
+      { name: "eth0", dr_priority: 100 }
+    ],
+    static_rp: [
+      { group: "239.0.0.0/8", rp: "10.0.0.1" }
+    ],
+    rp_address: "10.0.0.1"  // We are the RP
+  },
+
+  igmp: {
+    querier_interfaces: ["eth0", "eth1"],
+    query_interval: 125,
+    robustness: 2
+  }
+}
+```
+
+### CLI Commands
+
+```bash
+mcrctl pim neighbors           # Show PIM neighbor table
+mcrctl igmp groups             # Show IGMP group membership
+mcrctl mroute                  # Show multicast routing table
+```
+
+## 7. Monitoring and Hotspot Strategy
 
 - **Hotspot Management (Observe, Don't Act):** The initial design will not implement an automatic hotspot mitigation strategy. Instead, it will rely on a robust, **core-aware monitoring system** to make any potential single-core saturation observable to the operator.
 
@@ -254,13 +358,13 @@ The control interface provides runtime configuration and monitoring. The supervi
 
 - **On-Demand Packet Tracing (NOT IMPLEMENTED):** _Future work:_ The application will implement a low-impact, on-demand packet tracing capability. Tracing will be configurable on a per-rule basis via control interface commands (`EnableTrace`, `DisableTrace`, `GetTrace`) and disabled by default. Each data plane worker will maintain a pre-allocated, in-memory ring buffer to store key diagnostic events for packets matching an enabled rule. The `GetTrace` command will retrieve these events, providing a detailed, chronological log of a packet's lifecycle or the reason for its drop.
 
-## 7. Logging Architecture
+## 8. Logging Architecture
 
 Worker processes do not log directly to files. Instead, a simple and robust pipe-based mechanism decouples the high-performance workers from slower I/O by centralizing logging in the supervisor. Workers emit logs as a fast "fire-and-forget" operation into a pipe, and the supervisor asynchronously reads from these pipes, aggregates the messages, and prints them to its standard output.
 
 For a comprehensive guide to the logging system, including the high-performance cross-process design for the data plane, API usage, and monitoring techniques, see the detailed **[Logging Design Document](../design/LOGGING_DESIGN.md)**.
 
-## 8. Statistics Reporting Architecture
+## 9. Statistics Reporting Architecture
 
 ### Design Principles for Data Plane Stats
 
