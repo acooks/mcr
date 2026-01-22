@@ -89,17 +89,10 @@ Implemented multicast routing protocol support:
    - ~~**Facilities:** Add a table listing all 12 logging facilities.~~ ✅ Done (January 2026)
    - **Pinning:** Add a formal definition of the `pinning` JSON object.
 
-### HIGH: User Experience & Troubleshooting
+### ~~HIGH: User Experience & Troubleshooting~~ ✅ Done (January 2026)
 
-**Implementation Plan:**
-
-1. **Create `user_docs/TROUBLESHOOTING.md`:**
-   - **Permission Denied:** Explain `CAP_NET_RAW` and `setcap`.
-   - **Buffer Exhaustion:** Explain `buf_exhaust` counter.
-   - **Performance:** Explain `MCR_SOCKET_SNDBUF`.
-
-2. **Update `user_docs/GUIDE.md`:**
-   - Add "Known Limitations" section regarding CLI rule names.
+- Created `user_docs/TROUBLESHOOTING.md` with sections on permissions, buffer exhaustion, performance tuning, connection issues, and common error messages
+- Added "Known Limitations" section to `user_docs/GUIDE.md`
 
 ---
 

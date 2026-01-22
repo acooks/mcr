@@ -162,8 +162,16 @@ Generate test traffic:
 
 **Note:** `--interface` takes an IP address, not an interface name.
 
+## Known Limitations
+
+- **Rule names via CLI:** When adding rules via `mcrctl add`, the `--name` flag is not supported. Use configuration files to assign human-readable names to rules.
+- **IPv6:** MCR currently only supports IPv4 multicast. IPv6 multicast is not implemented.
+- **Hot interface changes:** If a network interface goes down or changes IP address, MCR does not automatically detect this. Restart the affected worker or the supervisor.
+
 ## More Information
 
 - **[Reference Manual](./REFERENCE.md)** - Complete command reference and configuration options
-- **[Operational Guide](./OPERATIONAL_GUIDE.md)** - Monitoring and troubleshooting
+- **[Operational Guide](./OPERATIONAL_GUIDE.md)** - Monitoring statistics
+- **[Troubleshooting Guide](./TROUBLESHOOTING.md)** - Diagnose and fix common issues
+- **[Security Model](./SECURITY.md)** - Privilege separation and capabilities
 - **[Why MCR?](./WHY_USE_MCR.md)** - Problem MCR solves vs alternatives
