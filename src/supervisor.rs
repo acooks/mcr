@@ -19,7 +19,15 @@ use tokio::time::{sleep, Duration};
 
 use crate::config::Config;
 use crate::logging::{AsyncConsumer, Facility, Logger, MPSCRingBuffer};
-use crate::{log_debug, log_info, log_warning, ForwardingRule, RelayCommand, Response};
+use crate::mroute::MulticastRib;
+use crate::protocols::igmp::InterfaceIgmpState;
+use crate::protocols::pim::PimState;
+use crate::protocols::{ProtocolEvent, TimerRequest, TimerType};
+use crate::{log_debug, log_info, log_warning, ForwardingRule, RelayCommand};
+use std::net::Ipv4Addr;
+use std::os::fd::OwnedFd;
+use std::time::Instant;
+use tokio::sync::mpsc;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 const INITIAL_BACKOFF_MS: u64 = 250;
@@ -29,6 +37,1555 @@ const PERIODIC_SYNC_INTERVAL_SECS: u64 = 300; // 5 minutes - periodic full rules
 
 /// Maximum interface name length (IFNAMSIZ - 1 for null terminator)
 const MAX_INTERFACE_NAME_LEN: usize = 15;
+
+// Protocol constants
+#[allow(dead_code)]
+const ALL_PIM_ROUTERS: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 13);
+
+/// Protocol state management for IGMP and PIM
+///
+/// This struct holds all protocol state machines and raw sockets needed
+/// for multicast routing protocol support. It runs in the supervisor
+/// process to maintain centralized state.
+pub struct ProtocolState {
+    /// IGMP state per interface (querier election, group membership)
+    pub igmp_state: HashMap<String, InterfaceIgmpState>,
+
+    /// Global PIM-SM state (neighbors, (*,G) and (S,G) entries)
+    pub pim_state: PimState,
+
+    /// Multicast Routing Information Base - merges static + dynamic routes
+    pub mrib: MulticastRib,
+
+    /// Raw socket for IGMP packets (protocol 2)
+    pub igmp_socket: Option<OwnedFd>,
+
+    /// Raw socket for PIM packets (protocol 103)
+    pub pim_socket: Option<OwnedFd>,
+
+    /// Channel to send timer requests
+    pub timer_tx: Option<mpsc::Sender<TimerRequest>>,
+
+    /// Whether protocols are enabled
+    pub igmp_enabled: bool,
+    pub pim_enabled: bool,
+
+    /// Logger for protocol events
+    logger: Logger,
+}
+
+impl ProtocolState {
+    /// Create a new ProtocolState with protocols disabled
+    pub fn new(logger: Logger) -> Self {
+        Self {
+            igmp_state: HashMap::new(),
+            pim_state: PimState::new(),
+            mrib: MulticastRib::new(),
+            igmp_socket: None,
+            pim_socket: None,
+            timer_tx: None,
+            igmp_enabled: false,
+            pim_enabled: false,
+            logger,
+        }
+    }
+
+    /// Initialize IGMP on specified interfaces
+    pub fn enable_igmp(&mut self, interfaces: &[String], config: &crate::config::IgmpConfig) {
+        use crate::protocols::igmp::IgmpConfig as ProtocolIgmpConfig;
+
+        let igmp_config = ProtocolIgmpConfig {
+            query_interval: std::time::Duration::from_secs(config.query_interval as u64),
+            query_response_interval: std::time::Duration::from_secs(
+                config.query_response_interval as u64,
+            ),
+            robustness_variable: config.robustness,
+            ..ProtocolIgmpConfig::default()
+        };
+
+        for iface in interfaces {
+            // Get interface IP address
+            if let Some(ip) = get_interface_ipv4(iface) {
+                let state = InterfaceIgmpState::new(iface.clone(), ip, igmp_config.clone());
+                self.igmp_state.insert(iface.clone(), state);
+                log_info!(
+                    self.logger,
+                    Facility::Supervisor,
+                    &format!("IGMP enabled on interface {} (IP: {})", iface, ip)
+                );
+            } else {
+                log_warning!(
+                    self.logger,
+                    Facility::Supervisor,
+                    &format!("Cannot enable IGMP on {}: no IPv4 address found", iface)
+                );
+            }
+        }
+        self.igmp_enabled = !self.igmp_state.is_empty();
+    }
+
+    /// Initialize PIM-SM with the given configuration
+    pub fn enable_pim(&mut self, config: &crate::config::PimConfig) {
+        use crate::protocols::pim::PimInterfaceConfig;
+
+        // Determine router ID
+        let router_id = config.router_id.unwrap_or_else(|| {
+            // Use highest interface IP as default router ID
+            config
+                .interfaces
+                .iter()
+                .filter_map(|iface| get_interface_ipv4(&iface.name))
+                .max()
+                .unwrap_or(Ipv4Addr::new(0, 0, 0, 1))
+        });
+
+        // Create new PIM state
+        self.pim_state = PimState::new();
+        self.pim_state.config.router_id = Some(router_id);
+
+        // Configure RP if we are one
+        if let Some(rp_addr) = config.rp_address {
+            self.pim_state.config.rp_address = Some(rp_addr);
+        }
+
+        // Add static RP mappings
+        for rp_config in &config.static_rp {
+            if let Ok(group) = parse_group_prefix(&rp_config.group) {
+                self.pim_state.config.static_rp.insert(group, rp_config.rp);
+            }
+        }
+
+        // Initialize per-interface PIM state
+        for iface_config in &config.interfaces {
+            if let Some(ip) = get_interface_ipv4(&iface_config.name) {
+                let pim_iface_config = PimInterfaceConfig {
+                    dr_priority: iface_config.dr_priority,
+                    ..PimInterfaceConfig::default()
+                };
+                self.pim_state
+                    .enable_interface(&iface_config.name, ip, pim_iface_config);
+                log_info!(
+                    self.logger,
+                    Facility::Supervisor,
+                    &format!(
+                        "PIM enabled on interface {} (IP: {}, DR priority: {})",
+                        iface_config.name, ip, iface_config.dr_priority
+                    )
+                );
+            }
+        }
+
+        self.pim_enabled = !config.interfaces.is_empty();
+        if self.pim_enabled {
+            log_info!(
+                self.logger,
+                Facility::Supervisor,
+                &format!("PIM-SM initialized with router_id={}", router_id)
+            );
+        }
+    }
+
+    /// Process a protocol event and return any timer requests
+    pub fn process_event(&mut self, event: ProtocolEvent) -> Vec<TimerRequest> {
+        match event {
+            ProtocolEvent::Igmp(igmp_event) => self.handle_igmp_event(igmp_event),
+            ProtocolEvent::Pim(pim_event) => self.handle_pim_event(pim_event),
+            ProtocolEvent::TimerExpired(timer_type) => self.handle_timer_expired(timer_type),
+        }
+    }
+
+    fn handle_igmp_event(&mut self, event: crate::protocols::igmp::IgmpEvent) -> Vec<TimerRequest> {
+        use crate::protocols::igmp::IgmpEvent;
+        let now = Instant::now();
+
+        match event {
+            IgmpEvent::EnableQuerier {
+                interface,
+                interface_ip,
+            } => {
+                let igmp_config = crate::protocols::igmp::IgmpConfig::default();
+                let state = InterfaceIgmpState::new(interface.clone(), interface_ip, igmp_config);
+                self.igmp_state.insert(interface, state);
+                Vec::new()
+            }
+            IgmpEvent::DisableQuerier { interface } => {
+                self.igmp_state.remove(&interface);
+                Vec::new()
+            }
+            IgmpEvent::PacketReceived {
+                interface,
+                src_ip,
+                msg_type,
+                max_resp_time: _,
+                group,
+            } => {
+                if let Some(igmp_state) = self.igmp_state.get_mut(&interface) {
+                    match msg_type {
+                        0x11 => {
+                            // Query - handle querier election
+                            igmp_state.received_query(src_ip, now)
+                        }
+                        0x16 => {
+                            // V2 Membership Report
+                            let timers = igmp_state.received_report(src_ip, group, now);
+                            // Add to MRIB if this is a new group
+                            if !self
+                                .mrib
+                                .get_igmp_interfaces_for_group(group)
+                                .contains(&interface)
+                            {
+                                let membership = crate::mroute::IgmpMembership {
+                                    group,
+                                    expires_at: now + igmp_state.config.group_membership_interval(),
+                                    last_reporter: Some(src_ip),
+                                };
+                                self.mrib.add_igmp_membership(&interface, group, membership);
+                            }
+                            timers
+                        }
+                        0x17 => {
+                            // Leave Group
+                            igmp_state.received_leave(group, now)
+                        }
+                        _ => Vec::new(),
+                    }
+                } else {
+                    Vec::new()
+                }
+            }
+            IgmpEvent::QueryTimerExpired { interface } => {
+                if let Some(igmp_state) = self.igmp_state.get_mut(&interface) {
+                    igmp_state.query_timer_expired(now)
+                } else {
+                    Vec::new()
+                }
+            }
+            IgmpEvent::OtherQuerierExpired { interface } => {
+                if let Some(igmp_state) = self.igmp_state.get_mut(&interface) {
+                    igmp_state.other_querier_expired(now)
+                } else {
+                    Vec::new()
+                }
+            }
+            IgmpEvent::GroupExpired { interface, group } => {
+                if let Some(igmp_state) = self.igmp_state.get_mut(&interface) {
+                    igmp_state.group_expired(group, now);
+                    // Remove from MRIB
+                    self.mrib.remove_igmp_membership(&interface, group);
+                }
+                Vec::new()
+            }
+            IgmpEvent::GroupQueryExpired { interface, group } => {
+                if let Some(igmp_state) = self.igmp_state.get_mut(&interface) {
+                    let (timers, expired) = igmp_state.group_query_expired(group, now);
+                    if expired {
+                        self.mrib.remove_igmp_membership(&interface, group);
+                    }
+                    timers
+                } else {
+                    Vec::new()
+                }
+            }
+        }
+    }
+
+    fn handle_pim_event(&mut self, event: crate::protocols::pim::PimEvent) -> Vec<TimerRequest> {
+        use crate::protocols::pim::PimEvent;
+
+        match event {
+            PimEvent::EnableInterface {
+                interface,
+                interface_ip,
+                dr_priority,
+            } => {
+                let config = if let Some(priority) = dr_priority {
+                    crate::protocols::pim::PimInterfaceConfig {
+                        dr_priority: priority,
+                        ..Default::default()
+                    }
+                } else {
+                    crate::protocols::pim::PimInterfaceConfig::default()
+                };
+                self.pim_state
+                    .enable_interface(&interface, interface_ip, config);
+                Vec::new()
+            }
+            PimEvent::DisableInterface { interface } => {
+                self.pim_state.disable_interface(&interface);
+                Vec::new()
+            }
+            PimEvent::PacketReceived {
+                interface,
+                src_ip,
+                msg_type,
+                payload,
+            } => {
+                match msg_type {
+                    0 => {
+                        // Hello - parse options and process
+                        if let Some(iface_state) = self.pim_state.get_interface_mut(&interface) {
+                            use crate::protocols::pim::PimHelloOption;
+                            use std::time::Duration;
+
+                            // Parse Hello options from payload
+                            let options = PimHelloOption::parse_all(&payload);
+                            let mut holdtime = Duration::from_secs(105); // Default holdtime
+                            let mut dr_priority = 1u32; // Default DR priority
+                            let mut generation_id = 0u32;
+
+                            for option in options {
+                                match option {
+                                    PimHelloOption::Holdtime(h) => {
+                                        holdtime = Duration::from_secs(h as u64)
+                                    }
+                                    PimHelloOption::DrPriority(p) => dr_priority = p,
+                                    PimHelloOption::GenerationId(g) => generation_id = g,
+                                    PimHelloOption::Unknown { .. } => {}
+                                }
+                            }
+
+                            let timers = iface_state.received_hello(
+                                src_ip,
+                                holdtime,
+                                dr_priority,
+                                generation_id,
+                                Instant::now(),
+                            );
+
+                            // Check if DR election changed
+                            if iface_state.elect_dr() {
+                                log_debug!(
+                                    self.logger,
+                                    Facility::Supervisor,
+                                    &format!(
+                                        "DR election on {} - we are {}DR",
+                                        interface,
+                                        if iface_state.is_dr() { "" } else { "not " }
+                                    )
+                                );
+                            }
+                            timers
+                        } else {
+                            Vec::new()
+                        }
+                    }
+                    1 => {
+                        // Register - only if we're RP
+                        if self.pim_state.config.rp_address.is_some() {
+                            // Parse Register message
+                            // Register format: 4 bytes flags, then encapsulated IP packet
+                            if payload.len() >= 24 {
+                                // 4 bytes flags + 20 bytes min IP header
+                                let flags = u32::from_be_bytes([
+                                    payload[0], payload[1], payload[2], payload[3],
+                                ]);
+                                let null_register = (flags & 0x40000000) != 0;
+
+                                // Extract source and group from encapsulated IP header
+                                let ip_header = &payload[4..];
+                                if ip_header.len() >= 20 {
+                                    let source = Ipv4Addr::new(
+                                        ip_header[12],
+                                        ip_header[13],
+                                        ip_header[14],
+                                        ip_header[15],
+                                    );
+                                    let group = Ipv4Addr::new(
+                                        ip_header[16],
+                                        ip_header[17],
+                                        ip_header[18],
+                                        ip_header[19],
+                                    );
+                                    let _ = self.pim_state.process_register(
+                                        source,
+                                        group,
+                                        null_register,
+                                    );
+                                }
+                            }
+                        }
+                        Vec::new()
+                    }
+                    3 => {
+                        // Join/Prune - parse the message
+                        use std::time::Duration;
+
+                        // Parse Join/Prune message
+                        // Format: upstream neighbor (encoded), reserved, num_groups, holdtime
+                        // Then for each group: encoded group, num_joins, num_prunes, sources
+                        if let Some((upstream, joins, prunes, holdtime)) =
+                            parse_pim_join_prune(&payload)
+                        {
+                            let _ = self.pim_state.process_join_prune(
+                                &interface,
+                                upstream,
+                                &joins,
+                                &prunes,
+                                Duration::from_secs(holdtime as u64),
+                            );
+                        }
+                        Vec::new()
+                    }
+                    _ => Vec::new(),
+                }
+            }
+            PimEvent::HelloTimerExpired { interface } => {
+                if let Some(iface_state) = self.pim_state.get_interface_mut(&interface) {
+                    iface_state.hello_timer_expired(Instant::now())
+                } else {
+                    Vec::new()
+                }
+            }
+            PimEvent::NeighborExpired {
+                interface,
+                neighbor,
+            } => {
+                if let Some(iface_state) = self.pim_state.get_interface_mut(&interface) {
+                    iface_state.neighbor_expired(neighbor);
+                    // Re-run DR election
+                    let _ = iface_state.elect_dr();
+                }
+                Vec::new()
+            }
+            PimEvent::RouteExpired { source, group } => {
+                // Remove the expired route from state
+                if let Some(src) = source {
+                    // (S,G) expired
+                    self.pim_state.sg.remove(&(src, group));
+                    self.mrib.remove_sg_route(src, group);
+                } else {
+                    // (*,G) expired
+                    self.pim_state.star_g.remove(&group);
+                    self.mrib.remove_star_g_route(group);
+                }
+                Vec::new()
+            }
+            PimEvent::SetStaticRp { group, rp } => {
+                self.pim_state.config.static_rp.insert(group, rp);
+                Vec::new()
+            }
+            PimEvent::SetRpAddress { rp } => {
+                self.pim_state.config.rp_address = Some(rp);
+                Vec::new()
+            }
+        }
+    }
+
+    fn handle_timer_expired(&mut self, timer_type: TimerType) -> Vec<TimerRequest> {
+        let now = Instant::now();
+
+        match timer_type {
+            TimerType::IgmpGeneralQuery { interface } => {
+                if let Some(igmp_state) = self.igmp_state.get_mut(&interface) {
+                    igmp_state.query_timer_expired(now)
+                } else {
+                    Vec::new()
+                }
+            }
+            TimerType::IgmpGroupQuery { interface, group } => {
+                if let Some(igmp_state) = self.igmp_state.get_mut(&interface) {
+                    let (timers, _expired) = igmp_state.group_query_expired(group, now);
+                    timers
+                } else {
+                    Vec::new()
+                }
+            }
+            TimerType::IgmpGroupExpiry { interface, group } => {
+                if let Some(igmp_state) = self.igmp_state.get_mut(&interface) {
+                    if igmp_state.group_expired(group, now) {
+                        self.mrib.remove_igmp_membership(&interface, group);
+                    }
+                }
+                Vec::new()
+            }
+            TimerType::IgmpOtherQuerierPresent { interface } => {
+                if let Some(igmp_state) = self.igmp_state.get_mut(&interface) {
+                    igmp_state.other_querier_expired(now)
+                } else {
+                    Vec::new()
+                }
+            }
+            TimerType::PimHello { interface } => {
+                if let Some(iface_state) = self.pim_state.get_interface_mut(&interface) {
+                    iface_state.hello_timer_expired(now)
+                } else {
+                    Vec::new()
+                }
+            }
+            TimerType::PimNeighborExpiry {
+                interface,
+                neighbor,
+            } => {
+                if let Some(iface_state) = self.pim_state.get_interface_mut(&interface) {
+                    if iface_state.neighbor_expired(neighbor) {
+                        log_info!(
+                            self.logger,
+                            Facility::Supervisor,
+                            &format!("PIM neighbor {} on {} timed out", neighbor, interface)
+                        );
+                        iface_state.elect_dr();
+                    }
+                }
+                Vec::new()
+            }
+            TimerType::PimJoinPrune {
+                interface: _,
+                group: _,
+            } => {
+                // TODO: Send periodic Join/Prune refresh
+                Vec::new()
+            }
+            TimerType::PimStarGExpiry { group } => {
+                self.mrib.remove_star_g_route(group);
+                Vec::new()
+            }
+            TimerType::PimSGExpiry { source, group } => {
+                self.mrib.remove_sg_route(source, group);
+                Vec::new()
+            }
+        }
+    }
+
+    /// Compile current MRIB state into forwarding rules
+    pub fn compile_forwarding_rules(&self) -> Vec<ForwardingRule> {
+        self.mrib.compile_forwarding_rules()
+    }
+
+    /// Get PIM neighbor information for CLI queries
+    pub fn get_pim_neighbors(&self) -> Vec<crate::PimNeighborInfo> {
+        let mut neighbors = Vec::new();
+        let now = Instant::now();
+        for (interface, iface_state) in self.pim_state.interfaces.iter() {
+            for (neighbor_ip, neighbor) in iface_state.neighbors.iter() {
+                let expires_in_secs = neighbor.expires_at.saturating_duration_since(now).as_secs();
+                neighbors.push(crate::PimNeighborInfo {
+                    interface: interface.clone(),
+                    address: *neighbor_ip,
+                    dr_priority: neighbor.dr_priority,
+                    is_dr: iface_state.designated_router == Some(*neighbor_ip),
+                    expires_in_secs,
+                    generation_id: neighbor.generation_id,
+                });
+            }
+        }
+        neighbors
+    }
+
+    /// Get IGMP group membership for CLI queries
+    pub fn get_igmp_groups(&self) -> Vec<crate::IgmpGroupInfo> {
+        let mut groups = Vec::new();
+        let now = Instant::now();
+        for (interface, iface_state) in self.igmp_state.iter() {
+            for (group_addr, membership) in iface_state.groups.iter() {
+                let expires_in_secs = membership
+                    .expires_at
+                    .saturating_duration_since(now)
+                    .as_secs();
+                groups.push(crate::IgmpGroupInfo {
+                    interface: interface.clone(),
+                    group: *group_addr,
+                    last_reporter: membership.last_reporter,
+                    expires_in_secs,
+                    is_querier: iface_state.is_querier,
+                });
+            }
+        }
+        groups
+    }
+
+    /// Get multicast routing table entries for CLI queries
+    pub fn get_mroute_entries(&self) -> Vec<crate::MrouteEntry> {
+        let mut entries = Vec::new();
+
+        // Add (*,G) entries from PIM state
+        for (group, star_g) in self.pim_state.star_g.iter() {
+            entries.push(crate::MrouteEntry {
+                source: None,
+                group: *group,
+                input_interface: star_g.upstream_interface.clone().unwrap_or_default(),
+                output_interfaces: star_g.downstream_interfaces.iter().cloned().collect(),
+                entry_type: crate::MrouteEntryType::StarG,
+                age_secs: star_g.created_at.elapsed().as_secs(),
+            });
+        }
+
+        // Add (S,G) entries from PIM state
+        for ((source, group), sg) in self.pim_state.sg.iter() {
+            entries.push(crate::MrouteEntry {
+                source: Some(*source),
+                group: *group,
+                input_interface: sg.upstream_interface.clone().unwrap_or_default(),
+                output_interfaces: sg.downstream_interfaces.iter().cloned().collect(),
+                entry_type: crate::MrouteEntryType::SG,
+                age_secs: sg.created_at.elapsed().as_secs(),
+            });
+        }
+
+        // Add static rules from MRIB
+        for rule in self.mrib.static_rules.values() {
+            entries.push(crate::MrouteEntry {
+                source: rule.input_source,
+                group: rule.input_group,
+                input_interface: rule.input_interface.clone(),
+                output_interfaces: rule.outputs.iter().map(|o| o.interface.clone()).collect(),
+                entry_type: crate::MrouteEntryType::Static,
+                age_secs: 0, // Static rules don't have uptime tracking
+            });
+        }
+
+        entries
+    }
+
+    /// Check if protocols need initialization from config
+    pub fn initialize_from_config(&mut self, config: &Config) {
+        if let Some(igmp_config) = &config.igmp {
+            if !igmp_config.querier_interfaces.is_empty() {
+                self.enable_igmp(&igmp_config.querier_interfaces, igmp_config);
+            }
+        }
+
+        if let Some(pim_config) = &config.pim {
+            if pim_config.enabled {
+                self.enable_pim(pim_config);
+            }
+        }
+    }
+
+    /// Create a raw socket for IGMP (IP protocol 2)
+    ///
+    /// This socket is used to:
+    /// - Send IGMP queries (General and Group-Specific)
+    /// - Receive IGMP reports and leaves from hosts
+    pub fn create_igmp_socket(&mut self) -> Result<()> {
+        // IGMP is IP protocol 2
+        const IPPROTO_IGMP: i32 = 2;
+
+        // Create raw socket for IGMP
+        let fd = unsafe {
+            libc::socket(
+                libc::AF_INET,
+                libc::SOCK_RAW | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+                IPPROTO_IGMP,
+            )
+        };
+
+        if fd < 0 {
+            return Err(anyhow::anyhow!(
+                "Failed to create IGMP raw socket: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+
+        // Set IP_HDRINCL so we can craft our own IP headers for IGMP messages
+        let hdrincl: libc::c_int = 1;
+        let result = unsafe {
+            libc::setsockopt(
+                fd,
+                libc::IPPROTO_IP,
+                libc::IP_HDRINCL,
+                &hdrincl as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+
+        if result < 0 {
+            unsafe { libc::close(fd) };
+            return Err(anyhow::anyhow!(
+                "Failed to set IP_HDRINCL on IGMP socket: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+
+        let sock = unsafe { OwnedFd::from_raw_fd(fd) };
+
+        log_info!(
+            self.logger,
+            Facility::Supervisor,
+            &format!("Created IGMP raw socket (fd: {})", sock.as_raw_fd())
+        );
+
+        self.igmp_socket = Some(sock);
+        Ok(())
+    }
+
+    /// Create a raw socket for PIM (IP protocol 103)
+    ///
+    /// This socket is used to:
+    /// - Send and receive PIM Hello messages
+    /// - Send and receive PIM Join/Prune messages
+    /// - Receive PIM Register messages (when we're the RP)
+    pub fn create_pim_socket(&mut self) -> Result<()> {
+        // PIM is IP protocol 103
+        const IPPROTO_PIM: i32 = 103;
+
+        // Create raw socket for PIM
+        let fd = unsafe {
+            libc::socket(
+                libc::AF_INET,
+                libc::SOCK_RAW | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+                IPPROTO_PIM,
+            )
+        };
+
+        if fd < 0 {
+            return Err(anyhow::anyhow!(
+                "Failed to create PIM raw socket: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+
+        // Join ALL-PIM-ROUTERS multicast group (224.0.0.13) on all interfaces
+        let all_pim_routers = Ipv4Addr::new(224, 0, 0, 13);
+        let mreq = libc::ip_mreq {
+            imr_multiaddr: libc::in_addr {
+                s_addr: u32::from(all_pim_routers).to_be(),
+            },
+            imr_interface: libc::in_addr {
+                s_addr: libc::INADDR_ANY,
+            },
+        };
+
+        let result = unsafe {
+            libc::setsockopt(
+                fd,
+                libc::IPPROTO_IP,
+                libc::IP_ADD_MEMBERSHIP,
+                &mreq as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::ip_mreq>() as libc::socklen_t,
+            )
+        };
+
+        if result < 0 {
+            unsafe { libc::close(fd) };
+            return Err(anyhow::anyhow!(
+                "Failed to join ALL-PIM-ROUTERS multicast group: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+
+        let sock = unsafe { OwnedFd::from_raw_fd(fd) };
+
+        log_info!(
+            self.logger,
+            Facility::Supervisor,
+            &format!(
+                "Created PIM raw socket (fd: {}), joined {}",
+                sock.as_raw_fd(),
+                all_pim_routers
+            )
+        );
+
+        self.pim_socket = Some(sock);
+        Ok(())
+    }
+
+    /// Create both protocol sockets if protocols are enabled
+    pub fn create_protocol_sockets(&mut self) -> Result<()> {
+        if self.igmp_enabled && self.igmp_socket.is_none() {
+            self.create_igmp_socket()?;
+        }
+        if self.pim_enabled && self.pim_socket.is_none() {
+            self.create_pim_socket()?;
+        }
+        Ok(())
+    }
+
+    /// Get the IGMP socket fd for async monitoring
+    pub fn igmp_socket_fd(&self) -> Option<RawFd> {
+        self.igmp_socket.as_ref().map(|s| s.as_raw_fd())
+    }
+
+    /// Get the PIM socket fd for async monitoring
+    pub fn pim_socket_fd(&self) -> Option<RawFd> {
+        self.pim_socket.as_ref().map(|s| s.as_raw_fd())
+    }
+}
+
+/// Async wrapper for raw socket I/O using tokio
+///
+/// This allows us to use raw sockets in an async context with tokio.
+struct AsyncRawSocket {
+    fd: RawFd,
+}
+
+impl AsyncRawSocket {
+    fn new(fd: RawFd) -> Self {
+        Self { fd }
+    }
+
+    /// Read a packet from the socket (non-blocking)
+    fn try_read(&self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = unsafe {
+            libc::recvfrom(
+                self.fd,
+                buf.as_mut_ptr() as *mut libc::c_void,
+                buf.len(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        if n < 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(n as usize)
+        }
+    }
+}
+
+impl std::os::unix::io::AsRawFd for AsyncRawSocket {
+    fn as_raw_fd(&self) -> RawFd {
+        self.fd
+    }
+}
+
+/// Protocol packet receiver loop
+///
+/// This function monitors the IGMP and PIM raw sockets for incoming packets
+/// and dispatches them to the event channel for processing by ProtocolState.
+pub async fn protocol_receiver_loop(
+    igmp_fd: Option<RawFd>,
+    pim_fd: Option<RawFd>,
+    event_tx: mpsc::Sender<ProtocolEvent>,
+    logger: Logger,
+) {
+    use tokio::io::unix::AsyncFd;
+
+    let mut buf = vec![0u8; 65536]; // Maximum IP packet size
+
+    // Create async fds for non-blocking socket I/O
+    let igmp_async = igmp_fd.and_then(|fd| {
+        let sock = AsyncRawSocket::new(fd);
+        AsyncFd::new(sock).ok()
+    });
+
+    let pim_async = pim_fd.and_then(|fd| {
+        let sock = AsyncRawSocket::new(fd);
+        AsyncFd::new(sock).ok()
+    });
+
+    if igmp_async.is_none() && pim_async.is_none() {
+        log_warning!(
+            logger,
+            Facility::Supervisor,
+            "No protocol sockets available, protocol receiver loop exiting"
+        );
+        return;
+    }
+
+    log_info!(
+        logger,
+        Facility::Supervisor,
+        &format!(
+            "Protocol receiver loop started (IGMP: {}, PIM: {})",
+            igmp_async.is_some(),
+            pim_async.is_some()
+        )
+    );
+
+    loop {
+        // Wait for either socket to be readable
+        tokio::select! {
+            // IGMP socket readable
+            result = async {
+                if let Some(ref async_fd) = igmp_async {
+                    async_fd.readable().await
+                } else {
+                    // Never completes if no IGMP socket
+                    std::future::pending().await
+                }
+            } => {
+                if let Ok(mut guard) = result {
+                    match guard.get_inner().try_read(&mut buf) {
+                        Ok(n) if n > 0 => {
+                            if let Some(event) = parse_igmp_packet(&buf[..n], &logger) {
+                                if event_tx.send(event).await.is_err() {
+                                    log_warning!(
+                                        logger,
+                                        Facility::Supervisor,
+                                        "Protocol event channel closed, receiver loop exiting"
+                                    );
+                                    return;
+                                }
+                            }
+                        }
+                        Ok(_) => {} // Empty read
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            // Socket not ready, this is normal
+                        }
+                        Err(e) => {
+                            log_warning!(
+                                logger,
+                                Facility::Supervisor,
+                                &format!("IGMP socket read error: {}", e)
+                            );
+                        }
+                    }
+                    guard.clear_ready();
+                }
+            }
+
+            // PIM socket readable
+            result = async {
+                if let Some(ref async_fd) = pim_async {
+                    async_fd.readable().await
+                } else {
+                    std::future::pending().await
+                }
+            } => {
+                if let Ok(mut guard) = result {
+                    match guard.get_inner().try_read(&mut buf) {
+                        Ok(n) if n > 0 => {
+                            if let Some(event) = parse_pim_packet(&buf[..n], &logger) {
+                                if event_tx.send(event).await.is_err() {
+                                    log_warning!(
+                                        logger,
+                                        Facility::Supervisor,
+                                        "Protocol event channel closed, receiver loop exiting"
+                                    );
+                                    return;
+                                }
+                            }
+                        }
+                        Ok(_) => {} // Empty read
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            // Socket not ready
+                        }
+                        Err(e) => {
+                            log_warning!(
+                                logger,
+                                Facility::Supervisor,
+                                &format!("PIM socket read error: {}", e)
+                            );
+                        }
+                    }
+                    guard.clear_ready();
+                }
+            }
+        }
+    }
+}
+
+/// Parse a raw IGMP packet into a ProtocolEvent
+fn parse_igmp_packet(packet: &[u8], logger: &Logger) -> Option<ProtocolEvent> {
+    use crate::protocols::igmp::IgmpEvent;
+
+    // IP header is at least 20 bytes
+    if packet.len() < 28 {
+        // 20 IP + 8 IGMP minimum
+        return None;
+    }
+
+    // Check IP version (first nibble should be 4)
+    let version = packet[0] >> 4;
+    if version != 4 {
+        return None;
+    }
+
+    // Get IP header length (IHL in 32-bit words)
+    let ihl = ((packet[0] & 0x0F) as usize) * 4;
+    if packet.len() < ihl + 8 {
+        return None;
+    }
+
+    // Check protocol is IGMP (2)
+    if packet[9] != 2 {
+        return None;
+    }
+
+    // Extract source IP
+    let src_ip = Ipv4Addr::new(packet[12], packet[13], packet[14], packet[15]);
+
+    // Find interface by source IP (simplified - in real implementation would use recvmsg)
+    let interface = find_interface_by_ip(src_ip).unwrap_or_else(|| "unknown".to_string());
+
+    // Parse IGMP header (after IP header)
+    let igmp = &packet[ihl..];
+    if igmp.len() < 8 {
+        return None;
+    }
+
+    let msg_type = igmp[0];
+    let max_resp_time = igmp[1];
+    let group = Ipv4Addr::new(igmp[4], igmp[5], igmp[6], igmp[7]);
+
+    log_debug!(
+        logger,
+        Facility::Supervisor,
+        &format!(
+            "Received IGMP packet: type={:#x}, src={}, group={}, interface={}",
+            msg_type, src_ip, group, interface
+        )
+    );
+
+    Some(ProtocolEvent::Igmp(IgmpEvent::PacketReceived {
+        interface,
+        src_ip,
+        msg_type,
+        max_resp_time,
+        group,
+    }))
+}
+
+/// Parse a raw PIM packet into a ProtocolEvent
+fn parse_pim_packet(packet: &[u8], logger: &Logger) -> Option<ProtocolEvent> {
+    use crate::protocols::pim::PimEvent;
+
+    // IP header is at least 20 bytes
+    if packet.len() < 24 {
+        // 20 IP + 4 PIM minimum
+        return None;
+    }
+
+    // Check IP version
+    let version = packet[0] >> 4;
+    if version != 4 {
+        return None;
+    }
+
+    // Get IP header length
+    let ihl = ((packet[0] & 0x0F) as usize) * 4;
+    if packet.len() < ihl + 4 {
+        return None;
+    }
+
+    // Check protocol is PIM (103)
+    if packet[9] != 103 {
+        return None;
+    }
+
+    // Extract source IP
+    let src_ip = Ipv4Addr::new(packet[12], packet[13], packet[14], packet[15]);
+
+    // Find interface by source IP
+    let interface = find_interface_by_ip(src_ip).unwrap_or_else(|| "unknown".to_string());
+
+    // Parse PIM header (after IP header)
+    let pim = &packet[ihl..];
+    if pim.len() < 4 {
+        return None;
+    }
+
+    // PIM header: version/type (1 byte), reserved (1 byte), checksum (2 bytes)
+    let pim_version = (pim[0] >> 4) & 0x0F;
+    let msg_type = pim[0] & 0x0F;
+
+    // Validate PIM version (should be 2)
+    if pim_version != 2 {
+        return None;
+    }
+
+    // Extract payload (after 4-byte PIM header)
+    let payload = if pim.len() > 4 {
+        pim[4..].to_vec()
+    } else {
+        Vec::new()
+    };
+
+    log_debug!(
+        logger,
+        Facility::Supervisor,
+        &format!(
+            "Received PIM packet: type={}, src={}, interface={}, payload_len={}",
+            msg_type,
+            src_ip,
+            interface,
+            payload.len()
+        )
+    );
+
+    Some(ProtocolEvent::Pim(PimEvent::PacketReceived {
+        interface,
+        src_ip,
+        msg_type,
+        payload,
+    }))
+}
+
+/// Find interface name by IP address
+fn find_interface_by_ip(ip: Ipv4Addr) -> Option<String> {
+    for iface in pnet::datalink::interfaces() {
+        for ip_net in &iface.ips {
+            if let std::net::IpAddr::V4(v4) = ip_net.ip() {
+                // Check if this IP is on the same subnet
+                // For simplicity, we check if it's the same interface IP
+                // In production, would check subnet membership
+                if v4 == ip || ip_net.contains(std::net::IpAddr::V4(ip)) {
+                    return Some(iface.name.clone());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Protocol timer management
+///
+/// This struct manages all protocol timers using a sorted list of pending timers.
+/// Timers are processed in order, with the next timer to fire determining the
+/// sleep duration.
+pub struct ProtocolTimerManager {
+    /// Pending timers sorted by fire time
+    timers: std::collections::BinaryHeap<std::cmp::Reverse<ScheduledTimer>>,
+    /// Channel to receive new timer requests
+    timer_rx: mpsc::Receiver<TimerRequest>,
+    /// Channel to send timer expiry events
+    event_tx: mpsc::Sender<ProtocolEvent>,
+    /// Logger
+    logger: Logger,
+}
+
+/// A scheduled timer with its fire time and type
+#[derive(Debug, Clone)]
+struct ScheduledTimer {
+    fire_at: Instant,
+    timer_type: TimerType,
+}
+
+impl PartialEq for ScheduledTimer {
+    fn eq(&self, other: &Self) -> bool {
+        self.fire_at == other.fire_at && self.timer_type == other.timer_type
+    }
+}
+
+impl Eq for ScheduledTimer {}
+
+impl PartialOrd for ScheduledTimer {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ScheduledTimer {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.fire_at.cmp(&other.fire_at)
+    }
+}
+
+impl ProtocolTimerManager {
+    /// Create a new timer manager
+    pub fn new(
+        timer_rx: mpsc::Receiver<TimerRequest>,
+        event_tx: mpsc::Sender<ProtocolEvent>,
+        logger: Logger,
+    ) -> Self {
+        Self {
+            timers: std::collections::BinaryHeap::new(),
+            timer_rx,
+            event_tx,
+            logger,
+        }
+    }
+
+    /// Schedule a new timer
+    fn schedule(&mut self, request: TimerRequest) {
+        if request.replace_existing {
+            // Remove any existing timer of the same type
+            self.timers = self
+                .timers
+                .drain()
+                .filter(|t| t.0.timer_type != request.timer_type)
+                .collect();
+        }
+
+        self.timers.push(std::cmp::Reverse(ScheduledTimer {
+            fire_at: request.fire_at,
+            timer_type: request.timer_type,
+        }));
+
+        log_debug!(
+            self.logger,
+            Facility::Supervisor,
+            &format!("Scheduled timer, {} pending", self.timers.len())
+        );
+    }
+
+    /// Run the timer management loop
+    pub async fn run(mut self) {
+        log_info!(
+            self.logger,
+            Facility::Supervisor,
+            "Protocol timer manager started"
+        );
+
+        loop {
+            // Calculate sleep duration based on next timer
+            let sleep_duration = if let Some(std::cmp::Reverse(next)) = self.timers.peek() {
+                let now = Instant::now();
+                if next.fire_at <= now {
+                    Duration::ZERO
+                } else {
+                    next.fire_at - now
+                }
+            } else {
+                // No timers, sleep for a long time (or until new timer request)
+                Duration::from_secs(3600)
+            };
+
+            tokio::select! {
+                // Wait for next timer or timeout
+                _ = sleep(sleep_duration) => {
+                    // Fire all expired timers
+                    let now = Instant::now();
+                    while let Some(std::cmp::Reverse(timer)) = self.timers.peek() {
+                        if timer.fire_at <= now {
+                            let timer = self.timers.pop().unwrap().0;
+                            let event = ProtocolEvent::TimerExpired(timer.timer_type.clone());
+
+                            log_debug!(
+                                self.logger,
+                                Facility::Supervisor,
+                                &format!("Timer expired: {:?}", timer.timer_type)
+                            );
+
+                            if self.event_tx.send(event).await.is_err() {
+                                log_warning!(
+                                    self.logger,
+                                    Facility::Supervisor,
+                                    "Event channel closed, timer manager exiting"
+                                );
+                                return;
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                }
+
+                // Receive new timer requests
+                request = self.timer_rx.recv() => {
+                    match request {
+                        Some(req) => {
+                            self.schedule(req);
+                        }
+                        None => {
+                            log_info!(
+                                self.logger,
+                                Facility::Supervisor,
+                                "Timer request channel closed, timer manager exiting"
+                            );
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Protocol coordinator that manages the integration between
+/// protocol state machines and the supervisor's main loop
+pub struct ProtocolCoordinator {
+    /// Protocol state machines and MRIB
+    pub state: ProtocolState,
+    /// Channel to receive protocol events
+    event_rx: mpsc::Receiver<ProtocolEvent>,
+    /// Channel to send timer requests
+    timer_tx: mpsc::Sender<TimerRequest>,
+    /// Flag to track if rules need syncing
+    rules_dirty: bool,
+}
+
+impl ProtocolCoordinator {
+    /// Create a new protocol coordinator with channels
+    pub fn new(
+        state: ProtocolState,
+        event_rx: mpsc::Receiver<ProtocolEvent>,
+        timer_tx: mpsc::Sender<TimerRequest>,
+    ) -> Self {
+        Self {
+            state,
+            event_rx,
+            timer_tx,
+            rules_dirty: false,
+        }
+    }
+
+    /// Process any pending protocol events (non-blocking)
+    ///
+    /// Returns true if the MRIB was modified and rules need syncing
+    pub async fn process_pending_events(&mut self) -> bool {
+        let mut mrib_modified = false;
+
+        // Process all available events without blocking
+        loop {
+            match self.event_rx.try_recv() {
+                Ok(event) => {
+                    let timer_requests = self.state.process_event(event);
+
+                    // Schedule any timer requests
+                    for req in timer_requests {
+                        let _ = self.timer_tx.send(req).await;
+                    }
+
+                    // Check if this event modified the MRIB
+                    // IGMP membership changes and PIM route changes affect forwarding
+                    mrib_modified = true;
+                }
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => break,
+            }
+        }
+
+        if mrib_modified {
+            self.rules_dirty = true;
+        }
+
+        mrib_modified
+    }
+
+    /// Get compiled forwarding rules from the MRIB
+    pub fn compile_rules(&self) -> Vec<ForwardingRule> {
+        self.state.compile_forwarding_rules()
+    }
+
+    /// Check if rules are dirty (need syncing)
+    pub fn rules_dirty(&self) -> bool {
+        self.rules_dirty
+    }
+
+    /// Clear the dirty flag
+    pub fn clear_dirty(&mut self) {
+        self.rules_dirty = false;
+    }
+}
+
+/// Initialize protocol subsystem and return the coordinator and background tasks
+///
+/// This function creates:
+/// - ProtocolState with sockets and state machines
+/// - Event channel for protocol events
+/// - Timer channel for timer requests
+/// - Background tasks for receiver loop and timer manager
+///
+/// The caller should spawn the returned tasks and process events through the coordinator.
+pub fn initialize_protocol_subsystem(
+    config: &Config,
+    logger: Logger,
+) -> Result<(
+    ProtocolCoordinator,
+    impl std::future::Future<Output = ()>,
+    impl std::future::Future<Output = ()>,
+)> {
+    // Create channels
+    let (event_tx, event_rx) = mpsc::channel::<ProtocolEvent>(1024);
+    let (timer_tx, timer_rx) = mpsc::channel::<TimerRequest>(256);
+
+    // Create protocol state
+    let mut state = ProtocolState::new(logger.clone());
+    state.timer_tx = Some(timer_tx.clone());
+
+    // Initialize from config
+    state.initialize_from_config(config);
+
+    // Create protocol sockets if needed
+    if state.igmp_enabled || state.pim_enabled {
+        state.create_protocol_sockets()?;
+    }
+
+    // Get socket file descriptors for the receiver loop
+    let igmp_fd = state.igmp_socket_fd();
+    let pim_fd = state.pim_socket_fd();
+
+    // Create background tasks
+    let receiver_logger = logger.clone();
+    let receiver_event_tx = event_tx.clone();
+    let receiver_task = async move {
+        protocol_receiver_loop(igmp_fd, pim_fd, receiver_event_tx, receiver_logger).await;
+    };
+
+    let timer_manager = ProtocolTimerManager::new(timer_rx, event_tx, logger.clone());
+    let timer_task = async move {
+        timer_manager.run().await;
+    };
+
+    // Create coordinator
+    let coordinator = ProtocolCoordinator::new(state, event_rx, timer_tx);
+
+    Ok((coordinator, receiver_task, timer_task))
+}
+
+/// Sync forwarding rules to all data plane workers
+///
+/// This function sends the compiled rules to all workers, filtering by interface.
+async fn sync_rules_to_workers(
+    rules: &[ForwardingRule],
+    worker_manager: &Arc<Mutex<WorkerManager>>,
+    logger: &Logger,
+) {
+    if rules.is_empty() {
+        return;
+    }
+
+    let stream_pairs_with_iface = {
+        let manager = worker_manager.lock().unwrap();
+        manager.get_all_dp_cmd_streams_with_interface()
+    };
+
+    for (interface, ingress_stream, egress_stream) in stream_pairs_with_iface {
+        // Filter rules to only include those matching this worker's input interface
+        let interface_rules: Vec<ForwardingRule> = rules
+            .iter()
+            .filter(|r| r.input_interface == interface)
+            .cloned()
+            .collect();
+
+        if interface_rules.is_empty() {
+            continue;
+        }
+
+        let sync_cmd = RelayCommand::SyncRules(interface_rules);
+        if let Ok(cmd_bytes) = serde_json::to_vec(&sync_cmd) {
+            let mut ingress = ingress_stream.lock().await;
+            let mut egress = egress_stream.lock().await;
+
+            // Fire-and-forget: ignore errors
+            let _ = ingress.write_all(&cmd_bytes).await;
+            let _ = egress.write_all(&cmd_bytes).await;
+        }
+    }
+
+    log_debug!(
+        logger,
+        Facility::Supervisor,
+        &format!("Synced {} rules to workers", rules.len())
+    );
+}
+
+/// Get IPv4 address for an interface
+fn get_interface_ipv4(interface: &str) -> Option<Ipv4Addr> {
+    for iface in pnet::datalink::interfaces() {
+        if iface.name == interface {
+            for ip_net in iface.ips {
+                if let std::net::IpAddr::V4(ip) = ip_net.ip() {
+                    if !ip.is_loopback() {
+                        return Some(ip);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Parse a group prefix like "239.0.0.0/8" or "239.1.1.1" into a base address
+fn parse_group_prefix(prefix: &str) -> Result<Ipv4Addr> {
+    if let Some((addr_str, _)) = prefix.split_once('/') {
+        addr_str
+            .parse()
+            .map_err(|_| anyhow::anyhow!("Invalid group prefix"))
+    } else {
+        prefix
+            .parse()
+            .map_err(|_| anyhow::anyhow!("Invalid group address"))
+    }
+}
+
+/// Parse a PIM Join/Prune message payload
+///
+/// Returns: (upstream_neighbor, joins, prunes, holdtime_secs)
+/// Where joins/prunes are Vec<(Option<source>, group)> - None source means (*,G)
+#[allow(clippy::type_complexity)]
+fn parse_pim_join_prune(
+    payload: &[u8],
+) -> Option<(
+    Ipv4Addr,
+    Vec<(Option<Ipv4Addr>, Ipv4Addr)>,
+    Vec<(Option<Ipv4Addr>, Ipv4Addr)>,
+    u16,
+)> {
+    // Minimum length: 8 bytes for header (upstream neighbor encoded + reserved + num_groups + holdtime)
+    if payload.len() < 8 {
+        return None;
+    }
+
+    // Parse encoded unicast upstream neighbor (simplified - assuming IPv4, 6 bytes)
+    // Format: addr_family(1) + encoding_type(1) + address(4)
+    if payload.len() < 6 || payload[0] != 1 {
+        // addr_family 1 = IPv4
+        return None;
+    }
+    let upstream = Ipv4Addr::new(payload[2], payload[3], payload[4], payload[5]);
+
+    // Reserved (1 byte) + num_groups (1 byte) + holdtime (2 bytes)
+    if payload.len() < 10 {
+        return None;
+    }
+    let num_groups = payload[7] as usize;
+    let holdtime = u16::from_be_bytes([payload[8], payload[9]]);
+
+    let mut joins = Vec::new();
+    let mut prunes = Vec::new();
+    let mut offset = 10;
+
+    for _ in 0..num_groups {
+        // Encoded group: addr_family(1) + encoding_type(1) + reserved(1) + mask_len(1) + group(4)
+        if offset + 8 > payload.len() {
+            break;
+        }
+        let group = Ipv4Addr::new(
+            payload[offset + 4],
+            payload[offset + 5],
+            payload[offset + 6],
+            payload[offset + 7],
+        );
+        offset += 8;
+
+        // Number of joined sources (2 bytes) + number of pruned sources (2 bytes)
+        if offset + 4 > payload.len() {
+            break;
+        }
+        let num_joins = u16::from_be_bytes([payload[offset], payload[offset + 1]]) as usize;
+        let num_prunes = u16::from_be_bytes([payload[offset + 2], payload[offset + 3]]) as usize;
+        offset += 4;
+
+        // Parse joined sources
+        for _ in 0..num_joins {
+            // Encoded source: addr_family(1) + encoding_type(1) + flags(1) + mask_len(1) + source(4)
+            if offset + 8 > payload.len() {
+                break;
+            }
+            let flags = payload[offset + 2];
+            let source = Ipv4Addr::new(
+                payload[offset + 4],
+                payload[offset + 5],
+                payload[offset + 6],
+                payload[offset + 7],
+            );
+            offset += 8;
+
+            // WC bit (0x02) indicates (*,G), otherwise (S,G)
+            if (flags & 0x02) != 0 {
+                joins.push((None, group));
+            } else {
+                joins.push((Some(source), group));
+            }
+        }
+
+        // Parse pruned sources
+        for _ in 0..num_prunes {
+            if offset + 8 > payload.len() {
+                break;
+            }
+            let flags = payload[offset + 2];
+            let source = Ipv4Addr::new(
+                payload[offset + 4],
+                payload[offset + 5],
+                payload[offset + 6],
+                payload[offset + 7],
+            );
+            offset += 8;
+
+            if (flags & 0x02) != 0 {
+                prunes.push((None, group));
+            } else {
+                prunes.push((Some(source), group));
+            }
+        }
+    }
+
+    Some((upstream, joins, prunes, holdtime))
+}
 
 /// Validate an interface name according to Linux kernel rules.
 /// Returns Ok(()) if valid, Err(reason) if invalid.
@@ -236,7 +1793,9 @@ pub fn handle_supervisor_command(
                 input_interface,
                 input_group,
                 input_port,
+                input_source: None, // CLI-added rules don't have source filtering
                 outputs,
+                source: crate::RuleSource::Dynamic, // Rules added via CLI are dynamic
             };
 
             // Validate interface configuration to prevent packet loops and reflection
@@ -532,6 +2091,122 @@ pub fn handle_supervisor_command(
                     CommandAction::None,
                 ),
             }
+        }
+
+        // --- PIM Commands ---
+        // Note: These commands require protocol state integration.
+        // Full implementation requires passing ProtocolCoordinator to this function.
+        SupervisorCommand::GetPimNeighbors => {
+            // Return empty list until protocol integration is complete
+            (Response::PimNeighbors(Vec::new()), CommandAction::None)
+        }
+
+        SupervisorCommand::EnablePim {
+            interface,
+            dr_priority,
+        } => {
+            // Validate interface name
+            if let Err(e) = validate_interface_name(&interface) {
+                return (
+                    Response::Error(format!("Invalid interface: {}", e)),
+                    CommandAction::None,
+                );
+            }
+            (
+                Response::Success(format!(
+                    "PIM enable requested for interface {} (dr_priority: {:?}). \
+                     Note: Full protocol integration pending.",
+                    interface, dr_priority
+                )),
+                CommandAction::None,
+            )
+        }
+
+        SupervisorCommand::DisablePim { interface } => {
+            if let Err(e) = validate_interface_name(&interface) {
+                return (
+                    Response::Error(format!("Invalid interface: {}", e)),
+                    CommandAction::None,
+                );
+            }
+            (
+                Response::Success(format!(
+                    "PIM disable requested for interface {}. Note: Full protocol integration pending.",
+                    interface
+                )),
+                CommandAction::None,
+            )
+        }
+
+        SupervisorCommand::SetStaticRp {
+            group_prefix,
+            rp_address,
+        } => {
+            // Validate RP address is unicast
+            if rp_address.is_multicast() {
+                return (
+                    Response::Error("RP address must be unicast".to_string()),
+                    CommandAction::None,
+                );
+            }
+            // Validate group prefix
+            if let Err(e) = parse_group_prefix(&group_prefix) {
+                return (
+                    Response::Error(format!("Invalid group prefix: {}", e)),
+                    CommandAction::None,
+                );
+            }
+            (
+                Response::Success(format!(
+                    "Static RP {} set for group {}. Note: Full protocol integration pending.",
+                    rp_address, group_prefix
+                )),
+                CommandAction::None,
+            )
+        }
+
+        // --- IGMP Commands ---
+        SupervisorCommand::GetIgmpGroups => {
+            // Return empty list until protocol integration is complete
+            (Response::IgmpGroups(Vec::new()), CommandAction::None)
+        }
+
+        SupervisorCommand::EnableIgmpQuerier { interface } => {
+            if let Err(e) = validate_interface_name(&interface) {
+                return (
+                    Response::Error(format!("Invalid interface: {}", e)),
+                    CommandAction::None,
+                );
+            }
+            (
+                Response::Success(format!(
+                    "IGMP querier enable requested for interface {}. Note: Full protocol integration pending.",
+                    interface
+                )),
+                CommandAction::None,
+            )
+        }
+
+        SupervisorCommand::DisableIgmpQuerier { interface } => {
+            if let Err(e) = validate_interface_name(&interface) {
+                return (
+                    Response::Error(format!("Invalid interface: {}", e)),
+                    CommandAction::None,
+                );
+            }
+            (
+                Response::Success(format!(
+                    "IGMP querier disable requested for interface {}. Note: Full protocol integration pending.",
+                    interface
+                )),
+                CommandAction::None,
+            )
+        }
+
+        // --- Multicast Routing Table ---
+        SupervisorCommand::GetMroute => {
+            // Return empty list until protocol integration is complete
+            (Response::Mroute(Vec::new()), CommandAction::None)
         }
     }
 }
@@ -1150,6 +2825,30 @@ impl WorkerManager {
             .collect()
     }
 
+    /// Get all data plane command streams with interface name for per-interface rule filtering
+    /// Returns tuples of (interface_name, ingress_stream, egress_stream) for each worker
+    #[allow(clippy::type_complexity)]
+    fn get_all_dp_cmd_streams_with_interface(
+        &self,
+    ) -> Vec<(
+        String,
+        Arc<tokio::sync::Mutex<UnixStream>>,
+        Arc<tokio::sync::Mutex<UnixStream>>,
+    )> {
+        self.workers
+            .values()
+            .filter_map(|w| {
+                let WorkerType::DataPlane { interface, .. } = &w.worker_type;
+                match (&w.ingress_cmd_stream, &w.egress_cmd_stream) {
+                    (Some(ingress), Some(egress)) => {
+                        Some((interface.clone(), ingress.clone(), egress.clone()))
+                    }
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
     /// Get worker info for all workers (for ListWorkers command)
     fn get_worker_info(&self) -> Vec<crate::WorkerInfo> {
         self.workers
@@ -1262,14 +2961,47 @@ async fn handle_client(
         >,
     >,
     startup_config_path: Option<PathBuf>,
+    protocol_coordinator: Arc<Mutex<Option<ProtocolCoordinator>>>,
 ) -> Result<()> {
-    use crate::SupervisorCommand;
+    use crate::{Response, SupervisorCommand};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let mut buffer = Vec::new();
     client_stream.read_to_end(&mut buffer).await?;
 
     let command: SupervisorCommand = serde_json::from_slice(&buffer)?;
+
+    // Handle protocol-specific queries directly (need access to ProtocolCoordinator state)
+    // These queries need real data from the protocol state machines
+    let protocol_response: Option<Response> = {
+        let coordinator_guard = protocol_coordinator.lock().unwrap();
+        if let Some(ref coordinator) = *coordinator_guard {
+            match &command {
+                SupervisorCommand::GetPimNeighbors => {
+                    let neighbors = coordinator.state.get_pim_neighbors();
+                    Some(Response::PimNeighbors(neighbors))
+                }
+                SupervisorCommand::GetIgmpGroups => {
+                    let groups = coordinator.state.get_igmp_groups();
+                    Some(Response::IgmpGroups(groups))
+                }
+                SupervisorCommand::GetMroute => {
+                    let routes = coordinator.state.get_mroute_entries();
+                    Some(Response::Mroute(routes))
+                }
+                _ => None,
+            }
+        } else {
+            None
+        }
+    };
+
+    // If we handled a protocol query, return early
+    if let Some(resp) = protocol_response {
+        let response_bytes = serde_json::to_vec(&resp)?;
+        client_stream.write_all(&response_bytes).await?;
+        return Ok(());
+    }
 
     // Get worker info and stats from WorkerManager (locked access)
     let (worker_info, worker_stats_arc) = {
@@ -1331,85 +3063,141 @@ async fn handle_client(
         }
         CommandAction::BroadcastToDataPlane(relay_cmd) => {
             let is_ping = matches!(relay_cmd, RelayCommand::Ping);
-            let cmd_bytes = serde_json::to_vec(&relay_cmd)?;
+            let is_sync_rules = matches!(relay_cmd, RelayCommand::SyncRules(_));
 
-            // Get cmd stream pairs from WorkerManager
-            let stream_pairs = {
-                let manager = worker_manager.lock().unwrap();
-                manager.get_all_dp_cmd_streams()
-            };
+            if is_sync_rules {
+                // For SyncRules, filter rules by interface before sending to each worker
+                // This implements per-interface rule distribution (Phase 1 of the roadmap)
+                let all_rules = if let RelayCommand::SyncRules(rules) = &relay_cmd {
+                    rules.clone()
+                } else {
+                    vec![]
+                };
 
-            if is_ping {
-                // For ping, wait for all sends to complete and verify success
-                let mut send_tasks = Vec::new();
+                // Get streams with interface info for per-interface filtering
+                let stream_pairs_with_iface = {
+                    let manager = worker_manager.lock().unwrap();
+                    manager.get_all_dp_cmd_streams_with_interface()
+                };
 
-                for (ingress_stream, egress_stream) in stream_pairs {
-                    // Send to ingress
+                for (interface, ingress_stream, egress_stream) in stream_pairs_with_iface {
+                    // Filter rules to only include those matching this worker's input interface
+                    let interface_rules: Vec<ForwardingRule> = all_rules
+                        .iter()
+                        .filter(|r| r.input_interface == interface)
+                        .cloned()
+                        .collect();
+
+                    // Create interface-specific SyncRules command
+                    let interface_cmd = RelayCommand::SyncRules(interface_rules);
+                    let cmd_bytes = match serde_json::to_vec(&interface_cmd) {
+                        Ok(bytes) => bytes,
+                        Err(e) => {
+                            error!(
+                                "Failed to serialize SyncRules for interface {}: {}",
+                                interface, e
+                            );
+                            continue;
+                        }
+                    };
+
+                    // Send to ingress worker
                     let cmd_bytes_clone = cmd_bytes.clone();
-                    let task = tokio::spawn(async move {
+                    tokio::spawn(async move {
                         let mut stream = ingress_stream.lock().await;
                         let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
-                        framed.send(cmd_bytes_clone.into()).await
+                        let _ = framed.send(cmd_bytes_clone.into()).await;
                     });
-                    send_tasks.push(task);
 
-                    // Send to egress
-                    let cmd_bytes_clone = cmd_bytes.clone();
-                    let task = tokio::spawn(async move {
+                    // Send to egress worker
+                    tokio::spawn(async move {
                         let mut stream = egress_stream.lock().await;
                         let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
-                        framed.send(cmd_bytes_clone.into()).await
+                        let _ = framed.send(cmd_bytes.into()).await;
                     });
-                    send_tasks.push(task);
-                }
-
-                // Wait for all sends and check for errors
-                let total_streams = send_tasks.len();
-                let mut ready_count = 0;
-                for task in send_tasks {
-                    match task.await {
-                        Ok(Ok(_)) => {
-                            // Send succeeded - worker stream is ready
-                            ready_count += 1;
-                        }
-                        Ok(Err(e)) => {
-                            eprintln!("[PING] Failed to send ping to worker: {}", e);
-                        }
-                        Err(e) => {
-                            eprintln!("[PING] Task join error: {}", e);
-                        }
-                    }
-                }
-
-                if ready_count == total_streams {
-                    final_response = Response::Success(format!(
-                        "pong: {}/{} worker streams ready",
-                        ready_count, total_streams
-                    ));
-                } else {
-                    final_response = Response::Error(format!(
-                        "Only {}/{} worker streams ready",
-                        ready_count, total_streams
-                    ));
                 }
             } else {
-                // For non-ping commands, fire and forget
-                for (ingress_stream, egress_stream) in stream_pairs {
-                    // Send to ingress
-                    let cmd_bytes_clone = cmd_bytes.clone();
-                    tokio::spawn(async move {
-                        let mut stream = ingress_stream.lock().await;
-                        let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
-                        let _ = framed.send(cmd_bytes_clone.into()).await;
-                    });
+                // For non-SyncRules commands, broadcast same command to all workers
+                let cmd_bytes = serde_json::to_vec(&relay_cmd)?;
 
-                    // Send to egress
-                    let cmd_bytes_clone = cmd_bytes.clone();
-                    tokio::spawn(async move {
-                        let mut stream = egress_stream.lock().await;
-                        let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
-                        let _ = framed.send(cmd_bytes_clone.into()).await;
-                    });
+                // Get cmd stream pairs from WorkerManager
+                let stream_pairs = {
+                    let manager = worker_manager.lock().unwrap();
+                    manager.get_all_dp_cmd_streams()
+                };
+
+                if is_ping {
+                    // For ping, wait for all sends to complete and verify success
+                    let mut send_tasks = Vec::new();
+
+                    for (ingress_stream, egress_stream) in stream_pairs {
+                        // Send to ingress
+                        let cmd_bytes_clone = cmd_bytes.clone();
+                        let task = tokio::spawn(async move {
+                            let mut stream = ingress_stream.lock().await;
+                            let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
+                            framed.send(cmd_bytes_clone.into()).await
+                        });
+                        send_tasks.push(task);
+
+                        // Send to egress
+                        let cmd_bytes_clone = cmd_bytes.clone();
+                        let task = tokio::spawn(async move {
+                            let mut stream = egress_stream.lock().await;
+                            let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
+                            framed.send(cmd_bytes_clone.into()).await
+                        });
+                        send_tasks.push(task);
+                    }
+
+                    // Wait for all sends and check for errors
+                    let total_streams = send_tasks.len();
+                    let mut ready_count = 0;
+                    for task in send_tasks {
+                        match task.await {
+                            Ok(Ok(_)) => {
+                                // Send succeeded - worker stream is ready
+                                ready_count += 1;
+                            }
+                            Ok(Err(e)) => {
+                                eprintln!("[PING] Failed to send ping to worker: {}", e);
+                            }
+                            Err(e) => {
+                                eprintln!("[PING] Task join error: {}", e);
+                            }
+                        }
+                    }
+
+                    if ready_count == total_streams {
+                        final_response = Response::Success(format!(
+                            "pong: {}/{} worker streams ready",
+                            ready_count, total_streams
+                        ));
+                    } else {
+                        final_response = Response::Error(format!(
+                            "Only {}/{} worker streams ready",
+                            ready_count, total_streams
+                        ));
+                    }
+                } else {
+                    // For non-ping, non-SyncRules commands, fire and forget
+                    for (ingress_stream, egress_stream) in stream_pairs {
+                        // Send to ingress
+                        let cmd_bytes_clone = cmd_bytes.clone();
+                        tokio::spawn(async move {
+                            let mut stream = ingress_stream.lock().await;
+                            let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
+                            let _ = framed.send(cmd_bytes_clone.into()).await;
+                        });
+
+                        // Send to egress
+                        let cmd_bytes_clone = cmd_bytes.clone();
+                        tokio::spawn(async move {
+                            let mut stream = egress_stream.lock().await;
+                            let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
+                            let _ = framed.send(cmd_bytes_clone.into()).await;
+                        });
+                    }
                 }
             }
         }
@@ -1610,6 +3398,7 @@ pub async fn run(
 
         // Send initial ruleset sync to all data plane workers
         // This ensures workers start with the same ruleset as the supervisor
+        // Rules are filtered per-interface so each worker only receives rules for its interface
         let rules_snapshot: Vec<ForwardingRule> = {
             let rules = master_rules.lock().unwrap();
             rules.values().cloned().collect()
@@ -1620,23 +3409,30 @@ pub async fn run(
                 supervisor_logger,
                 Facility::Supervisor,
                 &format!(
-                    "Sending initial ruleset sync ({} rules) to all data plane workers",
+                    "Sending initial ruleset sync ({} total rules) to data plane workers (per-interface filtered)",
                     rules_snapshot.len()
                 )
             );
 
-            let sync_cmd = RelayCommand::SyncRules(rules_snapshot);
-            let cmd_bytes = serde_json::to_vec(&sync_cmd)?;
+            // Get streams with interface info for per-interface filtering
+            let stream_pairs_with_iface = manager.get_all_dp_cmd_streams_with_interface();
+            for (interface, ingress_stream, egress_stream) in stream_pairs_with_iface {
+                // Filter rules to only include those matching this worker's input interface
+                let interface_rules: Vec<ForwardingRule> = rules_snapshot
+                    .iter()
+                    .filter(|r| r.input_interface == interface)
+                    .cloned()
+                    .collect();
 
-            // Get command streams and send SyncRules to all data plane workers
-            let stream_pairs = manager.get_all_dp_cmd_streams();
-            for (ingress_stream, egress_stream) in stream_pairs {
-                let mut ingress = ingress_stream.lock().await;
-                let mut egress = egress_stream.lock().await;
+                let sync_cmd = RelayCommand::SyncRules(interface_rules);
+                if let Ok(cmd_bytes) = serde_json::to_vec(&sync_cmd) {
+                    let mut ingress = ingress_stream.lock().await;
+                    let mut egress = egress_stream.lock().await;
 
-                // Send to both ingress and egress workers (fire-and-forget)
-                let _ = ingress.write_all(&cmd_bytes).await;
-                let _ = egress.write_all(&cmd_bytes).await;
+                    // Send to both ingress and egress workers (fire-and-forget)
+                    let _ = ingress.write_all(&cmd_bytes).await;
+                    let _ = egress.write_all(&cmd_bytes).await;
+                }
             }
         } else {
             log_info!(
@@ -1649,12 +3445,66 @@ pub async fn run(
         Arc::new(Mutex::new(manager))
     };
 
+    // Initialize protocol subsystem if PIM or IGMP is configured
+    // Wrap in Arc<Mutex<>> so it can be shared with handle_client and event processing
+    let protocol_coordinator: Arc<Mutex<Option<ProtocolCoordinator>>> = Arc::new(Mutex::new(None));
+
+    if let Some(ref config) = startup_config {
+        let pim_enabled = config.pim.as_ref().map(|p| p.enabled).unwrap_or(false);
+        let igmp_enabled = config
+            .igmp
+            .as_ref()
+            .map(|i| !i.querier_interfaces.is_empty())
+            .unwrap_or(false);
+
+        if pim_enabled || igmp_enabled {
+            log_info!(
+                supervisor_logger,
+                Facility::Supervisor,
+                &format!(
+                    "Initializing protocol subsystem (PIM: {}, IGMP: {})",
+                    pim_enabled, igmp_enabled
+                )
+            );
+
+            match initialize_protocol_subsystem(config, supervisor_logger.clone()) {
+                Ok((coordinator, receiver_task, timer_task)) => {
+                    // Spawn protocol background tasks
+                    tokio::spawn(async move {
+                        receiver_task.await;
+                    });
+                    tokio::spawn(async move {
+                        timer_task.await;
+                    });
+
+                    // Store coordinator in the shared Arc<Mutex<>>
+                    *protocol_coordinator.lock().unwrap() = Some(coordinator);
+
+                    log_info!(
+                        supervisor_logger,
+                        Facility::Supervisor,
+                        "Protocol subsystem initialized successfully"
+                    );
+                }
+                Err(e) => {
+                    log_warning!(
+                        supervisor_logger,
+                        Facility::Supervisor,
+                        &format!("Failed to initialize protocol subsystem: {}", e)
+                    );
+                }
+            }
+        }
+    }
+
     // Create interval timers outside the loop so they persist across iterations
     // Using tokio::time::interval instead of sleep ensures the timer isn't reset
     // when other select! branches complete (critical bug fix!)
     let mut health_check_interval = tokio::time::interval(Duration::from_millis(250));
     let mut periodic_sync_interval =
         tokio::time::interval(Duration::from_secs(PERIODIC_SYNC_INTERVAL_SECS));
+    // Protocol event processing interval (100ms - fast enough for responsive routing)
+    let mut protocol_event_interval = tokio::time::interval(Duration::from_millis(100));
 
     // Main supervisor loop
     loop {
@@ -1678,6 +3528,7 @@ pub async fn run(
                     Arc::clone(&global_min_level),
                     Arc::clone(&facility_min_levels),
                     startup_config_path.clone(),
+                    Arc::clone(&protocol_coordinator),
                 )
                 .await
                 {
@@ -1696,21 +3547,29 @@ pub async fn run(
                 match restart_result {
                     Ok(Some((_pid, was_dataplane))) if was_dataplane => {
                         // A data plane worker was restarted - send SyncRules to ensure it has current ruleset
+                        // Rules are filtered per-interface so each worker only receives rules for its interface
                         let rules_snapshot: Vec<ForwardingRule> = {
                             let rules = master_rules.lock().unwrap();
                             rules.values().cloned().collect()
                         };
 
                         if !rules_snapshot.is_empty() {
-                            let sync_cmd = RelayCommand::SyncRules(rules_snapshot);
-                            if let Ok(cmd_bytes) = serde_json::to_vec(&sync_cmd) {
-                                // Send to all data plane workers (simpler than targeting just the new one)
-                                let stream_pairs = {
-                                    let manager = worker_manager.lock().unwrap();
-                                    manager.get_all_dp_cmd_streams()
-                                };
+                            // Send per-interface filtered rules to all data plane workers
+                            let stream_pairs_with_iface = {
+                                let manager = worker_manager.lock().unwrap();
+                                manager.get_all_dp_cmd_streams_with_interface()
+                            };
 
-                                for (ingress_stream, egress_stream) in stream_pairs {
+                            for (interface, ingress_stream, egress_stream) in stream_pairs_with_iface {
+                                // Filter rules to only include those matching this worker's input interface
+                                let interface_rules: Vec<ForwardingRule> = rules_snapshot
+                                    .iter()
+                                    .filter(|r| r.input_interface == interface)
+                                    .cloned()
+                                    .collect();
+
+                                let sync_cmd = RelayCommand::SyncRules(interface_rules);
+                                if let Ok(cmd_bytes) = serde_json::to_vec(&sync_cmd) {
                                     let mut ingress = ingress_stream.lock().await;
                                     let mut egress = egress_stream.lock().await;
 
@@ -1733,6 +3592,7 @@ pub async fn run(
             // Periodic ruleset sync (every 5 minutes)
             // Part of Option C (Hybrid Approach) for fire-and-forget broadcast reliability
             // Recovers from any missed broadcasts due to transient failures
+            // Rules are filtered per-interface so each worker only receives rules for its interface
             _ = periodic_sync_interval.tick() => {
                 let rules_snapshot: Vec<ForwardingRule> = {
                     let rules = master_rules.lock().unwrap();
@@ -1744,19 +3604,27 @@ pub async fn run(
                         supervisor_logger,
                         Facility::Supervisor,
                         &format!(
-                            "Periodic ruleset sync: sending {} rules to all data plane workers",
+                            "Periodic ruleset sync: sending {} total rules (per-interface filtered)",
                             rules_snapshot.len()
                         )
                     );
 
-                    let sync_cmd = RelayCommand::SyncRules(rules_snapshot);
-                    if let Ok(cmd_bytes) = serde_json::to_vec(&sync_cmd) {
-                        let stream_pairs = {
-                            let manager = worker_manager.lock().unwrap();
-                            manager.get_all_dp_cmd_streams()
-                        };
+                    // Send per-interface filtered rules to all data plane workers
+                    let stream_pairs_with_iface = {
+                        let manager = worker_manager.lock().unwrap();
+                        manager.get_all_dp_cmd_streams_with_interface()
+                    };
 
-                        for (ingress_stream, egress_stream) in stream_pairs {
+                    for (interface, ingress_stream, egress_stream) in stream_pairs_with_iface {
+                        // Filter rules to only include those matching this worker's input interface
+                        let interface_rules: Vec<ForwardingRule> = rules_snapshot
+                            .iter()
+                            .filter(|r| r.input_interface == interface)
+                            .cloned()
+                            .collect();
+
+                        let sync_cmd = RelayCommand::SyncRules(interface_rules);
+                        if let Ok(cmd_bytes) = serde_json::to_vec(&sync_cmd) {
                             let mut ingress = ingress_stream.lock().await;
                             let mut egress = egress_stream.lock().await;
 
@@ -1771,6 +3639,58 @@ pub async fn run(
                         Facility::Supervisor,
                         "Periodic ruleset sync: no rules to sync (empty ruleset)"
                     );
+                }
+            }
+
+            // Protocol event processing (every 100ms)
+            // Processes IGMP reports, PIM messages, and timer events
+            _ = protocol_event_interval.tick() => {
+                let mut coordinator_guard = protocol_coordinator.lock().unwrap();
+                if let Some(ref mut coordinator) = *coordinator_guard {
+                    // Process any pending protocol events
+                    let mrib_modified = coordinator.process_pending_events().await;
+
+                    // If MRIB was modified, sync rules to workers
+                    if mrib_modified && coordinator.rules_dirty() {
+                        // Compile rules from MRIB (merges static + protocol-learned)
+                        let protocol_rules = coordinator.compile_rules();
+
+                        // Merge with static rules from master_rules
+                        let mut all_rules: Vec<ForwardingRule> = {
+                            let rules = master_rules.lock().unwrap();
+                            rules.values().cloned().collect()
+                        };
+
+                        // Add protocol-learned rules (avoid duplicates by rule_id)
+                        let static_rule_ids: std::collections::HashSet<_> =
+                            all_rules.iter().map(|r| r.rule_id.clone()).collect();
+                        for rule in protocol_rules {
+                            if !static_rule_ids.contains(&rule.rule_id) {
+                                all_rules.push(rule);
+                            }
+                        }
+
+                        // Drop the lock before the async call
+                        drop(coordinator_guard);
+
+                        // Sync merged rules to all workers
+                        sync_rules_to_workers(&all_rules, &worker_manager, &supervisor_logger).await;
+
+                        // Re-acquire lock to clear dirty flag
+                        let mut coordinator_guard = protocol_coordinator.lock().unwrap();
+                        if let Some(ref mut coordinator) = *coordinator_guard {
+                            coordinator.clear_dirty();
+                        }
+
+                        log_debug!(
+                            supervisor_logger,
+                            Facility::Supervisor,
+                            &format!(
+                                "Protocol MRIB changed: synced {} rules to workers",
+                                all_rules.len()
+                            )
+                        );
+                    }
                 }
             }
         }
@@ -2054,7 +3974,9 @@ mod tests {
                 input_interface: "lo".to_string(),
                 input_group: "224.0.0.1".parse().unwrap(),
                 input_port: 5000,
+                input_source: None,
                 outputs: vec![],
+                source: crate::RuleSource::Static,
             },
         );
         let worker_map = Mutex::new(HashMap::new());
@@ -2117,7 +4039,9 @@ mod tests {
                 input_interface: "lo".to_string(),
                 input_group: "224.0.0.1".parse().unwrap(),
                 input_port: 5000,
+                input_source: None,
                 outputs: vec![],
+                source: crate::RuleSource::Static,
             },
         );
         let worker_map = Mutex::new(HashMap::new());

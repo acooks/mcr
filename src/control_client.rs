@@ -59,6 +59,18 @@ pub enum CliCommand {
         #[clap(subcommand)]
         action: ConfigAction,
     },
+    /// PIM-SM protocol management
+    Pim {
+        #[clap(subcommand)]
+        action: PimAction,
+    },
+    /// IGMP protocol management
+    Igmp {
+        #[clap(subcommand)]
+        action: IgmpAction,
+    },
+    /// Show multicast routing table
+    Mroute,
 }
 
 #[derive(Parser, Debug)]
@@ -85,6 +97,54 @@ pub enum ConfigAction {
         /// Path to configuration file
         #[arg(long)]
         file: PathBuf,
+    },
+}
+
+#[derive(Parser, Debug)]
+pub enum PimAction {
+    /// Show PIM neighbor table
+    Neighbors,
+    /// Enable PIM on an interface
+    Enable {
+        /// Interface name
+        #[arg(long)]
+        interface: String,
+        /// DR priority (default: 1)
+        #[arg(long, default_value = "1")]
+        dr_priority: u32,
+    },
+    /// Disable PIM on an interface
+    Disable {
+        /// Interface name
+        #[arg(long)]
+        interface: String,
+    },
+    /// Set a static RP mapping
+    SetRp {
+        /// Group prefix (e.g., "239.0.0.0/8" or "239.1.1.1")
+        #[arg(long)]
+        group: String,
+        /// RP address
+        #[arg(long)]
+        rp: Ipv4Addr,
+    },
+}
+
+#[derive(Parser, Debug)]
+pub enum IgmpAction {
+    /// Show IGMP group membership table
+    Groups,
+    /// Enable IGMP querier on an interface
+    EnableQuerier {
+        /// Interface name
+        #[arg(long)]
+        interface: String,
+    },
+    /// Disable IGMP querier on an interface
+    DisableQuerier {
+        /// Interface name
+        #[arg(long)]
+        interface: String,
     },
 }
 
@@ -228,6 +288,33 @@ pub fn build_command(cli_command: CliCommand) -> Result<multicast_relay::Supervi
                 multicast_relay::SupervisorCommand::CheckConfig { config }
             }
         },
+        CliCommand::Pim { action } => match action {
+            PimAction::Neighbors => multicast_relay::SupervisorCommand::GetPimNeighbors,
+            PimAction::Enable {
+                interface,
+                dr_priority,
+            } => multicast_relay::SupervisorCommand::EnablePim {
+                interface,
+                dr_priority: Some(dr_priority),
+            },
+            PimAction::Disable { interface } => {
+                multicast_relay::SupervisorCommand::DisablePim { interface }
+            }
+            PimAction::SetRp { group, rp } => multicast_relay::SupervisorCommand::SetStaticRp {
+                group_prefix: group,
+                rp_address: rp,
+            },
+        },
+        CliCommand::Igmp { action } => match action {
+            IgmpAction::Groups => multicast_relay::SupervisorCommand::GetIgmpGroups,
+            IgmpAction::EnableQuerier { interface } => {
+                multicast_relay::SupervisorCommand::EnableIgmpQuerier { interface }
+            }
+            IgmpAction::DisableQuerier { interface } => {
+                multicast_relay::SupervisorCommand::DisableIgmpQuerier { interface }
+            }
+        },
+        CliCommand::Mroute => multicast_relay::SupervisorCommand::GetMroute,
     })
 }
 

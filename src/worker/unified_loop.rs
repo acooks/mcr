@@ -148,6 +148,10 @@ struct FlowCounters {
 pub struct UnifiedDataPlane {
     ring: IoUring,
 
+    // Interface this worker is bound to (for diagnostics and logging)
+    #[allow(dead_code)] // Reserved for future diagnostic/logging use
+    interface_name: String,
+
     // Ingress
     recv_socket: Socket,
     recv_buffers: Vec<ManagedBuffer>,
@@ -202,7 +206,7 @@ impl UnifiedDataPlane {
     /// * `af_packet_fd` - Pre-configured AF_PACKET socket FD from supervisor
     /// * `logger` - Logger instance
     pub fn new_with_socket(
-        _interface_name: &str,
+        interface_name: &str,
         config: UnifiedConfig,
         buffer_pool: std::sync::Arc<BufferPool>,
         cmd_stream_fd: OwnedFd,
@@ -213,11 +217,19 @@ impl UnifiedDataPlane {
         // SAFETY: The supervisor created and configured this socket, we're taking ownership
         let recv_socket = unsafe { Socket::from_raw_fd(af_packet_fd.into_raw_fd()) };
 
-        Self::new_internal(config, buffer_pool, cmd_stream_fd, recv_socket, logger)
+        Self::new_internal(
+            interface_name,
+            config,
+            buffer_pool,
+            cmd_stream_fd,
+            recv_socket,
+            logger,
+        )
     }
 
     /// Internal constructor.
     fn new_internal(
+        interface_name: &str,
         config: UnifiedConfig,
         buffer_pool: std::sync::Arc<BufferPool>,
         cmd_stream_fd: OwnedFd,
@@ -259,6 +271,7 @@ impl UnifiedDataPlane {
 
         let mut unified = Self {
             ring: IoUring::new(config.queue_depth)?,
+            interface_name: interface_name.to_string(),
             recv_socket,
             recv_buffers: Vec::new(),
             in_flight_recvs: HashMap::new(),
@@ -793,6 +806,18 @@ impl UnifiedDataPlane {
             }
         };
 
+        // Check source filter for PIM (S,G) matching
+        // If rule.input_source is Some, the packet's source must match
+        if let Some(required_source) = rule.input_source {
+            if headers.ipv4.src_ip != required_source {
+                // Source doesn't match (S,G) rule - packet is not forwarded
+                if self.config.track_stats {
+                    self.stats.rules_not_matched += 1;
+                }
+                return Ok(Vec::new());
+            }
+        }
+
         // Check if rule has any outputs
         if rule.outputs.is_empty() {
             return Ok(Vec::new());
@@ -1042,11 +1067,13 @@ mod tests {
             input_interface: "lo".to_string(),
             input_group: input_group.parse().unwrap(),
             input_port,
+            input_source: None,
             outputs: vec![OutputDestination {
                 group: "224.0.0.2".parse().unwrap(),
                 port: 5001,
                 interface: "lo".to_string(),
             }],
+            source: crate::RuleSource::Static,
         }
     }
 

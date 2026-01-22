@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::path::Path;
 
-use crate::{ForwardingRule, OutputDestination};
+use crate::{ForwardingRule, OutputDestination, RuleSource};
 
 /// Startup/running configuration (JSON5 file format)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -24,6 +24,95 @@ pub struct Config {
     /// Forwarding rules
     #[serde(default)]
     pub rules: Vec<ConfigRule>,
+
+    /// PIM-SM configuration (optional)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pim: Option<PimConfig>,
+
+    /// IGMP configuration (optional)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub igmp: Option<IgmpConfig>,
+}
+
+/// PIM-SM configuration
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct PimConfig {
+    /// Enable PIM-SM
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Router ID (typically highest loopback IP)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub router_id: Option<Ipv4Addr>,
+
+    /// Per-interface PIM configuration
+    #[serde(default)]
+    pub interfaces: Vec<PimInterfaceConfig>,
+
+    /// Static RP mappings (group prefix -> RP address)
+    #[serde(default)]
+    pub static_rp: Vec<StaticRpConfig>,
+
+    /// Our RP address (if we are an RP)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rp_address: Option<Ipv4Addr>,
+}
+
+/// Per-interface PIM configuration
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PimInterfaceConfig {
+    /// Interface name
+    pub name: String,
+
+    /// DR priority (higher wins, default 1)
+    #[serde(default = "default_dr_priority")]
+    pub dr_priority: u32,
+}
+
+fn default_dr_priority() -> u32 {
+    1
+}
+
+/// Static RP configuration
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct StaticRpConfig {
+    /// Multicast group or prefix (e.g., "239.0.0.0/8" or "239.1.1.1")
+    pub group: String,
+
+    /// RP address for this group
+    pub rp: Ipv4Addr,
+}
+
+/// IGMP configuration
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct IgmpConfig {
+    /// Interfaces to act as IGMP querier on
+    #[serde(default)]
+    pub querier_interfaces: Vec<String>,
+
+    /// Query interval in seconds (default 125)
+    #[serde(default = "default_query_interval")]
+    pub query_interval: u32,
+
+    /// Robustness variable (default 2)
+    #[serde(default = "default_robustness")]
+    pub robustness: u8,
+
+    /// Query response interval in seconds (default 10)
+    #[serde(default = "default_query_response_interval")]
+    pub query_response_interval: u32,
+}
+
+fn default_query_interval() -> u32 {
+    125
+}
+
+fn default_robustness() -> u8 {
+    2
+}
+
+fn default_query_response_interval() -> u32 {
+    10
 }
 
 /// Rule as stored in config file
@@ -153,6 +242,16 @@ impl Config {
             }
         }
 
+        // Validate PIM configuration
+        if let Some(pim) = &self.pim {
+            validate_pim_config(pim)?;
+        }
+
+        // Validate IGMP configuration
+        if let Some(igmp) = &self.igmp {
+            validate_igmp_config(igmp)?;
+        }
+
         Ok(())
     }
 
@@ -185,6 +284,8 @@ impl Config {
         Config {
             pinning: HashMap::new(),
             rules: rules.iter().map(ConfigRule::from_forwarding_rule).collect(),
+            pim: None,
+            igmp: None,
         }
     }
 }
@@ -198,6 +299,7 @@ impl ConfigRule {
             input_interface: self.input.interface.clone(),
             input_group: self.input.group,
             input_port: self.input.port,
+            input_source: None, // Static rules from config don't have source filtering
             outputs: self
                 .outputs
                 .iter()
@@ -207,6 +309,7 @@ impl ConfigRule {
                     interface: o.interface.clone(),
                 })
                 .collect(),
+            source: RuleSource::Static, // Config file rules are static
         }
     }
 
@@ -272,6 +375,165 @@ fn validate_interface_name(name: &str) -> Result<(), ConfigError> {
     Ok(())
 }
 
+/// Validate PIM configuration
+fn validate_pim_config(pim: &PimConfig) -> Result<(), ConfigError> {
+    // Validate router_id if provided (must be unicast)
+    if let Some(router_id) = pim.router_id {
+        if router_id.is_multicast() || router_id.is_broadcast() || router_id.is_unspecified() {
+            return Err(ConfigError::InvalidPimConfig {
+                reason: format!(
+                    "router_id must be a valid unicast address, got {}",
+                    router_id
+                ),
+            });
+        }
+    }
+
+    // Validate rp_address if provided (must be unicast)
+    if let Some(rp_address) = pim.rp_address {
+        if rp_address.is_multicast() || rp_address.is_broadcast() || rp_address.is_unspecified() {
+            return Err(ConfigError::InvalidPimConfig {
+                reason: format!(
+                    "rp_address must be a valid unicast address, got {}",
+                    rp_address
+                ),
+            });
+        }
+    }
+
+    // Validate interface configurations
+    let mut seen_interfaces = std::collections::HashSet::new();
+    for iface_config in &pim.interfaces {
+        validate_interface_name(&iface_config.name)?;
+
+        // Check for duplicate interface entries
+        if !seen_interfaces.insert(&iface_config.name) {
+            return Err(ConfigError::InvalidPimConfig {
+                reason: format!(
+                    "duplicate interface '{}' in PIM configuration",
+                    iface_config.name
+                ),
+            });
+        }
+    }
+
+    // Validate static RP configurations
+    for rp_config in &pim.static_rp {
+        validate_group_prefix(&rp_config.group)?;
+
+        // RP address must be unicast
+        if rp_config.rp.is_multicast()
+            || rp_config.rp.is_broadcast()
+            || rp_config.rp.is_unspecified()
+        {
+            return Err(ConfigError::InvalidPimConfig {
+                reason: format!(
+                    "static RP address must be unicast, got {} for group {}",
+                    rp_config.rp, rp_config.group
+                ),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+/// Validate IGMP configuration
+fn validate_igmp_config(igmp: &IgmpConfig) -> Result<(), ConfigError> {
+    // Validate all querier interface names
+    let mut seen_interfaces = std::collections::HashSet::new();
+    for iface in &igmp.querier_interfaces {
+        validate_interface_name(iface)?;
+
+        // Check for duplicate interface entries
+        if !seen_interfaces.insert(iface) {
+            return Err(ConfigError::InvalidIgmpConfig {
+                reason: format!("duplicate interface '{}' in IGMP querier_interfaces", iface),
+            });
+        }
+    }
+
+    // Validate query_interval (must be > 0)
+    if igmp.query_interval == 0 {
+        return Err(ConfigError::InvalidIgmpConfig {
+            reason: "query_interval must be greater than 0".to_string(),
+        });
+    }
+
+    // Validate robustness (must be > 0)
+    if igmp.robustness == 0 {
+        return Err(ConfigError::InvalidIgmpConfig {
+            reason: "robustness must be greater than 0".to_string(),
+        });
+    }
+
+    // Validate query_response_interval (should be less than query_interval)
+    if igmp.query_response_interval >= igmp.query_interval {
+        return Err(ConfigError::InvalidIgmpConfig {
+            reason: format!(
+                "query_response_interval ({}) must be less than query_interval ({})",
+                igmp.query_response_interval, igmp.query_interval
+            ),
+        });
+    }
+
+    Ok(())
+}
+
+/// Validate a multicast group prefix (e.g., "239.0.0.0/8" or "239.1.1.1")
+fn validate_group_prefix(prefix: &str) -> Result<(), ConfigError> {
+    // Check if it's a CIDR prefix or single address
+    if let Some((addr_str, prefix_len_str)) = prefix.split_once('/') {
+        // CIDR format: addr/prefix_len
+        let addr: Ipv4Addr = addr_str
+            .parse()
+            .map_err(|_| ConfigError::InvalidGroupPrefix {
+                prefix: prefix.to_string(),
+                reason: "invalid IPv4 address".to_string(),
+            })?;
+
+        let prefix_len: u8 =
+            prefix_len_str
+                .parse()
+                .map_err(|_| ConfigError::InvalidGroupPrefix {
+                    prefix: prefix.to_string(),
+                    reason: "invalid prefix length".to_string(),
+                })?;
+
+        if prefix_len > 32 {
+            return Err(ConfigError::InvalidGroupPrefix {
+                prefix: prefix.to_string(),
+                reason: "prefix length must be <= 32".to_string(),
+            });
+        }
+
+        // For PIM, the base address should be a multicast address
+        if !addr.is_multicast() {
+            return Err(ConfigError::InvalidGroupPrefix {
+                prefix: prefix.to_string(),
+                reason: "group prefix must be a multicast address (224.0.0.0/4)".to_string(),
+            });
+        }
+    } else {
+        // Single address format
+        let addr: Ipv4Addr = prefix
+            .parse()
+            .map_err(|_| ConfigError::InvalidGroupPrefix {
+                prefix: prefix.to_string(),
+                reason: "invalid IPv4 address".to_string(),
+            })?;
+
+        if !addr.is_multicast() {
+            return Err(ConfigError::InvalidGroupPrefix {
+                prefix: prefix.to_string(),
+                reason: "group address must be a multicast address (224.0.0.0/4)".to_string(),
+            });
+        }
+    }
+
+    Ok(())
+}
+
 /// Configuration errors
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConfigError {
@@ -293,6 +555,16 @@ pub enum ConfigError {
     },
     EmptyPinning {
         interface: String,
+    },
+    InvalidPimConfig {
+        reason: String,
+    },
+    InvalidIgmpConfig {
+        reason: String,
+    },
+    InvalidGroupPrefix {
+        prefix: String,
+        reason: String,
     },
 }
 
@@ -326,6 +598,15 @@ impl std::fmt::Display for ConfigError {
             }
             ConfigError::EmptyPinning { interface } => {
                 write!(f, "empty core list for pinned interface '{}'", interface)
+            }
+            ConfigError::InvalidPimConfig { reason } => {
+                write!(f, "invalid PIM configuration: {}", reason)
+            }
+            ConfigError::InvalidIgmpConfig { reason } => {
+                write!(f, "invalid IGMP configuration: {}", reason)
+            }
+            ConfigError::InvalidGroupPrefix { prefix, reason } => {
+                write!(f, "invalid group prefix '{}': {}", prefix, reason)
             }
         }
     }
@@ -427,6 +708,8 @@ mod tests {
                     outputs: vec![],
                 },
             ],
+            pim: None,
+            igmp: None,
         };
 
         let result = config.validate();
@@ -446,6 +729,8 @@ mod tests {
                 },
                 outputs: vec![],
             }],
+            pim: None,
+            igmp: None,
         };
 
         let result = config.validate();
@@ -468,6 +753,8 @@ mod tests {
                 },
                 outputs: vec![],
             }],
+            pim: None,
+            igmp: None,
         };
 
         let result = config.validate();
@@ -492,6 +779,8 @@ mod tests {
                 },
                 outputs: vec![],
             }],
+            pim: None,
+            igmp: None,
         };
 
         let result = config.validate();
@@ -516,6 +805,8 @@ mod tests {
                 },
                 outputs: vec![],
             }],
+            pim: None,
+            igmp: None,
         };
 
         let result = config.validate();
@@ -544,6 +835,8 @@ mod tests {
                     interface: "".to_string(), // Invalid empty output interface
                 }],
             }],
+            pim: None,
+            igmp: None,
         };
 
         let result = config.validate();
@@ -566,6 +859,8 @@ mod tests {
                 },
                 outputs: vec![],
             }],
+            pim: None,
+            igmp: None,
         };
 
         let result = config.validate();
@@ -589,6 +884,8 @@ mod tests {
                     interface: "eth1".to_string(),
                 }],
             }],
+            pim: None,
+            igmp: None,
         };
 
         let result = config.validate();
@@ -620,6 +917,8 @@ mod tests {
                     interface: "eth1".to_string(),
                 }],
             }],
+            pim: None,
+            igmp: None,
         };
 
         let result = config.validate();
@@ -644,6 +943,8 @@ mod tests {
                     interface: "eth1".to_string(),
                 }],
             }],
+            pim: None,
+            igmp: None,
         };
 
         let result = config.validate();
@@ -655,6 +956,8 @@ mod tests {
         let config = Config {
             pinning: [("eth0".to_string(), vec![])].into_iter().collect(), // Empty cores
             rules: vec![],
+            pim: None,
+            igmp: None,
         };
 
         let result = config.validate();
@@ -671,6 +974,8 @@ mod tests {
         let config = Config {
             pinning: [("".to_string(), vec![0, 1])].into_iter().collect(), // Empty interface name
             rules: vec![],
+            pim: None,
+            igmp: None,
         };
 
         let result = config.validate();
@@ -762,6 +1067,8 @@ mod tests {
                     interface: "eth1".to_string(),
                 }],
             }],
+            pim: None,
+            igmp: None,
         };
 
         let interfaces = config.get_interfaces();
@@ -785,11 +1092,357 @@ mod tests {
                     interface: "eth1".to_string(),
                 }],
             }],
+            pim: None,
+            igmp: None,
         };
 
         // Serialize to JSON5 and parse back
         let json5 = config.to_json5();
         let parsed = Config::parse(&json5).unwrap();
         assert_eq!(config, parsed);
+    }
+
+    // PIM configuration validation tests
+    #[test]
+    fn test_pim_config_valid() {
+        let config = Config {
+            pinning: HashMap::new(),
+            rules: vec![],
+            pim: Some(PimConfig {
+                enabled: true,
+                router_id: Some("10.0.0.1".parse().unwrap()),
+                interfaces: vec![PimInterfaceConfig {
+                    name: "eth0".to_string(),
+                    dr_priority: 100,
+                }],
+                static_rp: vec![StaticRpConfig {
+                    group: "239.0.0.0/8".to_string(),
+                    rp: "10.0.0.1".parse().unwrap(),
+                }],
+                rp_address: Some("10.0.0.1".parse().unwrap()),
+            }),
+            igmp: None,
+        };
+
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_pim_config_invalid_router_id_multicast() {
+        let config = Config {
+            pinning: HashMap::new(),
+            rules: vec![],
+            pim: Some(PimConfig {
+                enabled: true,
+                router_id: Some("224.0.0.1".parse().unwrap()), // Multicast address
+                interfaces: vec![],
+                static_rp: vec![],
+                rp_address: None,
+            }),
+            igmp: None,
+        };
+
+        let result = config.validate();
+        assert!(matches!(result, Err(ConfigError::InvalidPimConfig { .. })));
+    }
+
+    #[test]
+    fn test_pim_config_invalid_rp_address_multicast() {
+        let config = Config {
+            pinning: HashMap::new(),
+            rules: vec![],
+            pim: Some(PimConfig {
+                enabled: true,
+                router_id: Some("10.0.0.1".parse().unwrap()),
+                interfaces: vec![],
+                static_rp: vec![],
+                rp_address: Some("224.0.0.1".parse().unwrap()), // Multicast address
+            }),
+            igmp: None,
+        };
+
+        let result = config.validate();
+        assert!(matches!(result, Err(ConfigError::InvalidPimConfig { .. })));
+    }
+
+    #[test]
+    fn test_pim_config_duplicate_interface() {
+        let config = Config {
+            pinning: HashMap::new(),
+            rules: vec![],
+            pim: Some(PimConfig {
+                enabled: true,
+                router_id: None,
+                interfaces: vec![
+                    PimInterfaceConfig {
+                        name: "eth0".to_string(),
+                        dr_priority: 100,
+                    },
+                    PimInterfaceConfig {
+                        name: "eth0".to_string(), // Duplicate
+                        dr_priority: 50,
+                    },
+                ],
+                static_rp: vec![],
+                rp_address: None,
+            }),
+            igmp: None,
+        };
+
+        let result = config.validate();
+        assert!(matches!(result, Err(ConfigError::InvalidPimConfig { .. })));
+    }
+
+    #[test]
+    fn test_pim_config_invalid_interface_name() {
+        let config = Config {
+            pinning: HashMap::new(),
+            rules: vec![],
+            pim: Some(PimConfig {
+                enabled: true,
+                router_id: None,
+                interfaces: vec![PimInterfaceConfig {
+                    name: "".to_string(), // Empty name
+                    dr_priority: 100,
+                }],
+                static_rp: vec![],
+                rp_address: None,
+            }),
+            igmp: None,
+        };
+
+        let result = config.validate();
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidInterfaceName { .. })
+        ));
+    }
+
+    #[test]
+    fn test_pim_config_invalid_static_rp_unicast_group() {
+        let config = Config {
+            pinning: HashMap::new(),
+            rules: vec![],
+            pim: Some(PimConfig {
+                enabled: true,
+                router_id: None,
+                interfaces: vec![],
+                static_rp: vec![StaticRpConfig {
+                    group: "192.168.1.0/24".to_string(), // Unicast prefix
+                    rp: "10.0.0.1".parse().unwrap(),
+                }],
+                rp_address: None,
+            }),
+            igmp: None,
+        };
+
+        let result = config.validate();
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidGroupPrefix { .. })
+        ));
+    }
+
+    #[test]
+    fn test_pim_config_invalid_static_rp_multicast_rp() {
+        let config = Config {
+            pinning: HashMap::new(),
+            rules: vec![],
+            pim: Some(PimConfig {
+                enabled: true,
+                router_id: None,
+                interfaces: vec![],
+                static_rp: vec![StaticRpConfig {
+                    group: "239.0.0.0/8".to_string(),
+                    rp: "224.0.0.1".parse().unwrap(), // RP is multicast (invalid)
+                }],
+                rp_address: None,
+            }),
+            igmp: None,
+        };
+
+        let result = config.validate();
+        assert!(matches!(result, Err(ConfigError::InvalidPimConfig { .. })));
+    }
+
+    // IGMP configuration validation tests
+    #[test]
+    fn test_igmp_config_valid() {
+        let config = Config {
+            pinning: HashMap::new(),
+            rules: vec![],
+            pim: None,
+            igmp: Some(IgmpConfig {
+                querier_interfaces: vec!["eth0".to_string(), "eth1".to_string()],
+                query_interval: 125,
+                robustness: 2,
+                query_response_interval: 10,
+            }),
+        };
+
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_igmp_config_invalid_interface_name() {
+        let config = Config {
+            pinning: HashMap::new(),
+            rules: vec![],
+            pim: None,
+            igmp: Some(IgmpConfig {
+                querier_interfaces: vec!["".to_string()], // Empty name
+                query_interval: 125,
+                robustness: 2,
+                query_response_interval: 10,
+            }),
+        };
+
+        let result = config.validate();
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidInterfaceName { .. })
+        ));
+    }
+
+    #[test]
+    fn test_igmp_config_duplicate_interface() {
+        let config = Config {
+            pinning: HashMap::new(),
+            rules: vec![],
+            pim: None,
+            igmp: Some(IgmpConfig {
+                querier_interfaces: vec!["eth0".to_string(), "eth0".to_string()], // Duplicate
+                query_interval: 125,
+                robustness: 2,
+                query_response_interval: 10,
+            }),
+        };
+
+        let result = config.validate();
+        assert!(matches!(result, Err(ConfigError::InvalidIgmpConfig { .. })));
+    }
+
+    #[test]
+    fn test_igmp_config_invalid_query_interval() {
+        let config = Config {
+            pinning: HashMap::new(),
+            rules: vec![],
+            pim: None,
+            igmp: Some(IgmpConfig {
+                querier_interfaces: vec![],
+                query_interval: 0, // Invalid
+                robustness: 2,
+                query_response_interval: 0,
+            }),
+        };
+
+        let result = config.validate();
+        assert!(matches!(result, Err(ConfigError::InvalidIgmpConfig { .. })));
+    }
+
+    #[test]
+    fn test_igmp_config_invalid_robustness() {
+        let config = Config {
+            pinning: HashMap::new(),
+            rules: vec![],
+            pim: None,
+            igmp: Some(IgmpConfig {
+                querier_interfaces: vec![],
+                query_interval: 125,
+                robustness: 0, // Invalid
+                query_response_interval: 10,
+            }),
+        };
+
+        let result = config.validate();
+        assert!(matches!(result, Err(ConfigError::InvalidIgmpConfig { .. })));
+    }
+
+    #[test]
+    fn test_igmp_config_response_interval_too_large() {
+        let config = Config {
+            pinning: HashMap::new(),
+            rules: vec![],
+            pim: None,
+            igmp: Some(IgmpConfig {
+                querier_interfaces: vec![],
+                query_interval: 125,
+                robustness: 2,
+                query_response_interval: 125, // Must be < query_interval
+            }),
+        };
+
+        let result = config.validate();
+        assert!(matches!(result, Err(ConfigError::InvalidIgmpConfig { .. })));
+    }
+
+    // Group prefix validation tests
+    #[test]
+    fn test_group_prefix_cidr_valid() {
+        let result = validate_group_prefix("239.0.0.0/8");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_group_prefix_single_address_valid() {
+        let result = validate_group_prefix("239.1.1.1");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_group_prefix_invalid_address() {
+        let result = validate_group_prefix("not.an.ip");
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidGroupPrefix { .. })
+        ));
+    }
+
+    #[test]
+    fn test_group_prefix_invalid_prefix_len() {
+        let result = validate_group_prefix("239.0.0.0/33");
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidGroupPrefix { .. })
+        ));
+    }
+
+    #[test]
+    fn test_parse_pim_igmp_config() {
+        let json5 = r#"{
+            pim: {
+                enabled: true,
+                router_id: "10.0.0.1",
+                interfaces: [
+                    { name: "eth0", dr_priority: 100 },
+                ],
+                static_rp: [
+                    { group: "239.0.0.0/8", rp: "10.0.0.1" },
+                ],
+                rp_address: "10.0.0.1",
+            },
+            igmp: {
+                querier_interfaces: ["eth0", "eth1"],
+                query_interval: 125,
+                robustness: 2,
+                query_response_interval: 10,
+            },
+        }"#;
+
+        let config = Config::parse(json5).unwrap();
+        assert!(config.pim.is_some());
+        assert!(config.igmp.is_some());
+
+        let pim = config.pim.unwrap();
+        assert!(pim.enabled);
+        assert_eq!(pim.router_id, Some("10.0.0.1".parse().unwrap()));
+        assert_eq!(pim.interfaces.len(), 1);
+        assert_eq!(pim.interfaces[0].name, "eth0");
+        assert_eq!(pim.interfaces[0].dr_priority, 100);
+
+        let igmp = config.igmp.unwrap();
+        assert_eq!(igmp.querier_interfaces.len(), 2);
+        assert_eq!(igmp.query_interval, 125);
+        assert_eq!(igmp.robustness, 2);
     }
 }

@@ -17,6 +17,8 @@
 use std::net::Ipv4Addr;
 use thiserror::Error;
 
+use crate::{IP_PROTO_IGMP, IP_PROTO_PIM};
+
 /// Errors that can occur during packet parsing
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
 pub enum ParseError {
@@ -97,6 +99,108 @@ pub struct UdpHeader {
     pub checksum: u16,
 }
 
+/// Parsed IGMP header (8 bytes)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IgmpHeader {
+    /// Message type: 0x11=Query, 0x16=V2Report, 0x17=Leave
+    pub msg_type: u8,
+    /// Max response time (in 1/10 seconds) - meaningful for queries
+    pub max_resp_time: u8,
+    /// Checksum
+    pub checksum: u16,
+    /// Group address (0.0.0.0 for general queries)
+    pub group_address: Ipv4Addr,
+}
+
+impl IgmpHeader {
+    /// Check if this is a membership query
+    pub fn is_query(&self) -> bool {
+        self.msg_type == 0x11
+    }
+
+    /// Check if this is a general query (group = 0.0.0.0)
+    pub fn is_general_query(&self) -> bool {
+        self.is_query() && self.group_address == Ipv4Addr::UNSPECIFIED
+    }
+
+    /// Check if this is a group-specific query
+    pub fn is_group_specific_query(&self) -> bool {
+        self.is_query() && self.group_address != Ipv4Addr::UNSPECIFIED
+    }
+
+    /// Check if this is a V2 membership report
+    pub fn is_v2_report(&self) -> bool {
+        self.msg_type == 0x16
+    }
+
+    /// Check if this is a leave group message
+    pub fn is_leave(&self) -> bool {
+        self.msg_type == 0x17
+    }
+
+    /// Get human-readable message type name
+    pub fn type_name(&self) -> &'static str {
+        match self.msg_type {
+            0x11 => "Membership Query",
+            0x12 => "V1 Membership Report",
+            0x16 => "V2 Membership Report",
+            0x17 => "Leave Group",
+            _ => "Unknown",
+        }
+    }
+}
+
+/// Parsed PIM header (4 bytes common header)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PimHeader {
+    /// PIM version (must be 2)
+    pub version: u8,
+    /// Message type: 0=Hello, 1=Register, 3=Join/Prune, etc.
+    pub msg_type: u8,
+    /// Reserved field
+    pub reserved: u8,
+    /// Checksum
+    pub checksum: u16,
+}
+
+impl PimHeader {
+    /// Check if this is a Hello message
+    pub fn is_hello(&self) -> bool {
+        self.msg_type == 0
+    }
+
+    /// Check if this is a Register message
+    pub fn is_register(&self) -> bool {
+        self.msg_type == 1
+    }
+
+    /// Check if this is a Register-Stop message
+    pub fn is_register_stop(&self) -> bool {
+        self.msg_type == 2
+    }
+
+    /// Check if this is a Join/Prune message
+    pub fn is_join_prune(&self) -> bool {
+        self.msg_type == 3
+    }
+
+    /// Get human-readable message type name
+    pub fn type_name(&self) -> &'static str {
+        match self.msg_type {
+            0 => "Hello",
+            1 => "Register",
+            2 => "Register-Stop",
+            3 => "Join/Prune",
+            4 => "Bootstrap",
+            5 => "Assert",
+            6 => "Graft",
+            7 => "Graft-Ack",
+            8 => "Candidate-RP",
+            _ => "Unknown",
+        }
+    }
+}
+
 /// Complete parsed packet headers
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PacketHeaders {
@@ -116,6 +220,80 @@ impl PacketHeaders {
     /// Check if this packet matches a multicast relay rule
     pub fn matches(&self, group: Ipv4Addr, port: u16) -> bool {
         self.ipv4.dst_ip == group && self.udp.dst_port == port
+    }
+
+    /// Check if this packet matches a multicast relay rule with optional source filter
+    pub fn matches_with_source(
+        &self,
+        group: Ipv4Addr,
+        port: u16,
+        source: Option<Ipv4Addr>,
+    ) -> bool {
+        let basic_match = self.ipv4.dst_ip == group && self.udp.dst_port == port;
+        match source {
+            Some(required_source) => basic_match && self.ipv4.src_ip == required_source,
+            None => basic_match,
+        }
+    }
+}
+
+/// Parsed packet - can be UDP, IGMP, or PIM
+#[derive(Debug, Clone)]
+pub enum ParsedPacket {
+    /// UDP multicast data packet
+    Udp(PacketHeaders),
+    /// IGMP control packet
+    Igmp {
+        ethernet: EthernetHeader,
+        ipv4: Ipv4Header,
+        igmp: IgmpHeader,
+    },
+    /// PIM control packet
+    Pim {
+        ethernet: EthernetHeader,
+        ipv4: Ipv4Header,
+        pim: PimHeader,
+        /// Payload after PIM header (for parsing options/TLVs)
+        payload: Vec<u8>,
+    },
+}
+
+impl ParsedPacket {
+    /// Get the source IP address
+    pub fn src_ip(&self) -> Ipv4Addr {
+        match self {
+            ParsedPacket::Udp(h) => h.ipv4.src_ip,
+            ParsedPacket::Igmp { ipv4, .. } => ipv4.src_ip,
+            ParsedPacket::Pim { ipv4, .. } => ipv4.src_ip,
+        }
+    }
+
+    /// Get the destination IP address
+    pub fn dst_ip(&self) -> Ipv4Addr {
+        match self {
+            ParsedPacket::Udp(h) => h.ipv4.dst_ip,
+            ParsedPacket::Igmp { ipv4, .. } => ipv4.dst_ip,
+            ParsedPacket::Pim { ipv4, .. } => ipv4.dst_ip,
+        }
+    }
+
+    /// Get the IP protocol number
+    pub fn protocol(&self) -> u8 {
+        match self {
+            ParsedPacket::Udp(h) => h.ipv4.protocol,
+            ParsedPacket::Igmp { ipv4, .. } => ipv4.protocol,
+            ParsedPacket::Pim { ipv4, .. } => ipv4.protocol,
+        }
+    }
+
+    /// Check if this is a control protocol packet (IGMP or PIM)
+    pub fn is_control(&self) -> bool {
+        matches!(self, ParsedPacket::Igmp { .. } | ParsedPacket::Pim { .. })
+    }
+
+    /// Check if this is a data packet (UDP)
+    pub fn is_data(&self) -> bool {
+        matches!(self, ParsedPacket::Udp(_))
     }
 }
 
@@ -181,6 +359,160 @@ pub fn parse_packet(data: &[u8], validate_checksums: bool) -> Result<PacketHeade
         payload_offset,
         payload_len,
     })
+}
+
+/// Parse any IPv4 packet (UDP, IGMP, or PIM)
+///
+/// This function handles multiple IP protocols:
+/// - Protocol 17 (UDP): Returns ParsedPacket::Udp
+/// - Protocol 2 (IGMP): Returns ParsedPacket::Igmp
+/// - Protocol 103 (PIM): Returns ParsedPacket::Pim
+///
+/// # Arguments
+/// * `data` - Raw packet data (starting with Ethernet header)
+/// * `validate_checksums` - Whether to validate checksums
+///
+/// # Returns
+/// Parsed packet variant, or an error if parsing fails
+pub fn parse_packet_any(data: &[u8], validate_checksums: bool) -> Result<ParsedPacket, ParseError> {
+    // Parse Ethernet header (14 bytes minimum)
+    let ethernet = parse_ethernet(data)?;
+
+    // Verify it's IPv4
+    if ethernet.ether_type != 0x0800 {
+        return Err(ParseError::InvalidEtherType(ethernet.ether_type));
+    }
+
+    // Parse IPv4 header (starts at byte 14)
+    let ip_offset = 14;
+    let ipv4 = parse_ipv4(&data[ip_offset..], validate_checksums)?;
+
+    // Check for fragmentation (D30: reject fragments)
+    if ipv4.is_fragmented() {
+        return Err(ParseError::FragmentedPacket);
+    }
+
+    // Branch based on IP protocol
+    match ipv4.protocol {
+        17 => {
+            // UDP - use existing parse_packet logic
+            let udp_offset = ip_offset + ipv4.header_len();
+            let udp = parse_udp(&data[udp_offset..], &ipv4, data, validate_checksums)?;
+
+            let payload_offset = udp_offset + 8;
+            let payload_len = (udp.length as usize).saturating_sub(8);
+
+            let expected_total = payload_offset + payload_len;
+            if data.len() < expected_total {
+                return Err(ParseError::PacketTooShort {
+                    expected: expected_total,
+                    actual: data.len(),
+                });
+            }
+
+            Ok(ParsedPacket::Udp(PacketHeaders {
+                ethernet,
+                ipv4,
+                udp,
+                payload_offset,
+                payload_len,
+            }))
+        }
+
+        IP_PROTO_IGMP => {
+            // IGMP
+            let igmp_offset = ip_offset + ipv4.header_len();
+            let igmp = parse_igmp(&data[igmp_offset..], validate_checksums)?;
+
+            Ok(ParsedPacket::Igmp {
+                ethernet,
+                ipv4,
+                igmp,
+            })
+        }
+
+        IP_PROTO_PIM => {
+            // PIM
+            let pim_offset = ip_offset + ipv4.header_len();
+            let (pim, payload) = parse_pim(&data[pim_offset..], validate_checksums)?;
+
+            Ok(ParsedPacket::Pim {
+                ethernet,
+                ipv4,
+                pim,
+                payload,
+            })
+        }
+
+        other => {
+            // Unknown protocol - return error
+            Err(ParseError::InvalidIpProtocol(other))
+        }
+    }
+}
+
+/// Parse IGMP header (8 bytes)
+fn parse_igmp(data: &[u8], _validate_checksum: bool) -> Result<IgmpHeader, ParseError> {
+    if data.len() < 8 {
+        return Err(ParseError::PacketTooShort {
+            expected: 8,
+            actual: data.len(),
+        });
+    }
+
+    let msg_type = data[0];
+    let max_resp_time = data[1];
+    let checksum = u16::from_be_bytes([data[2], data[3]]);
+    let group_address = Ipv4Addr::new(data[4], data[5], data[6], data[7]);
+
+    // TODO: Add checksum validation if validate_checksum is true
+
+    Ok(IgmpHeader {
+        msg_type,
+        max_resp_time,
+        checksum,
+        group_address,
+    })
+}
+
+/// Parse PIM header (4 bytes minimum)
+fn parse_pim(data: &[u8], _validate_checksum: bool) -> Result<(PimHeader, Vec<u8>), ParseError> {
+    if data.len() < 4 {
+        return Err(ParseError::PacketTooShort {
+            expected: 4,
+            actual: data.len(),
+        });
+    }
+
+    let ver_type = data[0];
+    let version = (ver_type >> 4) & 0x0F;
+    let msg_type = ver_type & 0x0F;
+
+    // PIM version must be 2
+    if version != 2 {
+        return Err(ParseError::InvalidIpVersion(version));
+    }
+
+    let reserved = data[1];
+    let checksum = u16::from_be_bytes([data[2], data[3]]);
+
+    // TODO: Add checksum validation if validate_checksum is true
+
+    let pim = PimHeader {
+        version,
+        msg_type,
+        reserved,
+        checksum,
+    };
+
+    // Return payload after PIM header
+    let payload = if data.len() > 4 {
+        data[4..].to_vec()
+    } else {
+        Vec::new()
+    };
+
+    Ok((pim, payload))
 }
 
 /// Parse Ethernet header (14 bytes)
@@ -765,5 +1097,308 @@ mod tests {
         let headers = result.unwrap();
         assert_eq!(headers.ipv4.ihl, 15);
         assert_eq!(headers.ipv4.header_len(), 60);
+    }
+
+    /// Create a minimal valid IGMP membership report packet
+    fn create_igmp_packet(msg_type: u8, group: [u8; 4]) -> Vec<u8> {
+        let mut packet = Vec::new();
+
+        // Ethernet header (14 bytes)
+        packet.extend_from_slice(&[0x01, 0x00, 0x5e, 0x00, 0x00, 0x01]); // Dst MAC
+        packet.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]); // Src MAC
+        packet.extend_from_slice(&[0x08, 0x00]); // EtherType: IPv4
+
+        // IPv4 header (20 bytes) - protocol 2 (IGMP)
+        packet.push(0x45); // Version 4, IHL 5
+        packet.push(0x00);
+        packet.extend_from_slice(&[0x00, 0x1C]); // Total length: 28 (20 IP + 8 IGMP)
+        packet.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+        packet.push(1); // TTL (IGMP uses TTL=1)
+        packet.push(2); // Protocol: IGMP
+        packet.extend_from_slice(&[0x00, 0x00]); // Checksum placeholder
+        packet.extend_from_slice(&[192, 168, 1, 100]); // Src IP
+        packet.extend_from_slice(&[224, 0, 0, 1]); // Dst IP (all hosts)
+
+        // Calculate IP checksum
+        let ip_checksum = calculate_ip_checksum(&packet[14..34]);
+        packet[24] = (ip_checksum >> 8) as u8;
+        packet[25] = (ip_checksum & 0xFF) as u8;
+
+        // IGMP header (8 bytes)
+        packet.push(msg_type); // Type
+        packet.push(0x64); // Max resp time: 100 (10 seconds)
+        packet.extend_from_slice(&[0x00, 0x00]); // Checksum placeholder
+        packet.extend_from_slice(&group); // Group address
+
+        packet
+    }
+
+    #[test]
+    fn test_parse_igmp_query() {
+        let packet = create_igmp_packet(0x11, [0, 0, 0, 0]); // General query
+
+        let result = parse_packet_any(&packet, false);
+        assert!(result.is_ok());
+
+        match result.unwrap() {
+            ParsedPacket::Igmp { ipv4, igmp, .. } => {
+                assert_eq!(ipv4.protocol, IP_PROTO_IGMP);
+                assert!(igmp.is_query());
+                assert!(igmp.is_general_query());
+                assert!(!igmp.is_group_specific_query());
+                assert_eq!(igmp.max_resp_time, 100);
+            }
+            _ => panic!("Expected IGMP packet"),
+        }
+    }
+
+    #[test]
+    fn test_parse_igmp_group_specific_query() {
+        let packet = create_igmp_packet(0x11, [239, 1, 1, 1]); // Group-specific query
+
+        let result = parse_packet_any(&packet, false);
+        assert!(result.is_ok());
+
+        match result.unwrap() {
+            ParsedPacket::Igmp { igmp, .. } => {
+                assert!(igmp.is_query());
+                assert!(!igmp.is_general_query());
+                assert!(igmp.is_group_specific_query());
+                assert_eq!(igmp.group_address, Ipv4Addr::new(239, 1, 1, 1));
+            }
+            _ => panic!("Expected IGMP packet"),
+        }
+    }
+
+    #[test]
+    fn test_parse_igmp_v2_report() {
+        let packet = create_igmp_packet(0x16, [239, 2, 2, 2]); // V2 report
+
+        let result = parse_packet_any(&packet, false);
+        assert!(result.is_ok());
+
+        match result.unwrap() {
+            ParsedPacket::Igmp { igmp, .. } => {
+                assert!(igmp.is_v2_report());
+                assert!(!igmp.is_query());
+                assert_eq!(igmp.group_address, Ipv4Addr::new(239, 2, 2, 2));
+                assert_eq!(igmp.type_name(), "V2 Membership Report");
+            }
+            _ => panic!("Expected IGMP packet"),
+        }
+    }
+
+    #[test]
+    fn test_parse_igmp_leave() {
+        let packet = create_igmp_packet(0x17, [239, 3, 3, 3]); // Leave
+
+        let result = parse_packet_any(&packet, false);
+        assert!(result.is_ok());
+
+        match result.unwrap() {
+            ParsedPacket::Igmp { igmp, .. } => {
+                assert!(igmp.is_leave());
+                assert_eq!(igmp.group_address, Ipv4Addr::new(239, 3, 3, 3));
+                assert_eq!(igmp.type_name(), "Leave Group");
+            }
+            _ => panic!("Expected IGMP packet"),
+        }
+    }
+
+    /// Create a minimal valid PIM Hello packet
+    fn create_pim_packet(msg_type: u8) -> Vec<u8> {
+        let mut packet = Vec::new();
+
+        // Ethernet header (14 bytes)
+        packet.extend_from_slice(&[0x01, 0x00, 0x5e, 0x00, 0x00, 0x0d]); // Dst MAC (ALL-PIM-ROUTERS)
+        packet.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]); // Src MAC
+        packet.extend_from_slice(&[0x08, 0x00]); // EtherType: IPv4
+
+        // IPv4 header (20 bytes) - protocol 103 (PIM)
+        packet.push(0x45); // Version 4, IHL 5
+        packet.push(0x00);
+        packet.extend_from_slice(&[0x00, 0x22]); // Total length: 34 (20 IP + 4 PIM + 10 options)
+        packet.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+        packet.push(1); // TTL
+        packet.push(103); // Protocol: PIM
+        packet.extend_from_slice(&[0x00, 0x00]); // Checksum placeholder
+        packet.extend_from_slice(&[192, 168, 1, 1]); // Src IP
+        packet.extend_from_slice(&[224, 0, 0, 13]); // Dst IP (ALL-PIM-ROUTERS)
+
+        // Calculate IP checksum
+        let ip_checksum = calculate_ip_checksum(&packet[14..34]);
+        packet[24] = (ip_checksum >> 8) as u8;
+        packet[25] = (ip_checksum & 0xFF) as u8;
+
+        // PIM header (4 bytes)
+        packet.push((2 << 4) | msg_type); // Version 2, Type
+        packet.push(0x00); // Reserved
+        packet.extend_from_slice(&[0x00, 0x00]); // Checksum placeholder
+
+        // Hello options (10 bytes) - Holdtime option
+        packet.extend_from_slice(&[0x00, 0x01]); // Option type: Holdtime
+        packet.extend_from_slice(&[0x00, 0x02]); // Option length: 2
+        packet.extend_from_slice(&[0x00, 0x69]); // Holdtime: 105 seconds
+        packet.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // Padding
+
+        packet
+    }
+
+    #[test]
+    fn test_parse_pim_hello() {
+        let packet = create_pim_packet(0); // Hello
+
+        let result = parse_packet_any(&packet, false);
+        assert!(result.is_ok());
+
+        match result.unwrap() {
+            ParsedPacket::Pim {
+                ipv4, pim, payload, ..
+            } => {
+                assert_eq!(ipv4.protocol, IP_PROTO_PIM);
+                assert_eq!(pim.version, 2);
+                assert!(pim.is_hello());
+                assert_eq!(pim.type_name(), "Hello");
+                assert!(!payload.is_empty()); // Should have options
+            }
+            _ => panic!("Expected PIM packet"),
+        }
+    }
+
+    #[test]
+    fn test_parse_pim_join_prune() {
+        let packet = create_pim_packet(3); // Join/Prune
+
+        let result = parse_packet_any(&packet, false);
+        assert!(result.is_ok());
+
+        match result.unwrap() {
+            ParsedPacket::Pim { pim, .. } => {
+                assert!(pim.is_join_prune());
+                assert_eq!(pim.type_name(), "Join/Prune");
+            }
+            _ => panic!("Expected PIM packet"),
+        }
+    }
+
+    #[test]
+    fn test_parse_packet_any_udp() {
+        let packet = create_test_packet();
+
+        let result = parse_packet_any(&packet, false);
+        assert!(result.is_ok());
+
+        let parsed = result.unwrap();
+        match &parsed {
+            ParsedPacket::Udp(headers) => {
+                assert_eq!(headers.ipv4.protocol, 17);
+            }
+            _ => panic!("Expected UDP packet"),
+        }
+        assert!(parsed.is_data());
+        assert!(!parsed.is_control());
+    }
+
+    #[test]
+    fn test_parsed_packet_accessors() {
+        let udp_packet = create_test_packet();
+        let parsed = parse_packet_any(&udp_packet, false).unwrap();
+
+        assert_eq!(parsed.src_ip(), Ipv4Addr::new(192, 168, 1, 1));
+        assert_eq!(parsed.dst_ip(), Ipv4Addr::new(239, 255, 0, 1));
+        assert_eq!(parsed.protocol(), 17);
+        assert!(parsed.is_data());
+        assert!(!parsed.is_control());
+
+        let igmp_packet = create_igmp_packet(0x16, [239, 1, 1, 1]);
+        let parsed = parse_packet_any(&igmp_packet, false).unwrap();
+
+        assert!(parsed.is_control());
+        assert!(!parsed.is_data());
+        assert_eq!(parsed.protocol(), IP_PROTO_IGMP);
+    }
+
+    #[test]
+    fn test_matches_with_source() {
+        let packet = create_test_packet();
+        let headers = parse_packet(&packet, false).unwrap();
+
+        // Should match with no source filter
+        assert!(headers.matches_with_source(Ipv4Addr::new(239, 255, 0, 1), 8000, None));
+
+        // Should match with correct source
+        assert!(headers.matches_with_source(
+            Ipv4Addr::new(239, 255, 0, 1),
+            8000,
+            Some(Ipv4Addr::new(192, 168, 1, 1))
+        ));
+
+        // Should not match with wrong source
+        assert!(!headers.matches_with_source(
+            Ipv4Addr::new(239, 255, 0, 1),
+            8000,
+            Some(Ipv4Addr::new(192, 168, 1, 2))
+        ));
+    }
+
+    #[test]
+    fn test_igmp_header_methods() {
+        let header = IgmpHeader {
+            msg_type: 0x11,
+            max_resp_time: 100,
+            checksum: 0,
+            group_address: Ipv4Addr::UNSPECIFIED,
+        };
+        assert!(header.is_query());
+        assert!(header.is_general_query());
+        assert!(!header.is_group_specific_query());
+        assert!(!header.is_v2_report());
+        assert!(!header.is_leave());
+
+        let header = IgmpHeader {
+            msg_type: 0x16,
+            max_resp_time: 0,
+            checksum: 0,
+            group_address: Ipv4Addr::new(239, 1, 1, 1),
+        };
+        assert!(header.is_v2_report());
+        assert!(!header.is_query());
+
+        let header = IgmpHeader {
+            msg_type: 0x17,
+            max_resp_time: 0,
+            checksum: 0,
+            group_address: Ipv4Addr::new(239, 1, 1, 1),
+        };
+        assert!(header.is_leave());
+    }
+
+    #[test]
+    fn test_pim_header_methods() {
+        let header = PimHeader {
+            version: 2,
+            msg_type: 0,
+            reserved: 0,
+            checksum: 0,
+        };
+        assert!(header.is_hello());
+        assert!(!header.is_register());
+        assert!(!header.is_join_prune());
+
+        let header = PimHeader {
+            version: 2,
+            msg_type: 1,
+            reserved: 0,
+            checksum: 0,
+        };
+        assert!(header.is_register());
+
+        let header = PimHeader {
+            version: 2,
+            msg_type: 3,
+            reserved: 0,
+            checksum: 0,
+        };
+        assert!(header.is_join_prune());
     }
 }

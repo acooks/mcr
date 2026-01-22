@@ -10,9 +10,66 @@ use std::path::PathBuf;
 
 pub use config::{Config, ConfigRule, InputSpec, OutputSpec};
 
+pub mod mroute;
+pub mod protocols;
+
 /// Protocol version for supervisor-client communication.
 /// Increment when making breaking changes to SupervisorCommand or Response.
 pub const PROTOCOL_VERSION: u32 = 1;
+
+/// IP protocol numbers for PIM and IGMP
+pub const IP_PROTO_IGMP: u8 = 2;
+pub const IP_PROTO_PIM: u8 = 103;
+
+/// PIM tree type for (S,G) vs (*,G) routing
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum PimTreeType {
+    /// (*,G) shared tree rooted at RP
+    StarG,
+    /// (S,G) shortest-path tree rooted at source
+    SG,
+}
+
+impl std::fmt::Display for PimTreeType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PimTreeType::StarG => write!(f, "(*,G)"),
+            PimTreeType::SG => write!(f, "(S,G)"),
+        }
+    }
+}
+
+/// Source of a forwarding rule - distinguishes static from protocol-learned routes
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
+pub enum RuleSource {
+    /// Rule loaded from config file at startup
+    #[default]
+    Static,
+    /// Rule added dynamically via CLI at runtime
+    Dynamic,
+    /// Rule created by PIM state machine
+    Pim {
+        tree_type: PimTreeType,
+        /// Unix timestamp when the route was created
+        created_at: u64,
+    },
+    /// Rule created by IGMP membership
+    Igmp {
+        /// Unix timestamp when the membership was learned
+        created_at: u64,
+    },
+}
+
+impl std::fmt::Display for RuleSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RuleSource::Static => write!(f, "static"),
+            RuleSource::Dynamic => write!(f, "dynamic"),
+            RuleSource::Pim { tree_type, .. } => write!(f, "pim-{}", tree_type),
+            RuleSource::Igmp { .. } => write!(f, "igmp"),
+        }
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct WorkerInfo {
@@ -157,6 +214,37 @@ pub enum SupervisorCommand {
     CheckConfig {
         config: Config,
     },
+    // --- PIM Commands ---
+    /// Get PIM neighbor table
+    GetPimNeighbors,
+    /// Enable PIM on an interface
+    EnablePim {
+        interface: String,
+        dr_priority: Option<u32>,
+    },
+    /// Disable PIM on an interface
+    DisablePim {
+        interface: String,
+    },
+    /// Set a static RP mapping
+    SetStaticRp {
+        group_prefix: String,
+        rp_address: Ipv4Addr,
+    },
+    // --- IGMP Commands ---
+    /// Get IGMP group membership table
+    GetIgmpGroups,
+    /// Enable IGMP querier on an interface
+    EnableIgmpQuerier {
+        interface: String,
+    },
+    /// Disable IGMP querier on an interface
+    DisableIgmpQuerier {
+        interface: String,
+    },
+    // --- Multicast Routing Table ---
+    /// Get the multicast routing table (merged static + dynamic)
+    GetMroute,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -180,6 +268,74 @@ pub enum Response {
         valid: bool,
         errors: Vec<String>,
     },
+    /// PIM neighbor table response
+    PimNeighbors(Vec<PimNeighborInfo>),
+    /// IGMP group membership response
+    IgmpGroups(Vec<IgmpGroupInfo>),
+    /// Multicast routing table response
+    Mroute(Vec<MrouteEntry>),
+}
+
+/// Information about a PIM neighbor
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PimNeighborInfo {
+    /// Interface where neighbor was discovered
+    pub interface: String,
+    /// Neighbor's IP address
+    pub address: Ipv4Addr,
+    /// Neighbor's DR priority
+    pub dr_priority: u32,
+    /// Whether this neighbor is the DR on this interface
+    pub is_dr: bool,
+    /// Seconds until neighbor expires
+    pub expires_in_secs: u64,
+    /// Neighbor's generation ID
+    pub generation_id: u32,
+}
+
+/// Information about an IGMP group membership
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IgmpGroupInfo {
+    /// Interface where membership was learned
+    pub interface: String,
+    /// Multicast group address
+    pub group: Ipv4Addr,
+    /// Seconds until membership expires
+    pub expires_in_secs: u64,
+    /// IP address of the last host that reported membership
+    pub last_reporter: Option<Ipv4Addr>,
+    /// Whether we are the querier on this interface
+    pub is_querier: bool,
+}
+
+/// Entry in the multicast routing table
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MrouteEntry {
+    /// Source IP (None = (*,G) entry)
+    pub source: Option<Ipv4Addr>,
+    /// Multicast group address
+    pub group: Ipv4Addr,
+    /// Input interface
+    pub input_interface: String,
+    /// Output interfaces
+    pub output_interfaces: Vec<String>,
+    /// Type of entry (static, (*,G), (S,G), igmp)
+    pub entry_type: MrouteEntryType,
+    /// Age in seconds (how long ago was this entry created)
+    pub age_secs: u64,
+}
+
+/// Type of multicast route entry
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum MrouteEntryType {
+    /// Static rule from config/CLI
+    Static,
+    /// PIM (*,G) shared tree
+    StarG,
+    /// PIM (S,G) shortest-path tree
+    SG,
+    /// IGMP membership (local receivers)
+    Igmp,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Hash)]
@@ -191,7 +347,15 @@ pub struct ForwardingRule {
     pub input_interface: String,
     pub input_group: Ipv4Addr,
     pub input_port: u16,
+    /// Optional source IP filter for PIM (S,G) matching.
+    /// If Some, only packets from this source are matched.
+    /// If None, packets from any source are matched ((*,G) or static rules).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_source: Option<Ipv4Addr>,
     pub outputs: Vec<OutputDestination>,
+    /// Source of this rule (static, dynamic, PIM, IGMP)
+    #[serde(default)]
+    pub source: RuleSource,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -323,7 +487,9 @@ mod tests {
             input_interface: "eth0".to_string(),
             input_group: "224.0.0.1".parse().unwrap(),
             input_port: 5000,
+            input_source: None,
             outputs: vec![],
+            source: RuleSource::Static,
         };
         let rules_response = Response::Rules(vec![rule]);
         let json = serde_json::to_string(&rules_response).unwrap();
@@ -352,15 +518,72 @@ mod tests {
             input_interface: "eth0".to_string(),
             input_group: "224.0.0.1".parse().unwrap(),
             input_port: 5000,
+            input_source: None,
             outputs: vec![OutputDestination {
                 group: "224.0.0.2".parse().unwrap(),
                 port: 5001,
                 interface: "127.0.0.1".to_string(),
             }],
+            source: RuleSource::Static,
         };
         let json = serde_json::to_string(&rule).unwrap();
         let deserialized: ForwardingRule = serde_json::from_str(&json).unwrap();
         assert_eq!(rule, deserialized);
+    }
+
+    #[test]
+    fn test_forwarding_rule_with_source_filter() {
+        let rule = ForwardingRule {
+            rule_id: "sg-rule".to_string(),
+            name: Some("S,G rule".to_string()),
+            input_interface: "eth0".to_string(),
+            input_group: "239.1.1.1".parse().unwrap(),
+            input_port: 5000,
+            input_source: Some("10.0.0.5".parse().unwrap()),
+            outputs: vec![OutputDestination {
+                group: "239.1.1.1".parse().unwrap(),
+                port: 5000,
+                interface: "eth1".to_string(),
+            }],
+            source: RuleSource::Pim {
+                tree_type: PimTreeType::SG,
+                created_at: 1234567890,
+            },
+        };
+        let json = serde_json::to_string(&rule).unwrap();
+        let deserialized: ForwardingRule = serde_json::from_str(&json).unwrap();
+        assert_eq!(rule, deserialized);
+        assert_eq!(rule.input_source, Some("10.0.0.5".parse().unwrap()));
+        assert!(matches!(
+            rule.source,
+            RuleSource::Pim {
+                tree_type: PimTreeType::SG,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_rule_source_display() {
+        assert_eq!(RuleSource::Static.to_string(), "static");
+        assert_eq!(RuleSource::Dynamic.to_string(), "dynamic");
+        assert_eq!(
+            RuleSource::Pim {
+                tree_type: PimTreeType::StarG,
+                created_at: 0
+            }
+            .to_string(),
+            "pim-(*,G)"
+        );
+        assert_eq!(
+            RuleSource::Pim {
+                tree_type: PimTreeType::SG,
+                created_at: 0
+            }
+            .to_string(),
+            "pim-(S,G)"
+        );
+        assert_eq!(RuleSource::Igmp { created_at: 0 }.to_string(), "igmp");
     }
 
     #[test]
