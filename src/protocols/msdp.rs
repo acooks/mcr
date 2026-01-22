@@ -55,6 +55,55 @@ pub const DEFAULT_SA_CACHE_TIMEOUT: Duration = Duration::from_secs(60);
 /// MSDP well-known port
 pub const MSDP_PORT: u16 = 639;
 
+/// SA flood request - returned by state machine methods when SA needs to be flooded
+#[derive(Debug, Clone)]
+pub struct SaFloodRequest {
+    /// RP address that originated this SA
+    pub rp_address: Ipv4Addr,
+    /// Source/group pairs to flood
+    pub entries: Vec<(Ipv4Addr, Ipv4Addr)>,
+    /// Peer to exclude from flooding (the peer we learned from, if any)
+    pub exclude_peer: Option<Ipv4Addr>,
+}
+
+/// Result of MSDP state machine operations
+#[derive(Debug, Default)]
+pub struct MsdpActionResult {
+    /// Timer requests to schedule
+    pub timers: Vec<TimerRequest>,
+    /// SA flood requests to send
+    pub floods: Vec<SaFloodRequest>,
+    /// Newly learned (source, group) pairs that should be checked for local receivers
+    /// If local receivers exist, the supervisor should create (S,G) routing state
+    pub learned_sources: Vec<(Ipv4Addr, Ipv4Addr)>,
+}
+
+impl MsdpActionResult {
+    /// Create an empty result
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create a result with only timers
+    pub fn with_timers(timers: Vec<TimerRequest>) -> Self {
+        Self {
+            timers,
+            floods: Vec::new(),
+            learned_sources: Vec::new(),
+        }
+    }
+
+    /// Add a flood request
+    pub fn add_flood(&mut self, flood: SaFloodRequest) {
+        self.floods.push(flood);
+    }
+
+    /// Add a learned source
+    pub fn add_learned_source(&mut self, source: Ipv4Addr, group: Ipv4Addr) {
+        self.learned_sources.push((source, group));
+    }
+}
+
 /// MSDP peer state
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MsdpPeerState {
@@ -518,8 +567,11 @@ impl MsdpState {
         peer_addr: Ipv4Addr,
         entries: Vec<(Ipv4Addr, Ipv4Addr, Ipv4Addr)>, // (source, group, origin_rp)
         now: Instant,
-    ) -> Vec<TimerRequest> {
-        let mut timers = Vec::new();
+    ) -> MsdpActionResult {
+        let mut result = MsdpActionResult::new();
+
+        // Track new entries for flooding, grouped by origin_rp
+        let mut new_entries_by_rp: HashMap<Ipv4Addr, Vec<(Ipv4Addr, Ipv4Addr)>> = HashMap::new();
 
         // Update peer's last received time
         if let Some(peer) = self.peers.get_mut(&peer_addr) {
@@ -532,7 +584,7 @@ impl MsdpState {
             }
 
             // Reset hold timer
-            timers.push(TimerRequest {
+            result.timers.push(TimerRequest {
                 timer_type: TimerType::MsdpHold { peer: peer_addr },
                 fire_at: now + peer.config.hold_time,
                 replace_existing: true,
@@ -542,8 +594,7 @@ impl MsdpState {
         // Process each SA entry
         for (source, group, origin_rp) in entries {
             // RPF check: only accept SA if peer is the RPF neighbor toward origin_rp
-            // For simplicity, we skip this check for now and accept all SAs
-            // TODO: Implement proper RPF check
+            // TODO: Implement proper RPF check (for now, accept all SAs)
 
             let key = (source, group, origin_rp);
 
@@ -563,7 +614,7 @@ impl MsdpState {
                 self.sa_cache.insert(key, entry);
 
                 // Schedule expiry timer
-                timers.push(TimerRequest {
+                result.timers.push(TimerRequest {
                     timer_type: TimerType::MsdpSaCacheExpiry {
                         source,
                         group,
@@ -572,10 +623,28 @@ impl MsdpState {
                     fire_at: expires_at,
                     replace_existing: false,
                 });
+
+                // Track for flooding
+                new_entries_by_rp
+                    .entry(origin_rp)
+                    .or_default()
+                    .push((source, group));
+
+                // Track as learned source for MSDP-to-PIM notification
+                result.add_learned_source(source, group);
             }
         }
 
-        timers
+        // Create flood requests for new entries (grouped by origin_rp)
+        for (rp_address, entries) in new_entries_by_rp {
+            result.add_flood(SaFloodRequest {
+                rp_address,
+                entries,
+                exclude_peer: Some(peer_addr), // Don't flood back to sender
+            });
+        }
+
+        result
     }
 
     /// Process a received keepalive message
@@ -608,9 +677,9 @@ impl MsdpState {
         source: Ipv4Addr,
         group: Ipv4Addr,
         origin_rp: Ipv4Addr,
-        now: Instant,
-    ) -> Vec<TimerRequest> {
-        let mut timers = Vec::new();
+        _now: Instant,
+    ) -> MsdpActionResult {
+        let mut result = MsdpActionResult::new();
 
         use std::collections::hash_map::Entry;
 
@@ -622,7 +691,7 @@ impl MsdpState {
             e.insert(entry);
 
             // Schedule expiry timer
-            timers.push(TimerRequest {
+            result.timers.push(TimerRequest {
                 timer_type: TimerType::MsdpSaCacheExpiry {
                     source,
                     group,
@@ -632,11 +701,15 @@ impl MsdpState {
                 replace_existing: false,
             });
 
-            // TODO: Flood SA to all peers
-            let _ = now; // silence unused warning
+            // Request SA flood to all peers (local source, so no peer to exclude)
+            result.add_flood(SaFloodRequest {
+                rp_address: origin_rp,
+                entries: vec![(source, group)],
+                exclude_peer: None,
+            });
         }
 
-        timers
+        result
     }
 
     /// Remove a local source (from PIM)
@@ -1276,5 +1349,176 @@ mod tests {
         assert_eq!(stats.sa_cache_size, 2);
         assert_eq!(stats.local_entries, 1);
         assert_eq!(stats.learned_entries, 1);
+    }
+
+    #[test]
+    fn test_local_source_active_creates_flood_request() {
+        let mut state = MsdpState::new();
+        state.config.enabled = true;
+
+        let source: Ipv4Addr = "10.0.0.5".parse().unwrap();
+        let group: Ipv4Addr = "239.1.1.1".parse().unwrap();
+        let rp: Ipv4Addr = "10.0.0.1".parse().unwrap();
+
+        let result = state.local_source_active(source, group, rp, Instant::now());
+
+        // Should have timer for SA expiry
+        assert!(!result.timers.is_empty());
+
+        // Should have flood request
+        assert_eq!(result.floods.len(), 1);
+        assert_eq!(result.floods[0].rp_address, rp);
+        assert_eq!(result.floods[0].entries.len(), 1);
+        assert_eq!(result.floods[0].entries[0], (source, group));
+        assert!(result.floods[0].exclude_peer.is_none()); // Local source, no peer to exclude
+
+        // SA should be in cache
+        assert!(state.sa_cache.contains_key(&(source, group, rp)));
+    }
+
+    #[test]
+    fn test_local_source_active_no_duplicate_flood() {
+        let mut state = MsdpState::new();
+        state.config.enabled = true;
+
+        let source: Ipv4Addr = "10.0.0.5".parse().unwrap();
+        let group: Ipv4Addr = "239.1.1.1".parse().unwrap();
+        let rp: Ipv4Addr = "10.0.0.1".parse().unwrap();
+
+        // First call should create flood
+        let result1 = state.local_source_active(source, group, rp, Instant::now());
+        assert_eq!(result1.floods.len(), 1);
+
+        // Second call should NOT create flood (already in cache)
+        let result2 = state.local_source_active(source, group, rp, Instant::now());
+        assert!(result2.floods.is_empty());
+    }
+
+    #[test]
+    fn test_process_sa_message_creates_flood_and_learned_sources() {
+        let mut state = MsdpState::new();
+        state.config.enabled = true;
+
+        // Add a peer first
+        let config = MsdpPeerConfig::new("10.0.0.1".parse().unwrap());
+        state.add_peer(config);
+
+        // Activate the peer
+        let now = Instant::now();
+        state.connection_established("10.0.0.1".parse().unwrap(), true, now);
+        if let Some(peer) = state.peers.get_mut(&"10.0.0.1".parse().unwrap()) {
+            peer.activate();
+        }
+
+        let peer: Ipv4Addr = "10.0.0.1".parse().unwrap();
+        let entries = vec![
+            (
+                "10.0.0.5".parse().unwrap(),
+                "239.1.1.1".parse().unwrap(),
+                "10.0.0.2".parse().unwrap(),
+            ),
+            (
+                "10.0.0.6".parse().unwrap(),
+                "239.2.2.2".parse().unwrap(),
+                "10.0.0.2".parse().unwrap(),
+            ),
+        ];
+
+        let result = state.process_sa_message(peer, entries, now);
+
+        // Should have flood requests (grouped by RP)
+        assert_eq!(result.floods.len(), 1);
+        assert_eq!(result.floods[0].entries.len(), 2);
+        assert_eq!(result.floods[0].exclude_peer, Some(peer)); // Exclude sender
+
+        // Should track learned sources for MSDP-to-PIM
+        assert_eq!(result.learned_sources.len(), 2);
+
+        // SA entries should be in cache
+        assert_eq!(state.sa_cache.len(), 2);
+    }
+
+    #[test]
+    fn test_process_sa_message_no_flood_for_existing() {
+        let mut state = MsdpState::new();
+        state.config.enabled = true;
+
+        // Add a peer
+        let config = MsdpPeerConfig::new("10.0.0.1".parse().unwrap());
+        state.add_peer(config);
+        let now = Instant::now();
+        state.connection_established("10.0.0.1".parse().unwrap(), true, now);
+        if let Some(peer) = state.peers.get_mut(&"10.0.0.1".parse().unwrap()) {
+            peer.activate();
+        }
+
+        let peer: Ipv4Addr = "10.0.0.1".parse().unwrap();
+        let entries = vec![(
+            "10.0.0.5".parse().unwrap(),
+            "239.1.1.1".parse().unwrap(),
+            "10.0.0.2".parse().unwrap(),
+        )];
+
+        // First message should create flood
+        let result1 = state.process_sa_message(peer, entries.clone(), now);
+        assert_eq!(result1.floods.len(), 1);
+        assert_eq!(result1.learned_sources.len(), 1);
+
+        // Second message with same entries should just refresh, no flood
+        let result2 = state.process_sa_message(peer, entries, now);
+        assert!(result2.floods.is_empty());
+        assert!(result2.learned_sources.is_empty());
+    }
+
+    #[test]
+    fn test_sa_flood_request_struct() {
+        let flood = SaFloodRequest {
+            rp_address: "10.0.0.1".parse().unwrap(),
+            entries: vec![
+                ("10.0.0.5".parse().unwrap(), "239.1.1.1".parse().unwrap()),
+                ("10.0.0.6".parse().unwrap(), "239.2.2.2".parse().unwrap()),
+            ],
+            exclude_peer: Some("10.0.0.3".parse().unwrap()),
+        };
+
+        assert_eq!(flood.rp_address, "10.0.0.1".parse::<Ipv4Addr>().unwrap());
+        assert_eq!(flood.entries.len(), 2);
+        assert_eq!(flood.exclude_peer, Some("10.0.0.3".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_msdp_action_result() {
+        let mut result = MsdpActionResult::new();
+        assert!(result.timers.is_empty());
+        assert!(result.floods.is_empty());
+        assert!(result.learned_sources.is_empty());
+
+        result.add_flood(SaFloodRequest {
+            rp_address: "10.0.0.1".parse().unwrap(),
+            entries: vec![("10.0.0.5".parse().unwrap(), "239.1.1.1".parse().unwrap())],
+            exclude_peer: None,
+        });
+        assert_eq!(result.floods.len(), 1);
+
+        result.add_learned_source("10.0.0.5".parse().unwrap(), "239.1.1.1".parse().unwrap());
+        assert_eq!(result.learned_sources.len(), 1);
+    }
+
+    #[test]
+    fn test_local_source_inactive_removes_from_cache() {
+        let mut state = MsdpState::new();
+        state.config.enabled = true;
+
+        let source: Ipv4Addr = "10.0.0.5".parse().unwrap();
+        let group: Ipv4Addr = "239.1.1.1".parse().unwrap();
+        let rp: Ipv4Addr = "10.0.0.1".parse().unwrap();
+
+        // Add local source
+        state.local_source_active(source, group, rp, Instant::now());
+        assert!(state.sa_cache.contains_key(&(source, group, rp)));
+
+        // Remove it
+        state.local_source_inactive(source, group);
+        assert!(!state.sa_cache.contains_key(&(source, group, rp)));
     }
 }

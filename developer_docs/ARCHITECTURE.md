@@ -38,6 +38,7 @@ This document describes both **current implementation** and **target architectur
 - Data plane worker privilege dropping (AF_PACKET FD passing via SCM_RIGHTS)
 - IGMPv2 querier with group membership tracking (RFC 2236)
 - PIM-SM state machine with neighbor discovery and DR election (RFC 7761 subset)
+- MSDP for inter-domain multicast source discovery (RFC 3618)
 - Multicast RIB merging static rules with protocol-learned routes
 - Per-interface rule filtering for data plane workers
 
@@ -239,7 +240,7 @@ The control interface provides runtime configuration and monitoring. The supervi
   - **Rule Resynchronization:** When workers restart, the supervisor sends a `SyncRules` command with the complete ruleset. Periodic health checks (every 250ms) detect dead workers and trigger automatic restart with rule resync.
   - **Drift Detection:** Hash-based drift detection enables manual detection of workers with stale rulesets by comparing hash values in log output. Each component (supervisor, workers) logs a hash of its ruleset when rules change.
 
-## 6. Protocol Subsystem (IGMP and PIM-SM)
+## 6. Protocol Subsystem (IGMP, PIM-SM, and MSDP)
 
 MCR includes optional support for multicast routing protocols, transforming it from a pure static relay into a multicast router capable of learning routes dynamically.
 
@@ -338,6 +339,95 @@ mcrctl pim neighbors           # Show PIM neighbor table
 mcrctl igmp groups             # Show IGMP group membership
 mcrctl mroute                  # Show multicast routing table
 ```
+
+### MSDP (RFC 3618)
+
+MCR implements Multicast Source Discovery Protocol for inter-domain multicast source discovery between PIM-SM domains.
+
+#### Purpose
+
+MSDP enables receivers in one PIM domain to learn about active sources in other domains:
+
+- **Source-Active (SA) Messages:** Announce (source, group) pairs to MSDP peers
+- **Anycast-RP Support:** Multiple RPs sharing the same IP can synchronize via mesh groups
+- **Inter-domain Multicast:** Sources in one domain can reach receivers in another
+
+#### Architecture
+
+```text
+┌─────────────────────────────────────────────────────────────────┐
+│                         Supervisor                               │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐              │
+│  │ IGMP FSM    │  │ PIM-SM FSM  │  │ MSDP FSM    │              │
+│  │ (per-iface) │  │ (global)    │  │ (global)    │              │
+│  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘              │
+│         │                │                │                      │
+│         └────────────────┴────────────────┘                      │
+│                          │                                       │
+│  ┌───────────────────────┼───────────────────────┐              │
+│  │ Raw Sockets           │  TCP Connections      │              │
+│  │ (IGMP/PIM)            │  (MSDP port 639)      │              │
+│  └───────────────────────┴───────────────────────┘              │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### Key Features
+
+- **Peer Connections:** TCP connections on port 639 with keepalive/hold timers
+- **Collision Resolution:** Higher IP address initiates connection (RFC 3618)
+- **SA Cache:** Stores learned and local source-active entries with expiry
+- **Mesh Groups:** Peers in the same mesh group don't flood SAs to each other
+- **PIM Integration:** New sources trigger SA origination; learned SAs create (S,G) routes
+
+#### Integration Flow
+
+1. **PIM → MSDP:** When PIM receives a Register message for a new source, MSDP is notified
+2. **MSDP Flooding:** SA is flooded to all active peers (respecting mesh group rules)
+3. **MSDP → PIM:** When SA is learned for a group with IGMP receivers, an (S,G) route is created
+
+#### Configuration
+
+```json5
+{
+  msdp: {
+    enabled: true,
+    local_address: "10.0.0.1",
+    keepalive_interval: 60,
+    hold_time: 75,
+    peers: [
+      {
+        address: "10.0.0.2",
+        description: "Remote RP",
+        mesh_group: "anycast-rp"
+      },
+      {
+        address: "10.0.0.3",
+        description: "Backup RP",
+        mesh_group: "anycast-rp"
+      }
+    ]
+  }
+}
+```
+
+#### CLI Commands
+
+```bash
+mcrctl msdp peers              # Show MSDP peer table
+mcrctl msdp sa-cache           # Show SA cache entries
+mcrctl msdp add-peer           # Add a peer dynamically
+mcrctl msdp remove-peer        # Remove a peer
+mcrctl msdp clear-sa-cache     # Clear SA cache
+```
+
+#### Timer Reference (RFC 3618)
+
+| Timer | Default | Purpose |
+|-------|---------|---------|
+| ConnectRetry | 30s | Retry interval after connection failure |
+| Keepalive | 60s | Send keepalive if no other message sent |
+| Hold | 75s | Peer considered dead if no message received |
+| SA Cache | 60s | SA entry expiry (refreshed on receipt) |
 
 ## 7. Monitoring and Hotspot Strategy
 

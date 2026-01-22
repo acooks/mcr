@@ -383,7 +383,7 @@ impl ProtocolState {
                     }
                     1 => {
                         // Register - only if we're RP
-                        if self.pim_state.config.rp_address.is_some() {
+                        if let Some(rp_address) = self.pim_state.config.rp_address {
                             // Parse Register message
                             // Register format: 4 bytes flags, then encapsulated IP packet
                             if payload.len() >= 24 {
@@ -408,11 +408,39 @@ impl ProtocolState {
                                         ip_header[18],
                                         ip_header[19],
                                     );
+
+                                    // Check if this is a new source (not already in our state)
+                                    let is_new_source =
+                                        !self.pim_state.sg.contains_key(&(source, group));
+
                                     let _ = self.pim_state.process_register(
                                         source,
                                         group,
                                         null_register,
                                     );
+
+                                    // Notify MSDP of new local source (only for non-null registers)
+                                    if is_new_source && !null_register && self.msdp_enabled {
+                                        log_debug!(
+                                            self.logger,
+                                            Facility::Supervisor,
+                                            &format!(
+                                                "PIM: notifying MSDP of new source ({}, {})",
+                                                source, group
+                                            )
+                                        );
+                                        let now = Instant::now();
+                                        let result = self
+                                            .msdp_state
+                                            .local_source_active(source, group, rp_address, now);
+
+                                        // Process flood requests
+                                        if !result.floods.is_empty() {
+                                            self.process_msdp_floods(result.floods);
+                                        }
+
+                                        return result.timers;
+                                    }
                                 }
                             }
                         }
@@ -465,6 +493,16 @@ impl ProtocolState {
                     // (S,G) expired
                     self.pim_state.sg.remove(&(src, group));
                     self.mrib.remove_sg_route(src, group);
+
+                    // Notify MSDP of inactive source (if we're the RP and MSDP is enabled)
+                    if self.msdp_enabled && self.pim_state.config.rp_address.is_some() {
+                        log_debug!(
+                            self.logger,
+                            Facility::Supervisor,
+                            &format!("PIM: notifying MSDP of expired source ({}, {})", src, group)
+                        );
+                        self.msdp_state.local_source_inactive(src, group);
+                    }
                 } else {
                     // (*,G) expired
                     self.pim_state.star_g.remove(&group);
@@ -479,6 +517,23 @@ impl ProtocolState {
             PimEvent::SetRpAddress { rp } => {
                 self.pim_state.config.rp_address = Some(rp);
                 Vec::new()
+            }
+        }
+    }
+
+    /// Process MSDP flood requests by sending them via the TCP command channel
+    fn process_msdp_floods(&self, floods: Vec<crate::protocols::msdp::SaFloodRequest>) {
+        use crate::protocols::msdp_tcp::MsdpTcpCommand;
+
+        if let Some(ref tcp_tx) = self.msdp_tcp_tx {
+            for flood in floods {
+                let cmd = MsdpTcpCommand::FloodSa {
+                    rp_address: flood.rp_address,
+                    entries: flood.entries,
+                    exclude_peer: flood.exclude_peer,
+                };
+                // Fire and forget - don't block on channel send
+                let _ = tcp_tx.try_send(cmd);
             }
         }
     }
@@ -541,7 +596,53 @@ impl ProtocolState {
                                     entries.len()
                                 )
                             );
-                            self.msdp_state.process_sa_message(peer, entries, now)
+                            let result = self.msdp_state.process_sa_message(peer, entries, now);
+
+                            // Process flood requests
+                            if !result.floods.is_empty() {
+                                log_debug!(
+                                    self.logger,
+                                    Facility::Supervisor,
+                                    &format!(
+                                        "MSDP: flooding {} SA entries to peers",
+                                        result
+                                            .floods
+                                            .iter()
+                                            .map(|f| f.entries.len())
+                                            .sum::<usize>()
+                                    )
+                                );
+                                self.process_msdp_floods(result.floods);
+                            }
+
+                            // Process learned sources - create (S,G) routes for groups with local receivers
+                            for (source, group) in &result.learned_sources {
+                                let receivers = self.mrib.get_igmp_interfaces_for_group(*group);
+                                if !receivers.is_empty() {
+                                    log_info!(
+                                        self.logger,
+                                        Facility::Supervisor,
+                                        &format!(
+                                            "MSDP: creating (S,G) route for ({}, {}) - {} local receivers",
+                                            source, group, receivers.len()
+                                        )
+                                    );
+
+                                    // Create (S,G) route in MRIB
+                                    use crate::mroute::SGRoute;
+                                    let mut route = SGRoute::new(*source, *group);
+                                    // Add all receiver interfaces as downstream
+                                    for iface in receivers {
+                                        route.downstream_interfaces.insert(iface);
+                                    }
+                                    // Set expiry to match SA cache timeout
+                                    route.expires_at =
+                                        Some(now + self.msdp_state.config.sa_cache_timeout);
+                                    self.mrib.add_sg_route(route);
+                                }
+                            }
+
+                            result.timers
                         } else {
                             Vec::new()
                         }
@@ -574,7 +675,19 @@ impl ProtocolState {
                         Facility::Supervisor,
                         &format!("MSDP: local source active ({}, {})", source, group)
                     );
-                    self.msdp_state.local_source_active(source, group, rp, now)
+                    let result = self.msdp_state.local_source_active(source, group, rp, now);
+
+                    // Process flood requests (originating SA for local source)
+                    if !result.floods.is_empty() {
+                        log_debug!(
+                            self.logger,
+                            Facility::Supervisor,
+                            &format!("MSDP: originating SA for ({}, {}) to peers", source, group)
+                        );
+                        self.process_msdp_floods(result.floods);
+                    }
+
+                    result.timers
                 } else {
                     Vec::new()
                 }
