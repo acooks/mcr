@@ -21,6 +21,7 @@ use crate::config::Config;
 use crate::logging::{AsyncConsumer, Facility, Logger, MPSCRingBuffer};
 use crate::mroute::MulticastRib;
 use crate::protocols::igmp::InterfaceIgmpState;
+use crate::protocols::msdp::MsdpState;
 use crate::protocols::pim::PimState;
 use crate::protocols::{ProtocolEvent, TimerRequest, TimerType};
 use crate::{log_debug, log_info, log_warning, ForwardingRule, RelayCommand};
@@ -42,7 +43,7 @@ const MAX_INTERFACE_NAME_LEN: usize = 15;
 #[allow(dead_code)]
 const ALL_PIM_ROUTERS: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 13);
 
-/// Protocol state management for IGMP and PIM
+/// Protocol state management for IGMP, PIM, and MSDP
 ///
 /// This struct holds all protocol state machines and raw sockets needed
 /// for multicast routing protocol support. It runs in the supervisor
@@ -53,6 +54,9 @@ pub struct ProtocolState {
 
     /// Global PIM-SM state (neighbors, (*,G) and (S,G) entries)
     pub pim_state: PimState,
+
+    /// Global MSDP state (peers, SA cache)
+    pub msdp_state: MsdpState,
 
     /// Multicast Routing Information Base - merges static + dynamic routes
     pub mrib: MulticastRib,
@@ -66,9 +70,13 @@ pub struct ProtocolState {
     /// Channel to send timer requests
     pub timer_tx: Option<mpsc::Sender<TimerRequest>>,
 
+    /// Channel to send MSDP TCP commands
+    pub msdp_tcp_tx: Option<mpsc::Sender<crate::protocols::msdp_tcp::MsdpTcpCommand>>,
+
     /// Whether protocols are enabled
     pub igmp_enabled: bool,
     pub pim_enabled: bool,
+    pub msdp_enabled: bool,
 
     /// Logger for protocol events
     logger: Logger,
@@ -80,12 +88,15 @@ impl ProtocolState {
         Self {
             igmp_state: HashMap::new(),
             pim_state: PimState::new(),
+            msdp_state: MsdpState::new(),
             mrib: MulticastRib::new(),
             igmp_socket: None,
             pim_socket: None,
             timer_tx: None,
+            msdp_tcp_tx: None,
             igmp_enabled: false,
             pim_enabled: false,
+            msdp_enabled: false,
             logger,
         }
     }
@@ -190,6 +201,7 @@ impl ProtocolState {
         match event {
             ProtocolEvent::Igmp(igmp_event) => self.handle_igmp_event(igmp_event),
             ProtocolEvent::Pim(pim_event) => self.handle_pim_event(pim_event),
+            ProtocolEvent::Msdp(msdp_event) => self.handle_msdp_event(msdp_event),
             ProtocolEvent::TimerExpired(timer_type) => self.handle_timer_expired(timer_type),
         }
     }
@@ -471,6 +483,173 @@ impl ProtocolState {
         }
     }
 
+    fn handle_msdp_event(&mut self, event: crate::protocols::msdp::MsdpEvent) -> Vec<TimerRequest> {
+        use crate::protocols::msdp::MsdpEvent;
+        let now = Instant::now();
+
+        match event {
+            MsdpEvent::TcpConnectionEstablished { peer, is_active } => {
+                log_info!(
+                    self.logger,
+                    Facility::Supervisor,
+                    &format!(
+                        "MSDP peer {} connected ({})",
+                        peer,
+                        if is_active { "active" } else { "passive" }
+                    )
+                );
+                self.msdp_state.connection_established(peer, is_active, now)
+            }
+            MsdpEvent::TcpConnectionFailed { peer, reason } => {
+                log_warning!(
+                    self.logger,
+                    Facility::Supervisor,
+                    &format!("MSDP peer {} connection failed: {}", peer, reason)
+                );
+                self.msdp_state.connection_failed(peer, now)
+            }
+            MsdpEvent::TcpConnectionClosed { peer, reason } => {
+                log_info!(
+                    self.logger,
+                    Facility::Supervisor,
+                    &format!("MSDP peer {} connection closed: {}", peer, reason)
+                );
+                self.msdp_state.connection_closed(peer, now)
+            }
+            MsdpEvent::MessageReceived {
+                peer,
+                msg_type,
+                payload,
+            } => {
+                use crate::protocols::msdp::{MsdpSaMessage, MSDP_KEEPALIVE, MSDP_SA};
+
+                match msg_type {
+                    MSDP_SA => {
+                        // Parse SA message
+                        if let Some(sa_msg) = MsdpSaMessage::parse(&payload) {
+                            let entries: Vec<(Ipv4Addr, Ipv4Addr, Ipv4Addr)> = sa_msg
+                                .entries
+                                .iter()
+                                .map(|&(src, grp)| (src, grp, sa_msg.rp_address))
+                                .collect();
+                            log_debug!(
+                                self.logger,
+                                Facility::Supervisor,
+                                &format!(
+                                    "MSDP: received SA from {} with {} entries",
+                                    peer,
+                                    entries.len()
+                                )
+                            );
+                            self.msdp_state.process_sa_message(peer, entries, now)
+                        } else {
+                            Vec::new()
+                        }
+                    }
+                    MSDP_KEEPALIVE => {
+                        log_debug!(
+                            self.logger,
+                            Facility::Supervisor,
+                            &format!("MSDP: received keepalive from {}", peer)
+                        );
+                        self.msdp_state.process_keepalive(peer, now)
+                    }
+                    _ => {
+                        log_debug!(
+                            self.logger,
+                            Facility::Supervisor,
+                            &format!(
+                                "MSDP: received unknown message type {} from {}",
+                                msg_type, peer
+                            )
+                        );
+                        Vec::new()
+                    }
+                }
+            }
+            MsdpEvent::LocalSourceActive { source, group } => {
+                if let Some(rp) = self.pim_state.config.rp_address {
+                    log_debug!(
+                        self.logger,
+                        Facility::Supervisor,
+                        &format!("MSDP: local source active ({}, {})", source, group)
+                    );
+                    self.msdp_state.local_source_active(source, group, rp, now)
+                } else {
+                    Vec::new()
+                }
+            }
+            MsdpEvent::LocalSourceInactive { source, group } => {
+                self.msdp_state.local_source_inactive(source, group);
+                Vec::new()
+            }
+            MsdpEvent::ConnectRetryExpired { peer } => {
+                // This timer triggers a connection attempt
+                // The actual TCP connection logic will be handled elsewhere
+                log_debug!(
+                    self.logger,
+                    Facility::Supervisor,
+                    &format!("MSDP: connect retry timer expired for {}", peer)
+                );
+                Vec::new()
+            }
+            MsdpEvent::KeepaliveTimerExpired { peer } => {
+                // Need to send keepalive to peer
+                log_debug!(
+                    self.logger,
+                    Facility::Supervisor,
+                    &format!("MSDP: keepalive timer expired for {}", peer)
+                );
+                Vec::new()
+            }
+            MsdpEvent::HoldTimerExpired { peer } => {
+                // Peer timed out - disconnect
+                log_warning!(
+                    self.logger,
+                    Facility::Supervisor,
+                    &format!("MSDP: hold timer expired for {} - disconnecting", peer)
+                );
+                self.msdp_state.connection_closed(peer, now)
+            }
+            MsdpEvent::SaCacheExpired {
+                source,
+                group,
+                origin_rp,
+            } => {
+                self.msdp_state.sa_cache_expired(source, group, origin_rp);
+                Vec::new()
+            }
+            MsdpEvent::AddPeer { config } => {
+                log_info!(
+                    self.logger,
+                    Facility::Supervisor,
+                    &format!("MSDP: adding peer {}", config.address)
+                );
+                self.msdp_state.add_peer(config)
+            }
+            MsdpEvent::RemovePeer { peer } => {
+                log_info!(
+                    self.logger,
+                    Facility::Supervisor,
+                    &format!("MSDP: removing peer {}", peer)
+                );
+                self.msdp_state.remove_peer(peer);
+                Vec::new()
+            }
+            MsdpEvent::Enable => {
+                log_info!(self.logger, Facility::Supervisor, "MSDP: enabled");
+                self.msdp_enabled = true;
+                self.msdp_state.enable()
+            }
+            MsdpEvent::Disable => {
+                log_info!(self.logger, Facility::Supervisor, "MSDP: disabled");
+                self.msdp_enabled = false;
+                self.msdp_state.disable();
+                Vec::new()
+            }
+        }
+    }
+
     fn handle_timer_expired(&mut self, timer_type: TimerType) -> Vec<TimerRequest> {
         let now = Instant::now();
 
@@ -541,6 +720,99 @@ impl ProtocolState {
             }
             TimerType::PimSGExpiry { source, group } => {
                 self.mrib.remove_sg_route(source, group);
+                Vec::new()
+            }
+            // MSDP timer handling
+            TimerType::MsdpConnectRetry { peer } => {
+                use crate::protocols::msdp_tcp::MsdpTcpCommand;
+
+                log_debug!(
+                    self.logger,
+                    Facility::Supervisor,
+                    &format!("MSDP: connect retry timer expired for {}", peer)
+                );
+
+                // Send connect command to TCP runner
+                if let Some(ref tcp_tx) = self.msdp_tcp_tx {
+                    let _ = tcp_tx.try_send(MsdpTcpCommand::Connect { peer });
+                }
+
+                // Reschedule connect retry timer
+                vec![TimerRequest {
+                    timer_type: TimerType::MsdpConnectRetry { peer },
+                    fire_at: now + self.msdp_state.config.connect_retry_period,
+                    replace_existing: true,
+                }]
+            }
+            TimerType::MsdpKeepalive { peer } => {
+                use crate::protocols::msdp_tcp::MsdpTcpCommand;
+
+                // Check if keepalive is needed and get the interval
+                let (needs_keepalive, keepalive_interval) = {
+                    if let Some(msdp_peer) = self.msdp_state.get_peer(peer) {
+                        (
+                            msdp_peer.needs_keepalive(now),
+                            msdp_peer.config.keepalive_interval,
+                        )
+                    } else {
+                        return Vec::new();
+                    }
+                };
+
+                if needs_keepalive {
+                    log_debug!(
+                        self.logger,
+                        Facility::Supervisor,
+                        &format!("MSDP: sending keepalive to {}", peer)
+                    );
+
+                    // Send keepalive command to TCP runner
+                    if let Some(ref tcp_tx) = self.msdp_tcp_tx {
+                        let _ = tcp_tx.try_send(MsdpTcpCommand::SendKeepalive { peer });
+                    }
+
+                    // Update last_sent time
+                    if let Some(msdp_peer) = self.msdp_state.get_peer_mut(peer) {
+                        msdp_peer.record_sent(now);
+                        msdp_peer.keepalives_sent += 1;
+                    }
+
+                    // Reschedule keepalive timer
+                    return vec![TimerRequest {
+                        timer_type: TimerType::MsdpKeepalive { peer },
+                        fire_at: now + keepalive_interval,
+                        replace_existing: true,
+                    }];
+                }
+                Vec::new()
+            }
+            TimerType::MsdpHold { peer } => {
+                use crate::protocols::msdp_tcp::MsdpTcpCommand;
+
+                if let Some(msdp_peer) = self.msdp_state.get_peer(peer) {
+                    if msdp_peer.is_timed_out(now) {
+                        log_warning!(
+                            self.logger,
+                            Facility::Supervisor,
+                            &format!("MSDP: peer {} hold timer expired - disconnecting", peer)
+                        );
+
+                        // Send disconnect command to TCP runner
+                        if let Some(ref tcp_tx) = self.msdp_tcp_tx {
+                            let _ = tcp_tx.try_send(MsdpTcpCommand::Disconnect { peer });
+                        }
+
+                        return self.msdp_state.connection_closed(peer, now);
+                    }
+                }
+                Vec::new()
+            }
+            TimerType::MsdpSaCacheExpiry {
+                source,
+                group,
+                origin_rp,
+            } => {
+                self.msdp_state.sa_cache_expired(source, group, origin_rp);
                 Vec::new()
             }
         }
@@ -636,6 +908,43 @@ impl ProtocolState {
         entries
     }
 
+    /// Get MSDP peer information for CLI queries
+    pub fn get_msdp_peers(&self) -> Vec<crate::MsdpPeerInfo> {
+        self.msdp_state
+            .peers
+            .iter()
+            .map(|(&addr, peer)| crate::MsdpPeerInfo {
+                address: addr,
+                state: peer.state.to_string(),
+                description: peer.config.description.clone(),
+                mesh_group: peer.config.mesh_group.clone(),
+                default_peer: peer.config.default_peer,
+                uptime_secs: peer.uptime_secs(),
+                sa_received: peer.sa_received,
+                sa_sent: peer.sa_sent,
+                is_active: peer.is_active,
+            })
+            .collect()
+    }
+
+    /// Get MSDP SA cache entries for CLI queries
+    pub fn get_msdp_sa_cache(&self) -> Vec<crate::MsdpSaCacheInfo> {
+        let now = Instant::now();
+        self.msdp_state
+            .sa_cache
+            .values()
+            .map(|entry| crate::MsdpSaCacheInfo {
+                source: entry.source,
+                group: entry.group,
+                origin_rp: entry.origin_rp,
+                learned_from: entry.learned_from,
+                age_secs: entry.age_secs(),
+                expires_in_secs: entry.expires_in_secs(now),
+                is_local: entry.is_local,
+            })
+            .collect()
+    }
+
     /// Check if protocols need initialization from config
     pub fn initialize_from_config(&mut self, config: &Config) {
         if let Some(igmp_config) = &config.igmp {
@@ -648,6 +957,61 @@ impl ProtocolState {
             if pim_config.enabled {
                 self.enable_pim(pim_config);
             }
+        }
+
+        if let Some(msdp_config) = &config.msdp {
+            if msdp_config.enabled {
+                self.enable_msdp(msdp_config);
+            }
+        }
+    }
+
+    /// Initialize MSDP with the given configuration
+    pub fn enable_msdp(&mut self, config: &crate::config::MsdpConfig) {
+        use crate::protocols::msdp::MsdpPeerConfig as ProtocolMsdpPeerConfig;
+        use std::time::Duration;
+
+        // Configure global MSDP settings
+        self.msdp_state.config.enabled = config.enabled;
+        self.msdp_state.config.local_address = config.local_address;
+        self.msdp_state.config.keepalive_interval =
+            Duration::from_secs(config.keepalive_interval as u64);
+        self.msdp_state.config.hold_time = Duration::from_secs(config.hold_time as u64);
+
+        // Add configured peers
+        for peer_config in &config.peers {
+            let protocol_peer_config = ProtocolMsdpPeerConfig {
+                address: peer_config.address,
+                description: peer_config.description.clone(),
+                mesh_group: peer_config.mesh_group.clone(),
+                default_peer: peer_config.default_peer,
+                keepalive_interval: Duration::from_secs(config.keepalive_interval as u64),
+                hold_time: Duration::from_secs(config.hold_time as u64),
+            };
+            self.msdp_state.add_peer(protocol_peer_config);
+
+            log_info!(
+                self.logger,
+                Facility::Supervisor,
+                &format!(
+                    "MSDP peer {} configured{}",
+                    peer_config.address,
+                    peer_config
+                        .description
+                        .as_ref()
+                        .map(|d| format!(" ({})", d))
+                        .unwrap_or_default()
+                )
+            );
+        }
+
+        self.msdp_enabled = config.enabled;
+        if self.msdp_enabled {
+            log_info!(
+                self.logger,
+                Facility::Supervisor,
+                &format!("MSDP initialized with {} peer(s)", config.peers.len())
+            );
         }
     }
 
@@ -1280,6 +1644,8 @@ pub struct ProtocolCoordinator {
     pub state: ProtocolState,
     /// Channel to receive protocol events
     event_rx: mpsc::Receiver<ProtocolEvent>,
+    /// Channel to send protocol events (for MSDP TCP)
+    event_tx: mpsc::Sender<ProtocolEvent>,
     /// Channel to send timer requests
     timer_tx: mpsc::Sender<TimerRequest>,
     /// Flag to track if rules need syncing
@@ -1291,14 +1657,21 @@ impl ProtocolCoordinator {
     pub fn new(
         state: ProtocolState,
         event_rx: mpsc::Receiver<ProtocolEvent>,
+        event_tx: mpsc::Sender<ProtocolEvent>,
         timer_tx: mpsc::Sender<TimerRequest>,
     ) -> Self {
         Self {
             state,
             event_rx,
+            event_tx,
             timer_tx,
             rules_dirty: false,
         }
+    }
+
+    /// Get a clone of the event sender (for MSDP TCP)
+    pub fn event_tx_clone(&self) -> mpsc::Sender<ProtocolEvent> {
+        self.event_tx.clone()
     }
 
     /// Process any pending protocol events (non-blocking)
@@ -1394,13 +1767,16 @@ pub fn initialize_protocol_subsystem(
         protocol_receiver_loop(igmp_fd, pim_fd, receiver_event_tx, receiver_logger).await;
     };
 
+    // Clone event_tx before giving it to timer manager
+    let coordinator_event_tx = event_tx.clone();
+
     let timer_manager = ProtocolTimerManager::new(timer_rx, event_tx, logger.clone());
     let timer_task = async move {
         timer_manager.run().await;
     };
 
     // Create coordinator
-    let coordinator = ProtocolCoordinator::new(state, event_rx, timer_tx);
+    let coordinator = ProtocolCoordinator::new(state, event_rx, coordinator_event_tx, timer_tx);
 
     Ok((coordinator, receiver_task, timer_task))
 }
@@ -1704,6 +2080,17 @@ pub enum CommandAction {
         is_pinned: bool,
         command: RelayCommand,
     },
+    /// Add an MSDP peer
+    AddMsdpPeer {
+        address: Ipv4Addr,
+        description: Option<String>,
+        mesh_group: Option<String>,
+        default_peer: bool,
+    },
+    /// Remove an MSDP peer
+    RemoveMsdpPeer { address: Ipv4Addr },
+    /// Clear MSDP SA cache
+    ClearMsdpSaCache,
 }
 
 /// Handle a supervisor command by updating state and returning a response + action.
@@ -2214,6 +2601,45 @@ pub fn handle_supervisor_command(
             // Return empty list until protocol integration is complete
             (Response::Mroute(Vec::new()), CommandAction::None)
         }
+
+        // --- MSDP Commands ---
+        SupervisorCommand::GetMsdpPeers => {
+            // Return empty list until protocol integration is complete
+            (Response::MsdpPeers(Vec::new()), CommandAction::None)
+        }
+        SupervisorCommand::GetMsdpSaCache => {
+            // Return empty list until protocol integration is complete
+            (Response::MsdpSaCache(Vec::new()), CommandAction::None)
+        }
+        SupervisorCommand::AddMsdpPeer {
+            address,
+            description,
+            mesh_group,
+            default_peer,
+        } => (
+            Response::Success(format!(
+                "MSDP peer {} added{}",
+                address,
+                description
+                    .as_ref()
+                    .map(|d| format!(" ({})", d))
+                    .unwrap_or_default()
+            )),
+            CommandAction::AddMsdpPeer {
+                address,
+                description,
+                mesh_group,
+                default_peer,
+            },
+        ),
+        SupervisorCommand::RemoveMsdpPeer { address } => (
+            Response::Success(format!("MSDP peer {} removed", address)),
+            CommandAction::RemoveMsdpPeer { address },
+        ),
+        SupervisorCommand::ClearMsdpSaCache => (
+            Response::Success("MSDP SA cache cleared".to_string()),
+            CommandAction::ClearMsdpSaCache,
+        ),
     }
 }
 
@@ -2995,6 +3421,14 @@ async fn handle_client(
                     let routes = coordinator.state.get_mroute_entries();
                     Some(Response::Mroute(routes))
                 }
+                SupervisorCommand::GetMsdpPeers => {
+                    let peers = coordinator.state.get_msdp_peers();
+                    Some(Response::MsdpPeers(peers))
+                }
+                SupervisorCommand::GetMsdpSaCache => {
+                    let sa_cache = coordinator.state.get_msdp_sa_cache();
+                    Some(Response::MsdpSaCache(sa_cache))
+                }
                 _ => None,
             }
         } else {
@@ -3258,6 +3692,48 @@ async fn handle_client(
                 });
             }
         }
+        CommandAction::AddMsdpPeer {
+            address,
+            description,
+            mesh_group,
+            default_peer,
+        } => {
+            let mut coordinator_guard = protocol_coordinator.lock().unwrap();
+            if let Some(ref mut coordinator) = *coordinator_guard {
+                use crate::protocols::msdp::MsdpPeerConfig;
+                let peer_config = MsdpPeerConfig {
+                    address,
+                    description: description.clone(),
+                    mesh_group,
+                    default_peer,
+                    keepalive_interval: coordinator.state.msdp_state.config.keepalive_interval,
+                    hold_time: coordinator.state.msdp_state.config.hold_time,
+                };
+                coordinator.state.msdp_state.add_peer(peer_config);
+                log::info!(
+                    "MSDP peer {} added{}",
+                    address,
+                    description
+                        .as_ref()
+                        .map(|d| format!(" ({})", d))
+                        .unwrap_or_default()
+                );
+            }
+        }
+        CommandAction::RemoveMsdpPeer { address } => {
+            let mut coordinator_guard = protocol_coordinator.lock().unwrap();
+            if let Some(ref mut coordinator) = *coordinator_guard {
+                coordinator.state.msdp_state.remove_peer(address);
+                log::info!("MSDP peer {} removed", address);
+            }
+        }
+        CommandAction::ClearMsdpSaCache => {
+            let mut coordinator_guard = protocol_coordinator.lock().unwrap();
+            if let Some(ref mut coordinator) = *coordinator_guard {
+                coordinator.state.msdp_state.sa_cache.clear();
+                log::info!("MSDP SA cache cleared");
+            }
+        }
     }
 
     // Send final response to client
@@ -3451,7 +3927,7 @@ pub async fn run(
         Arc::new(Mutex::new(manager))
     };
 
-    // Initialize protocol subsystem if PIM or IGMP is configured
+    // Initialize protocol subsystem if PIM, IGMP, or MSDP is configured
     // Wrap in Arc<Mutex<>> so it can be shared with handle_client and event processing
     let protocol_coordinator: Arc<Mutex<Option<ProtocolCoordinator>>> = Arc::new(Mutex::new(None));
 
@@ -3462,19 +3938,20 @@ pub async fn run(
             .as_ref()
             .map(|i| !i.querier_interfaces.is_empty())
             .unwrap_or(false);
+        let msdp_enabled = config.msdp.as_ref().map(|m| m.enabled).unwrap_or(false);
 
-        if pim_enabled || igmp_enabled {
+        if pim_enabled || igmp_enabled || msdp_enabled {
             log_info!(
                 supervisor_logger,
                 Facility::Supervisor,
                 &format!(
-                    "Initializing protocol subsystem (PIM: {}, IGMP: {})",
-                    pim_enabled, igmp_enabled
+                    "Initializing protocol subsystem (PIM: {}, IGMP: {}, MSDP: {})",
+                    pim_enabled, igmp_enabled, msdp_enabled
                 )
             );
 
             match initialize_protocol_subsystem(config, supervisor_logger.clone()) {
-                Ok((coordinator, receiver_task, timer_task)) => {
+                Ok((mut coordinator, receiver_task, timer_task)) => {
                     // Spawn protocol background tasks
                     tokio::spawn(async move {
                         receiver_task.await;
@@ -3482,6 +3959,55 @@ pub async fn run(
                     tokio::spawn(async move {
                         timer_task.await;
                     });
+
+                    // Initialize MSDP TCP if enabled
+                    if msdp_enabled {
+                        if let Some(msdp_config) = &config.msdp {
+                            let local_addr = msdp_config.local_address.unwrap_or_else(|| {
+                                // Try to find a suitable local address
+                                get_interface_ipv4("lo").unwrap_or(Ipv4Addr::LOCALHOST)
+                            });
+
+                            // Create event channel for MSDP TCP
+                            let msdp_event_tx = coordinator.event_tx_clone();
+
+                            match crate::protocols::msdp_tcp::start_msdp_tcp(
+                                local_addr,
+                                msdp_event_tx,
+                            )
+                            .await
+                            {
+                                Ok((tcp_cmd_tx, listener_task, runner_task)) => {
+                                    // Store the command channel in protocol state
+                                    coordinator.state.msdp_tcp_tx = Some(tcp_cmd_tx);
+
+                                    // Spawn MSDP TCP tasks
+                                    tokio::spawn(async move {
+                                        listener_task.await;
+                                    });
+                                    tokio::spawn(async move {
+                                        runner_task.await;
+                                    });
+
+                                    log_info!(
+                                        supervisor_logger,
+                                        Facility::Supervisor,
+                                        &format!(
+                                            "MSDP TCP subsystem initialized on {}:639",
+                                            local_addr
+                                        )
+                                    );
+                                }
+                                Err(e) => {
+                                    log_warning!(
+                                        supervisor_logger,
+                                        Facility::Supervisor,
+                                        &format!("Failed to initialize MSDP TCP: {}", e)
+                                    );
+                                }
+                            }
+                        }
+                    }
 
                     // Store coordinator in the shared Arc<Mutex<>>
                     *protocol_coordinator.lock().unwrap() = Some(coordinator);

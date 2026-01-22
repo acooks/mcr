@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-//! Protocol implementations for PIM-SM and IGMP
+//! Protocol implementations for PIM-SM, IGMP, and MSDP
 //!
 //! This module contains the state machines and packet handling for multicast
 //! routing protocols that allow MCR to learn routes dynamically:
 //!
 //! - **IGMP (RFC 2236)**: Querier functionality and group membership tracking
 //! - **PIM-SM (RFC 7761)**: Neighbor discovery, DR election, RP functionality
+//! - **MSDP (RFC 3618)**: Inter-domain multicast source discovery
 //!
 //! ## Architecture
 //!
@@ -21,9 +22,12 @@
 //! |-------------|---------|-------------|
 //! | IGMP (proto 2) | Supervisor | Raw IP socket |
 //! | PIM (proto 103) | Supervisor | Raw IP socket |
+//! | MSDP (TCP 639) | Supervisor | TCP socket |
 //! | Multicast data | Workers | AF_PACKET + AF_INET |
 
 pub mod igmp;
+pub mod msdp;
+pub mod msdp_tcp;
 pub mod pim;
 
 use std::net::Ipv4Addr;
@@ -36,6 +40,8 @@ pub enum ProtocolEvent {
     Igmp(igmp::IgmpEvent),
     /// PIM event
     Pim(pim::PimEvent),
+    /// MSDP event
+    Msdp(msdp::MsdpEvent),
     /// Timer expired
     TimerExpired(TimerType),
 }
@@ -64,6 +70,18 @@ pub enum TimerType {
     PimStarGExpiry { group: Ipv4Addr },
     /// PIM (S,G) state expiry
     PimSGExpiry { source: Ipv4Addr, group: Ipv4Addr },
+    /// MSDP connect retry timer (attempt connection to peer)
+    MsdpConnectRetry { peer: Ipv4Addr },
+    /// MSDP keepalive timer (send keepalive to peer)
+    MsdpKeepalive { peer: Ipv4Addr },
+    /// MSDP hold timer (peer timeout)
+    MsdpHold { peer: Ipv4Addr },
+    /// MSDP SA cache entry expiry
+    MsdpSaCacheExpiry {
+        source: Ipv4Addr,
+        group: Ipv4Addr,
+        origin_rp: Ipv4Addr,
+    },
 }
 
 /// Request to schedule a timer

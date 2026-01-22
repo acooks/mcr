@@ -245,6 +245,24 @@ pub enum SupervisorCommand {
     // --- Multicast Routing Table ---
     /// Get the multicast routing table (merged static + dynamic)
     GetMroute,
+    // --- MSDP Commands ---
+    /// Get MSDP peer status
+    GetMsdpPeers,
+    /// Get MSDP SA cache
+    GetMsdpSaCache,
+    /// Add an MSDP peer
+    AddMsdpPeer {
+        address: Ipv4Addr,
+        description: Option<String>,
+        mesh_group: Option<String>,
+        default_peer: bool,
+    },
+    /// Remove an MSDP peer
+    RemoveMsdpPeer {
+        address: Ipv4Addr,
+    },
+    /// Clear MSDP SA cache
+    ClearMsdpSaCache,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -274,6 +292,10 @@ pub enum Response {
     IgmpGroups(Vec<IgmpGroupInfo>),
     /// Multicast routing table response
     Mroute(Vec<MrouteEntry>),
+    /// MSDP peer table response
+    MsdpPeers(Vec<MsdpPeerInfo>),
+    /// MSDP SA cache response
+    MsdpSaCache(Vec<MsdpSaCacheInfo>),
 }
 
 /// Information about a PIM neighbor
@@ -336,6 +358,48 @@ pub enum MrouteEntryType {
     SG,
     /// IGMP membership (local receivers)
     Igmp,
+}
+
+/// Information about an MSDP peer
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MsdpPeerInfo {
+    /// Peer's IP address
+    pub address: Ipv4Addr,
+    /// Peer state (disabled, connecting, established, active)
+    pub state: String,
+    /// Optional description
+    pub description: Option<String>,
+    /// Mesh group name (if configured)
+    pub mesh_group: Option<String>,
+    /// Whether this peer is a default peer
+    pub default_peer: bool,
+    /// Uptime in seconds (if connected)
+    pub uptime_secs: Option<u64>,
+    /// Number of SA messages received
+    pub sa_received: u64,
+    /// Number of SA messages sent
+    pub sa_sent: u64,
+    /// Whether we initiated (active) or received (passive) the connection
+    pub is_active: bool,
+}
+
+/// Information about an MSDP SA cache entry
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MsdpSaCacheInfo {
+    /// Source IP address
+    pub source: Ipv4Addr,
+    /// Multicast group address
+    pub group: Ipv4Addr,
+    /// RP that originated this SA
+    pub origin_rp: Ipv4Addr,
+    /// Peer from which we learned this SA (None if local)
+    pub learned_from: Option<Ipv4Addr>,
+    /// Age in seconds
+    pub age_secs: u64,
+    /// Seconds until expiry
+    pub expires_in_secs: u64,
+    /// Whether this is a local source
+    pub is_local: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Hash)]

@@ -32,6 +32,10 @@ pub struct Config {
     /// IGMP configuration (optional)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub igmp: Option<IgmpConfig>,
+
+    /// MSDP configuration (optional)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub msdp: Option<MsdpConfig>,
 }
 
 /// PIM-SM configuration
@@ -113,6 +117,57 @@ fn default_robustness() -> u8 {
 
 fn default_query_response_interval() -> u32 {
     10
+}
+
+/// MSDP (Multicast Source Discovery Protocol) configuration
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct MsdpConfig {
+    /// Enable MSDP
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Local address for MSDP connections (source IP for outbound TCP)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_address: Option<Ipv4Addr>,
+
+    /// MSDP peer configurations
+    #[serde(default)]
+    pub peers: Vec<MsdpPeerConfig>,
+
+    /// Keepalive interval in seconds (default 60)
+    #[serde(default = "default_msdp_keepalive_interval")]
+    pub keepalive_interval: u32,
+
+    /// Hold time in seconds (default 75)
+    #[serde(default = "default_msdp_hold_time")]
+    pub hold_time: u32,
+}
+
+/// Per-peer MSDP configuration
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MsdpPeerConfig {
+    /// Peer's IP address
+    pub address: Ipv4Addr,
+
+    /// Optional description for this peer
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+
+    /// Mesh group name (peers in the same mesh group don't flood SA to each other)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mesh_group: Option<String>,
+
+    /// Whether this is a default peer (used when no other peer available)
+    #[serde(default)]
+    pub default_peer: bool,
+}
+
+fn default_msdp_keepalive_interval() -> u32 {
+    60
+}
+
+fn default_msdp_hold_time() -> u32 {
+    75
 }
 
 /// Rule as stored in config file
@@ -252,6 +307,11 @@ impl Config {
             validate_igmp_config(igmp)?;
         }
 
+        // Validate MSDP configuration
+        if let Some(msdp) = &self.msdp {
+            validate_msdp_config(msdp)?;
+        }
+
         Ok(())
     }
 
@@ -286,6 +346,7 @@ impl Config {
             rules: rules.iter().map(ConfigRule::from_forwarding_rule).collect(),
             pim: None,
             igmp: None,
+            msdp: None,
         }
     }
 }
@@ -480,6 +541,75 @@ fn validate_igmp_config(igmp: &IgmpConfig) -> Result<(), ConfigError> {
     Ok(())
 }
 
+/// Validate MSDP configuration
+fn validate_msdp_config(msdp: &MsdpConfig) -> Result<(), ConfigError> {
+    // Validate local_address if provided (must be unicast)
+    if let Some(local_addr) = msdp.local_address {
+        if local_addr.is_multicast() || local_addr.is_broadcast() || local_addr.is_unspecified() {
+            return Err(ConfigError::InvalidMsdpConfig {
+                reason: format!(
+                    "local_address must be a valid unicast address, got {}",
+                    local_addr
+                ),
+            });
+        }
+    }
+
+    // Validate keepalive_interval (must be > 0)
+    if msdp.keepalive_interval == 0 {
+        return Err(ConfigError::InvalidMsdpConfig {
+            reason: "keepalive_interval must be greater than 0".to_string(),
+        });
+    }
+
+    // Validate hold_time (must be > keepalive_interval)
+    if msdp.hold_time <= msdp.keepalive_interval {
+        return Err(ConfigError::InvalidMsdpConfig {
+            reason: format!(
+                "hold_time ({}) must be greater than keepalive_interval ({})",
+                msdp.hold_time, msdp.keepalive_interval
+            ),
+        });
+    }
+
+    // Validate peer configurations
+    let mut seen_peers = std::collections::HashSet::new();
+    for peer_config in &msdp.peers {
+        // Peer address must be unicast
+        if peer_config.address.is_multicast()
+            || peer_config.address.is_broadcast()
+            || peer_config.address.is_unspecified()
+        {
+            return Err(ConfigError::InvalidMsdpConfig {
+                reason: format!("peer address must be unicast, got {}", peer_config.address),
+            });
+        }
+
+        // Check for duplicate peers
+        if !seen_peers.insert(peer_config.address) {
+            return Err(ConfigError::InvalidMsdpConfig {
+                reason: format!("duplicate peer address: {}", peer_config.address),
+            });
+        }
+
+        // Validate mesh_group name if provided
+        if let Some(ref mesh_group) = peer_config.mesh_group {
+            if mesh_group.is_empty() {
+                return Err(ConfigError::InvalidMsdpConfig {
+                    reason: "mesh_group name cannot be empty".to_string(),
+                });
+            }
+            if mesh_group.len() > 64 {
+                return Err(ConfigError::InvalidMsdpConfig {
+                    reason: "mesh_group name too long (max 64 chars)".to_string(),
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Validate a multicast group prefix (e.g., "239.0.0.0/8" or "239.1.1.1")
 fn validate_group_prefix(prefix: &str) -> Result<(), ConfigError> {
     // Check if it's a CIDR prefix or single address
@@ -566,6 +696,9 @@ pub enum ConfigError {
         prefix: String,
         reason: String,
     },
+    InvalidMsdpConfig {
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for ConfigError {
@@ -607,6 +740,9 @@ impl std::fmt::Display for ConfigError {
             }
             ConfigError::InvalidGroupPrefix { prefix, reason } => {
                 write!(f, "invalid group prefix '{}': {}", prefix, reason)
+            }
+            ConfigError::InvalidMsdpConfig { reason } => {
+                write!(f, "invalid MSDP configuration: {}", reason)
             }
         }
     }
@@ -710,6 +846,7 @@ mod tests {
             ],
             pim: None,
             igmp: None,
+            msdp: None,
         };
 
         let result = config.validate();
@@ -731,6 +868,7 @@ mod tests {
             }],
             pim: None,
             igmp: None,
+            msdp: None,
         };
 
         let result = config.validate();
@@ -755,6 +893,7 @@ mod tests {
             }],
             pim: None,
             igmp: None,
+            msdp: None,
         };
 
         let result = config.validate();
@@ -781,6 +920,7 @@ mod tests {
             }],
             pim: None,
             igmp: None,
+            msdp: None,
         };
 
         let result = config.validate();
@@ -807,6 +947,7 @@ mod tests {
             }],
             pim: None,
             igmp: None,
+            msdp: None,
         };
 
         let result = config.validate();
@@ -837,6 +978,7 @@ mod tests {
             }],
             pim: None,
             igmp: None,
+            msdp: None,
         };
 
         let result = config.validate();
@@ -861,6 +1003,7 @@ mod tests {
             }],
             pim: None,
             igmp: None,
+            msdp: None,
         };
 
         let result = config.validate();
@@ -886,6 +1029,7 @@ mod tests {
             }],
             pim: None,
             igmp: None,
+            msdp: None,
         };
 
         let result = config.validate();
@@ -919,6 +1063,7 @@ mod tests {
             }],
             pim: None,
             igmp: None,
+            msdp: None,
         };
 
         let result = config.validate();
@@ -945,6 +1090,7 @@ mod tests {
             }],
             pim: None,
             igmp: None,
+            msdp: None,
         };
 
         let result = config.validate();
@@ -958,6 +1104,7 @@ mod tests {
             rules: vec![],
             pim: None,
             igmp: None,
+            msdp: None,
         };
 
         let result = config.validate();
@@ -976,6 +1123,7 @@ mod tests {
             rules: vec![],
             pim: None,
             igmp: None,
+            msdp: None,
         };
 
         let result = config.validate();
@@ -1069,6 +1217,7 @@ mod tests {
             }],
             pim: None,
             igmp: None,
+            msdp: None,
         };
 
         let interfaces = config.get_interfaces();
@@ -1094,6 +1243,7 @@ mod tests {
             }],
             pim: None,
             igmp: None,
+            msdp: None,
         };
 
         // Serialize to JSON5 and parse back
@@ -1122,6 +1272,7 @@ mod tests {
                 rp_address: Some("10.0.0.1".parse().unwrap()),
             }),
             igmp: None,
+            msdp: None,
         };
 
         assert!(config.validate().is_ok());
@@ -1140,6 +1291,7 @@ mod tests {
                 rp_address: None,
             }),
             igmp: None,
+            msdp: None,
         };
 
         let result = config.validate();
@@ -1159,6 +1311,7 @@ mod tests {
                 rp_address: Some("224.0.0.1".parse().unwrap()), // Multicast address
             }),
             igmp: None,
+            msdp: None,
         };
 
         let result = config.validate();
@@ -1187,6 +1340,7 @@ mod tests {
                 rp_address: None,
             }),
             igmp: None,
+            msdp: None,
         };
 
         let result = config.validate();
@@ -1209,6 +1363,7 @@ mod tests {
                 rp_address: None,
             }),
             igmp: None,
+            msdp: None,
         };
 
         let result = config.validate();
@@ -1234,6 +1389,7 @@ mod tests {
                 rp_address: None,
             }),
             igmp: None,
+            msdp: None,
         };
 
         let result = config.validate();
@@ -1259,6 +1415,7 @@ mod tests {
                 rp_address: None,
             }),
             igmp: None,
+            msdp: None,
         };
 
         let result = config.validate();
@@ -1278,6 +1435,7 @@ mod tests {
                 robustness: 2,
                 query_response_interval: 10,
             }),
+            msdp: None,
         };
 
         assert!(config.validate().is_ok());
@@ -1295,6 +1453,7 @@ mod tests {
                 robustness: 2,
                 query_response_interval: 10,
             }),
+            msdp: None,
         };
 
         let result = config.validate();
@@ -1316,6 +1475,7 @@ mod tests {
                 robustness: 2,
                 query_response_interval: 10,
             }),
+            msdp: None,
         };
 
         let result = config.validate();
@@ -1334,6 +1494,7 @@ mod tests {
                 robustness: 2,
                 query_response_interval: 0,
             }),
+            msdp: None,
         };
 
         let result = config.validate();
@@ -1352,6 +1513,7 @@ mod tests {
                 robustness: 0, // Invalid
                 query_response_interval: 10,
             }),
+            msdp: None,
         };
 
         let result = config.validate();
@@ -1370,6 +1532,7 @@ mod tests {
                 robustness: 2,
                 query_response_interval: 125, // Must be < query_interval
             }),
+            msdp: None,
         };
 
         let result = config.validate();
@@ -1444,5 +1607,205 @@ mod tests {
         assert_eq!(igmp.querier_interfaces.len(), 2);
         assert_eq!(igmp.query_interval, 125);
         assert_eq!(igmp.robustness, 2);
+    }
+
+    // MSDP configuration validation tests
+    #[test]
+    fn test_msdp_config_valid() {
+        let config = Config {
+            pinning: HashMap::new(),
+            rules: vec![],
+            pim: None,
+            igmp: None,
+            msdp: Some(MsdpConfig {
+                enabled: true,
+                local_address: Some("10.0.0.1".parse().unwrap()),
+                peers: vec![MsdpPeerConfig {
+                    address: "10.1.0.1".parse().unwrap(),
+                    description: Some("Remote RP".to_string()),
+                    mesh_group: None,
+                    default_peer: false,
+                }],
+                keepalive_interval: 60,
+                hold_time: 75,
+            }),
+        };
+
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_msdp_config_invalid_local_address_multicast() {
+        let config = Config {
+            pinning: HashMap::new(),
+            rules: vec![],
+            pim: None,
+            igmp: None,
+            msdp: Some(MsdpConfig {
+                enabled: true,
+                local_address: Some("224.0.0.1".parse().unwrap()), // Multicast address
+                peers: vec![],
+                keepalive_interval: 60,
+                hold_time: 75,
+            }),
+        };
+
+        let result = config.validate();
+        assert!(matches!(result, Err(ConfigError::InvalidMsdpConfig { .. })));
+    }
+
+    #[test]
+    fn test_msdp_config_invalid_peer_address_multicast() {
+        let config = Config {
+            pinning: HashMap::new(),
+            rules: vec![],
+            pim: None,
+            igmp: None,
+            msdp: Some(MsdpConfig {
+                enabled: true,
+                local_address: Some("10.0.0.1".parse().unwrap()),
+                peers: vec![MsdpPeerConfig {
+                    address: "239.1.1.1".parse().unwrap(), // Multicast address
+                    description: None,
+                    mesh_group: None,
+                    default_peer: false,
+                }],
+                keepalive_interval: 60,
+                hold_time: 75,
+            }),
+        };
+
+        let result = config.validate();
+        assert!(matches!(result, Err(ConfigError::InvalidMsdpConfig { .. })));
+    }
+
+    #[test]
+    fn test_msdp_config_invalid_keepalive_zero() {
+        let config = Config {
+            pinning: HashMap::new(),
+            rules: vec![],
+            pim: None,
+            igmp: None,
+            msdp: Some(MsdpConfig {
+                enabled: true,
+                local_address: None,
+                peers: vec![],
+                keepalive_interval: 0, // Invalid
+                hold_time: 75,
+            }),
+        };
+
+        let result = config.validate();
+        assert!(matches!(result, Err(ConfigError::InvalidMsdpConfig { .. })));
+    }
+
+    #[test]
+    fn test_msdp_config_invalid_hold_time_less_than_keepalive() {
+        let config = Config {
+            pinning: HashMap::new(),
+            rules: vec![],
+            pim: None,
+            igmp: None,
+            msdp: Some(MsdpConfig {
+                enabled: true,
+                local_address: None,
+                peers: vec![],
+                keepalive_interval: 60,
+                hold_time: 50, // Must be > keepalive_interval
+            }),
+        };
+
+        let result = config.validate();
+        assert!(matches!(result, Err(ConfigError::InvalidMsdpConfig { .. })));
+    }
+
+    #[test]
+    fn test_msdp_config_duplicate_peers() {
+        let config = Config {
+            pinning: HashMap::new(),
+            rules: vec![],
+            pim: None,
+            igmp: None,
+            msdp: Some(MsdpConfig {
+                enabled: true,
+                local_address: None,
+                peers: vec![
+                    MsdpPeerConfig {
+                        address: "10.0.0.1".parse().unwrap(),
+                        description: None,
+                        mesh_group: None,
+                        default_peer: false,
+                    },
+                    MsdpPeerConfig {
+                        address: "10.0.0.1".parse().unwrap(), // Duplicate
+                        description: None,
+                        mesh_group: None,
+                        default_peer: false,
+                    },
+                ],
+                keepalive_interval: 60,
+                hold_time: 75,
+            }),
+        };
+
+        let result = config.validate();
+        assert!(matches!(result, Err(ConfigError::InvalidMsdpConfig { .. })));
+    }
+
+    #[test]
+    fn test_msdp_config_invalid_mesh_group_empty() {
+        let config = Config {
+            pinning: HashMap::new(),
+            rules: vec![],
+            pim: None,
+            igmp: None,
+            msdp: Some(MsdpConfig {
+                enabled: true,
+                local_address: None,
+                peers: vec![MsdpPeerConfig {
+                    address: "10.0.0.1".parse().unwrap(),
+                    description: None,
+                    mesh_group: Some("".to_string()), // Empty mesh group
+                    default_peer: false,
+                }],
+                keepalive_interval: 60,
+                hold_time: 75,
+            }),
+        };
+
+        let result = config.validate();
+        assert!(matches!(result, Err(ConfigError::InvalidMsdpConfig { .. })));
+    }
+
+    #[test]
+    fn test_parse_msdp_config() {
+        let json5 = r#"{
+            msdp: {
+                enabled: true,
+                local_address: "10.0.0.1",
+                keepalive_interval: 60,
+                hold_time: 75,
+                peers: [
+                    { address: "10.1.0.1", description: "Remote RP" },
+                    { address: "10.2.0.1", mesh_group: "anycast-rp" },
+                ],
+            },
+        }"#;
+
+        let config = Config::parse(json5).unwrap();
+        assert!(config.msdp.is_some());
+
+        let msdp = config.msdp.unwrap();
+        assert!(msdp.enabled);
+        assert_eq!(msdp.local_address, Some("10.0.0.1".parse().unwrap()));
+        assert_eq!(msdp.keepalive_interval, 60);
+        assert_eq!(msdp.hold_time, 75);
+        assert_eq!(msdp.peers.len(), 2);
+        assert_eq!(
+            msdp.peers[0].address,
+            "10.1.0.1".parse::<Ipv4Addr>().unwrap()
+        );
+        assert_eq!(msdp.peers[0].description, Some("Remote RP".to_string()));
+        assert_eq!(msdp.peers[1].mesh_group, Some("anycast-rp".to_string()));
     }
 }

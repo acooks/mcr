@@ -69,6 +69,11 @@ pub enum CliCommand {
         #[clap(subcommand)]
         action: IgmpAction,
     },
+    /// MSDP protocol management
+    Msdp {
+        #[clap(subcommand)]
+        action: MsdpAction,
+    },
     /// Show multicast routing table
     Mroute,
 }
@@ -146,6 +151,37 @@ pub enum IgmpAction {
         #[arg(long)]
         interface: String,
     },
+}
+
+#[derive(Parser, Debug)]
+pub enum MsdpAction {
+    /// Show MSDP peer table
+    Peers,
+    /// Show MSDP SA cache
+    SaCache,
+    /// Add an MSDP peer
+    AddPeer {
+        /// Peer address
+        #[arg(long)]
+        address: Ipv4Addr,
+        /// Optional description
+        #[arg(long)]
+        description: Option<String>,
+        /// Optional mesh group name
+        #[arg(long)]
+        mesh_group: Option<String>,
+        /// Mark as default peer
+        #[arg(long)]
+        default_peer: bool,
+    },
+    /// Remove an MSDP peer
+    RemovePeer {
+        /// Peer address
+        #[arg(long)]
+        address: Ipv4Addr,
+    },
+    /// Clear the MSDP SA cache
+    ClearSaCache,
 }
 
 #[derive(Parser, Debug)]
@@ -313,6 +349,25 @@ pub fn build_command(cli_command: CliCommand) -> Result<multicast_relay::Supervi
             IgmpAction::DisableQuerier { interface } => {
                 multicast_relay::SupervisorCommand::DisableIgmpQuerier { interface }
             }
+        },
+        CliCommand::Msdp { action } => match action {
+            MsdpAction::Peers => multicast_relay::SupervisorCommand::GetMsdpPeers,
+            MsdpAction::SaCache => multicast_relay::SupervisorCommand::GetMsdpSaCache,
+            MsdpAction::AddPeer {
+                address,
+                description,
+                mesh_group,
+                default_peer,
+            } => multicast_relay::SupervisorCommand::AddMsdpPeer {
+                address,
+                description,
+                mesh_group,
+                default_peer,
+            },
+            MsdpAction::RemovePeer { address } => {
+                multicast_relay::SupervisorCommand::RemoveMsdpPeer { address }
+            }
+            MsdpAction::ClearSaCache => multicast_relay::SupervisorCommand::ClearMsdpSaCache,
         },
         CliCommand::Mroute => multicast_relay::SupervisorCommand::GetMroute,
     })
@@ -809,5 +864,105 @@ mod tests {
             },
         };
         assert!(build_command(cmd).is_err());
+    }
+
+    #[test]
+    fn test_build_command_msdp_peers() {
+        let cmd = CliCommand::Msdp {
+            action: MsdpAction::Peers,
+        };
+        let supervisor_cmd = build_command(cmd).unwrap();
+        assert!(matches!(supervisor_cmd, SupervisorCommand::GetMsdpPeers));
+    }
+
+    #[test]
+    fn test_build_command_msdp_sa_cache() {
+        let cmd = CliCommand::Msdp {
+            action: MsdpAction::SaCache,
+        };
+        let supervisor_cmd = build_command(cmd).unwrap();
+        assert!(matches!(supervisor_cmd, SupervisorCommand::GetMsdpSaCache));
+    }
+
+    #[test]
+    fn test_build_command_msdp_add_peer() {
+        let cmd = CliCommand::Msdp {
+            action: MsdpAction::AddPeer {
+                address: "10.1.0.1".parse().unwrap(),
+                description: Some("Remote RP".to_string()),
+                mesh_group: Some("anycast-rp".to_string()),
+                default_peer: true,
+            },
+        };
+        let supervisor_cmd = build_command(cmd).unwrap();
+        match supervisor_cmd {
+            SupervisorCommand::AddMsdpPeer {
+                address,
+                description,
+                mesh_group,
+                default_peer,
+            } => {
+                assert_eq!(address, "10.1.0.1".parse::<Ipv4Addr>().unwrap());
+                assert_eq!(description, Some("Remote RP".to_string()));
+                assert_eq!(mesh_group, Some("anycast-rp".to_string()));
+                assert!(default_peer);
+            }
+            _ => panic!("Expected AddMsdpPeer command"),
+        }
+    }
+
+    #[test]
+    fn test_build_command_msdp_add_peer_minimal() {
+        let cmd = CliCommand::Msdp {
+            action: MsdpAction::AddPeer {
+                address: "10.2.0.1".parse().unwrap(),
+                description: None,
+                mesh_group: None,
+                default_peer: false,
+            },
+        };
+        let supervisor_cmd = build_command(cmd).unwrap();
+        match supervisor_cmd {
+            SupervisorCommand::AddMsdpPeer {
+                address,
+                description,
+                mesh_group,
+                default_peer,
+            } => {
+                assert_eq!(address, "10.2.0.1".parse::<Ipv4Addr>().unwrap());
+                assert!(description.is_none());
+                assert!(mesh_group.is_none());
+                assert!(!default_peer);
+            }
+            _ => panic!("Expected AddMsdpPeer command"),
+        }
+    }
+
+    #[test]
+    fn test_build_command_msdp_remove_peer() {
+        let cmd = CliCommand::Msdp {
+            action: MsdpAction::RemovePeer {
+                address: "10.1.0.1".parse().unwrap(),
+            },
+        };
+        let supervisor_cmd = build_command(cmd).unwrap();
+        match supervisor_cmd {
+            SupervisorCommand::RemoveMsdpPeer { address } => {
+                assert_eq!(address, "10.1.0.1".parse::<Ipv4Addr>().unwrap());
+            }
+            _ => panic!("Expected RemoveMsdpPeer command"),
+        }
+    }
+
+    #[test]
+    fn test_build_command_msdp_clear_sa_cache() {
+        let cmd = CliCommand::Msdp {
+            action: MsdpAction::ClearSaCache,
+        };
+        let supervisor_cmd = build_command(cmd).unwrap();
+        assert!(matches!(
+            supervisor_cmd,
+            SupervisorCommand::ClearMsdpSaCache
+        ));
     }
 }
