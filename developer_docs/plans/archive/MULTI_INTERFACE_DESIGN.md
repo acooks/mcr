@@ -1,6 +1,6 @@
 # Multi-Interface Architecture Design
 
-**Status:** IMPLEMENTED (94%)
+**Status:** IMPLEMENTED (97%)
 **Created:** 2025-12-04
 **Last Updated:** January 2026
 
@@ -402,7 +402,7 @@ struct WorkerId {
 
 ## Current Status
 
-### Completion: 94%
+### Completion: 97%
 
 | Feature | Status | Notes |
 |---------|--------|-------|
@@ -411,16 +411,16 @@ struct WorkerId {
 | WorkerManager redesign | Complete | Tracks by (interface, core_id) |
 | Dynamic worker spawning | Complete | Workers spawn on rule addition |
 | Two-state config model | Complete | Running vs startup config |
-| CLI commands | Partial (23/25) | See below |
+| CLI commands | Complete (25/25) | All commands wired |
 
 ### CLI Command Status
 
 | Command | Status |
 |---------|--------|
 | `mcrctl add` | Complete |
-| `mcrctl add --name` | **TODO** - Supervisor supports it, CLI has TODO |
+| `mcrctl add --name` | Complete |
 | `mcrctl remove --id` | Complete |
-| `mcrctl remove --name` | **TODO** - RemoveRuleByName exists but not wired |
+| `mcrctl remove --name` | Complete |
 | `mcrctl show` | Complete |
 | `mcrctl check` | Complete |
 | `mcrctl load` | Complete |
@@ -434,11 +434,7 @@ struct WorkerId {
 
 ### Remaining Work
 
-1. **CLI --name options:**
-   - `mcrctl add --name <NAME>` - Wire to AddRule command
-   - `mcrctl remove --name <NAME>` - Wire RemoveRuleByName
-
-2. **Dynamic worker cleanup:**
+1. **Dynamic worker cleanup:**
    - Configurable grace period for idle dynamic workers
    - Currently workers persist until daemon restart
 

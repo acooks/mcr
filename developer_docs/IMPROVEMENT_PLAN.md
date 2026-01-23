@@ -143,13 +143,13 @@ Missing tests:
 
 Workers currently create all AF_PACKET sockets upfront. Implement lazy creation triggered by rule additions.
 
-#### 7. Add CLI --name Options
+#### 7. ~~Add CLI --name Options~~ ✓ COMPLETE
 
 **Source:** MULTI_INTERFACE_DESIGN gap
 **Impact:** User experience
 
-- `mcrctl add --name <NAME>` - Supervisor supports it, CLI has TODO
-- `mcrctl remove --name <NAME>` - RemoveRuleByName exists but not wired
+- ✓ `mcrctl add --name <NAME>` - Now wired to CLI
+- ✓ `mcrctl remove --name <NAME>` - Now wired to RemoveRuleByName
 
 #### 8. Consolidate Config Validation
 
@@ -244,7 +244,7 @@ Establish and enforce naming conventions (e.g., `group_address` vs `group` vs `g
 |------|--------|----------|
 | CONTROL_PLANE_INTEGRATION | **Archived** (93%) | plans/archive/ |
 | MSDP_IMPLEMENTATION | **Archived** (95%) | plans/archive/ |
-| MULTI_INTERFACE_DESIGN | **Archived** (94%) | plans/archive/ |
+| MULTI_INTERFACE_DESIGN | **Archived** (97%) | plans/archive/ |
 | CAPABILITIES_AND_PACKAGING | **Active** (89%) | plans/ |
 | REFACTORING_PLAN | **Active** (0%) | plans/ |
 
