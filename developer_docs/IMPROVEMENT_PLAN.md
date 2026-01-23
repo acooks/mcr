@@ -103,7 +103,7 @@ src/supervisor/
 ```
 
 **Status:** Complete - All 313 unit tests pass. Handlers are now pure functions.
-**Plan:** [plans/REFACTORING_PLAN.md](plans/REFACTORING_PLAN.md) (Section 2)
+**Plan:** [plans/archive/REFACTORING_PLAN.md](plans/archive/REFACTORING_PLAN.md) (Section 2)
 
 ---
 
@@ -246,13 +246,15 @@ Establish and enforce naming conventions (e.g., `group_address` vs `group` vs `g
 
 ## Plan Document Status
 
+All development plans have been consolidated into this document. Original plans are archived for reference.
+
 | Plan | Status | Location |
 |------|--------|----------|
 | CONTROL_PLANE_INTEGRATION | **Archived** (93%) | plans/archive/ |
 | MSDP_IMPLEMENTATION | **Archived** (95%) | plans/archive/ |
 | MULTI_INTERFACE_DESIGN | **Archived** (97%) | plans/archive/ |
-| CAPABILITIES_AND_PACKAGING | **Active** (89%) | plans/ |
-| REFACTORING_PLAN | **Active** (30%) | plans/ |
+| CAPABILITIES_AND_PACKAGING | **Archived** (89%) | plans/archive/ |
+| REFACTORING_PLAN | **Archived** (100% HIGH) | plans/archive/ |
 
 ---
 
@@ -262,15 +264,15 @@ Establish and enforce naming conventions (e.g., `group_address` vs `group` vs `g
 
 1. ✓ Add CLI --name options
 2. ✓ Split supervisor.rs into submodules
+3. ✓ Decouple protocols from MRIB
 
 ### Phase 2: Code Quality
 
 1. Audit critical unwrap() calls
-2. Decouple protocols from MRIB
-3. Add MSDP integration tests
-4. Reorganize worker module (unified_loop.rs, packet_parser.rs)
+2. Add MSDP integration tests
+3. Reorganize worker module (unified_loop.rs, packet_parser.rs)
 
-### Phase 3: Features & Polish (5-6 weeks)
+### Phase 3: Features & Polish
 
 1. Network state reconciliation
 2. Lazy socket creation

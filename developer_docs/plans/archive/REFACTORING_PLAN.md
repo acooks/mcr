@@ -30,30 +30,32 @@ This document outlines opportunities for refactoring and improving the MCR codeb
 
 **Impact:** Maintainability bottleneck, difficult to navigate, hard to test components in isolation.
 
-**Proposed Structure:**
+**Implemented Structure:**
 
 ```text
 src/supervisor/
-├── mod.rs                  # Re-exports, orchestration (~500 lines)
-├── protocol_state.rs       # ProtocolState struct and methods (~800 lines)
-├── event_handlers.rs       # handle_igmp_event, handle_pim_event, handle_msdp_event (~1000 lines)
-├── worker_manager.rs       # Supervisor, Worker, InterfaceWorkers (~1200 lines)
-├── timer_manager.rs        # TimerState, ProtocolTimerManager (~600 lines)
-├── query_handlers.rs       # CLI response handlers (~400 lines)
-└── command_handler.rs      # handle_supervisor_command (~1500 lines)
+├── mod.rs                  # Main orchestration, ProtocolState (3,196 lines)
+├── actions.rs              # MribAction enum and ProtocolHandlerResult (150 lines)
+├── command_handler.rs      # Pure command parsing and validation (1,572 lines)
+├── worker_manager.rs       # Worker lifecycle, spawn, restart with backoff (745 lines)
+├── timer_manager.rs        # Protocol timer scheduling with priority queue (172 lines)
+├── socket_helpers.rs       # AF_PACKET socket creation and FD passing (206 lines)
+└── event_subscription.rs   # Event broadcast channel management (49 lines)
 ```
 
 **Implementation Steps:**
 
-1. [ ] Create `src/supervisor/` directory structure
-2. [ ] Extract `ProtocolState` and related methods to `protocol_state.rs`
-3. [ ] Extract event handlers to `event_handlers.rs`
-4. [ ] Extract worker management to `worker_manager.rs`
-5. [ ] Extract timer management to `timer_manager.rs`
-6. [ ] Extract query handlers to `query_handlers.rs`
-7. [ ] Keep orchestration and main loop in `mod.rs`
-8. [ ] Update imports throughout codebase
-9. [ ] Verify all tests pass
+1. [x] Create `src/supervisor/` directory structure
+2. [x] Extract command handling to `command_handler.rs`
+3. [x] Extract worker management to `worker_manager.rs`
+4. [x] Extract timer management to `timer_manager.rs`
+5. [x] Extract socket helpers to `socket_helpers.rs`
+6. [x] Extract event subscription to `event_subscription.rs`
+7. [x] Keep orchestration and ProtocolState in `mod.rs`
+8. [x] Update imports throughout codebase
+9. [x] Verify all tests pass
+
+**Status:** Complete (January 2026)
 
 ---
 
