@@ -23,6 +23,9 @@ pub enum CliCommand {
     Add {
         #[arg(long)]
         rule_id: Option<String>,
+        /// Human-friendly name for the rule
+        #[arg(long)]
+        name: Option<String>,
         #[arg(long)]
         input_interface: String,
         #[arg(long)]
@@ -34,8 +37,12 @@ pub enum CliCommand {
     },
     /// Remove a forwarding rule
     Remove {
-        #[arg(long)]
-        rule_id: String,
+        /// Rule ID (auto-generated)
+        #[arg(long, conflicts_with = "name")]
+        rule_id: Option<String>,
+        /// Human-friendly rule name
+        #[arg(long, conflicts_with = "rule_id")]
+        name: Option<String>,
     },
     /// List all forwarding rules
     List,
@@ -349,20 +356,31 @@ pub fn build_command(cli_command: CliCommand) -> Result<multicast_relay::Supervi
     Ok(match cli_command {
         CliCommand::Add {
             rule_id,
+            name,
             input_interface,
             input_group,
             input_port,
             outputs,
         } => multicast_relay::SupervisorCommand::AddRule {
             rule_id: rule_id.unwrap_or_default(),
-            name: None, // TODO: Add --name option to CLI
+            name,
             input_interface,
             input_group,
             input_port,
             outputs,
         },
-        CliCommand::Remove { rule_id } => {
-            multicast_relay::SupervisorCommand::RemoveRule { rule_id }
+        CliCommand::Remove { rule_id, name } => {
+            match (rule_id, name) {
+                (Some(id), None) => multicast_relay::SupervisorCommand::RemoveRule { rule_id: id },
+                (None, Some(n)) => multicast_relay::SupervisorCommand::RemoveRuleByName { name: n },
+                (None, None) => {
+                    return Err(anyhow::anyhow!("Must specify either --rule-id or --name"));
+                }
+                (Some(_), Some(_)) => {
+                    // This shouldn't happen due to conflicts_with, but handle it anyway
+                    return Err(anyhow::anyhow!("Cannot specify both --rule-id and --name"));
+                }
+            }
         }
         CliCommand::List => multicast_relay::SupervisorCommand::ListRules,
         CliCommand::ListRules => multicast_relay::SupervisorCommand::ListRules,
@@ -779,6 +797,7 @@ mod tests {
     fn test_build_command_add() {
         let cmd = CliCommand::Add {
             rule_id: Some("test-rule".to_string()),
+            name: None,
             input_interface: "eth0".to_string(),
             input_group: "239.1.1.1".parse().unwrap(),
             input_port: 5000,
@@ -808,9 +827,10 @@ mod tests {
             _ => panic!("Expected AddRule command"),
         }
 
-        // Test with no rule_id (should default to empty string)
+        // Test with name
         let cmd = CliCommand::Add {
             rule_id: None,
+            name: Some("video-feed".to_string()),
             input_interface: "eth0".to_string(),
             input_group: "239.1.1.1".parse().unwrap(),
             input_port: 5000,
@@ -818,8 +838,9 @@ mod tests {
         };
         let supervisor_cmd = build_command(cmd).unwrap();
         match supervisor_cmd {
-            SupervisorCommand::AddRule { rule_id, .. } => {
+            SupervisorCommand::AddRule { rule_id, name, .. } => {
                 assert_eq!(rule_id, "");
+                assert_eq!(name, Some("video-feed".to_string()));
             }
             _ => panic!("Expected AddRule command"),
         }
@@ -827,8 +848,10 @@ mod tests {
 
     #[test]
     fn test_build_command_remove() {
+        // Remove by rule_id
         let cmd = CliCommand::Remove {
-            rule_id: "rule-to-remove".to_string(),
+            rule_id: Some("rule-to-remove".to_string()),
+            name: None,
         };
         let supervisor_cmd = build_command(cmd).unwrap();
         match supervisor_cmd {
@@ -837,6 +860,26 @@ mod tests {
             }
             _ => panic!("Expected RemoveRule command"),
         }
+
+        // Remove by name
+        let cmd = CliCommand::Remove {
+            rule_id: None,
+            name: Some("video-feed".to_string()),
+        };
+        let supervisor_cmd = build_command(cmd).unwrap();
+        match supervisor_cmd {
+            SupervisorCommand::RemoveRuleByName { name } => {
+                assert_eq!(name, "video-feed");
+            }
+            _ => panic!("Expected RemoveRuleByName command"),
+        }
+
+        // Error: neither specified
+        let cmd = CliCommand::Remove {
+            rule_id: None,
+            name: None,
+        };
+        assert!(build_command(cmd).is_err());
     }
 
     #[test]
