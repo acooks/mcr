@@ -125,13 +125,15 @@ fn process_protocol_event(&mut self, event: ProtocolEvent) {
 
 **Implementation Steps:**
 
-1. [ ] Define `ProtocolHandler` trait in `src/protocols/mod.rs`
-2. [ ] Define `ProtocolResult` and `StateChange` types
-3. [ ] Refactor IGMP handler to return results instead of mutating
-4. [ ] Refactor PIM handler
-5. [ ] Refactor MSDP handler
-6. [ ] Update supervisor to apply results
-7. [ ] Add unit tests for protocol handlers in isolation
+1. [x] ~~Define `ProtocolHandler` trait~~ Created `ProtocolHandlerResult` struct and `MribAction` enum in `src/supervisor/actions.rs`
+2. [x] ~~Define `ProtocolResult` and `StateChange` types~~ `ProtocolHandlerResult` with timers, mrib_actions, notifications; `MribAction` enum
+3. [x] Refactor IGMP handler to return results instead of mutating
+4. [x] Refactor PIM handler
+5. [x] Refactor MSDP handler
+6. [x] Update supervisor to apply results (`apply_mrib_actions()`, `emit_notifications()`)
+7. [x] Add unit tests for protocol handlers in isolation (tests in `actions.rs`)
+
+**Status:** Complete (January 2026)
 
 ---
 

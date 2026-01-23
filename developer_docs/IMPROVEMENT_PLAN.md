@@ -87,6 +87,24 @@ src/supervisor/
 
 **Status:** Complete - All 309 unit tests, 61 integration tests, and topology tests pass.
 
+### Protocol Handler Decoupling (January 2026)
+
+Refactored protocol event handlers to return explicit actions instead of directly mutating MRIB:
+
+- **MribAction enum:** AddIgmpMembership, RemoveIgmpMembership, AddStarGRoute, RemoveStarGRoute, AddSgRoute, RemoveSgRoute
+- **ProtocolHandlerResult:** Unified result type with timers, mrib_actions, and notifications
+- **Handler migration:** IGMP, PIM, MSDP, and Timer handlers all return results
+- **Centralized application:** process_event() applies actions after handlers return
+
+```text
+src/supervisor/
+├── actions.rs              # MribAction enum and ProtocolHandlerResult (NEW)
+└── mod.rs                  # Updated handlers + apply_mrib_actions(), emit_notifications()
+```
+
+**Status:** Complete - All 313 unit tests pass. Handlers are now pure functions.
+**Plan:** [plans/REFACTORING_PLAN.md](plans/REFACTORING_PLAN.md) (Section 2)
+
 ---
 
 ## Remaining Work
@@ -102,16 +120,9 @@ src/supervisor/
 - Use `rtnetlink` crate in supervisor to monitor network events
 - Gracefully handle interface flaps
 
-#### 3. Decouple Protocols from MRIB
-
-**Source:** REFACTORING_PLAN
-**Impact:** Testability, maintainability
-
-Protocol handlers should return results instead of directly mutating MRIB. Define `ProtocolHandler` trait for cleaner separation.
-
 ### MEDIUM Priority
 
-#### 4. Audit unwrap()/expect() Usage
+#### 2. Audit unwrap()/expect() Usage
 
 **Source:** REFACTORING_PLAN
 **Impact:** Production stability
@@ -126,7 +137,7 @@ Protocol handlers should return results instead of directly mutating MRIB. Defin
 
 Focus on packet parsing paths where malformed data could cause panics.
 
-#### 5. Add MSDP Integration Tests
+#### 3. Add MSDP Integration Tests
 
 **Source:** MSDP_IMPLEMENTATION Phase 5
 **Impact:** Test coverage
@@ -139,21 +150,21 @@ Missing tests:
 - Mesh group flood suppression
 - Peer timeout and reconnection
 
-#### 6. Implement Lazy Socket Creation
+#### 4. Implement Lazy Socket Creation
 
 **Source:** REFACTORING_PLAN, supervisor.rs TODO
 **Impact:** Scalability on multi-interface systems
 
 Workers currently create all AF_PACKET sockets upfront. Implement lazy creation triggered by rule additions.
 
-#### 7. Consolidate Config Validation
+#### 5. Consolidate Config Validation
 
 **Source:** REFACTORING_PLAN
 **Impact:** Code quality
 
 Create `src/validation.rs` with reusable validators instead of 7 separate validation functions.
 
-#### 8. Reorganize Worker Module
+#### 6. Reorganize Worker Module
 
 **Source:** REFACTORING_PLAN
 **Impact:** Code organization
@@ -162,14 +173,14 @@ Split `unified_loop.rs` (1,273 lines) and `packet_parser.rs` (1,404 lines) into 
 
 ### LOW Priority
 
-#### 9. Add require_mcrd_caps! Macro
+#### 7. Add require_mcrd_caps! Macro
 
 **Source:** CAPABILITIES_AND_PACKAGING Phase 4.2
 **Impact:** Test convenience
 
 Create test macro that checks for root OR required capabilities (not just root).
 
-#### 10. Add Capability Section to OPERATIONAL_GUIDE.md
+#### 8. Add Capability Section to OPERATIONAL_GUIDE.md
 
 **Source:** CAPABILITIES_AND_PACKAGING Phase 1.2
 **Impact:** Documentation completeness
