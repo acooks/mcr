@@ -300,8 +300,9 @@ pub enum RouteType { StarG, SG }
 
 **New Commands (`src/lib.rs`):**
 
-- [ ] `Subscribe { events: Vec<EventType> }` - Subscribe to event types
-- [ ] `Unsubscribe { events: Vec<EventType> }` - Unsubscribe from event types
+- [x] `Subscribe { events: Vec<EventType> }` - Subscribe to event types
+- [x] `Unsubscribe { subscription_id: SubscriptionId }` - Unsubscribe from events
+- [x] `ListSubscriptions` - List active subscriptions
 
 **Architecture:**
 
@@ -333,11 +334,12 @@ pub enum RouteType { StarG, SG }
 
 **Implementation:**
 
-- [ ] Add `EventSubscriptionManager` to supervisor
-- [ ] Modify control socket to support persistent connections for subscribers
-- [ ] Add event emission hooks in IGMP/PIM/MSDP state machines
-- [ ] Use `tokio::sync::broadcast` for efficient multi-subscriber delivery
-- [ ] Add configurable event buffer size and backpressure handling
+- [x] Add `EventSubscriptionManager` to supervisor
+- [x] Modify control socket to support persistent connections for subscribers
+- [x] Add event emission hooks in IGMP/PIM/MSDP state machines
+- [x] Use `tokio::sync::broadcast` for efficient multi-subscriber delivery
+- [x] Add configurable event buffer size (256 events default)
+- [x] Handle backpressure via broadcast channel lag warnings
 
 **Wire Format:**
 
@@ -433,12 +435,11 @@ pub struct ControlPlaneConfig {
 
 - **Phase 1:** Complete
 - **Phase 2:** Complete (external socket protocol deferred)
-- **Phase 3:** Not Started
+- **Phase 3:** Complete
 - **Phase 4:** Not Started
 
 ## Next Steps
 
-1. Begin Phase 3 implementation with event subscription types
-2. Add broadcast channel for event distribution
-3. Implement Subscribe/Unsubscribe commands
-4. Add event emission hooks to IGMP/PIM/MSDP state machines
+1. Begin Phase 4 implementation with configuration documentation
+2. Add namespace-aware operation documentation
+3. Add example systemd unit with namespace support

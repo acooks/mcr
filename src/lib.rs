@@ -302,6 +302,19 @@ pub enum SupervisorCommand {
     },
     /// Clear MSDP SA cache
     ClearMsdpSaCache,
+    // --- Event Subscription Commands ---
+    /// Subscribe to protocol events (returns subscription ID)
+    Subscribe {
+        /// Event types to subscribe to
+        events: Vec<EventType>,
+    },
+    /// Unsubscribe from events (by subscription ID)
+    Unsubscribe {
+        /// Subscription ID to cancel
+        subscription_id: SubscriptionId,
+    },
+    /// List active subscriptions for this connection
+    ListSubscriptions,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -343,6 +356,17 @@ pub enum Response {
     RpfResult(Option<RpfInfo>),
     /// Static RPF routes response
     RpfRoutes(Vec<RpfRouteEntry>),
+    /// Subscription created successfully
+    Subscribed {
+        /// Unique subscription ID for managing this subscription
+        subscription_id: SubscriptionId,
+        /// Event types subscribed to
+        events: Vec<EventType>,
+    },
+    /// List of active subscriptions
+    Subscriptions(Vec<SubscriptionInfo>),
+    /// Protocol event notification (pushed to subscribers)
+    Event(ProtocolEventNotification),
 }
 
 /// Source of a PIM neighbor - distinguishes Hello-learned from externally-injected
@@ -541,6 +565,236 @@ pub struct MsdpSaCacheInfo {
     pub expires_in_secs: u64,
     /// Whether this is a local source
     pub is_local: bool,
+}
+
+// ============================================================================
+// Event Subscription Types (Phase 3: Control Plane Integration)
+// ============================================================================
+
+/// Event types that can be subscribed to for push notifications
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum EventType {
+    /// IGMP membership changes (join/leave)
+    IgmpMembership,
+    /// PIM neighbor changes (up/down)
+    PimNeighbor,
+    /// PIM route changes (add/remove/update)
+    PimRoute,
+    /// MSDP SA cache changes (add/remove/refresh)
+    MsdpSaCache,
+}
+
+impl std::fmt::Display for EventType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EventType::IgmpMembership => write!(f, "igmp-membership"),
+            EventType::PimNeighbor => write!(f, "pim-neighbor"),
+            EventType::PimRoute => write!(f, "pim-route"),
+            EventType::MsdpSaCache => write!(f, "msdp-sa-cache"),
+        }
+    }
+}
+
+/// Protocol event notification payload - sent to subscribers
+///
+/// This is the external event notification type for control plane integration.
+/// It differs from `protocols::ProtocolEvent` which is used internally for
+/// state machine communication.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum ProtocolEventNotification {
+    /// IGMP membership change on an interface
+    IgmpMembershipChange {
+        /// Interface where membership changed
+        interface: String,
+        /// Multicast group address
+        group: Ipv4Addr,
+        /// Join or leave action
+        action: MembershipAction,
+        /// IP address of the reporting host (if available)
+        reporter: Option<Ipv4Addr>,
+        /// Unix timestamp (seconds since epoch)
+        timestamp: u64,
+    },
+    /// PIM neighbor state change
+    PimNeighborChange {
+        /// Interface where neighbor changed
+        interface: String,
+        /// Neighbor IP address
+        neighbor: Ipv4Addr,
+        /// Up or down action
+        action: NeighborAction,
+        /// Source of the neighbor (Hello-learned or external)
+        source: NeighborSource,
+        /// Unix timestamp (seconds since epoch)
+        timestamp: u64,
+    },
+    /// PIM route state change
+    PimRouteChange {
+        /// Type of route ((*,G) or (S,G))
+        route_type: PimTreeType,
+        /// Multicast group address
+        group: Ipv4Addr,
+        /// Source address (None for (*,G))
+        source: Option<Ipv4Addr>,
+        /// Add, remove, or update action
+        action: RouteAction,
+        /// Unix timestamp (seconds since epoch)
+        timestamp: u64,
+    },
+    /// MSDP SA cache change
+    MsdpSaCacheChange {
+        /// Source IP address
+        source: Ipv4Addr,
+        /// Multicast group address
+        group: Ipv4Addr,
+        /// RP that originated this SA
+        rp: Ipv4Addr,
+        /// Add, remove, or refresh action
+        action: SaCacheAction,
+        /// Unix timestamp (seconds since epoch)
+        timestamp: u64,
+    },
+}
+
+impl ProtocolEventNotification {
+    /// Get the event type for this notification
+    pub fn event_type(&self) -> EventType {
+        match self {
+            ProtocolEventNotification::IgmpMembershipChange { .. } => EventType::IgmpMembership,
+            ProtocolEventNotification::PimNeighborChange { .. } => EventType::PimNeighbor,
+            ProtocolEventNotification::PimRouteChange { .. } => EventType::PimRoute,
+            ProtocolEventNotification::MsdpSaCacheChange { .. } => EventType::MsdpSaCache,
+        }
+    }
+
+    /// Get the timestamp for this event
+    pub fn timestamp(&self) -> u64 {
+        match self {
+            ProtocolEventNotification::IgmpMembershipChange { timestamp, .. } => *timestamp,
+            ProtocolEventNotification::PimNeighborChange { timestamp, .. } => *timestamp,
+            ProtocolEventNotification::PimRouteChange { timestamp, .. } => *timestamp,
+            ProtocolEventNotification::MsdpSaCacheChange { timestamp, .. } => *timestamp,
+        }
+    }
+}
+
+/// IGMP membership action
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum MembershipAction {
+    /// Host joined the group
+    Join,
+    /// Host left the group (or membership expired)
+    Leave,
+}
+
+impl std::fmt::Display for MembershipAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MembershipAction::Join => write!(f, "join"),
+            MembershipAction::Leave => write!(f, "leave"),
+        }
+    }
+}
+
+/// PIM neighbor action
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum NeighborAction {
+    /// Neighbor came up (Hello received or externally injected)
+    Up,
+    /// Neighbor went down (timeout or externally removed)
+    Down,
+}
+
+impl std::fmt::Display for NeighborAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NeighborAction::Up => write!(f, "up"),
+            NeighborAction::Down => write!(f, "down"),
+        }
+    }
+}
+
+/// PIM route action
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RouteAction {
+    /// Route was added
+    Add,
+    /// Route was removed
+    Remove,
+    /// Route was updated (e.g., OIL changed)
+    Update,
+}
+
+impl std::fmt::Display for RouteAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RouteAction::Add => write!(f, "add"),
+            RouteAction::Remove => write!(f, "remove"),
+            RouteAction::Update => write!(f, "update"),
+        }
+    }
+}
+
+/// MSDP SA cache action
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SaCacheAction {
+    /// SA entry was added
+    Add,
+    /// SA entry was removed (expired or withdrawn)
+    Remove,
+    /// SA entry was refreshed
+    Refresh,
+}
+
+impl std::fmt::Display for SaCacheAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SaCacheAction::Add => write!(f, "add"),
+            SaCacheAction::Remove => write!(f, "remove"),
+            SaCacheAction::Refresh => write!(f, "refresh"),
+        }
+    }
+}
+
+/// Subscription identifier for tracking active subscriptions
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct SubscriptionId(pub String);
+
+impl SubscriptionId {
+    /// Generate a new unique subscription ID
+    pub fn new() -> Self {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        SubscriptionId(format!("sub-{:x}", ts))
+    }
+}
+
+impl Default for SubscriptionId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Display for SubscriptionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// Information about an active subscription
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SubscriptionInfo {
+    /// Unique subscription ID
+    pub id: SubscriptionId,
+    /// Event types subscribed to
+    pub events: Vec<EventType>,
+    /// Unix timestamp when subscription was created
+    pub created_at: u64,
+    /// Number of events delivered on this subscription
+    pub events_delivered: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Hash)]
@@ -845,5 +1099,153 @@ mod tests {
 
         let id5 = generate_rule_id("eth0", "224.0.0.2".parse().unwrap(), 5000);
         assert_ne!(id1, id5, "Different group should generate different ID");
+    }
+
+    #[test]
+    fn test_event_type_display() {
+        assert_eq!(EventType::IgmpMembership.to_string(), "igmp-membership");
+        assert_eq!(EventType::PimNeighbor.to_string(), "pim-neighbor");
+        assert_eq!(EventType::PimRoute.to_string(), "pim-route");
+        assert_eq!(EventType::MsdpSaCache.to_string(), "msdp-sa-cache");
+    }
+
+    #[test]
+    fn test_event_type_serialization() {
+        let events = vec![
+            EventType::IgmpMembership,
+            EventType::PimNeighbor,
+            EventType::PimRoute,
+            EventType::MsdpSaCache,
+        ];
+        for event in events {
+            let json = serde_json::to_string(&event).unwrap();
+            let deserialized: EventType = serde_json::from_str(&json).unwrap();
+            assert_eq!(event, deserialized);
+        }
+    }
+
+    #[test]
+    fn test_protocol_event_notification_igmp() {
+        let event = ProtocolEventNotification::IgmpMembershipChange {
+            interface: "eth0".to_string(),
+            group: "239.1.1.1".parse().unwrap(),
+            action: MembershipAction::Join,
+            reporter: Some("10.0.0.5".parse().unwrap()),
+            timestamp: 1706012345,
+        };
+        assert_eq!(event.event_type(), EventType::IgmpMembership);
+        assert_eq!(event.timestamp(), 1706012345);
+
+        let json = serde_json::to_string(&event).unwrap();
+        let deserialized: ProtocolEventNotification = serde_json::from_str(&json).unwrap();
+        assert_eq!(event, deserialized);
+    }
+
+    #[test]
+    fn test_protocol_event_notification_pim_neighbor() {
+        let event = ProtocolEventNotification::PimNeighborChange {
+            interface: "eth0".to_string(),
+            neighbor: "10.0.0.1".parse().unwrap(),
+            action: NeighborAction::Up,
+            source: NeighborSource::PimHello,
+            timestamp: 1706012345,
+        };
+        assert_eq!(event.event_type(), EventType::PimNeighbor);
+
+        let json = serde_json::to_string(&event).unwrap();
+        let deserialized: ProtocolEventNotification = serde_json::from_str(&json).unwrap();
+        assert_eq!(event, deserialized);
+    }
+
+    #[test]
+    fn test_protocol_event_notification_pim_route() {
+        let event = ProtocolEventNotification::PimRouteChange {
+            route_type: PimTreeType::SG,
+            group: "239.1.1.1".parse().unwrap(),
+            source: Some("10.0.0.5".parse().unwrap()),
+            action: RouteAction::Add,
+            timestamp: 1706012345,
+        };
+        assert_eq!(event.event_type(), EventType::PimRoute);
+
+        let json = serde_json::to_string(&event).unwrap();
+        let deserialized: ProtocolEventNotification = serde_json::from_str(&json).unwrap();
+        assert_eq!(event, deserialized);
+    }
+
+    #[test]
+    fn test_protocol_event_notification_msdp() {
+        let event = ProtocolEventNotification::MsdpSaCacheChange {
+            source: "10.0.0.5".parse().unwrap(),
+            group: "239.1.1.1".parse().unwrap(),
+            rp: "10.0.0.1".parse().unwrap(),
+            action: SaCacheAction::Add,
+            timestamp: 1706012345,
+        };
+        assert_eq!(event.event_type(), EventType::MsdpSaCache);
+
+        let json = serde_json::to_string(&event).unwrap();
+        let deserialized: ProtocolEventNotification = serde_json::from_str(&json).unwrap();
+        assert_eq!(event, deserialized);
+    }
+
+    #[test]
+    fn test_action_enum_display() {
+        assert_eq!(MembershipAction::Join.to_string(), "join");
+        assert_eq!(MembershipAction::Leave.to_string(), "leave");
+        assert_eq!(NeighborAction::Up.to_string(), "up");
+        assert_eq!(NeighborAction::Down.to_string(), "down");
+        assert_eq!(RouteAction::Add.to_string(), "add");
+        assert_eq!(RouteAction::Remove.to_string(), "remove");
+        assert_eq!(RouteAction::Update.to_string(), "update");
+        assert_eq!(SaCacheAction::Add.to_string(), "add");
+        assert_eq!(SaCacheAction::Remove.to_string(), "remove");
+        assert_eq!(SaCacheAction::Refresh.to_string(), "refresh");
+    }
+
+    #[test]
+    fn test_subscription_id_unique() {
+        let id1 = SubscriptionId::new();
+        let id2 = SubscriptionId::new();
+        // IDs should be unique (different nanosecond timestamps)
+        assert_ne!(id1.0, id2.0);
+        assert!(id1.0.starts_with("sub-"));
+        assert!(id2.0.starts_with("sub-"));
+    }
+
+    #[test]
+    fn test_subscribe_command_serialization() {
+        let cmd = SupervisorCommand::Subscribe {
+            events: vec![EventType::IgmpMembership, EventType::PimNeighbor],
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        let deserialized: SupervisorCommand = serde_json::from_str(&json).unwrap();
+        assert_eq!(cmd, deserialized);
+    }
+
+    #[test]
+    fn test_subscribed_response_serialization() {
+        let resp = Response::Subscribed {
+            subscription_id: SubscriptionId("sub-12345".to_string()),
+            events: vec![EventType::IgmpMembership],
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let deserialized: Response = serde_json::from_str(&json).unwrap();
+        assert_eq!(resp, deserialized);
+    }
+
+    #[test]
+    fn test_event_response_serialization() {
+        let event = ProtocolEventNotification::IgmpMembershipChange {
+            interface: "eth0".to_string(),
+            group: "239.1.1.1".parse().unwrap(),
+            action: MembershipAction::Join,
+            reporter: None,
+            timestamp: 1706012345,
+        };
+        let resp = Response::Event(event.clone());
+        let json = serde_json::to_string(&resp).unwrap();
+        let deserialized: Response = serde_json::from_str(&json).unwrap();
+        assert_eq!(resp, deserialized);
     }
 }

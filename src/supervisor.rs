@@ -43,6 +43,15 @@ const MAX_INTERFACE_NAME_LEN: usize = 15;
 #[allow(dead_code)]
 const ALL_PIM_ROUTERS: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 13);
 
+/// Get current Unix timestamp in seconds
+fn unix_timestamp() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 /// Protocol state management for IGMP, PIM, and MSDP
 ///
 /// This struct holds all protocol state machines and raw sockets needed
@@ -80,6 +89,53 @@ pub struct ProtocolState {
 
     /// Logger for protocol events
     logger: Logger,
+
+    /// Event subscription manager for push notifications
+    pub event_manager: Option<EventSubscriptionManager>,
+}
+
+/// Manages event subscriptions for external control plane integration.
+///
+/// Provides a broadcast channel for protocol events (IGMP membership changes,
+/// PIM neighbor/route changes, MSDP SA cache updates) to be pushed to
+/// subscribed clients.
+#[derive(Clone)]
+pub struct EventSubscriptionManager {
+    /// Broadcast sender for protocol events
+    event_tx: tokio::sync::broadcast::Sender<crate::ProtocolEventNotification>,
+}
+
+impl EventSubscriptionManager {
+    /// Create a new EventSubscriptionManager with the specified buffer size
+    pub fn new(buffer_size: usize) -> Self {
+        let (event_tx, _) = tokio::sync::broadcast::channel(buffer_size);
+        Self { event_tx }
+    }
+
+    /// Get a new receiver for subscribing to events
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<crate::ProtocolEventNotification> {
+        self.event_tx.subscribe()
+    }
+
+    /// Send an event to all subscribers
+    ///
+    /// Returns the number of receivers that received the event.
+    /// If there are no subscribers, returns 0 (not an error).
+    pub fn send(&self, event: crate::ProtocolEventNotification) -> usize {
+        self.event_tx.send(event).unwrap_or_default()
+    }
+
+    /// Get the number of active subscribers
+    pub fn subscriber_count(&self) -> usize {
+        self.event_tx.receiver_count()
+    }
+}
+
+impl Default for EventSubscriptionManager {
+    fn default() -> Self {
+        // Default buffer size of 256 events
+        Self::new(256)
+    }
 }
 
 impl ProtocolState {
@@ -98,6 +154,19 @@ impl ProtocolState {
             pim_enabled: false,
             msdp_enabled: false,
             logger,
+            event_manager: None,
+        }
+    }
+
+    /// Enable event subscription manager for external control plane integration
+    pub fn enable_event_subscriptions(&mut self, buffer_size: usize) {
+        self.event_manager = Some(EventSubscriptionManager::new(buffer_size));
+    }
+
+    /// Emit an event to all subscribers (if event manager is enabled)
+    pub fn emit_event(&self, event: crate::ProtocolEventNotification) {
+        if let Some(ref manager) = self.event_manager {
+            manager.send(event);
         }
     }
 
@@ -241,17 +310,27 @@ impl ProtocolState {
                             // V2 Membership Report
                             let timers = igmp_state.received_report(src_ip, group, now);
                             // Add to MRIB if this is a new group
-                            if !self
+                            let is_new = !self
                                 .mrib
                                 .get_igmp_interfaces_for_group(group)
-                                .contains(&interface)
-                            {
+                                .contains(&interface);
+                            if is_new {
                                 let membership = crate::mroute::IgmpMembership {
                                     group,
                                     expires_at: now + igmp_state.config.group_membership_interval(),
                                     last_reporter: Some(src_ip),
                                 };
                                 self.mrib.add_igmp_membership(&interface, group, membership);
+                                // Emit event for new membership
+                                self.emit_event(
+                                    crate::ProtocolEventNotification::IgmpMembershipChange {
+                                        interface: interface.clone(),
+                                        group,
+                                        action: crate::MembershipAction::Join,
+                                        reporter: Some(src_ip),
+                                        timestamp: unix_timestamp(),
+                                    },
+                                );
                             }
                             timers
                         }
@@ -284,6 +363,14 @@ impl ProtocolState {
                     igmp_state.group_expired(group, now);
                     // Remove from MRIB
                     self.mrib.remove_igmp_membership(&interface, group);
+                    // Emit event for membership leave
+                    self.emit_event(crate::ProtocolEventNotification::IgmpMembershipChange {
+                        interface: interface.clone(),
+                        group,
+                        action: crate::MembershipAction::Leave,
+                        reporter: None,
+                        timestamp: unix_timestamp(),
+                    });
                 }
                 Vec::new()
             }
@@ -292,6 +379,14 @@ impl ProtocolState {
                     let (timers, expired) = igmp_state.group_query_expired(group, now);
                     if expired {
                         self.mrib.remove_igmp_membership(&interface, group);
+                        // Emit event for membership leave
+                        self.emit_event(crate::ProtocolEventNotification::IgmpMembershipChange {
+                            interface: interface.clone(),
+                            group,
+                            action: crate::MembershipAction::Leave,
+                            reporter: None,
+                            timestamp: unix_timestamp(),
+                        });
                     }
                     timers
                 } else {
@@ -335,51 +430,73 @@ impl ProtocolState {
                 match msg_type {
                     0 => {
                         // Hello - parse options and process
-                        if let Some(iface_state) = self.pim_state.get_interface_mut(&interface) {
-                            use crate::protocols::pim::PimHelloOption;
-                            use std::time::Duration;
+                        let (timers, is_new_neighbor, dr_changed, is_dr) =
+                            if let Some(iface_state) = self.pim_state.get_interface_mut(&interface)
+                            {
+                                use crate::protocols::pim::PimHelloOption;
+                                use std::time::Duration;
 
-                            // Parse Hello options from payload
-                            let options = PimHelloOption::parse_all(&payload);
-                            let mut holdtime = Duration::from_secs(105); // Default holdtime
-                            let mut dr_priority = 1u32; // Default DR priority
-                            let mut generation_id = 0u32;
+                                // Parse Hello options from payload
+                                let options = PimHelloOption::parse_all(&payload);
+                                let mut holdtime = Duration::from_secs(105); // Default holdtime
+                                let mut dr_priority = 1u32; // Default DR priority
+                                let mut generation_id = 0u32;
 
-                            for option in options {
-                                match option {
-                                    PimHelloOption::Holdtime(h) => {
-                                        holdtime = Duration::from_secs(h as u64)
+                                for option in options {
+                                    match option {
+                                        PimHelloOption::Holdtime(h) => {
+                                            holdtime = Duration::from_secs(h as u64)
+                                        }
+                                        PimHelloOption::DrPriority(p) => dr_priority = p,
+                                        PimHelloOption::GenerationId(g) => generation_id = g,
+                                        PimHelloOption::Unknown { .. } => {}
                                     }
-                                    PimHelloOption::DrPriority(p) => dr_priority = p,
-                                    PimHelloOption::GenerationId(g) => generation_id = g,
-                                    PimHelloOption::Unknown { .. } => {}
                                 }
-                            }
 
-                            let timers = iface_state.received_hello(
-                                src_ip,
-                                holdtime,
-                                dr_priority,
-                                generation_id,
-                                Instant::now(),
-                            );
+                                // Check if this is a new neighbor before processing
+                                let is_new = !iface_state.has_neighbor(src_ip);
 
-                            // Check if DR election changed
-                            if iface_state.elect_dr() {
-                                log_debug!(
-                                    self.logger,
-                                    Facility::Supervisor,
-                                    &format!(
-                                        "DR election on {} - we are {}DR",
-                                        interface,
-                                        if iface_state.is_dr() { "" } else { "not " }
-                                    )
+                                let timers = iface_state.received_hello(
+                                    src_ip,
+                                    holdtime,
+                                    dr_priority,
+                                    generation_id,
+                                    Instant::now(),
                                 );
-                            }
-                            timers
-                        } else {
-                            Vec::new()
+
+                                // Check if DR election changed
+                                let dr_changed = iface_state.elect_dr();
+                                let is_dr = iface_state.is_dr();
+
+                                (timers, is_new, dr_changed, is_dr)
+                            } else {
+                                (Vec::new(), false, false, false)
+                            };
+
+                        // Emit event for new neighbor (outside mutable borrow)
+                        if is_new_neighbor {
+                            self.emit_event(crate::ProtocolEventNotification::PimNeighborChange {
+                                interface: interface.clone(),
+                                neighbor: src_ip,
+                                action: crate::NeighborAction::Up,
+                                source: crate::NeighborSource::PimHello,
+                                timestamp: unix_timestamp(),
+                            });
                         }
+
+                        if dr_changed {
+                            log_debug!(
+                                self.logger,
+                                Facility::Supervisor,
+                                &format!(
+                                    "DR election on {} - we are {}DR",
+                                    interface,
+                                    if is_dr { "" } else { "not " }
+                                )
+                            );
+                        }
+
+                        timers
                     }
                     1 => {
                         // Register - only if we're RP
@@ -480,10 +597,25 @@ impl ProtocolState {
                 interface,
                 neighbor,
             } => {
-                if let Some(iface_state) = self.pim_state.get_interface_mut(&interface) {
-                    iface_state.neighbor_expired(neighbor);
-                    // Re-run DR election
-                    let _ = iface_state.elect_dr();
+                let neighbor_existed =
+                    if let Some(iface_state) = self.pim_state.get_interface_mut(&interface) {
+                        iface_state.neighbor_expired(neighbor);
+                        // Re-run DR election
+                        let _ = iface_state.elect_dr();
+                        true
+                    } else {
+                        false
+                    };
+
+                // Emit event for neighbor down (outside mutable borrow)
+                if neighbor_existed {
+                    self.emit_event(crate::ProtocolEventNotification::PimNeighborChange {
+                        interface: interface.clone(),
+                        neighbor,
+                        action: crate::NeighborAction::Down,
+                        source: crate::NeighborSource::PimHello,
+                        timestamp: unix_timestamp(),
+                    });
                 }
                 Vec::new()
             }
@@ -493,6 +625,14 @@ impl ProtocolState {
                     // (S,G) expired
                     self.pim_state.sg.remove(&(src, group));
                     self.mrib.remove_sg_route(src, group);
+                    // Emit event for route removal
+                    self.emit_event(crate::ProtocolEventNotification::PimRouteChange {
+                        route_type: crate::PimTreeType::SG,
+                        group,
+                        source: Some(src),
+                        action: crate::RouteAction::Remove,
+                        timestamp: unix_timestamp(),
+                    });
 
                     // Notify MSDP of inactive source (if we're the RP and MSDP is enabled)
                     if self.msdp_enabled && self.pim_state.config.rp_address.is_some() {
@@ -507,6 +647,14 @@ impl ProtocolState {
                     // (*,G) expired
                     self.pim_state.star_g.remove(&group);
                     self.mrib.remove_star_g_route(group);
+                    // Emit event for route removal
+                    self.emit_event(crate::ProtocolEventNotification::PimRouteChange {
+                        route_type: crate::PimTreeType::StarG,
+                        group,
+                        source: None,
+                        action: crate::RouteAction::Remove,
+                        timestamp: unix_timestamp(),
+                    });
                 }
                 Vec::new()
             }
@@ -617,6 +765,17 @@ impl ProtocolState {
 
                             // Process learned sources - create (S,G) routes for groups with local receivers
                             for (source, group) in &result.learned_sources {
+                                // Emit event for new SA entry
+                                self.emit_event(
+                                    crate::ProtocolEventNotification::MsdpSaCacheChange {
+                                        source: *source,
+                                        group: *group,
+                                        rp: sa_msg.rp_address,
+                                        action: crate::SaCacheAction::Add,
+                                        timestamp: unix_timestamp(),
+                                    },
+                                );
+
                                 let receivers = self.mrib.get_igmp_interfaces_for_group(*group);
                                 if !receivers.is_empty() {
                                     log_info!(
@@ -730,6 +889,14 @@ impl ProtocolState {
                 origin_rp,
             } => {
                 self.msdp_state.sa_cache_expired(source, group, origin_rp);
+                // Emit event for SA cache removal
+                self.emit_event(crate::ProtocolEventNotification::MsdpSaCacheChange {
+                    source,
+                    group,
+                    rp: origin_rp,
+                    action: crate::SaCacheAction::Remove,
+                    timestamp: unix_timestamp(),
+                });
                 Vec::new()
             }
             MsdpEvent::AddPeer { config } => {
@@ -1872,6 +2039,9 @@ pub fn initialize_protocol_subsystem(
     let mut state = ProtocolState::new(logger.clone());
     state.timer_tx = Some(timer_tx.clone());
 
+    // Enable event subscriptions for external control plane integration
+    state.enable_event_subscriptions(256);
+
     // Initialize from config
     state.initialize_from_config(config);
 
@@ -2852,6 +3022,28 @@ pub fn handle_supervisor_command(
             Response::Success("All static RPF routes cleared".to_string()),
             CommandAction::ClearRpfRoutes,
         ),
+
+        // --- Event Subscription Commands ---
+        // These are handled by the control socket handler since subscriptions
+        // are per-connection state. Return placeholder responses here.
+        SupervisorCommand::Subscribe { events } => {
+            let subscription_id = crate::SubscriptionId::new();
+            (
+                Response::Subscribed {
+                    subscription_id,
+                    events,
+                },
+                CommandAction::None,
+            )
+        }
+        SupervisorCommand::Unsubscribe { subscription_id } => (
+            Response::Success(format!("Unsubscribed from {}", subscription_id)),
+            CommandAction::None,
+        ),
+        SupervisorCommand::ListSubscriptions => {
+            // Return empty list - actual subscriptions tracked per-connection
+            (Response::Subscriptions(Vec::new()), CommandAction::None)
+        }
     }
 }
 
@@ -3615,6 +3807,72 @@ async fn handle_client(
 
     let command: SupervisorCommand = serde_json::from_slice(&buffer)?;
 
+    // Handle subscription requests specially (they need persistent connections)
+    if let SupervisorCommand::Subscribe { events } = &command {
+        let subscription_result: Option<(
+            crate::SubscriptionId,
+            Vec<crate::EventType>,
+            tokio::sync::broadcast::Receiver<crate::ProtocolEventNotification>,
+        )> = {
+            let coordinator_guard = protocol_coordinator.lock().unwrap();
+            if let Some(ref coordinator) = *coordinator_guard {
+                if let Some(ref event_manager) = coordinator.state.event_manager {
+                    let id = crate::SubscriptionId::new();
+                    let rx = event_manager.subscribe();
+                    Some((id, events.clone(), rx))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+
+        if let Some((subscription_id, subscribed_events, mut event_rx)) = subscription_result {
+            // Send subscription confirmation
+            let response = Response::Subscribed {
+                subscription_id: subscription_id.clone(),
+                events: subscribed_events.clone(),
+            };
+            let response_bytes = serde_json::to_vec(&response)?;
+            client_stream.write_all(&response_bytes).await?;
+            client_stream.write_all(b"\n").await?; // Delimiter for streaming
+
+            // Stream events until connection is closed
+            let subscribed_set: std::collections::HashSet<_> =
+                subscribed_events.into_iter().collect();
+            loop {
+                match event_rx.recv().await {
+                    Ok(event) => {
+                        // Only send events that match subscription
+                        if subscribed_set.contains(&event.event_type()) {
+                            let event_response = Response::Event(event);
+                            let event_bytes = serde_json::to_vec(&event_response)?;
+                            if client_stream.write_all(&event_bytes).await.is_err() {
+                                break; // Client disconnected
+                            }
+                            if client_stream.write_all(b"\n").await.is_err() {
+                                break; // Client disconnected
+                            }
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        // Log lag but continue - subscriber missed some events
+                        log::warn!("Event subscriber lagged by {} events", n);
+                    }
+                }
+            }
+            return Ok(());
+        } else {
+            // Event subscriptions not available
+            let response = Response::Error("Event subscriptions not available".to_string());
+            let response_bytes = serde_json::to_vec(&response)?;
+            client_stream.write_all(&response_bytes).await?;
+            return Ok(());
+        }
+    }
+
     // Handle protocol-specific queries directly (need access to ProtocolCoordinator state)
     // These queries need real data from the protocol state machines
     let protocol_response: Option<Response> = {
@@ -3985,6 +4243,18 @@ async fn handle_client(
                         neighbor.address,
                         neighbor.interface
                     );
+                    // Emit event for external neighbor up
+                    coordinator.state.emit_event(
+                        crate::ProtocolEventNotification::PimNeighborChange {
+                            interface: neighbor.interface.clone(),
+                            neighbor: neighbor.address,
+                            action: crate::NeighborAction::Up,
+                            source: crate::NeighborSource::External {
+                                tag: neighbor.tag.clone(),
+                            },
+                            timestamp: unix_timestamp(),
+                        },
+                    );
                 } else {
                     log::warn!(
                         "Failed to add external neighbor {}: interface {} not enabled for PIM",
@@ -4010,6 +4280,16 @@ async fn handle_client(
                         "External PIM neighbor {} removed from {}",
                         address,
                         interface
+                    );
+                    // Emit event for external neighbor down
+                    coordinator.state.emit_event(
+                        crate::ProtocolEventNotification::PimNeighborChange {
+                            interface: interface.clone(),
+                            neighbor: address,
+                            action: crate::NeighborAction::Down,
+                            source: crate::NeighborSource::External { tag: None },
+                            timestamp: unix_timestamp(),
+                        },
                     );
                 } else {
                     log::warn!(

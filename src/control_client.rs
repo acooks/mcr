@@ -76,6 +76,16 @@ pub enum CliCommand {
     },
     /// Show multicast routing table
     Mroute,
+    /// Subscribe to protocol events (streaming output)
+    Subscribe {
+        /// Event types to subscribe to (comma-separated: igmp,pim-neighbor,pim-route,msdp)
+        #[arg(
+            long,
+            value_delimiter = ',',
+            default_value = "igmp,pim-neighbor,pim-route,msdp"
+        )]
+        events: Vec<String>,
+    },
 }
 
 #[derive(Parser, Debug)]
@@ -501,6 +511,34 @@ pub fn build_command(cli_command: CliCommand) -> Result<multicast_relay::Supervi
             MsdpAction::ClearSaCache => multicast_relay::SupervisorCommand::ClearMsdpSaCache,
         },
         CliCommand::Mroute => multicast_relay::SupervisorCommand::GetMroute,
+        CliCommand::Subscribe { events } => {
+            // Parse event type strings to EventType enum
+            let event_types: Vec<multicast_relay::EventType> = events
+                .iter()
+                .filter_map(|s| match s.to_lowercase().as_str() {
+                    "igmp" | "igmp-membership" => Some(multicast_relay::EventType::IgmpMembership),
+                    "pim-neighbor" | "pim-neighbors" => {
+                        Some(multicast_relay::EventType::PimNeighbor)
+                    }
+                    "pim-route" | "pim-routes" => Some(multicast_relay::EventType::PimRoute),
+                    "msdp" | "msdp-sa-cache" => Some(multicast_relay::EventType::MsdpSaCache),
+                    _ => {
+                        eprintln!("Warning: Unknown event type '{}', ignoring", s);
+                        None
+                    }
+                })
+                .collect();
+
+            if event_types.is_empty() {
+                return Err(anyhow::anyhow!(
+                    "No valid event types specified. Valid types: igmp, pim-neighbor, pim-route, msdp"
+                ));
+            }
+
+            multicast_relay::SupervisorCommand::Subscribe {
+                events: event_types,
+            }
+        }
     })
 }
 
@@ -508,22 +546,48 @@ pub fn build_command(cli_command: CliCommand) -> Result<multicast_relay::Supervi
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     use multicast_relay::Response;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixStream;
 
     let args = Args::parse();
+
+    // Check if this is a Subscribe command - needs special handling for streaming
+    let is_subscribe = matches!(args.command, CliCommand::Subscribe { .. });
+
     let command = build_command(args.command)?;
 
     let mut stream = UnixStream::connect(args.socket_path).await?;
     let command_bytes = serde_json::to_vec(&command)?;
     stream.write_all(&command_bytes).await?;
-    stream.shutdown().await?;
 
-    let mut response_bytes = Vec::new();
-    stream.read_to_end(&mut response_bytes).await?;
+    if is_subscribe {
+        // For subscriptions, don't shutdown write side - keep reading events
+        let reader = BufReader::new(stream);
+        let mut lines = reader.lines();
 
-    let response: Response = serde_json::from_slice(&response_bytes)?;
-    println!("{}", serde_json::to_string_pretty(&response)?);
+        while let Ok(Some(line)) = lines.next_line().await {
+            if line.is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<Response>(&line) {
+                Ok(response) => {
+                    println!("{}", serde_json::to_string_pretty(&response)?);
+                }
+                Err(e) => {
+                    eprintln!("Error parsing response: {}", e);
+                }
+            }
+        }
+    } else {
+        // Normal command - shutdown write side and read single response
+        stream.shutdown().await?;
+
+        let mut response_bytes = Vec::new();
+        stream.read_to_end(&mut response_bytes).await?;
+
+        let response: Response = serde_json::from_slice(&response_bytes)?;
+        println!("{}", serde_json::to_string_pretty(&response)?);
+    }
 
     Ok(())
 }

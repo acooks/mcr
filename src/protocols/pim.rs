@@ -317,6 +317,11 @@ impl PimInterfaceState {
         self.designated_router != old_dr
     }
 
+    /// Check if a neighbor exists on this interface
+    pub fn has_neighbor(&self, addr: Ipv4Addr) -> bool {
+        self.neighbors.contains_key(&addr)
+    }
+
     /// Process received Hello from a neighbor
     pub fn received_hello(
         &mut self,
