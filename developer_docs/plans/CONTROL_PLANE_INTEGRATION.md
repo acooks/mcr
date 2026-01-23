@@ -378,15 +378,17 @@ pub struct ControlPlaneConfig {
 
 **Namespace Documentation:**
 
-- [ ] Document that MCR works correctly in network namespaces
-- [ ] Document control socket path configuration for namespaced deployments
-- [ ] Add example systemd unit with namespace support
-- [ ] Document multiple-instance deployment patterns
+- [x] Document that MCR works correctly in network namespaces
+- [x] Document control socket path configuration for namespaced deployments
+- [x] Add example systemd unit with namespace support
+- [x] Document multiple-instance deployment patterns
+
+See: [NAMESPACE_DEPLOYMENT.md](../NAMESPACE_DEPLOYMENT.md) and [examples/mcrd-namespace.service](../../examples/mcrd-namespace.service)
 
 **CLI Additions:**
 
-- [ ] `mcrctl config show control-plane` - Show integration config
-- [ ] `mcrctl config set rpf-provider <disabled|static|external:PATH>`
+- [x] `mcrctl config control-plane` - Show integration config
+- [x] `mcrctl pim set-rpf --provider <disabled|static|/path/to/socket>` (already implemented in Phase 2)
 
 ## Implementation Order
 
@@ -436,10 +438,18 @@ pub struct ControlPlaneConfig {
 - **Phase 1:** Complete
 - **Phase 2:** Complete (external socket protocol deferred)
 - **Phase 3:** Complete
-- **Phase 4:** Not Started
+- **Phase 4:** Complete
 
-## Next Steps
+## Completed Deliverables
 
-1. Begin Phase 4 implementation with configuration documentation
-2. Add namespace-aware operation documentation
-3. Add example systemd unit with namespace support
+1. `ControlPlaneConfig` struct in `src/config.rs` with validation
+2. Config wired to supervisor initialization (RPF provider, event buffer size)
+3. CLI command `mcrctl config control-plane` to show control plane configuration
+4. Namespace deployment documentation: `developer_docs/NAMESPACE_DEPLOYMENT.md`
+5. Example systemd template unit: `examples/mcrd-namespace.service`
+
+## Future Work
+
+1. Implement external RPF socket protocol (currently only static RPF entries supported)
+2. Add RPF cache with configurable TTL for external lookups
+3. Integration testing for namespace deployments

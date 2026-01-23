@@ -92,6 +92,8 @@ pub enum CliCommand {
 pub enum ConfigAction {
     /// Show running configuration (JSON5 format)
     Show,
+    /// Show control plane integration configuration
+    ControlPlane,
     /// Load configuration from a file
     Load {
         /// Path to configuration file
@@ -392,6 +394,7 @@ pub fn build_command(cli_command: CliCommand) -> Result<multicast_relay::Supervi
         CliCommand::Version => multicast_relay::SupervisorCommand::GetVersion,
         CliCommand::Config { action } => match action {
             ConfigAction::Show => multicast_relay::SupervisorCommand::GetConfig,
+            ConfigAction::ControlPlane => multicast_relay::SupervisorCommand::GetControlPlaneConfig,
             ConfigAction::Load { file, replace } => {
                 // Load and parse the config file
                 let config = Config::load_from_file(&file).map_err(|e| anyhow::anyhow!("{}", e))?;

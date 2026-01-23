@@ -92,6 +92,9 @@ pub struct ProtocolState {
 
     /// Event subscription manager for push notifications
     pub event_manager: Option<EventSubscriptionManager>,
+
+    /// Event buffer size for subscription manager
+    event_buffer_size: usize,
 }
 
 /// Manages event subscriptions for external control plane integration.
@@ -155,12 +158,19 @@ impl ProtocolState {
             msdp_enabled: false,
             logger,
             event_manager: None,
+            event_buffer_size: 256, // Default
         }
     }
 
     /// Enable event subscription manager for external control plane integration
     pub fn enable_event_subscriptions(&mut self, buffer_size: usize) {
+        self.event_buffer_size = buffer_size;
         self.event_manager = Some(EventSubscriptionManager::new(buffer_size));
+    }
+
+    /// Get the configured event buffer size
+    pub fn event_buffer_size(&self) -> usize {
+        self.event_buffer_size
     }
 
     /// Emit an event to all subscribers (if event manager is enabled)
@@ -1255,6 +1265,30 @@ impl ProtocolState {
                 self.enable_msdp(msdp_config);
             }
         }
+
+        // Apply control plane configuration
+        if let Some(cp_config) = &config.control_plane {
+            self.apply_control_plane_config(cp_config);
+        }
+    }
+
+    /// Apply control plane integration configuration
+    fn apply_control_plane_config(&mut self, config: &crate::config::ControlPlaneConfig) {
+        // Set RPF provider
+        let rpf_provider = if config.rpf_provider == "disabled" {
+            crate::RpfProvider::Disabled
+        } else if config.rpf_provider == "static" {
+            crate::RpfProvider::Static
+        } else {
+            // Treat as external socket path
+            crate::RpfProvider::External {
+                socket_path: config.rpf_provider.clone(),
+            }
+        };
+        self.pim_state.set_rpf_provider(rpf_provider);
+
+        // Event buffer size is set separately during initialization
+        // (before this method is called)
     }
 
     /// Initialize MSDP with the given configuration
@@ -2040,7 +2074,13 @@ pub fn initialize_protocol_subsystem(
     state.timer_tx = Some(timer_tx.clone());
 
     // Enable event subscriptions for external control plane integration
-    state.enable_event_subscriptions(256);
+    // Use buffer size from config if specified, otherwise use default
+    let event_buffer_size = config
+        .control_plane
+        .as_ref()
+        .map(|cp| cp.event_buffer_size)
+        .unwrap_or(256);
+    state.enable_event_subscriptions(event_buffer_size);
 
     // Initialize from config
     state.initialize_from_config(config);
@@ -2690,6 +2730,18 @@ pub fn handle_supervisor_command(
             let rules_vec: Vec<crate::ForwardingRule> = rules.values().cloned().collect();
             let config = crate::Config::from_forwarding_rules(&rules_vec);
             (Response::Config(config), CommandAction::None)
+        }
+
+        SupervisorCommand::GetControlPlaneConfig => {
+            // Handled in protocol_response section (requires ProtocolCoordinator access)
+            (
+                Response::ControlPlaneConfig {
+                    rpf_provider: "disabled".to_string(),
+                    external_neighbors_enabled: true,
+                    event_buffer_size: 256,
+                },
+                CommandAction::None,
+            )
         }
 
         SupervisorCommand::LoadConfig { config, replace } => {
@@ -3928,6 +3980,18 @@ async fn handle_client(
                         })
                         .collect();
                     Some(Response::RpfRoutes(routes))
+                }
+                SupervisorCommand::GetControlPlaneConfig => {
+                    let rpf_provider_str = match coordinator.state.pim_state.get_rpf_provider() {
+                        crate::RpfProvider::Disabled => "disabled".to_string(),
+                        crate::RpfProvider::Static => "static".to_string(),
+                        crate::RpfProvider::External { socket_path } => socket_path.clone(),
+                    };
+                    Some(Response::ControlPlaneConfig {
+                        rpf_provider: rpf_provider_str,
+                        external_neighbors_enabled: true, // External neighbors are always accepted via API
+                        event_buffer_size: coordinator.state.event_buffer_size(),
+                    })
                 }
                 _ => None,
             }

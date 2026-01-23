@@ -214,6 +214,8 @@ pub enum SupervisorCommand {
     CheckConfig {
         config: Config,
     },
+    /// Get control plane integration configuration
+    GetControlPlaneConfig,
     // --- PIM Commands ---
     /// Get PIM neighbor table
     GetPimNeighbors,
@@ -337,6 +339,12 @@ pub enum Response {
     ConfigValidation {
         valid: bool,
         errors: Vec<String>,
+    },
+    /// Control plane integration configuration response
+    ControlPlaneConfig {
+        rpf_provider: String,
+        external_neighbors_enabled: bool,
+        event_buffer_size: usize,
     },
     /// PIM neighbor table response
     PimNeighbors(Vec<PimNeighborInfo>),

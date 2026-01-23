@@ -1,0 +1,57 @@
+[Unit]
+Description=Multicast Relay Daemon (%i namespace)
+Documentation=https://github.com/acooks/mcr
+After=network-online.target
+Wants=network-online.target
+
+# Ensure the network namespace exists before starting
+# Use: systemd-networkd or a separate unit to create namespaces
+ConditionPathExists=/run/netns/%i
+
+[Service]
+Type=simple
+User=mcr
+Group=mcr
+
+# Execute within the specified network namespace
+# %i is replaced with the instance name (e.g., mcrd@red.service -> red)
+NetworkNamespacePath=/run/netns/%i
+
+# Grant only the required capabilities
+AmbientCapabilities=CAP_NET_RAW CAP_SETUID CAP_SETGID
+CapabilityBoundingSet=CAP_NET_RAW CAP_SETUID CAP_SETGID
+
+# Hardening options
+NoNewPrivileges=no
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+MemoryDenyWriteExecute=yes
+LockPersonality=yes
+
+# Runtime directories
+RuntimeDirectory=mcr
+StateDirectory=mcr
+ConfigurationDirectory=mcr
+
+# Start the daemon with namespace-specific config and socket
+# Configuration: /etc/mcr/<namespace>.json5
+# Socket: /run/mcr/mcrd-<namespace>.sock
+ExecStart=/usr/bin/mcrd supervisor \
+    --config /etc/mcr/%i.json5 \
+    --control-socket-path /run/mcr/mcrd-%i.sock
+
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Restart policy
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

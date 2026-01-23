@@ -36,6 +36,10 @@ pub struct Config {
     /// MSDP configuration (optional)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub msdp: Option<MsdpConfig>,
+
+    /// Control plane integration configuration (optional)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_plane: Option<ControlPlaneConfig>,
 }
 
 /// PIM-SM configuration
@@ -168,6 +172,47 @@ fn default_msdp_keepalive_interval() -> u32 {
 
 fn default_msdp_hold_time() -> u32 {
     75
+}
+
+/// Control plane integration configuration
+///
+/// Settings for external control plane integration including RPF providers,
+/// external neighbor injection, and event subscriptions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ControlPlaneConfig {
+    /// RPF provider configuration: "disabled", "static", or socket path for external
+    #[serde(default = "default_rpf_provider")]
+    pub rpf_provider: String,
+
+    /// Allow external neighbor injection via control socket
+    #[serde(default = "default_external_neighbors_enabled")]
+    pub external_neighbors_enabled: bool,
+
+    /// Event subscription buffer size (number of events to buffer)
+    #[serde(default = "default_event_buffer_size")]
+    pub event_buffer_size: usize,
+}
+
+impl Default for ControlPlaneConfig {
+    fn default() -> Self {
+        Self {
+            rpf_provider: "disabled".to_string(),
+            external_neighbors_enabled: true,
+            event_buffer_size: default_event_buffer_size(),
+        }
+    }
+}
+
+fn default_rpf_provider() -> String {
+    "disabled".to_string()
+}
+
+fn default_external_neighbors_enabled() -> bool {
+    true
+}
+
+fn default_event_buffer_size() -> usize {
+    256
 }
 
 /// Rule as stored in config file
@@ -312,6 +357,11 @@ impl Config {
             validate_msdp_config(msdp)?;
         }
 
+        // Validate control plane configuration
+        if let Some(control_plane) = &self.control_plane {
+            validate_control_plane_config(control_plane)?;
+        }
+
         Ok(())
     }
 
@@ -347,6 +397,7 @@ impl Config {
             pim: None,
             igmp: None,
             msdp: None,
+            control_plane: None,
         }
     }
 }
@@ -610,6 +661,35 @@ fn validate_msdp_config(msdp: &MsdpConfig) -> Result<(), ConfigError> {
     Ok(())
 }
 
+/// Validate control plane integration configuration
+fn validate_control_plane_config(config: &ControlPlaneConfig) -> Result<(), ConfigError> {
+    // Validate RPF provider value
+    let rpf = config.rpf_provider.as_str();
+    if rpf != "disabled" && rpf != "static" && !rpf.starts_with('/') {
+        return Err(ConfigError::InvalidControlPlane {
+            reason: format!(
+                "rpf_provider must be 'disabled', 'static', or an absolute socket path (got '{}')",
+                rpf
+            ),
+        });
+    }
+
+    // Validate event buffer size
+    if config.event_buffer_size == 0 {
+        return Err(ConfigError::InvalidControlPlane {
+            reason: "event_buffer_size must be greater than 0".to_string(),
+        });
+    }
+
+    if config.event_buffer_size > 65536 {
+        return Err(ConfigError::InvalidControlPlane {
+            reason: "event_buffer_size must be <= 65536".to_string(),
+        });
+    }
+
+    Ok(())
+}
+
 /// Validate a multicast group prefix (e.g., "239.0.0.0/8" or "239.1.1.1")
 fn validate_group_prefix(prefix: &str) -> Result<(), ConfigError> {
     // Check if it's a CIDR prefix or single address
@@ -699,6 +779,9 @@ pub enum ConfigError {
     InvalidMsdpConfig {
         reason: String,
     },
+    InvalidControlPlane {
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for ConfigError {
@@ -743,6 +826,9 @@ impl std::fmt::Display for ConfigError {
             }
             ConfigError::InvalidMsdpConfig { reason } => {
                 write!(f, "invalid MSDP configuration: {}", reason)
+            }
+            ConfigError::InvalidControlPlane { reason } => {
+                write!(f, "invalid control plane configuration: {}", reason)
             }
         }
     }
@@ -847,6 +933,7 @@ mod tests {
             pim: None,
             igmp: None,
             msdp: None,
+            control_plane: None,
         };
 
         let result = config.validate();
@@ -869,6 +956,7 @@ mod tests {
             pim: None,
             igmp: None,
             msdp: None,
+            control_plane: None,
         };
 
         let result = config.validate();
@@ -894,6 +982,7 @@ mod tests {
             pim: None,
             igmp: None,
             msdp: None,
+            control_plane: None,
         };
 
         let result = config.validate();
@@ -921,6 +1010,7 @@ mod tests {
             pim: None,
             igmp: None,
             msdp: None,
+            control_plane: None,
         };
 
         let result = config.validate();
@@ -948,6 +1038,7 @@ mod tests {
             pim: None,
             igmp: None,
             msdp: None,
+            control_plane: None,
         };
 
         let result = config.validate();
@@ -979,6 +1070,7 @@ mod tests {
             pim: None,
             igmp: None,
             msdp: None,
+            control_plane: None,
         };
 
         let result = config.validate();
@@ -1004,6 +1096,7 @@ mod tests {
             pim: None,
             igmp: None,
             msdp: None,
+            control_plane: None,
         };
 
         let result = config.validate();
@@ -1030,6 +1123,7 @@ mod tests {
             pim: None,
             igmp: None,
             msdp: None,
+            control_plane: None,
         };
 
         let result = config.validate();
@@ -1064,6 +1158,7 @@ mod tests {
             pim: None,
             igmp: None,
             msdp: None,
+            control_plane: None,
         };
 
         let result = config.validate();
@@ -1091,6 +1186,7 @@ mod tests {
             pim: None,
             igmp: None,
             msdp: None,
+            control_plane: None,
         };
 
         let result = config.validate();
@@ -1105,6 +1201,7 @@ mod tests {
             pim: None,
             igmp: None,
             msdp: None,
+            control_plane: None,
         };
 
         let result = config.validate();
@@ -1124,6 +1221,7 @@ mod tests {
             pim: None,
             igmp: None,
             msdp: None,
+            control_plane: None,
         };
 
         let result = config.validate();
@@ -1218,6 +1316,7 @@ mod tests {
             pim: None,
             igmp: None,
             msdp: None,
+            control_plane: None,
         };
 
         let interfaces = config.get_interfaces();
@@ -1244,6 +1343,7 @@ mod tests {
             pim: None,
             igmp: None,
             msdp: None,
+            control_plane: None,
         };
 
         // Serialize to JSON5 and parse back
@@ -1273,6 +1373,7 @@ mod tests {
             }),
             igmp: None,
             msdp: None,
+            control_plane: None,
         };
 
         assert!(config.validate().is_ok());
@@ -1292,6 +1393,7 @@ mod tests {
             }),
             igmp: None,
             msdp: None,
+            control_plane: None,
         };
 
         let result = config.validate();
@@ -1312,6 +1414,7 @@ mod tests {
             }),
             igmp: None,
             msdp: None,
+            control_plane: None,
         };
 
         let result = config.validate();
@@ -1341,6 +1444,7 @@ mod tests {
             }),
             igmp: None,
             msdp: None,
+            control_plane: None,
         };
 
         let result = config.validate();
@@ -1364,6 +1468,7 @@ mod tests {
             }),
             igmp: None,
             msdp: None,
+            control_plane: None,
         };
 
         let result = config.validate();
@@ -1390,6 +1495,7 @@ mod tests {
             }),
             igmp: None,
             msdp: None,
+            control_plane: None,
         };
 
         let result = config.validate();
@@ -1416,6 +1522,7 @@ mod tests {
             }),
             igmp: None,
             msdp: None,
+            control_plane: None,
         };
 
         let result = config.validate();
@@ -1436,6 +1543,7 @@ mod tests {
                 query_response_interval: 10,
             }),
             msdp: None,
+            control_plane: None,
         };
 
         assert!(config.validate().is_ok());
@@ -1454,6 +1562,7 @@ mod tests {
                 query_response_interval: 10,
             }),
             msdp: None,
+            control_plane: None,
         };
 
         let result = config.validate();
@@ -1476,6 +1585,7 @@ mod tests {
                 query_response_interval: 10,
             }),
             msdp: None,
+            control_plane: None,
         };
 
         let result = config.validate();
@@ -1495,6 +1605,7 @@ mod tests {
                 query_response_interval: 0,
             }),
             msdp: None,
+            control_plane: None,
         };
 
         let result = config.validate();
@@ -1514,6 +1625,7 @@ mod tests {
                 query_response_interval: 10,
             }),
             msdp: None,
+            control_plane: None,
         };
 
         let result = config.validate();
@@ -1533,6 +1645,7 @@ mod tests {
                 query_response_interval: 125, // Must be < query_interval
             }),
             msdp: None,
+            control_plane: None,
         };
 
         let result = config.validate();
@@ -1629,6 +1742,7 @@ mod tests {
                 keepalive_interval: 60,
                 hold_time: 75,
             }),
+            control_plane: None,
         };
 
         assert!(config.validate().is_ok());
@@ -1648,6 +1762,7 @@ mod tests {
                 keepalive_interval: 60,
                 hold_time: 75,
             }),
+            control_plane: None,
         };
 
         let result = config.validate();
@@ -1673,6 +1788,7 @@ mod tests {
                 keepalive_interval: 60,
                 hold_time: 75,
             }),
+            control_plane: None,
         };
 
         let result = config.validate();
@@ -1693,6 +1809,7 @@ mod tests {
                 keepalive_interval: 0, // Invalid
                 hold_time: 75,
             }),
+            control_plane: None,
         };
 
         let result = config.validate();
@@ -1713,6 +1830,7 @@ mod tests {
                 keepalive_interval: 60,
                 hold_time: 50, // Must be > keepalive_interval
             }),
+            control_plane: None,
         };
 
         let result = config.validate();
@@ -1746,6 +1864,7 @@ mod tests {
                 keepalive_interval: 60,
                 hold_time: 75,
             }),
+            control_plane: None,
         };
 
         let result = config.validate();
@@ -1771,6 +1890,7 @@ mod tests {
                 keepalive_interval: 60,
                 hold_time: 75,
             }),
+            control_plane: None,
         };
 
         let result = config.validate();
@@ -1807,5 +1927,159 @@ mod tests {
         );
         assert_eq!(msdp.peers[0].description, Some("Remote RP".to_string()));
         assert_eq!(msdp.peers[1].mesh_group, Some("anycast-rp".to_string()));
+    }
+
+    #[test]
+    fn test_control_plane_config_valid_disabled() {
+        let config = Config {
+            pinning: HashMap::new(),
+            rules: vec![],
+            pim: None,
+            igmp: None,
+            msdp: None,
+            control_plane: Some(ControlPlaneConfig {
+                rpf_provider: "disabled".to_string(),
+                external_neighbors_enabled: true,
+                event_buffer_size: 256,
+            }),
+        };
+
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_control_plane_config_valid_static() {
+        let config = Config {
+            pinning: HashMap::new(),
+            rules: vec![],
+            pim: None,
+            igmp: None,
+            msdp: None,
+            control_plane: Some(ControlPlaneConfig {
+                rpf_provider: "static".to_string(),
+                external_neighbors_enabled: false,
+                event_buffer_size: 1024,
+            }),
+        };
+
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_control_plane_config_valid_external() {
+        let config = Config {
+            pinning: HashMap::new(),
+            rules: vec![],
+            pim: None,
+            igmp: None,
+            msdp: None,
+            control_plane: Some(ControlPlaneConfig {
+                rpf_provider: "/var/run/babel-rpf.sock".to_string(),
+                external_neighbors_enabled: true,
+                event_buffer_size: 512,
+            }),
+        };
+
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_control_plane_config_invalid_rpf_provider() {
+        let config = Config {
+            pinning: HashMap::new(),
+            rules: vec![],
+            pim: None,
+            igmp: None,
+            msdp: None,
+            control_plane: Some(ControlPlaneConfig {
+                rpf_provider: "invalid".to_string(), // Not disabled, static, or absolute path
+                external_neighbors_enabled: true,
+                event_buffer_size: 256,
+            }),
+        };
+
+        let result = config.validate();
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidControlPlane { .. })
+        ));
+    }
+
+    #[test]
+    fn test_control_plane_config_invalid_buffer_size_zero() {
+        let config = Config {
+            pinning: HashMap::new(),
+            rules: vec![],
+            pim: None,
+            igmp: None,
+            msdp: None,
+            control_plane: Some(ControlPlaneConfig {
+                rpf_provider: "disabled".to_string(),
+                external_neighbors_enabled: true,
+                event_buffer_size: 0, // Invalid
+            }),
+        };
+
+        let result = config.validate();
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidControlPlane { .. })
+        ));
+    }
+
+    #[test]
+    fn test_control_plane_config_invalid_buffer_size_too_large() {
+        let config = Config {
+            pinning: HashMap::new(),
+            rules: vec![],
+            pim: None,
+            igmp: None,
+            msdp: None,
+            control_plane: Some(ControlPlaneConfig {
+                rpf_provider: "disabled".to_string(),
+                external_neighbors_enabled: true,
+                event_buffer_size: 100000, // Too large
+            }),
+        };
+
+        let result = config.validate();
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidControlPlane { .. })
+        ));
+    }
+
+    #[test]
+    fn test_parse_control_plane_config() {
+        let json5 = r#"{
+            control_plane: {
+                rpf_provider: "static",
+                external_neighbors_enabled: false,
+                event_buffer_size: 512,
+            },
+        }"#;
+
+        let config = Config::parse(json5).unwrap();
+        assert!(config.control_plane.is_some());
+
+        let cp = config.control_plane.unwrap();
+        assert_eq!(cp.rpf_provider, "static");
+        assert!(!cp.external_neighbors_enabled);
+        assert_eq!(cp.event_buffer_size, 512);
+    }
+
+    #[test]
+    fn test_control_plane_config_defaults() {
+        let json5 = r#"{
+            control_plane: {},
+        }"#;
+
+        let config = Config::parse(json5).unwrap();
+        assert!(config.control_plane.is_some());
+
+        let cp = config.control_plane.unwrap();
+        assert_eq!(cp.rpf_provider, "disabled");
+        assert!(cp.external_neighbors_enabled);
+        assert_eq!(cp.event_buffer_size, 256);
     }
 }
