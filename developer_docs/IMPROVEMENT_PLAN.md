@@ -109,9 +109,45 @@ src/supervisor/
 
 ## Remaining Work
 
+### CRITICAL Priority
+
+#### 1. Protocol Packet Transmission Infrastructure
+
+**Source:** PROTOCOL_IMPLEMENTATION_GAP_ANALYSIS (January 2026)
+**Impact:** PIM and IGMP control plane completely non-functional
+
+The protocol architecture only supports receiving packets. There is no mechanism for handlers to request packet transmission.
+
+Missing:
+
+- `OutgoingPacket` type in `actions.rs`
+- `outgoing_packets` field in `ProtocolHandlerResult`
+- Packet send loop in supervisor
+- IP header construction for raw sockets
+
+**Report:** [reports/PROTOCOL_IMPLEMENTATION_GAP_ANALYSIS.md](reports/PROTOCOL_IMPLEMENTATION_GAP_ANALYSIS.md)
+
+#### 2. PIM Hello Send/Receive
+
+**Source:** PROTOCOL_IMPLEMENTATION_GAP_ANALYSIS
+**Impact:** No PIM neighbor discovery, DR election broken
+
+- `hello_timer_expired()` schedules timers but doesn't build/send Hello packets
+- `PimHelloBuilder` exists but is only used in tests
+- Neighbor discovery completely non-functional
+
+#### 3. PIM Route to MRIB Integration
+
+**Source:** PROTOCOL_IMPLEMENTATION_GAP_ANALYSIS
+**Impact:** PIM routes never become forwarding rules
+
+- `process_join_prune()` results discarded (no MRIB actions generated)
+- (*,G) and (S,G) routes exist in PIM state but not in MRIB
+- `upstream_interface` never set in route state
+
 ### HIGH Priority
 
-#### 1. Network State Reconciliation
+#### 4. Network State Reconciliation
 
 **Source:** Original IMPROVEMENT_PLAN
 **Impact:** Resilience to network changes
@@ -122,7 +158,7 @@ src/supervisor/
 
 ### MEDIUM Priority
 
-#### 2. Audit unwrap()/expect() Usage
+#### 5. Audit unwrap()/expect() Usage
 
 **Source:** REFACTORING_PLAN
 **Impact:** Production stability
@@ -137,34 +173,50 @@ src/supervisor/
 
 Focus on packet parsing paths where malformed data could cause panics.
 
-#### 3. Add MSDP Integration Tests
+#### 6. Add Protocol Integration Tests
 
-**Source:** MSDP_IMPLEMENTATION Phase 5
+**Source:** MSDP_IMPLEMENTATION Phase 5, PROTOCOL_IMPLEMENTATION_GAP_ANALYSIS
 **Impact:** Test coverage
 
-Missing tests:
+No integration tests exist for control plane protocols. Missing:
+
+**MSDP:**
 
 - Peer connection establishment (active/passive)
 - Keepalive exchange
 - SA message exchange
 - Mesh group flood suppression
-- Peer timeout and reconnection
 
-#### 4. Implement Lazy Socket Creation
+**PIM:**
+
+- Hello exchange between routers
+- Neighbor discovery and DR election
+- Join/Prune message processing
+
+**IGMP:**
+
+- Querier election
+- Membership report handling
+
+**End-to-End:**
+
+- IGMP join → PIM Join → RP → MSDP SA flow
+
+#### 7. Implement Lazy Socket Creation
 
 **Source:** REFACTORING_PLAN, supervisor.rs TODO
 **Impact:** Scalability on multi-interface systems
 
 Workers currently create all AF_PACKET sockets upfront. Implement lazy creation triggered by rule additions.
 
-#### 5. Consolidate Config Validation
+#### 8. Consolidate Config Validation
 
 **Source:** REFACTORING_PLAN
 **Impact:** Code quality
 
 Create `src/validation.rs` with reusable validators instead of 7 separate validation functions.
 
-#### 6. Reorganize Worker Module
+#### 9. Reorganize Worker Module
 
 **Source:** REFACTORING_PLAN
 **Impact:** Code organization
@@ -173,14 +225,14 @@ Split `unified_loop.rs` (1,273 lines) and `packet_parser.rs` (1,404 lines) into 
 
 ### LOW Priority
 
-#### 7. Add require_mcrd_caps! Macro
+#### 10. Add require_mcrd_caps! Macro
 
 **Source:** CAPABILITIES_AND_PACKAGING Phase 4.2
 **Impact:** Test convenience
 
 Create test macro that checks for root OR required capabilities (not just root).
 
-#### 8. Add Capability Section to OPERATIONAL_GUIDE.md
+#### 11. Add Capability Section to OPERATIONAL_GUIDE.md
 
 **Source:** CAPABILITIES_AND_PACKAGING Phase 1.2
 **Impact:** Documentation completeness
@@ -260,26 +312,34 @@ All development plans have been consolidated into this document. Original plans 
 
 ## Roadmap
 
-### Phase 1: Critical Fixes ✓ COMPLETE
+### Phase 1: Infrastructure ✓ COMPLETE
 
 1. ✓ Add CLI --name options
 2. ✓ Split supervisor.rs into submodules
 3. ✓ Decouple protocols from MRIB
+4. ✓ Fix MSDP connection timer scheduling
 
-### Phase 2: Code Quality
+### Phase 2: Protocol I/O (CRITICAL)
+
+1. Add outgoing packet infrastructure to supervisor
+2. Wire up PIM Hello packet transmission
+3. Wire up IGMP Query packet transmission
+4. Fix PIM route → MRIB integration
+5. Add protocol integration tests
+
+### Phase 3: Code Quality
 
 1. Audit critical unwrap() calls
-2. Add MSDP integration tests
-3. Reorganize worker module (unified_loop.rs, packet_parser.rs)
+2. Network state reconciliation
+3. Reorganize worker module
 
-### Phase 3: Features & Polish
+### Phase 4: Features & Polish
 
-1. Network state reconciliation
-2. Lazy socket creation
-3. Consolidate config validation
-4. Documentation updates
+1. Lazy socket creation
+2. Consolidate config validation
+3. Documentation updates
 
-### Phase 4: Nice-to-Have (ongoing)
+### Phase 5: Nice-to-Have (ongoing)
 
 1. Jumbo frame support
 2. Packet tracing
