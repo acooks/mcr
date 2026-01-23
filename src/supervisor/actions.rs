@@ -11,6 +11,40 @@ use crate::mroute::{IgmpMembership, SGRoute, StarGRoute};
 use crate::protocols::TimerRequest;
 use crate::ProtocolEventNotification;
 
+/// Protocol types for outgoing packets
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProtocolType {
+    /// IGMP (IP protocol 2)
+    Igmp,
+    /// PIM (IP protocol 103)
+    Pim,
+}
+
+impl ProtocolType {
+    /// Get the IP protocol number
+    pub fn protocol_number(&self) -> u8 {
+        match self {
+            ProtocolType::Igmp => 2,
+            ProtocolType::Pim => 103,
+        }
+    }
+}
+
+/// An outgoing protocol packet to be transmitted
+#[derive(Debug, Clone)]
+pub struct OutgoingPacket {
+    /// The protocol type (determines IP protocol number)
+    pub protocol: ProtocolType,
+    /// Interface to send the packet on
+    pub interface: String,
+    /// Destination IP address (usually multicast)
+    pub destination: Ipv4Addr,
+    /// Source IP address (use interface's primary IP if None)
+    pub source: Option<Ipv4Addr>,
+    /// Raw packet data (IGMP/PIM payload, not including IP header)
+    pub data: Vec<u8>,
+}
+
 /// Actions that protocol handlers can request on the MRIB
 #[derive(Debug, Clone)]
 pub enum MribAction {
@@ -38,6 +72,7 @@ pub enum MribAction {
 /// - Timer requests for scheduling/canceling timers
 /// - MRIB actions for routing table modifications
 /// - Notifications for external subscribers
+/// - Outgoing packets to transmit
 #[derive(Debug, Default)]
 pub struct ProtocolHandlerResult {
     /// Timer requests to schedule or cancel
@@ -46,6 +81,8 @@ pub struct ProtocolHandlerResult {
     pub mrib_actions: Vec<MribAction>,
     /// Notifications to emit to subscribers
     pub notifications: Vec<ProtocolEventNotification>,
+    /// Outgoing packets to transmit
+    pub packets: Vec<OutgoingPacket>,
 }
 
 impl ProtocolHandlerResult {
@@ -82,16 +119,25 @@ impl ProtocolHandlerResult {
         self.notifications.push(notification);
     }
 
+    /// Add an outgoing packet
+    pub fn send_packet(&mut self, packet: OutgoingPacket) {
+        self.packets.push(packet);
+    }
+
     /// Merge another result into this one
     pub fn merge(&mut self, other: ProtocolHandlerResult) {
         self.timers.extend(other.timers);
         self.mrib_actions.extend(other.mrib_actions);
         self.notifications.extend(other.notifications);
+        self.packets.extend(other.packets);
     }
 
-    /// Check if the result is empty (no actions, timers, or notifications)
+    /// Check if the result is empty (no actions, timers, notifications, or packets)
     pub fn is_empty(&self) -> bool {
-        self.timers.is_empty() && self.mrib_actions.is_empty() && self.notifications.is_empty()
+        self.timers.is_empty()
+            && self.mrib_actions.is_empty()
+            && self.notifications.is_empty()
+            && self.packets.is_empty()
     }
 }
 

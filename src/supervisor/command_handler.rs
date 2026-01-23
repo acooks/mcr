@@ -128,9 +128,11 @@ fn validate_port(port: u16, context: &str) -> Result<(), String> {
 /// * `facility_min_levels` - Per-facility log level overrides
 /// * `worker_stats` - Latest stats from all data plane workers (keyed by PID)
 /// * `startup_config_path` - Path to startup config file (if mcrd started with --config)
+/// * `startup_config` - The startup config (for GetConfig to return protocol configs)
 ///
 /// # Returns
 /// A tuple of (Response to send to client, Action to take)
+#[allow(clippy::too_many_arguments)]
 pub fn handle_supervisor_command(
     command: crate::SupervisorCommand,
     master_rules: &Mutex<HashMap<String, ForwardingRule>>,
@@ -141,6 +143,7 @@ pub fn handle_supervisor_command(
     >,
     worker_stats: &Mutex<HashMap<u32, Vec<crate::FlowStats>>>,
     startup_config_path: Option<&PathBuf>,
+    startup_config: Option<&crate::Config>,
 ) -> (crate::Response, CommandAction) {
     use crate::{Response, SupervisorCommand};
     use std::sync::atomic::Ordering;
@@ -395,9 +398,22 @@ pub fn handle_supervisor_command(
 
         SupervisorCommand::GetConfig => {
             // Return current running configuration
+            // Merge startup config (for protocol settings) with current forwarding rules
             let rules = master_rules.lock().unwrap();
             let rules_vec: Vec<crate::ForwardingRule> = rules.values().cloned().collect();
-            let config = crate::Config::from_forwarding_rules(&rules_vec);
+
+            let config = if let Some(base_config) = startup_config {
+                // Clone the startup config and update with current rules
+                let mut config = base_config.clone();
+                config.rules = rules_vec
+                    .iter()
+                    .map(crate::ConfigRule::from_forwarding_rule)
+                    .collect();
+                config
+            } else {
+                // No startup config, just return rules-only config
+                crate::Config::from_forwarding_rules(&rules_vec)
+            };
             (Response::Config(config), CommandAction::None)
         }
 
@@ -800,6 +816,7 @@ mod tests {
             &facility_min_levels,
             &worker_stats,
             None,
+            None,
         );
 
         assert!(matches!(response, crate::Response::Workers(workers) if workers.len() == 1));
@@ -830,6 +847,7 @@ mod tests {
             &global_min_level,
             &facility_min_levels,
             &worker_stats,
+            None,
             None,
         );
 
@@ -874,6 +892,7 @@ mod tests {
             &facility_min_levels,
             &worker_stats,
             None,
+            None,
         );
 
         assert!(matches!(response, crate::Response::Success(_)));
@@ -904,6 +923,7 @@ mod tests {
             &facility_min_levels,
             &worker_stats,
             None,
+            None,
         );
 
         assert!(matches!(response, crate::Response::Error(_)));
@@ -927,6 +947,7 @@ mod tests {
             &global_min_level,
             &facility_min_levels,
             &worker_stats,
+            None,
             None,
         );
 
@@ -979,6 +1000,7 @@ mod tests {
             &facility_min_levels,
             &worker_stats,
             None,
+            None,
         );
 
         if let crate::Response::Stats(stats) = response {
@@ -1013,6 +1035,7 @@ mod tests {
             &facility_min_levels,
             &worker_stats,
             None,
+            None,
         );
 
         assert!(matches!(response, crate::Response::Success(_)));
@@ -1046,6 +1069,7 @@ mod tests {
             &global_min_level,
             &facility_min_levels,
             &worker_stats,
+            None,
             None,
         );
 
@@ -1086,6 +1110,7 @@ mod tests {
             &facility_min_levels,
             &worker_stats,
             None,
+            None,
         );
 
         if let crate::Response::LogLevels {
@@ -1122,6 +1147,7 @@ mod tests {
             &facility_min_levels,
             &worker_stats,
             None,
+            None,
         );
 
         if let crate::Response::Success(msg) = response {
@@ -1152,6 +1178,7 @@ mod tests {
             &global_min_level,
             &facility_min_levels,
             &worker_stats,
+            None,
             None,
         );
 
@@ -1196,6 +1223,7 @@ mod tests {
             &facility_min_levels,
             &worker_stats,
             None,
+            None,
         );
 
         assert!(matches!(response, crate::Response::Success(msg) if msg.contains("my-rule")));
@@ -1225,6 +1253,7 @@ mod tests {
             &global_min_level,
             &facility_min_levels,
             &worker_stats,
+            None,
             None,
         );
 
@@ -1259,6 +1288,7 @@ mod tests {
             &global_min_level,
             &facility_min_levels,
             &worker_stats,
+            None,
             None,
         );
 
@@ -1302,6 +1332,7 @@ mod tests {
             &global_min_level,
             &facility_min_levels,
             &worker_stats,
+            None,
             None,
         );
 
@@ -1422,6 +1453,7 @@ mod tests {
             &facility_min_levels,
             &worker_stats,
             None,
+            None,
         );
 
         match response {
@@ -1460,6 +1492,7 @@ mod tests {
             &global_min_level,
             &facility_min_levels,
             &worker_stats,
+            None,
             None,
         );
 
@@ -1520,6 +1553,7 @@ mod tests {
             &facility_min_levels,
             &worker_stats,
             None,
+            None,
         );
 
         match response {
@@ -1558,6 +1592,7 @@ mod tests {
             &global_min_level,
             &facility_min_levels,
             &worker_stats,
+            None,
             None,
         );
 

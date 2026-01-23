@@ -11,7 +11,7 @@ mod timer_manager;
 mod worker_manager;
 
 // Re-exports
-pub use actions::{MribAction, ProtocolHandlerResult};
+pub use actions::{MribAction, OutgoingPacket, ProtocolHandlerResult, ProtocolType};
 pub use command_handler::{handle_supervisor_command, CommandAction};
 pub use event_subscription::EventSubscriptionManager;
 pub use timer_manager::ProtocolTimerManager;
@@ -284,9 +284,10 @@ impl ProtocolState {
             ProtocolEvent::TimerExpired(timer_type) => self.handle_timer_expired(timer_type),
         };
 
-        // Apply MRIB actions and emit notifications
+        // Apply MRIB actions, emit notifications, and send packets
         self.apply_mrib_actions(result.mrib_actions);
         self.emit_notifications(result.notifications);
+        self.send_outgoing_packets(result.packets);
 
         result.timers
     }
@@ -941,13 +942,70 @@ impl ProtocolState {
         match timer_type {
             TimerType::IgmpGeneralQuery { interface } => {
                 if let Some(igmp_state) = self.igmp_state.get_mut(&interface) {
+                    // Schedule next query timer
                     result.add_timers(igmp_state.query_timer_expired(now));
+
+                    // Only send query if we're the elected querier
+                    if igmp_state.is_querier {
+                        use crate::protocols::igmp::IgmpQueryBuilder;
+                        use crate::protocols::PacketBuilder;
+                        const IGMP_ALL_HOSTS: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 1);
+
+                        // Max response time in tenths of seconds (default 10 seconds = 100)
+                        let max_resp_time =
+                            (igmp_state.config.query_response_interval.as_millis() / 100) as u8;
+                        let builder = IgmpQueryBuilder::general_query(max_resp_time);
+                        let packet_data = builder.build();
+
+                        result.send_packet(OutgoingPacket {
+                            protocol: ProtocolType::Igmp,
+                            interface: interface.clone(),
+                            destination: IGMP_ALL_HOSTS,
+                            source: Some(igmp_state.interface_ip),
+                            data: packet_data,
+                        });
+
+                        log_debug!(
+                            self.logger,
+                            Facility::Supervisor,
+                            &format!("IGMP: Sending General Query on {}", interface)
+                        );
+                    }
                 }
             }
             TimerType::IgmpGroupQuery { interface, group } => {
                 if let Some(igmp_state) = self.igmp_state.get_mut(&interface) {
                     let (timers, _expired) = igmp_state.group_query_expired(group, now);
                     result.add_timers(timers);
+
+                    // Only send query if we're the elected querier
+                    if igmp_state.is_querier {
+                        use crate::protocols::igmp::IgmpQueryBuilder;
+                        use crate::protocols::PacketBuilder;
+
+                        // Group-specific query uses last member query interval
+                        let max_resp_time =
+                            (igmp_state.config.last_member_query_interval.as_millis() / 100) as u8;
+                        let builder = IgmpQueryBuilder::group_specific_query(group, max_resp_time);
+                        let packet_data = builder.build();
+
+                        result.send_packet(OutgoingPacket {
+                            protocol: ProtocolType::Igmp,
+                            interface: interface.clone(),
+                            destination: group, // Group-specific query goes to the group address
+                            source: Some(igmp_state.interface_ip),
+                            data: packet_data,
+                        });
+
+                        log_debug!(
+                            self.logger,
+                            Facility::Supervisor,
+                            &format!(
+                                "IGMP: Sending Group-Specific Query for {} on {}",
+                                group, interface
+                            )
+                        );
+                    }
                 }
             }
             TimerType::IgmpGroupExpiry { interface, group } => {
@@ -967,7 +1025,36 @@ impl ProtocolState {
             }
             TimerType::PimHello { interface } => {
                 if let Some(iface_state) = self.pim_state.get_interface_mut(&interface) {
+                    // Schedule next Hello timer
                     result.add_timers(iface_state.hello_timer_expired(now));
+
+                    // Build and queue PIM Hello packet
+                    use crate::protocols::pim::PimHelloBuilder;
+                    use crate::protocols::PacketBuilder;
+                    const PIM_ALL_ROUTERS: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 13);
+
+                    // Holdtime is typically 3.5x the hello period
+                    let holdtime = (iface_state.config.hello_period.as_secs() as f64 * 3.5) as u16;
+                    let builder = PimHelloBuilder::new(
+                        holdtime,
+                        iface_state.config.dr_priority,
+                        iface_state.generation_id,
+                    );
+                    let packet_data = builder.build();
+
+                    result.send_packet(OutgoingPacket {
+                        protocol: ProtocolType::Pim,
+                        interface: interface.clone(),
+                        destination: PIM_ALL_ROUTERS,
+                        source: Some(iface_state.address),
+                        data: packet_data,
+                    });
+
+                    log_debug!(
+                        self.logger,
+                        Facility::Supervisor,
+                        &format!("PIM: Sending Hello on {}", interface)
+                    );
                 }
             }
             TimerType::PimNeighborExpiry {
@@ -1007,9 +1094,24 @@ impl ProtocolState {
                     &format!("MSDP: connect retry timer expired for {}", peer)
                 );
 
+                // Update peer state to Connecting
+                if let Some(msdp_peer) = self.msdp_state.get_peer_mut(peer) {
+                    // Only transition to Connecting if currently Disabled
+                    if msdp_peer.state == crate::protocols::msdp::MsdpPeerState::Disabled {
+                        msdp_peer.state = crate::protocols::msdp::MsdpPeerState::Connecting;
+                    }
+                }
+
                 // Send connect command to TCP runner
                 if let Some(ref tcp_tx) = self.msdp_tcp_tx {
                     let _ = tcp_tx.try_send(MsdpTcpCommand::Connect { peer });
+                } else {
+                    // TCP runner not available - log this only once at debug level
+                    log_debug!(
+                        self.logger,
+                        Facility::Supervisor,
+                        &format!("MSDP: TCP runner not available for peer {}", peer)
+                    );
                 }
 
                 // Reschedule connect retry timer
@@ -1485,6 +1587,132 @@ impl ProtocolState {
     pub fn pim_socket_fd(&self) -> Option<RawFd> {
         self.pim_socket.as_ref().map(|s| s.as_raw_fd())
     }
+
+    /// Send outgoing packets using the appropriate protocol sockets
+    ///
+    /// Returns the number of packets successfully sent
+    pub fn send_outgoing_packets(&self, packets: Vec<OutgoingPacket>) -> usize {
+        let mut sent = 0;
+
+        for packet in packets {
+            match self.send_packet(&packet) {
+                Ok(()) => {
+                    sent += 1;
+                    log_debug!(
+                        self.logger,
+                        Facility::Supervisor,
+                        &format!(
+                            "Sent {:?} packet to {} via {}",
+                            packet.protocol, packet.destination, packet.interface
+                        )
+                    );
+                }
+                Err(e) => {
+                    log_warning!(
+                        self.logger,
+                        Facility::Supervisor,
+                        &format!(
+                            "Failed to send {:?} packet to {} via {}: {}",
+                            packet.protocol, packet.destination, packet.interface, e
+                        )
+                    );
+                }
+            }
+        }
+
+        sent
+    }
+
+    /// Send a single outgoing packet
+    fn send_packet(&self, packet: &OutgoingPacket) -> Result<()> {
+        // Get the appropriate socket
+        let fd = match packet.protocol {
+            ProtocolType::Igmp => self
+                .igmp_socket
+                .as_ref()
+                .map(|s| s.as_raw_fd())
+                .ok_or_else(|| anyhow::anyhow!("IGMP socket not available"))?,
+            ProtocolType::Pim => self
+                .pim_socket
+                .as_ref()
+                .map(|s| s.as_raw_fd())
+                .ok_or_else(|| anyhow::anyhow!("PIM socket not available"))?,
+        };
+
+        // Get source IP from interface if not specified
+        let source_ip = packet.source.unwrap_or_else(|| {
+            get_interface_ipv4(&packet.interface).unwrap_or(Ipv4Addr::UNSPECIFIED)
+        });
+
+        // Build IP header + payload
+        let ip_packet = build_ip_packet(
+            source_ip,
+            packet.destination,
+            packet.protocol.protocol_number(),
+            &packet.data,
+        );
+
+        // Set up destination address
+        let dest_addr = libc::sockaddr_in {
+            sin_family: libc::AF_INET as u16,
+            sin_port: 0,
+            sin_addr: libc::in_addr {
+                s_addr: u32::from(packet.destination).to_be(),
+            },
+            sin_zero: [0; 8],
+        };
+
+        // Send the packet
+        let result = unsafe {
+            libc::sendto(
+                fd,
+                ip_packet.as_ptr() as *const libc::c_void,
+                ip_packet.len(),
+                0,
+                &dest_addr as *const libc::sockaddr_in as *const libc::sockaddr,
+                std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+            )
+        };
+
+        if result < 0 {
+            return Err(anyhow::anyhow!(
+                "sendto failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+/// Build an IP packet with the given payload
+///
+/// Creates a complete IP packet with:
+/// - 20-byte IP header (no options)
+/// - Payload data
+///
+/// The kernel will fill in some fields (like checksum) when IP_HDRINCL is set.
+fn build_ip_packet(source: Ipv4Addr, dest: Ipv4Addr, protocol: u8, payload: &[u8]) -> Vec<u8> {
+    let total_len = 20 + payload.len();
+
+    let mut packet = vec![0u8; total_len];
+
+    // IP header (20 bytes, no options)
+    packet[0] = 0x45; // Version 4, IHL 5 (20 bytes)
+    packet[1] = 0x00; // TOS (DSCP + ECN)
+    packet[2..4].copy_from_slice(&(total_len as u16).to_be_bytes()); // Total length
+    packet[4..6].copy_from_slice(&[0x00, 0x00]); // Identification (kernel fills)
+    packet[6..8].copy_from_slice(&[0x00, 0x00]); // Flags + Fragment offset
+    packet[8] = 1; // TTL = 1 for link-local protocols (IGMP/PIM)
+    packet[9] = protocol; // Protocol
+    packet[10..12].copy_from_slice(&[0x00, 0x00]); // Header checksum (kernel fills)
+    packet[12..16].copy_from_slice(&source.octets()); // Source IP
+    packet[16..20].copy_from_slice(&dest.octets()); // Destination IP
+
+    // Copy payload
+    packet[20..].copy_from_slice(payload);
+
+    packet
 }
 
 /// Async wrapper for raw socket I/O using tokio
@@ -2143,6 +2371,7 @@ fn parse_pim_join_prune(
 // --- Client Handling ---
 
 /// Handle a single client connection on the control socket
+#[allow(clippy::too_many_arguments)]
 async fn handle_client(
     mut client_stream: tokio::net::UnixStream,
     worker_manager: Arc<Mutex<WorkerManager>>,
@@ -2154,6 +2383,7 @@ async fn handle_client(
         >,
     >,
     startup_config_path: Option<PathBuf>,
+    startup_config: Arc<Option<Config>>,
     protocol_coordinator: Arc<Mutex<Option<ProtocolCoordinator>>>,
 ) -> Result<()> {
     use crate::{Response, SupervisorCommand};
@@ -2230,11 +2460,11 @@ async fn handle_client(
         }
     }
 
-    // Handle protocol-specific queries directly (need access to ProtocolCoordinator state)
-    // These queries need real data from the protocol state machines
+    // Handle protocol-specific queries and mutations directly (need access to ProtocolCoordinator state)
+    // These commands need real data from the protocol state machines
     let protocol_response: Option<Response> = {
-        let coordinator_guard = protocol_coordinator.lock().unwrap();
-        if let Some(ref coordinator) = *coordinator_guard {
+        let mut coordinator_guard = protocol_coordinator.lock().unwrap();
+        if let Some(ref mut coordinator) = *coordinator_guard {
             match &command {
                 SupervisorCommand::GetPimNeighbors => {
                     let neighbors = coordinator.state.get_pim_neighbors();
@@ -2298,6 +2528,87 @@ async fn handle_client(
                         event_buffer_size: coordinator.state.event_buffer_size(),
                     })
                 }
+                SupervisorCommand::AddExternalNeighbor { ref neighbor } => {
+                    // Validate and add in one atomic operation
+                    if coordinator.state.pim_state.add_external_neighbor(neighbor) {
+                        log::info!(
+                            "External PIM neighbor {} added on {}",
+                            neighbor.address,
+                            neighbor.interface
+                        );
+                        // Emit event for external neighbor up
+                        coordinator.state.emit_event(
+                            crate::ProtocolEventNotification::PimNeighborChange {
+                                interface: neighbor.interface.clone(),
+                                neighbor: neighbor.address,
+                                action: crate::NeighborAction::Up,
+                                source: crate::NeighborSource::External {
+                                    tag: neighbor.tag.clone(),
+                                },
+                                timestamp: unix_timestamp(),
+                            },
+                        );
+                        Some(Response::Success(format!(
+                            "External neighbor {} added on {}",
+                            neighbor.address, neighbor.interface
+                        )))
+                    } else {
+                        Some(Response::Error(format!(
+                            "Interface {} not enabled for PIM. Enable PIM on the interface first.",
+                            neighbor.interface
+                        )))
+                    }
+                }
+                SupervisorCommand::RemoveExternalNeighbor { address, interface } => {
+                    // Remove in one atomic operation
+                    if coordinator
+                        .state
+                        .pim_state
+                        .remove_external_neighbor(*address, interface)
+                    {
+                        log::info!(
+                            "External PIM neighbor {} removed from {}",
+                            address,
+                            interface
+                        );
+                        // Emit event for external neighbor down
+                        coordinator.state.emit_event(
+                            crate::ProtocolEventNotification::PimNeighborChange {
+                                interface: interface.clone(),
+                                neighbor: *address,
+                                action: crate::NeighborAction::Down,
+                                source: crate::NeighborSource::External { tag: None },
+                                timestamp: unix_timestamp(),
+                            },
+                        );
+                        Some(Response::Success(format!(
+                            "External neighbor {} removed from {}",
+                            address, interface
+                        )))
+                    } else {
+                        Some(Response::Error(format!(
+                            "External neighbor {} not found on interface {}",
+                            address, interface
+                        )))
+                    }
+                }
+                SupervisorCommand::ClearExternalNeighbors { ref interface } => {
+                    // Clear in one atomic operation
+                    let removed = coordinator
+                        .state
+                        .pim_state
+                        .clear_external_neighbors(interface.as_deref());
+                    let msg = match interface {
+                        Some(iface) => {
+                            format!("Cleared {} external neighbors from {}", removed, iface)
+                        }
+                        None => {
+                            format!("Cleared {} external neighbors from all interfaces", removed)
+                        }
+                    };
+                    log::info!("{}", msg);
+                    Some(Response::Success(msg))
+                }
                 _ => None,
             }
         } else {
@@ -2335,6 +2646,7 @@ async fn handle_client(
         &facility_min_levels,
         &worker_stats_arc,
         startup_config_path.as_ref(),
+        startup_config.as_ref().as_ref(),
     );
 
     // Log ruleset hash for drift detection if rules changed
@@ -3036,6 +3348,9 @@ pub async fn run(
         }
     }
 
+    // Wrap startup_config in Arc for sharing with handle_client
+    let startup_config: Arc<Option<Config>> = Arc::new(startup_config);
+
     // Create interval timers outside the loop so they persist across iterations
     // Using tokio::time::interval instead of sleep ensures the timer isn't reset
     // when other select! branches complete (critical bug fix!)
@@ -3067,6 +3382,7 @@ pub async fn run(
                     Arc::clone(&global_min_level),
                     Arc::clone(&facility_min_levels),
                     startup_config_path.clone(),
+                    Arc::clone(&startup_config),
                     Arc::clone(&protocol_coordinator),
                 )
                 .await
