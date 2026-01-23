@@ -165,6 +165,46 @@ pub enum PimAction {
         #[arg(long)]
         interface: Option<String>,
     },
+    // --- RPF Commands ---
+    /// Set the RPF provider (disabled, static, or external socket path)
+    SetRpf {
+        /// RPF provider: "disabled", "static", or socket path for external
+        #[arg(long)]
+        provider: String,
+    },
+    /// Show current RPF provider configuration
+    GetRpf,
+    /// Query RPF for a specific source address
+    QueryRpf {
+        /// Source IP address to query
+        #[arg(long)]
+        source: Ipv4Addr,
+    },
+    /// Add a static RPF route
+    AddRpfRoute {
+        /// Source IP address
+        #[arg(long)]
+        source: Ipv4Addr,
+        /// Upstream interface name
+        #[arg(long)]
+        interface: String,
+        /// Optional upstream neighbor IP
+        #[arg(long)]
+        neighbor: Option<Ipv4Addr>,
+        /// Optional metric
+        #[arg(long)]
+        metric: Option<u32>,
+    },
+    /// Remove a static RPF route
+    RemoveRpfRoute {
+        /// Source IP address
+        #[arg(long)]
+        source: Ipv4Addr,
+    },
+    /// List all static RPF routes
+    ListRpfRoutes,
+    /// Clear all static RPF routes
+    ClearRpfRoutes,
 }
 
 #[derive(Parser, Debug)]
@@ -394,6 +434,43 @@ pub fn build_command(cli_command: CliCommand) -> Result<multicast_relay::Supervi
             PimAction::ClearNeighbors { interface } => {
                 multicast_relay::SupervisorCommand::ClearExternalNeighbors { interface }
             }
+            PimAction::SetRpf { provider } => {
+                let rpf_provider = if provider == "disabled" {
+                    multicast_relay::RpfProvider::Disabled
+                } else if provider == "static" {
+                    multicast_relay::RpfProvider::Static
+                } else {
+                    // Treat as external socket path
+                    multicast_relay::RpfProvider::External {
+                        socket_path: provider,
+                    }
+                };
+                multicast_relay::SupervisorCommand::SetRpfProvider {
+                    provider: rpf_provider,
+                }
+            }
+            PimAction::GetRpf => multicast_relay::SupervisorCommand::GetRpfProvider,
+            PimAction::QueryRpf { source } => {
+                multicast_relay::SupervisorCommand::QueryRpf { source }
+            }
+            PimAction::AddRpfRoute {
+                source,
+                interface,
+                neighbor,
+                metric,
+            } => multicast_relay::SupervisorCommand::AddRpfRoute {
+                source,
+                rpf: multicast_relay::RpfInfo {
+                    upstream_interface: interface,
+                    upstream_neighbor: neighbor,
+                    metric,
+                },
+            },
+            PimAction::RemoveRpfRoute { source } => {
+                multicast_relay::SupervisorCommand::RemoveRpfRoute { source }
+            }
+            PimAction::ListRpfRoutes => multicast_relay::SupervisorCommand::ListRpfRoutes,
+            PimAction::ClearRpfRoutes => multicast_relay::SupervisorCommand::ClearRpfRoutes,
         },
         CliCommand::Igmp { action } => match action {
             IgmpAction::Groups => multicast_relay::SupervisorCommand::GetIgmpGroups,

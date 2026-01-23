@@ -43,7 +43,7 @@ use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
 use super::{PacketBuilder, TimerRequest, TimerType};
-use crate::{ExternalNeighbor, NeighborSource};
+use crate::{ExternalNeighbor, NeighborSource, RpfInfo, RpfProvider};
 
 // PIM message types
 pub const PIM_HELLO: u8 = 0;
@@ -110,6 +110,8 @@ pub struct PimConfig {
     pub join_prune_period: Duration,
     /// Join/Prune holdtime
     pub join_prune_holdtime: Duration,
+    /// RPF provider configuration
+    pub rpf_provider: RpfProvider,
 }
 
 impl PimConfig {
@@ -400,6 +402,8 @@ pub struct PimState {
     pub star_g: HashMap<Ipv4Addr, StarGState>,
     /// (S,G) entries
     pub sg: HashMap<(Ipv4Addr, Ipv4Addr), SGState>,
+    /// Static RPF entries (source -> RPF info)
+    pub static_rpf: HashMap<Ipv4Addr, RpfInfo>,
 }
 
 /// (*,G) shared tree state
@@ -745,6 +749,75 @@ impl PimState {
             }
         }
         false
+    }
+
+    // --- RPF Management Methods ---
+
+    /// Set the RPF provider
+    pub fn set_rpf_provider(&mut self, provider: RpfProvider) {
+        self.config.rpf_provider = provider;
+    }
+
+    /// Get the current RPF provider
+    pub fn get_rpf_provider(&self) -> &RpfProvider {
+        &self.config.rpf_provider
+    }
+
+    /// Add a static RPF entry
+    pub fn add_rpf_route(&mut self, source: Ipv4Addr, rpf: RpfInfo) {
+        self.static_rpf.insert(source, rpf);
+    }
+
+    /// Remove a static RPF entry
+    /// Returns true if entry was found and removed
+    pub fn remove_rpf_route(&mut self, source: Ipv4Addr) -> bool {
+        self.static_rpf.remove(&source).is_some()
+    }
+
+    /// Get all static RPF entries
+    pub fn get_rpf_routes(&self) -> Vec<(Ipv4Addr, &RpfInfo)> {
+        self.static_rpf.iter().map(|(s, r)| (*s, r)).collect()
+    }
+
+    /// Clear all static RPF entries
+    /// Returns the number of entries removed
+    pub fn clear_rpf_routes(&mut self) -> usize {
+        let count = self.static_rpf.len();
+        self.static_rpf.clear();
+        count
+    }
+
+    /// Lookup RPF information for a source address
+    /// Returns RPF info if found based on current provider configuration
+    pub fn lookup_rpf(&self, source: Ipv4Addr) -> Option<&RpfInfo> {
+        match &self.config.rpf_provider {
+            RpfProvider::Disabled => None,
+            RpfProvider::Static => self.static_rpf.get(&source),
+            RpfProvider::External { .. } => {
+                // For external provider, we only check static entries here
+                // External lookups are handled asynchronously by the supervisor
+                self.static_rpf.get(&source)
+            }
+        }
+    }
+
+    /// Check if the RPF interface for a source matches the expected interface
+    /// Returns true if RPF check passes or RPF is disabled
+    pub fn check_rpf(&self, source: Ipv4Addr, interface: &str) -> bool {
+        match &self.config.rpf_provider {
+            RpfProvider::Disabled => true, // No RPF check
+            RpfProvider::Static | RpfProvider::External { .. } => {
+                match self.static_rpf.get(&source) {
+                    Some(rpf) => rpf.upstream_interface == interface,
+                    None => {
+                        // No RPF entry found - behavior depends on provider
+                        // For static: fail (must have explicit entry)
+                        // For external: could be pending lookup, allow for now
+                        matches!(self.config.rpf_provider, RpfProvider::External { .. })
+                    }
+                }
+            }
+        }
     }
 
     /// Clean up expired entries
@@ -1510,6 +1583,211 @@ mod tests {
             }
             .to_string(),
             "external:babel"
+        );
+    }
+
+    // --- RPF Tests ---
+
+    #[test]
+    fn test_rpf_provider_default() {
+        let state = PimState::new();
+        assert!(matches!(state.config.rpf_provider, RpfProvider::Disabled));
+    }
+
+    #[test]
+    fn test_set_rpf_provider() {
+        let mut state = PimState::new();
+
+        state.set_rpf_provider(RpfProvider::Static);
+        assert!(matches!(state.config.rpf_provider, RpfProvider::Static));
+
+        state.set_rpf_provider(RpfProvider::External {
+            socket_path: "/tmp/rpf.sock".to_string(),
+        });
+        assert!(matches!(
+            state.config.rpf_provider,
+            RpfProvider::External { .. }
+        ));
+    }
+
+    #[test]
+    fn test_add_rpf_route() {
+        let mut state = PimState::new();
+
+        let rpf = RpfInfo {
+            upstream_interface: "eth0".to_string(),
+            upstream_neighbor: Some("10.0.0.1".parse().unwrap()),
+            metric: Some(100),
+        };
+
+        state.add_rpf_route("192.168.1.1".parse().unwrap(), rpf.clone());
+
+        assert_eq!(state.static_rpf.len(), 1);
+        let stored = state
+            .static_rpf
+            .get(&"192.168.1.1".parse().unwrap())
+            .unwrap();
+        assert_eq!(stored.upstream_interface, "eth0");
+        assert_eq!(stored.upstream_neighbor, Some("10.0.0.1".parse().unwrap()));
+        assert_eq!(stored.metric, Some(100));
+    }
+
+    #[test]
+    fn test_remove_rpf_route() {
+        let mut state = PimState::new();
+
+        let rpf = RpfInfo {
+            upstream_interface: "eth0".to_string(),
+            upstream_neighbor: None,
+            metric: None,
+        };
+
+        state.add_rpf_route("192.168.1.1".parse().unwrap(), rpf);
+        assert_eq!(state.static_rpf.len(), 1);
+
+        // Remove existing route
+        assert!(state.remove_rpf_route("192.168.1.1".parse().unwrap()));
+        assert_eq!(state.static_rpf.len(), 0);
+
+        // Remove non-existent route
+        assert!(!state.remove_rpf_route("192.168.1.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_get_rpf_routes() {
+        let mut state = PimState::new();
+
+        state.add_rpf_route(
+            "10.1.0.1".parse().unwrap(),
+            RpfInfo {
+                upstream_interface: "eth0".to_string(),
+                upstream_neighbor: None,
+                metric: None,
+            },
+        );
+        state.add_rpf_route(
+            "10.2.0.1".parse().unwrap(),
+            RpfInfo {
+                upstream_interface: "eth1".to_string(),
+                upstream_neighbor: None,
+                metric: None,
+            },
+        );
+
+        let routes = state.get_rpf_routes();
+        assert_eq!(routes.len(), 2);
+    }
+
+    #[test]
+    fn test_clear_rpf_routes() {
+        let mut state = PimState::new();
+
+        state.add_rpf_route(
+            "10.1.0.1".parse().unwrap(),
+            RpfInfo {
+                upstream_interface: "eth0".to_string(),
+                upstream_neighbor: None,
+                metric: None,
+            },
+        );
+        state.add_rpf_route(
+            "10.2.0.1".parse().unwrap(),
+            RpfInfo {
+                upstream_interface: "eth1".to_string(),
+                upstream_neighbor: None,
+                metric: None,
+            },
+        );
+
+        let cleared = state.clear_rpf_routes();
+        assert_eq!(cleared, 2);
+        assert_eq!(state.static_rpf.len(), 0);
+    }
+
+    #[test]
+    fn test_lookup_rpf_disabled() {
+        let state = PimState::new();
+        // With disabled provider, lookup always returns None
+        assert!(state.lookup_rpf("10.1.0.1".parse().unwrap()).is_none());
+    }
+
+    #[test]
+    fn test_lookup_rpf_static() {
+        let mut state = PimState::new();
+        state.set_rpf_provider(RpfProvider::Static);
+
+        // No entry yet
+        assert!(state.lookup_rpf("10.1.0.1".parse().unwrap()).is_none());
+
+        // Add entry
+        state.add_rpf_route(
+            "10.1.0.1".parse().unwrap(),
+            RpfInfo {
+                upstream_interface: "eth0".to_string(),
+                upstream_neighbor: None,
+                metric: None,
+            },
+        );
+
+        // Now lookup succeeds
+        let rpf = state.lookup_rpf("10.1.0.1".parse().unwrap());
+        assert!(rpf.is_some());
+        assert_eq!(rpf.unwrap().upstream_interface, "eth0");
+    }
+
+    #[test]
+    fn test_check_rpf_disabled() {
+        let state = PimState::new();
+        // With disabled provider, RPF check always passes
+        assert!(state.check_rpf("10.1.0.1".parse().unwrap(), "eth0"));
+        assert!(state.check_rpf("10.1.0.1".parse().unwrap(), "eth1"));
+    }
+
+    #[test]
+    fn test_check_rpf_static() {
+        let mut state = PimState::new();
+        state.set_rpf_provider(RpfProvider::Static);
+
+        state.add_rpf_route(
+            "10.1.0.1".parse().unwrap(),
+            RpfInfo {
+                upstream_interface: "eth0".to_string(),
+                upstream_neighbor: None,
+                metric: None,
+            },
+        );
+
+        // Correct interface passes
+        assert!(state.check_rpf("10.1.0.1".parse().unwrap(), "eth0"));
+
+        // Wrong interface fails
+        assert!(!state.check_rpf("10.1.0.1".parse().unwrap(), "eth1"));
+
+        // No entry for source - static mode fails
+        assert!(!state.check_rpf("10.2.0.1".parse().unwrap(), "eth0"));
+    }
+
+    #[test]
+    fn test_check_rpf_external_no_entry() {
+        let mut state = PimState::new();
+        state.set_rpf_provider(RpfProvider::External {
+            socket_path: "/tmp/rpf.sock".to_string(),
+        });
+
+        // With external provider and no cached entry, allow (pending lookup)
+        assert!(state.check_rpf("10.1.0.1".parse().unwrap(), "eth0"));
+    }
+
+    #[test]
+    fn test_rpf_provider_display() {
+        assert_eq!(RpfProvider::Disabled.to_string(), "disabled");
+        assert_eq!(RpfProvider::Static.to_string(), "static");
+        assert_eq!(
+            RpfProvider::External {
+                socket_path: "/tmp/rpf.sock".to_string()
+            }
+            .to_string(),
+            "external:/tmp/rpf.sock"
         );
     }
 }

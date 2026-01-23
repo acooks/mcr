@@ -182,11 +182,13 @@ pub enum RpfProvider {
 
 **New Commands (`src/lib.rs`):**
 
-- [ ] `SetRpfProvider { provider: RpfProvider }` - Configure RPF source
-- [ ] `GetRpfProvider` - Query current RPF configuration
-- [ ] `QueryRpf { source: Ipv4Addr }` - Manual RPF query (for debugging)
-- [ ] `InjectRpfRoute { source: Ipv4Addr, rpf: RpfInfo }` - Static RPF entry
-- [ ] `RemoveRpfRoute { source: Ipv4Addr }` - Remove static RPF entry
+- [x] `SetRpfProvider { provider: RpfProvider }` - Configure RPF source
+- [x] `GetRpfProvider` - Query current RPF configuration
+- [x] `QueryRpf { source: Ipv4Addr }` - Manual RPF query (for debugging)
+- [x] `AddRpfRoute { source: Ipv4Addr, rpf: RpfInfo }` - Static RPF entry
+- [x] `RemoveRpfRoute { source: Ipv4Addr }` - Remove static RPF entry
+- [x] `ListRpfRoutes` - List all static RPF entries
+- [x] `ClearRpfRoutes` - Clear all static RPF entries
 
 **External RPF Protocol:**
 
@@ -202,19 +204,30 @@ Response (External → MCR):
 {"upstream_interface": "veth-peer3", "upstream_neighbor": "10.2.0.1", "metric": 100}
 ```
 
+Note: External socket protocol implementation deferred - static RPF entries are sufficient for initial integration.
+
 **State Changes:**
 
-- [ ] Add `rpf_provider: RpfProvider` to `PimConfig`
-- [ ] Add `rpf_cache: HashMap<Ipv4Addr, RpfInfo>` to `PimState`
-- [ ] Add `static_rpf: HashMap<Ipv4Addr, RpfInfo>` to `PimState`
-- [ ] Create `RpfResolver` trait with implementations for each provider type
-- [ ] Cache external RPF lookups with configurable TTL
+- [x] Add `rpf_provider: RpfProvider` to `PimConfig`
+- [x] Add `static_rpf: HashMap<Ipv4Addr, RpfInfo>` to `PimState`
+- [x] Implemented `lookup_rpf()` and `check_rpf()` methods
+- [ ] Cache external RPF lookups with configurable TTL (deferred)
+
+**CLI Commands:**
+
+- [x] `pim set-rpf --provider <disabled|static|/path/to/socket>`
+- [x] `pim get-rpf`
+- [x] `pim query-rpf --source <IP>`
+- [x] `pim add-rpf-route --source <IP> --interface <IFACE> [--neighbor <IP>] [--metric <N>]`
+- [x] `pim remove-rpf-route --source <IP>`
+- [x] `pim list-rpf-routes`
+- [x] `pim clear-rpf-routes`
 
 **Integration Points:**
 
-- [ ] `process_join_prune()` - Validate RPF for received Joins
-- [ ] `create_sg_route()` - Set upstream_interface from RPF lookup
-- [ ] `process_sa_message()` (MSDP) - RPF check for SA origin
+- [ ] `process_join_prune()` - Validate RPF for received Joins (deferred)
+- [ ] `create_sg_route()` - Set upstream_interface from RPF lookup (deferred)
+- [ ] `process_sa_message()` (MSDP) - RPF check for SA origin (deferred)
 
 ### Phase 3: Event Subscription API
 
@@ -419,13 +432,13 @@ pub struct ControlPlaneConfig {
 ## Current Status
 
 - **Phase 1:** Complete
-- **Phase 2:** Not Started
+- **Phase 2:** Complete (external socket protocol deferred)
 - **Phase 3:** Not Started
 - **Phase 4:** Not Started
 
 ## Next Steps
 
-1. Begin Phase 2 implementation with RPF provider types and configuration
-2. Implement external RPF socket protocol
-3. Add RPF validation to Join/Prune processing
-4. Create integration test with mock RPF provider
+1. Begin Phase 3 implementation with event subscription types
+2. Add broadcast channel for event distribution
+3. Implement Subscribe/Unsubscribe commands
+4. Add event emission hooks to IGMP/PIM/MSDP state machines

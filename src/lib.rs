@@ -246,6 +246,30 @@ pub enum SupervisorCommand {
     ClearExternalNeighbors {
         interface: Option<String>,
     },
+    // --- RPF Commands ---
+    /// Set the RPF provider (disabled, static, or external socket)
+    SetRpfProvider {
+        provider: RpfProvider,
+    },
+    /// Get current RPF provider configuration
+    GetRpfProvider,
+    /// Query RPF for a specific source (for debugging)
+    QueryRpf {
+        source: Ipv4Addr,
+    },
+    /// Add a static RPF entry
+    AddRpfRoute {
+        source: Ipv4Addr,
+        rpf: RpfInfo,
+    },
+    /// Remove a static RPF entry
+    RemoveRpfRoute {
+        source: Ipv4Addr,
+    },
+    /// List all static RPF entries
+    ListRpfRoutes,
+    /// Clear all static RPF entries
+    ClearRpfRoutes,
     // --- IGMP Commands ---
     /// Get IGMP group membership table
     GetIgmpGroups,
@@ -313,6 +337,12 @@ pub enum Response {
     MsdpPeers(Vec<MsdpPeerInfo>),
     /// MSDP SA cache response
     MsdpSaCache(Vec<MsdpSaCacheInfo>),
+    /// RPF provider configuration response
+    RpfProvider(RpfProviderInfo),
+    /// RPF query result response
+    RpfResult(Option<RpfInfo>),
+    /// Static RPF routes response
+    RpfRoutes(Vec<RpfRouteEntry>),
 }
 
 /// Source of a PIM neighbor - distinguishes Hello-learned from externally-injected
@@ -349,6 +379,62 @@ pub struct ExternalNeighbor {
     pub dr_priority: Option<u32>,
     /// Optional tag for tracking source (e.g., "babel", "ospf")
     pub tag: Option<String>,
+}
+
+/// RPF (Reverse Path Forwarding) lookup result
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RpfInfo {
+    /// Interface toward the source (RPF interface)
+    pub upstream_interface: String,
+    /// Next-hop neighbor toward the source (optional, for Join targeting)
+    pub upstream_neighbor: Option<Ipv4Addr>,
+    /// Metric/preference (lower is better, for choosing between multiple paths)
+    pub metric: Option<u32>,
+}
+
+/// RPF provider configuration - determines how RPF lookups are performed
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub enum RpfProvider {
+    /// No RPF check (accept from any interface) - default for backwards compatibility
+    #[default]
+    Disabled,
+    /// Use static RPF entries only
+    Static,
+    /// Query external Unix socket for RPF information
+    External {
+        /// Path to the external RPF provider socket
+        socket_path: String,
+    },
+}
+
+impl std::fmt::Display for RpfProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RpfProvider::Disabled => write!(f, "disabled"),
+            RpfProvider::Static => write!(f, "static"),
+            RpfProvider::External { socket_path } => write!(f, "external:{}", socket_path),
+        }
+    }
+}
+
+/// Information about the current RPF provider configuration
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RpfProviderInfo {
+    /// Current RPF provider type
+    pub provider: RpfProvider,
+    /// Number of static RPF entries
+    pub static_entries: usize,
+    /// Number of cached external RPF lookups
+    pub cached_entries: usize,
+}
+
+/// Entry in the static RPF table
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RpfRouteEntry {
+    /// Source IP address this RPF entry applies to
+    pub source: Ipv4Addr,
+    /// RPF information (upstream interface and neighbor)
+    pub rpf: RpfInfo,
 }
 
 /// Information about a PIM neighbor

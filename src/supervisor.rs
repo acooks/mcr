@@ -2224,6 +2224,17 @@ pub enum CommandAction {
     },
     /// Clear all external PIM neighbors
     ClearExternalNeighbors { interface: Option<String> },
+    /// Set the RPF provider
+    SetRpfProvider { provider: crate::RpfProvider },
+    /// Add a static RPF route
+    AddRpfRoute {
+        source: Ipv4Addr,
+        rpf: crate::RpfInfo,
+    },
+    /// Remove a static RPF route
+    RemoveRpfRoute { source: Ipv4Addr },
+    /// Clear all static RPF routes
+    ClearRpfRoutes,
 }
 
 /// Handle a supervisor command by updating state and returning a response + action.
@@ -2799,6 +2810,47 @@ pub fn handle_supervisor_command(
                 None => "All external neighbors cleared".to_string(),
             }),
             CommandAction::ClearExternalNeighbors { interface },
+        ),
+
+        // --- RPF Commands ---
+        SupervisorCommand::SetRpfProvider { provider } => (
+            Response::Success(format!("RPF provider set to {}", provider)),
+            CommandAction::SetRpfProvider { provider },
+        ),
+        SupervisorCommand::GetRpfProvider => {
+            // Handled via protocol coordinator, return placeholder here
+            (
+                Response::RpfProvider(crate::RpfProviderInfo {
+                    provider: crate::RpfProvider::Disabled,
+                    static_entries: 0,
+                    cached_entries: 0,
+                }),
+                CommandAction::None,
+            )
+        }
+        SupervisorCommand::QueryRpf { source } => {
+            // Handled via protocol coordinator, return placeholder here
+            let _ = source;
+            (Response::RpfResult(None), CommandAction::None)
+        }
+        SupervisorCommand::AddRpfRoute { source, rpf } => (
+            Response::Success(format!(
+                "Static RPF route added for {} via {}",
+                source, rpf.upstream_interface
+            )),
+            CommandAction::AddRpfRoute { source, rpf },
+        ),
+        SupervisorCommand::RemoveRpfRoute { source } => (
+            Response::Success(format!("Static RPF route removed for {}", source)),
+            CommandAction::RemoveRpfRoute { source },
+        ),
+        SupervisorCommand::ListRpfRoutes => {
+            // Handled via protocol coordinator, return placeholder here
+            (Response::RpfRoutes(Vec::new()), CommandAction::None)
+        }
+        SupervisorCommand::ClearRpfRoutes => (
+            Response::Success("All static RPF routes cleared".to_string()),
+            CommandAction::ClearRpfRoutes,
         ),
     }
 }
@@ -3593,6 +3645,32 @@ async fn handle_client(
                     let neighbors = coordinator.state.get_external_neighbors();
                     Some(Response::ExternalNeighbors(neighbors))
                 }
+                SupervisorCommand::GetRpfProvider => {
+                    let provider = coordinator.state.pim_state.get_rpf_provider().clone();
+                    let static_entries = coordinator.state.pim_state.static_rpf.len();
+                    Some(Response::RpfProvider(crate::RpfProviderInfo {
+                        provider,
+                        static_entries,
+                        cached_entries: 0, // No caching implemented yet
+                    }))
+                }
+                SupervisorCommand::QueryRpf { source } => {
+                    let rpf = coordinator.state.pim_state.lookup_rpf(*source).cloned();
+                    Some(Response::RpfResult(rpf))
+                }
+                SupervisorCommand::ListRpfRoutes => {
+                    let routes: Vec<crate::RpfRouteEntry> = coordinator
+                        .state
+                        .pim_state
+                        .get_rpf_routes()
+                        .into_iter()
+                        .map(|(source, rpf)| crate::RpfRouteEntry {
+                            source,
+                            rpf: rpf.clone(),
+                        })
+                        .collect();
+                    Some(Response::RpfRoutes(routes))
+                }
                 _ => None,
             }
         } else {
@@ -3961,6 +4039,49 @@ async fn handle_client(
                         .map(|i| format!(" from {}", i))
                         .unwrap_or_default()
                 );
+            }
+        }
+        CommandAction::SetRpfProvider { provider } => {
+            let mut coordinator_guard = protocol_coordinator.lock().unwrap();
+            if let Some(ref mut coordinator) = *coordinator_guard {
+                coordinator
+                    .state
+                    .pim_state
+                    .set_rpf_provider(provider.clone());
+                log::info!("RPF provider set to {}", provider);
+            }
+        }
+        CommandAction::AddRpfRoute { source, rpf } => {
+            let mut coordinator_guard = protocol_coordinator.lock().unwrap();
+            if let Some(ref mut coordinator) = *coordinator_guard {
+                coordinator
+                    .state
+                    .pim_state
+                    .add_rpf_route(source, rpf.clone());
+                log::info!(
+                    "Static RPF route added for {} via {}",
+                    source,
+                    rpf.upstream_interface
+                );
+            }
+        }
+        CommandAction::RemoveRpfRoute { source } => {
+            let mut coordinator_guard = protocol_coordinator.lock().unwrap();
+            if let Some(ref mut coordinator) = *coordinator_guard {
+                if coordinator.state.pim_state.remove_rpf_route(source) {
+                    log::info!("Static RPF route removed for {}", source);
+                } else {
+                    log::warn!("Static RPF route not found for {}", source);
+                    final_response =
+                        Response::Error(format!("Static RPF route not found for {}", source));
+                }
+            }
+        }
+        CommandAction::ClearRpfRoutes => {
+            let mut coordinator_guard = protocol_coordinator.lock().unwrap();
+            if let Some(ref mut coordinator) = *coordinator_guard {
+                let count = coordinator.state.pim_state.clear_rpf_routes();
+                log::info!("Cleared {} static RPF route(s)", count);
             }
         }
     }
