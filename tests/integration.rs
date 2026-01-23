@@ -49,6 +49,10 @@ mod protocol_pim; // PIM neighbor management and configuration tests (requires r
 #[path = "integration/protocol_msdp.rs"]
 mod protocol_msdp; // MSDP peer management and SA cache tests (requires root)
 
+// Topology tests - multi-node protocol validation
+#[path = "integration/topology.rs"]
+mod topology; // PIM Hello exchange, IGMP querier election, MSDP TCP session (requires root)
+
 // REMOVED: supervisor.rs - redundant with unit tests in src/supervisor.rs
 // REMOVED: ipc.rs - broken code, redundant with rule_management.rs
 // REMOVED: 4 tests from log_level_control.rs - redundant with supervisor unit tests (kept 2 IPC tests)

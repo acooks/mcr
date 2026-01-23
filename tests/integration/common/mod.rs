@@ -41,7 +41,7 @@ pub mod stats;
 pub mod traffic;
 
 pub use control_client::ControlClient;
-pub use mcr::McrInstance;
+pub use mcr::{McrInstance, McrInstanceBuilder};
 pub use network::{NetworkNamespace, VethPair};
 pub use stats::Stats;
 
