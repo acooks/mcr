@@ -1297,7 +1297,20 @@ impl ProtocolState {
                 keepalive_interval: Duration::from_secs(config.keepalive_interval as u64),
                 hold_time: Duration::from_secs(config.hold_time as u64),
             };
-            self.msdp_state.add_peer(protocol_peer_config);
+            let timers = self.msdp_state.add_peer(protocol_peer_config);
+
+            // Schedule connection timers (if timer channel is available)
+            if let Some(ref timer_tx) = self.timer_tx {
+                for timer in timers {
+                    if let Err(e) = timer_tx.try_send(timer) {
+                        log_warning!(
+                            self.logger,
+                            Facility::Supervisor,
+                            &format!("Failed to schedule MSDP timer: {}", e)
+                        );
+                    }
+                }
+            }
 
             log_info!(
                 self.logger,
@@ -2565,7 +2578,15 @@ async fn handle_client(
                     keepalive_interval: coordinator.state.msdp_state.config.keepalive_interval,
                     hold_time: coordinator.state.msdp_state.config.hold_time,
                 };
-                coordinator.state.msdp_state.add_peer(peer_config);
+                let timers = coordinator.state.msdp_state.add_peer(peer_config);
+
+                // Schedule connection timers
+                for timer in timers {
+                    if let Err(e) = coordinator.timer_tx.try_send(timer) {
+                        log::warn!("Failed to schedule MSDP timer: {}", e);
+                    }
+                }
+
                 log::info!(
                     "MSDP peer {} added{}",
                     address,
