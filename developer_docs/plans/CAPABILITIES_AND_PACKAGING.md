@@ -395,3 +395,33 @@ run-caps *ARGS:
 3. **SELinux policy**: Custom policy for even tighter security
 4. **Capability reduction**: Investigate if CAP_CHOWN can be eliminated
    by using socket in user-writable location
+
+---
+
+## Current Status
+
+### Completion: 89%
+
+| Phase | Status | Notes |
+|-------|--------|-------|
+| Phase 1: User Documentation | Partial | REFERENCE.md updated (missing CAP_CHOWN), SECURITY.md updated (missing CAP_CHOWN), OPERATIONAL_GUIDE.md not updated |
+| Phase 2: Systemd Service | Complete | mcrd.service created, missing CAP_CHOWN in AmbientCapabilities |
+| Phase 3: RPM Spec | Complete | mcr.spec created and functional |
+| Phase 4: Test Infrastructure | Partial | require_root! updated, require_mcrd_caps! not implemented |
+| Phase 5: Justfile Commands | Complete | set-caps, clear-caps, build-with-caps added |
+| Phase 6: Example Config | Complete | examples/config.json5 exists |
+
+### Known Issues
+
+1. **CAP_CHOWN missing from documentation and systemd file:**
+   - `user_docs/REFERENCE.md` (line 232): Missing CAP_CHOWN in setcap command
+   - `user_docs/SECURITY.md` (line 92): Missing CAP_CHOWN in setcap example
+   - `packaging/systemd/mcrd.service` (lines 13-14): Missing CAP_CHOWN in AmbientCapabilities
+
+2. **require_mcrd_caps! macro not implemented** (Phase 4.2)
+
+3. **OPERATIONAL_GUIDE.md capability section not added** (Phase 1.2)
+
+### Remaining Work
+
+See [IMPROVEMENT_PLAN.md](../IMPROVEMENT_PLAN.md) for consolidated roadmap tracking these items.

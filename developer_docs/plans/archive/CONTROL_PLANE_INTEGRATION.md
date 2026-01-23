@@ -435,12 +435,16 @@ See: [NAMESPACE_DEPLOYMENT.md](../NAMESPACE_DEPLOYMENT.md) and [examples/mcrd-na
 
 ## Current Status
 
-- **Phase 1:** Complete
-- **Phase 2:** Complete (external socket protocol deferred)
-- **Phase 3:** Complete
-- **Phase 4:** Complete
+### Completion: 93%
 
-## Completed Deliverables
+| Phase | Status | Notes |
+|-------|--------|-------|
+| Phase 1: External Neighbor API | Complete | All commands implemented |
+| Phase 2: External RPF Provider | Complete | Static entries work; external socket protocol intentionally deferred |
+| Phase 3: Event Subscription API | Complete | Subscribe/unsubscribe, broadcast delivery |
+| Phase 4: Config & Documentation | Complete | Namespace docs, systemd example, CLI |
+
+### Completed Deliverables
 
 1. `ControlPlaneConfig` struct in `src/config.rs` with validation
 2. Config wired to supervisor initialization (RPF provider, event buffer size)
@@ -448,8 +452,18 @@ See: [NAMESPACE_DEPLOYMENT.md](../NAMESPACE_DEPLOYMENT.md) and [examples/mcrd-na
 4. Namespace deployment documentation: `developer_docs/NAMESPACE_DEPLOYMENT.md`
 5. Example systemd template unit: `examples/mcrd-namespace.service`
 
-## Future Work
+### Intentionally Deferred
 
-1. Implement external RPF socket protocol (currently only static RPF entries supported)
+The **external RPF socket protocol** (Phase 2) was intentionally deferred because:
+
+- Static RPF entries are sufficient for most overlay deployments
+- External socket protocol adds complexity without clear immediate use case
+- Can be implemented when specific integration requirements arise
+
+### Remaining Work (Future)
+
+1. Implement external RPF socket protocol if needed
 2. Add RPF cache with configurable TTL for external lookups
 3. Integration testing for namespace deployments
+
+See [IMPROVEMENT_PLAN.md](../IMPROVEMENT_PLAN.md) for consolidated roadmap.

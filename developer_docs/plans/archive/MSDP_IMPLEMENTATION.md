@@ -252,20 +252,32 @@ mcrctl msdp clear-sa-cache
 
 ## Current Status
 
-- **Phase 0:** Complete
-- **Phase 1:** Complete
-- **Phase 2:** Complete
-- **Phase 3:** Complete
-- **Phase 4:** Complete (SA-Request/Response deferred)
-- **Phase 5:** Not Started
+### Completion: 95%
 
-## Next Steps
+| Phase | Status | Notes |
+|-------|--------|-------|
+| Phase 0: Foundation | Complete | Config, types, CLI framework |
+| Phase 1: State Machine | Complete | MsdpState, peers, SA cache, mesh groups |
+| Phase 2: TCP Layer | Complete | Connection management, collision resolution |
+| Phase 3: Supervisor Integration | Complete | Event handlers, timers, commands |
+| Phase 4: Protocol Integration | Complete | PIM-to-MSDP, SA flooding (SA-Request/Response deferred) |
+| Phase 5: Testing and Documentation | Not Started | Integration tests needed |
 
-1. Phase 5 Testing and Documentation:
-   - Add integration tests for peer connections
-   - Update ARCHITECTURE.md with MSDP documentation
-   - Add troubleshooting guidance
+### Remaining Work
 
-2. Future enhancements:
-   - Implement SA-Request/Response messages
-   - Add full RPF check with routing table access
+1. **Integration tests** (Phase 5):
+   - Peer connection establishment (active/passive)
+   - Keepalive exchange
+   - SA message exchange
+   - Mesh group flood suppression
+   - Peer timeout and reconnection
+
+2. **Documentation**:
+   - Update ARCHITECTURE.md Section 6 with MSDP
+   - Add MSDP troubleshooting guide
+
+3. **Deferred features**:
+   - SA-Request/Response messages
+   - Full RPF check with routing table access
+
+See [IMPROVEMENT_PLAN.md](../IMPROVEMENT_PLAN.md) for consolidated roadmap.

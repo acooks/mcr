@@ -2,9 +2,13 @@
 
 Last updated: January 2026
 
+## Overview
+
+This is the master roadmap for MCR development. It consolidates all planned work from individual plan documents and tracks completion status.
+
 ## Priority Legend
 
-- **CRITICAL** - Security, correctness, or major undocumented features
+- **CRITICAL** - Security, correctness, or blocking issues
 - **HIGH** - Significant impact on maintainability or user experience
 - **MEDIUM** - Quality improvements, technical debt
 - **LOW** - Nice-to-have, future enhancements
@@ -13,150 +17,279 @@ Last updated: January 2026
 
 ## Recently Completed
 
-### ✅ Logging Subsystem Cleanup (January 2026)
+### Control Plane Integration (January 2026)
 
-Removed ~600 lines of dead code and fixed critical log level propagation bug:
+Implemented external control plane APIs for overlay/mesh network integration:
 
-- **Dead Code Removal:** Deleted unused `SPSCRingBuffer`, `SharedSPSCRingBuffer`, `BlockingConsumer`, and `SharedBlockingConsumer` types
-- **Log Level Propagation:** Added `RelayCommand::SetLogLevel` to propagate log level changes from supervisor to workers
-- **Logger API:** Added `set_global_level()`, `set_facility_level()`, and `clear_facility_level()` methods to `Logger`
-- **Documentation:** Updated REFERENCE.md with logging facilities table
+- **External Neighbor API:** Inject PIM neighbors from external routing daemons (Babel, OSPF)
+- **RPF Provider API:** Static RPF entries for overlay topologies
+- **Event Subscription API:** Push notifications for IGMP/PIM/MSDP state changes
+- **Namespace Documentation:** Deployment guide for network namespace environments
 
-**Implementation:** `src/logging/`, `src/lib.rs`, `src/supervisor.rs`, `src/worker/unified_loop.rs`
+**Status:** Complete (93%) - External RPF socket protocol intentionally deferred
+**Plan:** [plans/archive/CONTROL_PLANE_INTEGRATION.md](plans/archive/CONTROL_PLANE_INTEGRATION.md)
 
-### ✅ PIM-SM and IGMP Protocol Support (January 2026)
+### MSDP Protocol Support (January 2026)
 
-Implemented multicast routing protocol support:
+Implemented Multicast Source Discovery Protocol (RFC 3618):
+
+- **State Machine:** Peer states, SA cache management, mesh group support
+- **TCP Layer:** Connection management with RFC 3618 collision resolution
+- **Protocol Integration:** PIM-to-MSDP and MSDP-to-PIM notifications, SA flooding
+- **CLI Commands:** `msdp peers`, `msdp sa-cache`, `msdp add-peer`, etc.
+
+**Status:** Complete (95%) - Integration tests deferred
+**Plan:** [plans/archive/MSDP_IMPLEMENTATION.md](plans/archive/MSDP_IMPLEMENTATION.md)
+
+### Multi-Interface Architecture (December 2025)
+
+Redesigned MCR for multiple input interfaces from a single daemon:
+
+- **Configuration:** JSON5 format with pinning and rules
+- **Worker Model:** Dynamic spawning, per-interface fanout groups
+- **Two-State Config:** Running config vs startup config model
+- **CLI:** Full mcrctl command set (23/25 commands)
+
+**Status:** Complete (94%) - Minor CLI polish remaining
+**Plan:** [plans/archive/MULTI_INTERFACE_DESIGN.md](plans/archive/MULTI_INTERFACE_DESIGN.md)
+
+### PIM-SM and IGMP Protocol Support (January 2026)
 
 - **IGMPv2 Querier:** Querier election, group membership tracking, RFC 2236 timers
 - **PIM-SM:** Neighbor discovery, DR election, (*,G) and (S,G) state machines
 - **Multicast RIB:** Unified abstraction merging static rules with protocol-learned routes
-- **Per-interface Rule Filtering:** Rules synced to workers based on their interface
-- **CLI Commands:** `mcrctl pim neighbors`, `mcrctl igmp groups`, `mcrctl mroute`
+- **IGMP-MRIB Integration:** Automatic fanout when hosts join multicast groups
 
-**Implementation:** `src/protocols/`, `src/mroute.rs`, protocol integration in `src/supervisor.rs`
+### Logging Subsystem Cleanup (January 2026)
 
-### ✅ IGMP-PIM Integration (January 2026)
-
-Completed the IGMP-MRIB integration to merge IGMP-learned interfaces into forwarding rules:
-
-- **Static Rule Merging:** IGMP-learned interfaces are added to static rule outputs for matching groups
-- **PIM Route Merging:** IGMP-learned interfaces are added as downstream interfaces on (*,G) and (S,G) routes
-- **Loop Prevention:** Input interfaces are not added as outputs; upstream interfaces are not added as downstream
-- **Duplicate Prevention:** Existing outputs are not duplicated when merging IGMP interfaces
-
-This enables automatic fanout: when hosts join a multicast group via IGMP, their interfaces are automatically added to the forwarding path.
-
-**Implementation:** `src/mroute.rs` (`compile_forwarding_rules()` method)
+- Removed ~600 lines of dead code (unused ring buffers)
+- Fixed log level propagation to workers
+- Added per-facility log level control
 
 ---
 
-## HIGH: Code Simplification & Performance
-
-### Implement Async io_uring Logging (Deferred)
-
-**Status:** Deferred - not needed for current use cases.
-
-**Rationale:** The worker's hot packet processing path does NOT log. Logging is strategically excluded from performance-critical code. The current `StderrJsonLogger` using `eprintln!()` is acceptable because it's only called during command processing and error handling, not during normal packet forwarding.
-
-**Original Issue:** The current `StderrJsonLogger` uses `eprintln!`, which locks stderr and performs blocking I/O syscalls in the hot data path.
-
-**Implementation Plan:**
-
-1. **New `IoUringLogger` Backend:**
-   - Create a new struct `IoUringLogger` implementing `RingBuffer`.
-   - It holds an `Arc<crossbeam_queue::SegQueue<String>>`.
-   - Its `write()` method formats the `LogEntry` to JSON and pushes the String to the queue.
-
-2. **Update `UnifiedDataPlane`:**
-   - Add `log_queue: Arc<SegQueue<String>>` to the struct.
-   - Add `in_flight_logs: HashMap<u64, ManagedBuffer>` to track submitted writes.
-   - Define `LOG_BASE` / `LOG_MAX` user_data range.
-
-3. **Modify Event Loop (`unified_loop.rs`):**
-   - Add `submit_log_writes()` method:
-     - Drain the `log_queue`.
-     - For each log, acquire a `Small` (2KB) buffer from `BufferPool`.
-     - Copy string bytes into buffer.
-     - Submit `opcode::Write` targeting FD 2 (stderr).
-     - Use `IOSQE_IO_LINK` if ordering is critical (optional).
-   - Update `process_completions`:
-     - Handle `LOG_BASE..LOG_MAX` completions.
-     - Drop the `ManagedBuffer` to return it to the pool.
-
-4. **Worker Initialization (`mod.rs`):**
-   - Initialize `log_queue`.
-   - Create `Logger` with `IoUringLogger(log_queue)`.
-   - Pass `log_queue` (consumer side) to `UnifiedDataPlane`.
-
----
-
-## Documentation & API Parity
-
-### HIGH: Undocumented Features
-
-**Implementation Plan:**
-
-1. **Update `user_docs/REFERENCE.md`:**
-   - **Config Load:** Add documentation for `mcrctl config load <file> --replace`.
-   - ~~**Facilities:** Add a table listing all 12 logging facilities.~~ ✅ Done (January 2026)
-   - **Pinning:** Add a formal definition of the `pinning` JSON object.
-
-### ~~HIGH: User Experience & Troubleshooting~~ ✅ Done (January 2026)
-
-- Created `user_docs/TROUBLESHOOTING.md` with sections on permissions, buffer exhaustion, performance tuning, connection issues, and common error messages
-- Added "Known Limitations" section to `user_docs/GUIDE.md`
-
----
-
-## Code Improvements (General)
+## Remaining Work
 
 ### HIGH Priority
 
-#### Network State Reconciliation
+#### 1. Fix CAP_CHOWN in Capabilities Documentation
 
-- **Goal:** Detect when interfaces go down or change IP.
-- **Plan:** Use `rtnetlink` crate in supervisor to monitor network events.
+**Source:** CAPABILITIES_AND_PACKAGING plan gap
+**Impact:** Users may set insufficient permissions
 
-#### Automated Drift Recovery (Phase 2)
+The plan specified 4 capabilities but only 3 are documented:
 
-- **Goal:** Supervisor automatically fixes worker state.
-- **Plan:** Workers report ruleset hash; Supervisor reconciles.
+| File | Issue |
+|------|-------|
+| `user_docs/REFERENCE.md` (line 232) | Missing CAP_CHOWN in setcap command |
+| `user_docs/SECURITY.md` (line 92) | Missing CAP_CHOWN in setcap example |
+| `packaging/systemd/mcrd.service` (lines 13-14) | Missing CAP_CHOWN in AmbientCapabilities |
+
+**Action:** Add CAP_CHOWN to all three files.
+
+#### 2. Split supervisor.rs (6,050 lines)
+
+**Source:** REFACTORING_PLAN
+**Impact:** Maintainability bottleneck
+
+Proposed structure:
+
+```text
+src/supervisor/
+├── mod.rs                  # Orchestration (~500 lines)
+├── protocol_state.rs       # ProtocolState struct and methods
+├── event_handlers.rs       # handle_igmp/pim/msdp_event
+├── worker_manager.rs       # Supervisor, Worker, InterfaceWorkers
+├── timer_manager.rs        # TimerState, ProtocolTimerManager
+└── command_handler.rs      # handle_supervisor_command
+```
+
+**Plan:** [plans/REFACTORING_PLAN.md](plans/REFACTORING_PLAN.md)
+
+#### 3. Network State Reconciliation
+
+**Source:** Original IMPROVEMENT_PLAN
+**Impact:** Resilience to network changes
+
+- Detect when interfaces go down or change IP
+- Use `rtnetlink` crate in supervisor to monitor network events
+- Gracefully handle interface flaps
+
+#### 4. Decouple Protocols from MRIB
+
+**Source:** REFACTORING_PLAN
+**Impact:** Testability, maintainability
+
+Protocol handlers should return results instead of directly mutating MRIB. Define `ProtocolHandler` trait for cleaner separation.
 
 ### MEDIUM Priority
 
-#### Dynamic Worker Idle Cleanup
+#### 5. Audit unwrap()/expect() Usage (654 occurrences)
 
-- **Goal:** Save resources.
-- **Plan:** Shut down workers with 0 rules after idle timeout.
+**Source:** REFACTORING_PLAN
+**Impact:** Production stability
 
-#### Buffer Size for Jumbo Frames
+| File | Count |
+|------|-------|
+| supervisor.rs | 86 |
+| protocols/msdp.rs | 96 |
+| protocols/pim.rs | 80 |
+| control_client.rs | 80 |
 
-- **Goal:** Support 9k packets.
-- **Plan:** Add Jumbo slab to `BufferPool` and use in `UnifiedDataPlane`.
+Focus on packet parsing paths where malformed data could cause panics.
+
+#### 6. Add MSDP Integration Tests
+
+**Source:** MSDP_IMPLEMENTATION Phase 5
+**Impact:** Test coverage
+
+Missing tests:
+
+- Peer connection establishment (active/passive)
+- Keepalive exchange
+- SA message exchange
+- Mesh group flood suppression
+- Peer timeout and reconnection
+
+#### 7. Implement Lazy Socket Creation
+
+**Source:** REFACTORING_PLAN, supervisor.rs TODO
+**Impact:** Scalability on multi-interface systems
+
+Workers currently create all AF_PACKET sockets upfront. Implement lazy creation triggered by rule additions.
+
+#### 8. Add CLI --name Options
+
+**Source:** MULTI_INTERFACE_DESIGN gap
+**Impact:** User experience
+
+- `mcrctl add --name <NAME>` - Supervisor supports it, CLI has TODO
+- `mcrctl remove --name <NAME>` - RemoveRuleByName exists but not wired
+
+#### 9. Consolidate Config Validation
+
+**Source:** REFACTORING_PLAN
+**Impact:** Code quality
+
+Create `src/validation.rs` with reusable validators instead of 7 separate validation functions.
+
+#### 10. Reorganize Worker Module
+
+**Source:** REFACTORING_PLAN
+**Impact:** Code organization
+
+Split `unified_loop.rs` (1,273 lines) and `packet_parser.rs` (1,404 lines) into focused submodules.
 
 ### LOW Priority
 
-#### On-Demand Packet Tracing
+#### 11. Add require_mcrd_caps! Macro
 
-- **Plan:** Add `TraceRule` command to log sampled packets.
+**Source:** CAPABILITIES_AND_PACKAGING Phase 4.2
+**Impact:** Test convenience
+
+Create test macro that checks for root OR required capabilities (not just root).
+
+#### 12. Add Capability Section to OPERATIONAL_GUIDE.md
+
+**Source:** CAPABILITIES_AND_PACKAGING Phase 1.2
+**Impact:** Documentation completeness
+
+Document capability-based deployment as recommended production approach.
+
+#### 13. Dynamic Worker Idle Cleanup
+
+**Source:** Original IMPROVEMENT_PLAN
+**Impact:** Resource efficiency
+
+Shut down workers with 0 rules after configurable idle timeout.
+
+#### 14. Jumbo Frame Support
+
+**Source:** Original IMPROVEMENT_PLAN
+**Impact:** Feature completeness
+
+Add 9KB buffer slab to BufferPool for jumbo frame support.
+
+#### 15. On-Demand Packet Tracing
+
+**Source:** Original IMPROVEMENT_PLAN
+**Impact:** Debugging capability
+
+Add `TraceRule` command to log sampled packets for debugging.
+
+#### 16. Consolidate Display Implementations
+
+**Source:** REFACTORING_PLAN
+**Impact:** Code quality
+
+10 repetitive Display implementations could use `strum` crate or string constants.
+
+#### 17. Create Shared Test Fixtures
+
+**Source:** REFACTORING_PLAN
+**Impact:** Test maintainability
+
+Extract common test helpers to `tests/common/` module.
+
+#### 18. Standardize API Naming
+
+**Source:** REFACTORING_PLAN
+**Impact:** Consistency
+
+Establish and enforce naming conventions (e.g., `group_address` vs `group` vs `group_addr`).
+
+---
+
+## Documentation Gaps
+
+### Undocumented Features
+
+- `mcrctl config load <file> --replace` - Not in REFERENCE.md
+- `pinning` JSON object - No formal definition
+
+### Missing Troubleshooting
+
+- MSDP-specific troubleshooting guide
+
+---
+
+## Plan Document Status
+
+| Plan | Status | Location |
+|------|--------|----------|
+| CONTROL_PLANE_INTEGRATION | **Archived** (93%) | plans/archive/ |
+| MSDP_IMPLEMENTATION | **Archived** (95%) | plans/archive/ |
+| MULTI_INTERFACE_DESIGN | **Archived** (94%) | plans/archive/ |
+| CAPABILITIES_AND_PACKAGING | **Active** (89%) | plans/ |
+| REFACTORING_PLAN | **Active** (0%) | plans/ |
 
 ---
 
 ## Roadmap
 
-**Phase 1 (Immediate - Maintenance):**
+### Phase 1: Critical Fixes (1-2 weeks)
 
-1. **Simplify Logging:** Delete unused ring buffers.
-2. **Fix Dynamic Log Levels:** Implement IPC command.
-3. **Documentation Parity:** Update Reference and create Troubleshooting guide.
+1. Fix CAP_CHOWN in capabilities documentation
+2. Add CLI --name options
+3. Begin supervisor.rs split
 
-**Phase 2 (Performance & Stability):**
+### Phase 2: Code Quality (3-4 weeks)
 
-1. **Async Logging:** Implement io_uring log writer.
-2. **Network Reconciliation:** Handle interface flaps.
+1. Complete supervisor.rs refactoring
+2. Audit critical unwrap() calls
+3. Decouple protocols from MRIB
+4. Add MSDP integration tests
 
-**Phase 3 (Features):**
+### Phase 3: Features & Polish (5-6 weeks)
 
-1. Drift Recovery.
-2. Packet Tracing.
+1. Network state reconciliation
+2. Lazy socket creation
+3. Consolidate config validation
+4. Documentation updates
+
+### Phase 4: Nice-to-Have (ongoing)
+
+1. Jumbo frame support
+2. Packet tracing
+3. Test infrastructure improvements
+4. API naming standardization
