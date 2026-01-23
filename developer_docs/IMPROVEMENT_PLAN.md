@@ -72,22 +72,7 @@ Redesigned MCR for multiple input interfaces from a single daemon:
 
 ### HIGH Priority
 
-#### 1. Fix CAP_CHOWN in Capabilities Documentation
-
-**Source:** CAPABILITIES_AND_PACKAGING plan gap
-**Impact:** Users may set insufficient permissions
-
-The plan specified 4 capabilities but only 3 are documented:
-
-| File | Issue |
-|------|-------|
-| `user_docs/REFERENCE.md` (line 232) | Missing CAP_CHOWN in setcap command |
-| `user_docs/SECURITY.md` (line 92) | Missing CAP_CHOWN in setcap example |
-| `packaging/systemd/mcrd.service` (lines 13-14) | Missing CAP_CHOWN in AmbientCapabilities |
-
-**Action:** Add CAP_CHOWN to all three files.
-
-#### 2. Split supervisor.rs (6,050 lines)
+#### 1. Split supervisor.rs (6,050 lines)
 
 **Source:** REFACTORING_PLAN
 **Impact:** Maintainability bottleneck
@@ -106,7 +91,7 @@ src/supervisor/
 
 **Plan:** [plans/REFACTORING_PLAN.md](plans/REFACTORING_PLAN.md)
 
-#### 3. Network State Reconciliation
+#### 2. Network State Reconciliation
 
 **Source:** Original IMPROVEMENT_PLAN
 **Impact:** Resilience to network changes
@@ -115,7 +100,7 @@ src/supervisor/
 - Use `rtnetlink` crate in supervisor to monitor network events
 - Gracefully handle interface flaps
 
-#### 4. Decouple Protocols from MRIB
+#### 3. Decouple Protocols from MRIB
 
 **Source:** REFACTORING_PLAN
 **Impact:** Testability, maintainability
@@ -124,7 +109,7 @@ Protocol handlers should return results instead of directly mutating MRIB. Defin
 
 ### MEDIUM Priority
 
-#### 5. Audit unwrap()/expect() Usage (654 occurrences)
+#### 4. Audit unwrap()/expect() Usage (654 occurrences)
 
 **Source:** REFACTORING_PLAN
 **Impact:** Production stability
@@ -138,7 +123,7 @@ Protocol handlers should return results instead of directly mutating MRIB. Defin
 
 Focus on packet parsing paths where malformed data could cause panics.
 
-#### 6. Add MSDP Integration Tests
+#### 5. Add MSDP Integration Tests
 
 **Source:** MSDP_IMPLEMENTATION Phase 5
 **Impact:** Test coverage
@@ -151,14 +136,14 @@ Missing tests:
 - Mesh group flood suppression
 - Peer timeout and reconnection
 
-#### 7. Implement Lazy Socket Creation
+#### 6. Implement Lazy Socket Creation
 
 **Source:** REFACTORING_PLAN, supervisor.rs TODO
 **Impact:** Scalability on multi-interface systems
 
 Workers currently create all AF_PACKET sockets upfront. Implement lazy creation triggered by rule additions.
 
-#### 8. Add CLI --name Options
+#### 7. Add CLI --name Options
 
 **Source:** MULTI_INTERFACE_DESIGN gap
 **Impact:** User experience
@@ -166,14 +151,14 @@ Workers currently create all AF_PACKET sockets upfront. Implement lazy creation 
 - `mcrctl add --name <NAME>` - Supervisor supports it, CLI has TODO
 - `mcrctl remove --name <NAME>` - RemoveRuleByName exists but not wired
 
-#### 9. Consolidate Config Validation
+#### 8. Consolidate Config Validation
 
 **Source:** REFACTORING_PLAN
 **Impact:** Code quality
 
 Create `src/validation.rs` with reusable validators instead of 7 separate validation functions.
 
-#### 10. Reorganize Worker Module
+#### 9. Reorganize Worker Module
 
 **Source:** REFACTORING_PLAN
 **Impact:** Code organization
@@ -182,56 +167,56 @@ Split `unified_loop.rs` (1,273 lines) and `packet_parser.rs` (1,404 lines) into 
 
 ### LOW Priority
 
-#### 11. Add require_mcrd_caps! Macro
+#### 10. Add require_mcrd_caps! Macro
 
 **Source:** CAPABILITIES_AND_PACKAGING Phase 4.2
 **Impact:** Test convenience
 
 Create test macro that checks for root OR required capabilities (not just root).
 
-#### 12. Add Capability Section to OPERATIONAL_GUIDE.md
+#### 11. Add Capability Section to OPERATIONAL_GUIDE.md
 
 **Source:** CAPABILITIES_AND_PACKAGING Phase 1.2
 **Impact:** Documentation completeness
 
 Document capability-based deployment as recommended production approach.
 
-#### 13. Dynamic Worker Idle Cleanup
+#### 12. Dynamic Worker Idle Cleanup
 
 **Source:** Original IMPROVEMENT_PLAN
 **Impact:** Resource efficiency
 
 Shut down workers with 0 rules after configurable idle timeout.
 
-#### 14. Jumbo Frame Support
+#### 13. Jumbo Frame Support
 
 **Source:** Original IMPROVEMENT_PLAN
 **Impact:** Feature completeness
 
 Add 9KB buffer slab to BufferPool for jumbo frame support.
 
-#### 15. On-Demand Packet Tracing
+#### 14. On-Demand Packet Tracing
 
 **Source:** Original IMPROVEMENT_PLAN
 **Impact:** Debugging capability
 
 Add `TraceRule` command to log sampled packets for debugging.
 
-#### 16. Consolidate Display Implementations
+#### 15. Consolidate Display Implementations
 
 **Source:** REFACTORING_PLAN
 **Impact:** Code quality
 
 10 repetitive Display implementations could use `strum` crate or string constants.
 
-#### 17. Create Shared Test Fixtures
+#### 16. Create Shared Test Fixtures
 
 **Source:** REFACTORING_PLAN
 **Impact:** Test maintainability
 
 Extract common test helpers to `tests/common/` module.
 
-#### 18. Standardize API Naming
+#### 17. Standardize API Naming
 
 **Source:** REFACTORING_PLAN
 **Impact:** Consistency
@@ -267,11 +252,10 @@ Establish and enforce naming conventions (e.g., `group_address` vs `group` vs `g
 
 ## Roadmap
 
-### Phase 1: Critical Fixes (1-2 weeks)
+### Phase 1: Critical Fixes
 
-1. Fix CAP_CHOWN in capabilities documentation
-2. Add CLI --name options
-3. Begin supervisor.rs split
+1. Add CLI --name options
+2. Begin supervisor.rs split
 
 ### Phase 2: Code Quality (3-4 weeks)
 

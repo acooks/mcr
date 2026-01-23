@@ -413,14 +413,12 @@ run-caps *ARGS:
 
 ### Known Issues
 
-1. **CAP_CHOWN missing from documentation and systemd file:**
-   - `user_docs/REFERENCE.md` (line 232): Missing CAP_CHOWN in setcap command
-   - `user_docs/SECURITY.md` (line 92): Missing CAP_CHOWN in setcap example
-   - `packaging/systemd/mcrd.service` (lines 13-14): Missing CAP_CHOWN in AmbientCapabilities
+1. **require_mcrd_caps! macro not implemented** (Phase 4.2)
 
-2. **require_mcrd_caps! macro not implemented** (Phase 4.2)
+2. **OPERATIONAL_GUIDE.md capability section not added** (Phase 1.2)
 
-3. **OPERATIONAL_GUIDE.md capability section not added** (Phase 1.2)
+Note: The plan originally specified CAP_CHOWN, but the implementation avoids needing it.
+The documentation correctly reflects only 3 capabilities are required.
 
 ### Remaining Work
 
