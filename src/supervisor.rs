@@ -942,7 +942,9 @@ impl ProtocolState {
         let now = Instant::now();
         for (interface, iface_state) in self.pim_state.interfaces.iter() {
             for (neighbor_ip, neighbor) in iface_state.neighbors.iter() {
-                let expires_in_secs = neighbor.expires_at.saturating_duration_since(now).as_secs();
+                let expires_in_secs = neighbor
+                    .expires_at
+                    .map(|e| e.saturating_duration_since(now).as_secs());
                 neighbors.push(crate::PimNeighborInfo {
                     interface: interface.clone(),
                     address: *neighbor_ip,
@@ -950,10 +952,19 @@ impl ProtocolState {
                     is_dr: iface_state.designated_router == Some(*neighbor_ip),
                     expires_in_secs,
                     generation_id: neighbor.generation_id,
+                    source: neighbor.source.clone(),
                 });
             }
         }
         neighbors
+    }
+
+    /// Get external PIM neighbors for CLI queries
+    pub fn get_external_neighbors(&self) -> Vec<crate::PimNeighborInfo> {
+        self.get_pim_neighbors()
+            .into_iter()
+            .filter(|n| matches!(n.source, crate::NeighborSource::External { .. }))
+            .collect()
     }
 
     /// Get IGMP group membership for CLI queries
@@ -2204,6 +2215,15 @@ pub enum CommandAction {
     RemoveMsdpPeer { address: Ipv4Addr },
     /// Clear MSDP SA cache
     ClearMsdpSaCache,
+    /// Add an external PIM neighbor
+    AddExternalNeighbor { neighbor: crate::ExternalNeighbor },
+    /// Remove an external PIM neighbor
+    RemoveExternalNeighbor {
+        address: Ipv4Addr,
+        interface: String,
+    },
+    /// Clear all external PIM neighbors
+    ClearExternalNeighbors { interface: Option<String> },
 }
 
 /// Handle a supervisor command by updating state and returning a response + action.
@@ -2752,6 +2772,33 @@ pub fn handle_supervisor_command(
         SupervisorCommand::ClearMsdpSaCache => (
             Response::Success("MSDP SA cache cleared".to_string()),
             CommandAction::ClearMsdpSaCache,
+        ),
+
+        // --- External Neighbor Commands ---
+        SupervisorCommand::AddExternalNeighbor { neighbor } => (
+            Response::Success(format!(
+                "External neighbor {} added on {}",
+                neighbor.address, neighbor.interface
+            )),
+            CommandAction::AddExternalNeighbor { neighbor },
+        ),
+        SupervisorCommand::RemoveExternalNeighbor { address, interface } => (
+            Response::Success(format!(
+                "External neighbor {} removed from {}",
+                address, interface
+            )),
+            CommandAction::RemoveExternalNeighbor { address, interface },
+        ),
+        SupervisorCommand::ListExternalNeighbors => {
+            // This is handled via protocol coordinator, return empty here
+            (Response::ExternalNeighbors(Vec::new()), CommandAction::None)
+        }
+        SupervisorCommand::ClearExternalNeighbors { interface } => (
+            Response::Success(match &interface {
+                Some(iface) => format!("External neighbors cleared from {}", iface),
+                None => "All external neighbors cleared".to_string(),
+            }),
+            CommandAction::ClearExternalNeighbors { interface },
         ),
     }
 }
@@ -3542,6 +3589,10 @@ async fn handle_client(
                     let sa_cache = coordinator.state.get_msdp_sa_cache();
                     Some(Response::MsdpSaCache(sa_cache))
                 }
+                SupervisorCommand::ListExternalNeighbors => {
+                    let neighbors = coordinator.state.get_external_neighbors();
+                    Some(Response::ExternalNeighbors(neighbors))
+                }
                 _ => None,
             }
         } else {
@@ -3845,6 +3896,71 @@ async fn handle_client(
             if let Some(ref mut coordinator) = *coordinator_guard {
                 coordinator.state.msdp_state.sa_cache.clear();
                 log::info!("MSDP SA cache cleared");
+            }
+        }
+        CommandAction::AddExternalNeighbor { neighbor } => {
+            let mut coordinator_guard = protocol_coordinator.lock().unwrap();
+            if let Some(ref mut coordinator) = *coordinator_guard {
+                if coordinator.state.pim_state.add_external_neighbor(&neighbor) {
+                    log::info!(
+                        "External PIM neighbor {} added on {}",
+                        neighbor.address,
+                        neighbor.interface
+                    );
+                } else {
+                    log::warn!(
+                        "Failed to add external neighbor {}: interface {} not enabled for PIM",
+                        neighbor.address,
+                        neighbor.interface
+                    );
+                    final_response = Response::Error(format!(
+                        "Interface {} not enabled for PIM",
+                        neighbor.interface
+                    ));
+                }
+            }
+        }
+        CommandAction::RemoveExternalNeighbor { address, interface } => {
+            let mut coordinator_guard = protocol_coordinator.lock().unwrap();
+            if let Some(ref mut coordinator) = *coordinator_guard {
+                if coordinator
+                    .state
+                    .pim_state
+                    .remove_external_neighbor(address, &interface)
+                {
+                    log::info!(
+                        "External PIM neighbor {} removed from {}",
+                        address,
+                        interface
+                    );
+                } else {
+                    log::warn!(
+                        "External neighbor {} not found on {} (or not external)",
+                        address,
+                        interface
+                    );
+                    final_response = Response::Error(format!(
+                        "External neighbor {} not found on {}",
+                        address, interface
+                    ));
+                }
+            }
+        }
+        CommandAction::ClearExternalNeighbors { interface } => {
+            let mut coordinator_guard = protocol_coordinator.lock().unwrap();
+            if let Some(ref mut coordinator) = *coordinator_guard {
+                let count = coordinator
+                    .state
+                    .pim_state
+                    .clear_external_neighbors(interface.as_deref());
+                log::info!(
+                    "Cleared {} external PIM neighbor(s){}",
+                    count,
+                    interface
+                        .as_ref()
+                        .map(|i| format!(" from {}", i))
+                        .unwrap_or_default()
+                );
             }
         }
     }

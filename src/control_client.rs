@@ -133,6 +133,38 @@ pub enum PimAction {
         #[arg(long)]
         rp: Ipv4Addr,
     },
+    /// Add an external PIM neighbor (injected by external control plane)
+    AddNeighbor {
+        /// Neighbor's IP address
+        #[arg(long)]
+        address: Ipv4Addr,
+        /// Interface where neighbor is reachable
+        #[arg(long)]
+        interface: String,
+        /// DR priority (default: 1)
+        #[arg(long)]
+        priority: Option<u32>,
+        /// Optional tag to identify the source (e.g., "babel", "ospf")
+        #[arg(long)]
+        tag: Option<String>,
+    },
+    /// Remove an external PIM neighbor
+    RemoveNeighbor {
+        /// Neighbor's IP address
+        #[arg(long)]
+        address: Ipv4Addr,
+        /// Interface where neighbor was added
+        #[arg(long)]
+        interface: String,
+    },
+    /// List external PIM neighbors
+    ExternalNeighbors,
+    /// Clear all external PIM neighbors
+    ClearNeighbors {
+        /// Optional interface to clear (clears all if not specified)
+        #[arg(long)]
+        interface: Option<String>,
+    },
 }
 
 #[derive(Parser, Debug)]
@@ -340,6 +372,28 @@ pub fn build_command(cli_command: CliCommand) -> Result<multicast_relay::Supervi
                 group_prefix: group,
                 rp_address: rp,
             },
+            PimAction::AddNeighbor {
+                address,
+                interface,
+                priority,
+                tag,
+            } => multicast_relay::SupervisorCommand::AddExternalNeighbor {
+                neighbor: multicast_relay::ExternalNeighbor {
+                    address,
+                    interface,
+                    dr_priority: priority,
+                    tag,
+                },
+            },
+            PimAction::RemoveNeighbor { address, interface } => {
+                multicast_relay::SupervisorCommand::RemoveExternalNeighbor { address, interface }
+            }
+            PimAction::ExternalNeighbors => {
+                multicast_relay::SupervisorCommand::ListExternalNeighbors
+            }
+            PimAction::ClearNeighbors { interface } => {
+                multicast_relay::SupervisorCommand::ClearExternalNeighbors { interface }
+            }
         },
         CliCommand::Igmp { action } => match action {
             IgmpAction::Groups => multicast_relay::SupervisorCommand::GetIgmpGroups,

@@ -231,6 +231,21 @@ pub enum SupervisorCommand {
         group_prefix: String,
         rp_address: Ipv4Addr,
     },
+    /// Add an external PIM neighbor (injected by external control plane)
+    AddExternalNeighbor {
+        neighbor: ExternalNeighbor,
+    },
+    /// Remove an external PIM neighbor
+    RemoveExternalNeighbor {
+        address: Ipv4Addr,
+        interface: String,
+    },
+    /// List external PIM neighbors
+    ListExternalNeighbors,
+    /// Clear all external PIM neighbors (optionally filtered by interface)
+    ClearExternalNeighbors {
+        interface: Option<String>,
+    },
     // --- IGMP Commands ---
     /// Get IGMP group membership table
     GetIgmpGroups,
@@ -288,6 +303,8 @@ pub enum Response {
     },
     /// PIM neighbor table response
     PimNeighbors(Vec<PimNeighborInfo>),
+    /// External PIM neighbors response
+    ExternalNeighbors(Vec<PimNeighborInfo>),
     /// IGMP group membership response
     IgmpGroups(Vec<IgmpGroupInfo>),
     /// Multicast routing table response
@@ -296,6 +313,42 @@ pub enum Response {
     MsdpPeers(Vec<MsdpPeerInfo>),
     /// MSDP SA cache response
     MsdpSaCache(Vec<MsdpSaCacheInfo>),
+}
+
+/// Source of a PIM neighbor - distinguishes Hello-learned from externally-injected
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
+pub enum NeighborSource {
+    /// Discovered via PIM Hello exchange (default)
+    #[default]
+    PimHello,
+    /// Injected by external control plane
+    External {
+        /// Optional tag for tracking the source (e.g., "babel", "ospf")
+        tag: Option<String>,
+    },
+}
+
+impl std::fmt::Display for NeighborSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NeighborSource::PimHello => write!(f, "pim-hello"),
+            NeighborSource::External { tag: Some(t) } => write!(f, "external:{}", t),
+            NeighborSource::External { tag: None } => write!(f, "external"),
+        }
+    }
+}
+
+/// External neighbor injection request
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ExternalNeighbor {
+    /// Neighbor's IP address
+    pub address: Ipv4Addr,
+    /// Interface where neighbor is reachable
+    pub interface: String,
+    /// Optional DR priority (defaults to 1)
+    pub dr_priority: Option<u32>,
+    /// Optional tag for tracking source (e.g., "babel", "ospf")
+    pub tag: Option<String>,
 }
 
 /// Information about a PIM neighbor
@@ -309,10 +362,12 @@ pub struct PimNeighborInfo {
     pub dr_priority: u32,
     /// Whether this neighbor is the DR on this interface
     pub is_dr: bool,
-    /// Seconds until neighbor expires
-    pub expires_in_secs: u64,
-    /// Neighbor's generation ID
-    pub generation_id: u32,
+    /// Seconds until neighbor expires (None for external neighbors)
+    pub expires_in_secs: Option<u64>,
+    /// Neighbor's generation ID (None for external neighbors)
+    pub generation_id: Option<u32>,
+    /// Source of this neighbor (Hello-learned or external)
+    pub source: NeighborSource,
 }
 
 /// Information about an IGMP group membership

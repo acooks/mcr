@@ -43,6 +43,7 @@ use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
 use super::{PacketBuilder, TimerRequest, TimerType};
+use crate::{ExternalNeighbor, NeighborSource};
 
 // PIM message types
 pub const PIM_HELLO: u8 = 0;
@@ -180,16 +181,18 @@ pub struct PimNeighbor {
     pub address: Ipv4Addr,
     /// Interface the neighbor is reachable on
     pub interface: String,
-    /// When the neighbor expires (based on Holdtime)
-    pub expires_at: Instant,
-    /// DR priority from Hello
+    /// When the neighbor expires (based on Holdtime) - None for external neighbors
+    pub expires_at: Option<Instant>,
+    /// DR priority from Hello or external config
     pub dr_priority: u32,
-    /// Generation ID from Hello
-    pub generation_id: u32,
+    /// Generation ID from Hello - None for external neighbors
+    pub generation_id: Option<u32>,
+    /// Source of this neighbor (Hello-learned or external)
+    pub source: NeighborSource,
 }
 
 impl PimNeighbor {
-    /// Create a new neighbor entry
+    /// Create a new Hello-learned neighbor entry
     pub fn new(
         address: Ipv4Addr,
         interface: String,
@@ -200,24 +203,54 @@ impl PimNeighbor {
         Self {
             address,
             interface,
-            expires_at,
+            expires_at: Some(expires_at),
             dr_priority,
-            generation_id,
+            generation_id: Some(generation_id),
+            source: NeighborSource::PimHello,
         }
     }
 
-    /// Check if the neighbor has expired
-    pub fn is_expired(&self, now: Instant) -> bool {
-        now >= self.expires_at
+    /// Create an external neighbor entry (no expiry, managed externally)
+    pub fn new_external(
+        address: Ipv4Addr,
+        interface: String,
+        dr_priority: u32,
+        tag: Option<String>,
+    ) -> Self {
+        Self {
+            address,
+            interface,
+            expires_at: None,
+            dr_priority,
+            generation_id: None,
+            source: NeighborSource::External { tag },
+        }
     }
 
-    /// Refresh the neighbor's expiry time
+    /// Check if this is an external neighbor
+    pub fn is_external(&self) -> bool {
+        matches!(self.source, NeighborSource::External { .. })
+    }
+
+    /// Check if the neighbor has expired (external neighbors never expire)
+    pub fn is_expired(&self, now: Instant) -> bool {
+        match self.expires_at {
+            Some(expires_at) => now >= expires_at,
+            None => false, // External neighbors don't expire
+        }
+    }
+
+    /// Refresh the neighbor's expiry time (Hello-learned neighbors only)
     pub fn refresh(&mut self, expires_at: Instant, dr_priority: u32, generation_id: u32) {
-        self.expires_at = expires_at;
+        // If this was an external neighbor and we receive a Hello, transition to Hello-learned
+        if self.is_external() {
+            self.source = NeighborSource::PimHello;
+        }
+        self.expires_at = Some(expires_at);
         self.dr_priority = dr_priority;
         // If generation ID changed, neighbor rebooted
-        if self.generation_id != generation_id {
-            self.generation_id = generation_id;
+        if self.generation_id != Some(generation_id) {
+            self.generation_id = Some(generation_id);
         }
     }
 }
@@ -630,6 +663,88 @@ impl PimState {
             .values()
             .flat_map(|iface| iface.neighbors.values())
             .collect()
+    }
+
+    /// Add an external neighbor (injected by external control plane)
+    /// Returns true if neighbor was added, false if interface doesn't exist
+    pub fn add_external_neighbor(&mut self, neighbor: &ExternalNeighbor) -> bool {
+        if let Some(iface_state) = self.interfaces.get_mut(&neighbor.interface) {
+            let pim_neighbor = PimNeighbor::new_external(
+                neighbor.address,
+                neighbor.interface.clone(),
+                neighbor.dr_priority.unwrap_or(DEFAULT_DR_PRIORITY),
+                neighbor.tag.clone(),
+            );
+            iface_state.neighbors.insert(neighbor.address, pim_neighbor);
+            // Re-run DR election with new neighbor
+            iface_state.elect_dr();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Remove an external neighbor
+    /// Returns true if neighbor was removed, false if not found or not external
+    pub fn remove_external_neighbor(&mut self, address: Ipv4Addr, interface: &str) -> bool {
+        if let Some(iface_state) = self.interfaces.get_mut(interface) {
+            // Only remove if it's an external neighbor
+            if let Some(neighbor) = iface_state.neighbors.get(&address) {
+                if neighbor.is_external() {
+                    iface_state.neighbors.remove(&address);
+                    // Re-run DR election
+                    iface_state.elect_dr();
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// List all external neighbors
+    pub fn list_external_neighbors(&self) -> Vec<&PimNeighbor> {
+        self.interfaces
+            .values()
+            .flat_map(|iface| iface.neighbors.values())
+            .filter(|n| n.is_external())
+            .collect()
+    }
+
+    /// Clear all external neighbors, optionally filtered by interface
+    /// Returns the number of neighbors removed
+    pub fn clear_external_neighbors(&mut self, interface: Option<&str>) -> usize {
+        let mut removed = 0;
+
+        let interfaces_to_clear: Vec<String> = match interface {
+            Some(iface) => vec![iface.to_string()],
+            None => self.interfaces.keys().cloned().collect(),
+        };
+
+        for iface_name in interfaces_to_clear {
+            if let Some(iface_state) = self.interfaces.get_mut(&iface_name) {
+                let before = iface_state.neighbors.len();
+                iface_state.neighbors.retain(|_, n| !n.is_external());
+                let after = iface_state.neighbors.len();
+                removed += before - after;
+
+                if before != after {
+                    // Re-run DR election if we removed any
+                    iface_state.elect_dr();
+                }
+            }
+        }
+
+        removed
+    }
+
+    /// Check if a neighbor is valid (either Hello-learned and not expired, or external)
+    pub fn is_valid_neighbor(&self, address: Ipv4Addr, interface: &str, now: Instant) -> bool {
+        if let Some(iface_state) = self.interfaces.get(interface) {
+            if let Some(neighbor) = iface_state.neighbors.get(&address) {
+                return !neighbor.is_expired(now);
+            }
+        }
+        false
     }
 
     /// Clean up expired entries
@@ -1065,5 +1180,336 @@ mod tests {
         let removed = state.neighbor_expired("192.168.1.2".parse().unwrap());
         assert!(removed);
         assert!(state.neighbors.is_empty());
+    }
+
+    #[test]
+    fn test_external_neighbor_creation() {
+        let neighbor = PimNeighbor::new_external(
+            "192.168.1.5".parse().unwrap(),
+            "eth0".to_string(),
+            100,
+            Some("babel".to_string()),
+        );
+
+        assert_eq!(neighbor.address, "192.168.1.5".parse::<Ipv4Addr>().unwrap());
+        assert_eq!(neighbor.interface, "eth0");
+        assert_eq!(neighbor.dr_priority, 100);
+        assert!(neighbor.expires_at.is_none());
+        assert!(neighbor.generation_id.is_none());
+        assert!(neighbor.is_external());
+        assert!(matches!(
+            neighbor.source,
+            NeighborSource::External {
+                tag: Some(ref t)
+            } if t == "babel"
+        ));
+    }
+
+    #[test]
+    fn test_external_neighbor_never_expires() {
+        let neighbor = PimNeighbor::new_external(
+            "192.168.1.5".parse().unwrap(),
+            "eth0".to_string(),
+            100,
+            None,
+        );
+
+        let now = Instant::now();
+        let future = now + Duration::from_secs(100000);
+
+        // External neighbors should never expire
+        assert!(!neighbor.is_expired(now));
+        assert!(!neighbor.is_expired(future));
+    }
+
+    #[test]
+    fn test_external_neighbor_transitions_on_hello() {
+        let mut neighbor = PimNeighbor::new_external(
+            "192.168.1.5".parse().unwrap(),
+            "eth0".to_string(),
+            100,
+            Some("babel".to_string()),
+        );
+
+        assert!(neighbor.is_external());
+
+        // Receiving a Hello should transition to PimHello source
+        let now = Instant::now();
+        neighbor.refresh(now + Duration::from_secs(105), 200, 54321);
+
+        assert!(!neighbor.is_external());
+        assert!(matches!(neighbor.source, NeighborSource::PimHello));
+        assert_eq!(neighbor.dr_priority, 200);
+        assert_eq!(neighbor.generation_id, Some(54321));
+        assert!(neighbor.expires_at.is_some());
+    }
+
+    #[test]
+    fn test_add_external_neighbor_to_pim_state() {
+        let mut state = PimState::new();
+
+        // Enable interface first
+        state.enable_interface(
+            "eth0",
+            "192.168.1.1".parse().unwrap(),
+            PimInterfaceConfig::default(),
+        );
+
+        let external = ExternalNeighbor {
+            address: "192.168.1.5".parse().unwrap(),
+            interface: "eth0".to_string(),
+            dr_priority: Some(200),
+            tag: Some("test".to_string()),
+        };
+
+        assert!(state.add_external_neighbor(&external));
+        assert_eq!(state.interfaces["eth0"].neighbors.len(), 1);
+
+        let neighbor = state.interfaces["eth0"]
+            .neighbors
+            .get(&"192.168.1.5".parse().unwrap())
+            .unwrap();
+        assert!(neighbor.is_external());
+        assert_eq!(neighbor.dr_priority, 200);
+    }
+
+    #[test]
+    fn test_add_external_neighbor_nonexistent_interface() {
+        let mut state = PimState::new();
+
+        let external = ExternalNeighbor {
+            address: "192.168.1.5".parse().unwrap(),
+            interface: "eth99".to_string(), // Not enabled
+            dr_priority: None,
+            tag: None,
+        };
+
+        // Should return false because interface doesn't exist
+        assert!(!state.add_external_neighbor(&external));
+    }
+
+    #[test]
+    fn test_remove_external_neighbor() {
+        let mut state = PimState::new();
+
+        state.enable_interface(
+            "eth0",
+            "192.168.1.1".parse().unwrap(),
+            PimInterfaceConfig::default(),
+        );
+
+        let external = ExternalNeighbor {
+            address: "192.168.1.5".parse().unwrap(),
+            interface: "eth0".to_string(),
+            dr_priority: None,
+            tag: None,
+        };
+
+        state.add_external_neighbor(&external);
+        assert_eq!(state.interfaces["eth0"].neighbors.len(), 1);
+
+        // Remove the external neighbor
+        assert!(state.remove_external_neighbor("192.168.1.5".parse().unwrap(), "eth0"));
+        assert_eq!(state.interfaces["eth0"].neighbors.len(), 0);
+
+        // Removing again should return false
+        assert!(!state.remove_external_neighbor("192.168.1.5".parse().unwrap(), "eth0"));
+    }
+
+    #[test]
+    fn test_remove_external_neighbor_does_not_remove_hello_learned() {
+        let mut state = PimState::new();
+
+        state.enable_interface(
+            "eth0",
+            "192.168.1.1".parse().unwrap(),
+            PimInterfaceConfig::default(),
+        );
+
+        // Add a Hello-learned neighbor
+        let iface = state.interfaces.get_mut("eth0").unwrap();
+        let now = Instant::now();
+        iface.received_hello(
+            "192.168.1.5".parse().unwrap(),
+            Duration::from_secs(105),
+            100,
+            12345,
+            now,
+        );
+        assert_eq!(iface.neighbors.len(), 1);
+
+        // Trying to remove as external should fail
+        assert!(!state.remove_external_neighbor("192.168.1.5".parse().unwrap(), "eth0"));
+        assert_eq!(state.interfaces["eth0"].neighbors.len(), 1);
+    }
+
+    #[test]
+    fn test_list_external_neighbors() {
+        let mut state = PimState::new();
+
+        state.enable_interface(
+            "eth0",
+            "192.168.1.1".parse().unwrap(),
+            PimInterfaceConfig::default(),
+        );
+
+        // Add one external neighbor
+        let external = ExternalNeighbor {
+            address: "192.168.1.5".parse().unwrap(),
+            interface: "eth0".to_string(),
+            dr_priority: None,
+            tag: Some("babel".to_string()),
+        };
+        state.add_external_neighbor(&external);
+
+        // Add one Hello-learned neighbor
+        let iface = state.interfaces.get_mut("eth0").unwrap();
+        let now = Instant::now();
+        iface.received_hello(
+            "192.168.1.6".parse().unwrap(),
+            Duration::from_secs(105),
+            100,
+            12345,
+            now,
+        );
+
+        // Total neighbors should be 2
+        assert_eq!(state.all_neighbors().len(), 2);
+
+        // External neighbors should be 1
+        let external_list = state.list_external_neighbors();
+        assert_eq!(external_list.len(), 1);
+        assert_eq!(
+            external_list[0].address,
+            "192.168.1.5".parse::<Ipv4Addr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_clear_external_neighbors() {
+        let mut state = PimState::new();
+
+        state.enable_interface(
+            "eth0",
+            "192.168.1.1".parse().unwrap(),
+            PimInterfaceConfig::default(),
+        );
+        state.enable_interface(
+            "eth1",
+            "192.168.2.1".parse().unwrap(),
+            PimInterfaceConfig::default(),
+        );
+
+        // Add external neighbors on both interfaces
+        state.add_external_neighbor(&ExternalNeighbor {
+            address: "192.168.1.5".parse().unwrap(),
+            interface: "eth0".to_string(),
+            dr_priority: None,
+            tag: None,
+        });
+        state.add_external_neighbor(&ExternalNeighbor {
+            address: "192.168.2.5".parse().unwrap(),
+            interface: "eth1".to_string(),
+            dr_priority: None,
+            tag: None,
+        });
+
+        // Clear only eth0
+        let removed = state.clear_external_neighbors(Some("eth0"));
+        assert_eq!(removed, 1);
+        assert_eq!(state.interfaces["eth0"].neighbors.len(), 0);
+        assert_eq!(state.interfaces["eth1"].neighbors.len(), 1);
+
+        // Clear all remaining
+        let removed = state.clear_external_neighbors(None);
+        assert_eq!(removed, 1);
+        assert_eq!(state.interfaces["eth1"].neighbors.len(), 0);
+    }
+
+    #[test]
+    fn test_external_neighbor_participates_in_dr_election() {
+        let mut state = PimState::new();
+
+        state.enable_interface(
+            "eth0",
+            "192.168.1.1".parse().unwrap(),
+            PimInterfaceConfig {
+                dr_priority: 100,
+                ..Default::default()
+            },
+        );
+
+        // Run initial DR election (with no neighbors, we should be DR)
+        let iface = state.interfaces.get_mut("eth0").unwrap();
+        iface.elect_dr();
+        assert!(iface.is_dr());
+
+        // Add external neighbor with higher priority
+        let external = ExternalNeighbor {
+            address: "192.168.1.5".parse().unwrap(),
+            interface: "eth0".to_string(),
+            dr_priority: Some(200), // Higher priority
+            tag: None,
+        };
+        state.add_external_neighbor(&external);
+
+        // External neighbor should be DR now (election runs in add_external_neighbor)
+        let iface = state.interfaces.get("eth0").unwrap();
+        assert!(!iface.is_dr());
+        assert_eq!(
+            iface.designated_router,
+            Some("192.168.1.5".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn test_is_valid_neighbor() {
+        let mut state = PimState::new();
+
+        state.enable_interface(
+            "eth0",
+            "192.168.1.1".parse().unwrap(),
+            PimInterfaceConfig::default(),
+        );
+
+        // Add external neighbor (never expires)
+        state.add_external_neighbor(&ExternalNeighbor {
+            address: "192.168.1.5".parse().unwrap(),
+            interface: "eth0".to_string(),
+            dr_priority: None,
+            tag: None,
+        });
+
+        let now = Instant::now();
+
+        // External neighbor should always be valid
+        assert!(state.is_valid_neighbor("192.168.1.5".parse().unwrap(), "eth0", now));
+        assert!(state.is_valid_neighbor(
+            "192.168.1.5".parse().unwrap(),
+            "eth0",
+            now + Duration::from_secs(100000)
+        ));
+
+        // Unknown neighbor should not be valid
+        assert!(!state.is_valid_neighbor("192.168.1.99".parse().unwrap(), "eth0", now));
+
+        // Wrong interface should not be valid
+        assert!(!state.is_valid_neighbor("192.168.1.5".parse().unwrap(), "eth1", now));
+    }
+
+    #[test]
+    fn test_neighbor_source_display() {
+        assert_eq!(NeighborSource::PimHello.to_string(), "pim-hello");
+        assert_eq!(
+            NeighborSource::External { tag: None }.to_string(),
+            "external"
+        );
+        assert_eq!(
+            NeighborSource::External {
+                tag: Some("babel".to_string())
+            }
+            .to_string(),
+            "external:babel"
+        );
     }
 }
