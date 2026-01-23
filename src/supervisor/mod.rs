@@ -3,6 +3,7 @@
 #![allow(clippy::await_holding_lock)]
 
 // Submodules
+mod actions;
 mod command_handler;
 mod event_subscription;
 mod socket_helpers;
@@ -10,6 +11,7 @@ mod timer_manager;
 mod worker_manager;
 
 // Re-exports
+pub use actions::{MribAction, ProtocolHandlerResult};
 pub use command_handler::{handle_supervisor_command, CommandAction};
 pub use event_subscription::EventSubscriptionManager;
 pub use timer_manager::ProtocolTimerManager;
@@ -141,6 +143,43 @@ impl ProtocolState {
         }
     }
 
+    /// Apply MRIB actions returned by a protocol handler
+    pub fn apply_mrib_actions(&mut self, actions: Vec<MribAction>) {
+        for action in actions {
+            match action {
+                MribAction::AddIgmpMembership {
+                    interface,
+                    group,
+                    membership,
+                } => {
+                    self.mrib.add_igmp_membership(&interface, group, membership);
+                }
+                MribAction::RemoveIgmpMembership { interface, group } => {
+                    self.mrib.remove_igmp_membership(&interface, group);
+                }
+                MribAction::AddStarGRoute(route) => {
+                    self.mrib.add_star_g_route(route);
+                }
+                MribAction::RemoveStarGRoute { group } => {
+                    self.mrib.remove_star_g_route(group);
+                }
+                MribAction::AddSgRoute(route) => {
+                    self.mrib.add_sg_route(route);
+                }
+                MribAction::RemoveSgRoute { source, group } => {
+                    self.mrib.remove_sg_route(source, group);
+                }
+            }
+        }
+    }
+
+    /// Emit notifications returned by a protocol handler
+    pub fn emit_notifications(&self, notifications: Vec<crate::ProtocolEventNotification>) {
+        for notification in notifications {
+            self.emit_event(notification);
+        }
+    }
+
     /// Initialize IGMP on specified interfaces
     pub fn enable_igmp(&mut self, interfaces: &[String], config: &crate::config::IgmpConfig) {
         use crate::protocols::igmp::IgmpConfig as ProtocolIgmpConfig;
@@ -238,17 +277,27 @@ impl ProtocolState {
 
     /// Process a protocol event and return any timer requests
     pub fn process_event(&mut self, event: ProtocolEvent) -> Vec<TimerRequest> {
-        match event {
+        let result = match event {
             ProtocolEvent::Igmp(igmp_event) => self.handle_igmp_event(igmp_event),
             ProtocolEvent::Pim(pim_event) => self.handle_pim_event(pim_event),
             ProtocolEvent::Msdp(msdp_event) => self.handle_msdp_event(msdp_event),
             ProtocolEvent::TimerExpired(timer_type) => self.handle_timer_expired(timer_type),
-        }
+        };
+
+        // Apply MRIB actions and emit notifications
+        self.apply_mrib_actions(result.mrib_actions);
+        self.emit_notifications(result.notifications);
+
+        result.timers
     }
 
-    fn handle_igmp_event(&mut self, event: crate::protocols::igmp::IgmpEvent) -> Vec<TimerRequest> {
+    fn handle_igmp_event(
+        &mut self,
+        event: crate::protocols::igmp::IgmpEvent,
+    ) -> ProtocolHandlerResult {
         use crate::protocols::igmp::IgmpEvent;
         let now = Instant::now();
+        let mut result = ProtocolHandlerResult::new();
 
         match event {
             IgmpEvent::EnableQuerier {
@@ -258,11 +307,9 @@ impl ProtocolState {
                 let igmp_config = crate::protocols::igmp::IgmpConfig::default();
                 let state = InterfaceIgmpState::new(interface.clone(), interface_ip, igmp_config);
                 self.igmp_state.insert(interface, state);
-                Vec::new()
             }
             IgmpEvent::DisableQuerier { interface } => {
                 self.igmp_state.remove(&interface);
-                Vec::new()
             }
             IgmpEvent::PacketReceived {
                 interface,
@@ -275,12 +322,13 @@ impl ProtocolState {
                     match msg_type {
                         0x11 => {
                             // Query - handle querier election
-                            igmp_state.received_query(src_ip, now)
+                            result.add_timers(igmp_state.received_query(src_ip, now));
                         }
                         0x16 => {
                             // V2 Membership Report
                             let timers = igmp_state.received_report(src_ip, group, now);
-                            // Add to MRIB if this is a new group
+                            result.add_timers(timers);
+                            // Add to MRIB if this is a new group (read access is kept)
                             let is_new = !self
                                 .mrib
                                 .get_igmp_interfaces_for_group(group)
@@ -291,9 +339,12 @@ impl ProtocolState {
                                     expires_at: now + igmp_state.config.group_membership_interval(),
                                     last_reporter: Some(src_ip),
                                 };
-                                self.mrib.add_igmp_membership(&interface, group, membership);
-                                // Emit event for new membership
-                                self.emit_event(
+                                result.add_action(MribAction::AddIgmpMembership {
+                                    interface: interface.clone(),
+                                    group,
+                                    membership,
+                                });
+                                result.notify(
                                     crate::ProtocolEventNotification::IgmpMembershipChange {
                                         interface: interface.clone(),
                                         group,
@@ -303,39 +354,33 @@ impl ProtocolState {
                                     },
                                 );
                             }
-                            timers
                         }
                         0x17 => {
                             // Leave Group
-                            igmp_state.received_leave(group, now)
+                            result.add_timers(igmp_state.received_leave(group, now));
                         }
-                        _ => Vec::new(),
+                        _ => {}
                     }
-                } else {
-                    Vec::new()
                 }
             }
             IgmpEvent::QueryTimerExpired { interface } => {
                 if let Some(igmp_state) = self.igmp_state.get_mut(&interface) {
-                    igmp_state.query_timer_expired(now)
-                } else {
-                    Vec::new()
+                    result.add_timers(igmp_state.query_timer_expired(now));
                 }
             }
             IgmpEvent::OtherQuerierExpired { interface } => {
                 if let Some(igmp_state) = self.igmp_state.get_mut(&interface) {
-                    igmp_state.other_querier_expired(now)
-                } else {
-                    Vec::new()
+                    result.add_timers(igmp_state.other_querier_expired(now));
                 }
             }
             IgmpEvent::GroupExpired { interface, group } => {
                 if let Some(igmp_state) = self.igmp_state.get_mut(&interface) {
                     igmp_state.group_expired(group, now);
-                    // Remove from MRIB
-                    self.mrib.remove_igmp_membership(&interface, group);
-                    // Emit event for membership leave
-                    self.emit_event(crate::ProtocolEventNotification::IgmpMembershipChange {
+                    result.add_action(MribAction::RemoveIgmpMembership {
+                        interface: interface.clone(),
+                        group,
+                    });
+                    result.notify(crate::ProtocolEventNotification::IgmpMembershipChange {
                         interface: interface.clone(),
                         group,
                         action: crate::MembershipAction::Leave,
@@ -343,15 +388,17 @@ impl ProtocolState {
                         timestamp: unix_timestamp(),
                     });
                 }
-                Vec::new()
             }
             IgmpEvent::GroupQueryExpired { interface, group } => {
                 if let Some(igmp_state) = self.igmp_state.get_mut(&interface) {
                     let (timers, expired) = igmp_state.group_query_expired(group, now);
+                    result.add_timers(timers);
                     if expired {
-                        self.mrib.remove_igmp_membership(&interface, group);
-                        // Emit event for membership leave
-                        self.emit_event(crate::ProtocolEventNotification::IgmpMembershipChange {
+                        result.add_action(MribAction::RemoveIgmpMembership {
+                            interface: interface.clone(),
+                            group,
+                        });
+                        result.notify(crate::ProtocolEventNotification::IgmpMembershipChange {
                             interface: interface.clone(),
                             group,
                             action: crate::MembershipAction::Leave,
@@ -359,16 +406,18 @@ impl ProtocolState {
                             timestamp: unix_timestamp(),
                         });
                     }
-                    timers
-                } else {
-                    Vec::new()
                 }
             }
         }
+        result
     }
 
-    fn handle_pim_event(&mut self, event: crate::protocols::pim::PimEvent) -> Vec<TimerRequest> {
+    fn handle_pim_event(
+        &mut self,
+        event: crate::protocols::pim::PimEvent,
+    ) -> ProtocolHandlerResult {
         use crate::protocols::pim::PimEvent;
+        let mut result = ProtocolHandlerResult::new();
 
         match event {
             PimEvent::EnableInterface {
@@ -386,11 +435,9 @@ impl ProtocolState {
                 };
                 self.pim_state
                     .enable_interface(&interface, interface_ip, config);
-                Vec::new()
             }
             PimEvent::DisableInterface { interface } => {
                 self.pim_state.disable_interface(&interface);
-                Vec::new()
             }
             PimEvent::PacketReceived {
                 interface,
@@ -444,9 +491,11 @@ impl ProtocolState {
                                 (Vec::new(), false, false, false)
                             };
 
+                        result.add_timers(timers);
+
                         // Emit event for new neighbor (outside mutable borrow)
                         if is_new_neighbor {
-                            self.emit_event(crate::ProtocolEventNotification::PimNeighborChange {
+                            result.notify(crate::ProtocolEventNotification::PimNeighborChange {
                                 interface: interface.clone(),
                                 neighbor: src_ip,
                                 action: crate::NeighborAction::Up,
@@ -466,8 +515,6 @@ impl ProtocolState {
                                 )
                             );
                         }
-
-                        timers
                     }
                     1 => {
                         // Register - only if we're RP
@@ -518,21 +565,20 @@ impl ProtocolState {
                                             )
                                         );
                                         let now = Instant::now();
-                                        let result = self
+                                        let msdp_result = self
                                             .msdp_state
                                             .local_source_active(source, group, rp_address, now);
 
                                         // Process flood requests
-                                        if !result.floods.is_empty() {
-                                            self.process_msdp_floods(result.floods);
+                                        if !msdp_result.floods.is_empty() {
+                                            self.process_msdp_floods(msdp_result.floods);
                                         }
 
-                                        return result.timers;
+                                        result.add_timers(msdp_result.timers);
                                     }
                                 }
                             }
                         }
-                        Vec::new()
                     }
                     3 => {
                         // Join/Prune - parse the message
@@ -552,16 +598,13 @@ impl ProtocolState {
                                 Duration::from_secs(holdtime as u64),
                             );
                         }
-                        Vec::new()
                     }
-                    _ => Vec::new(),
+                    _ => {}
                 }
             }
             PimEvent::HelloTimerExpired { interface } => {
                 if let Some(iface_state) = self.pim_state.get_interface_mut(&interface) {
-                    iface_state.hello_timer_expired(Instant::now())
-                } else {
-                    Vec::new()
+                    result.add_timers(iface_state.hello_timer_expired(Instant::now()));
                 }
             }
             PimEvent::NeighborExpired {
@@ -580,7 +623,7 @@ impl ProtocolState {
 
                 // Emit event for neighbor down (outside mutable borrow)
                 if neighbor_existed {
-                    self.emit_event(crate::ProtocolEventNotification::PimNeighborChange {
+                    result.notify(crate::ProtocolEventNotification::PimNeighborChange {
                         interface: interface.clone(),
                         neighbor,
                         action: crate::NeighborAction::Down,
@@ -588,16 +631,14 @@ impl ProtocolState {
                         timestamp: unix_timestamp(),
                     });
                 }
-                Vec::new()
             }
             PimEvent::RouteExpired { source, group } => {
                 // Remove the expired route from state
                 if let Some(src) = source {
                     // (S,G) expired
                     self.pim_state.sg.remove(&(src, group));
-                    self.mrib.remove_sg_route(src, group);
-                    // Emit event for route removal
-                    self.emit_event(crate::ProtocolEventNotification::PimRouteChange {
+                    result.add_action(MribAction::RemoveSgRoute { source: src, group });
+                    result.notify(crate::ProtocolEventNotification::PimRouteChange {
                         route_type: crate::PimTreeType::SG,
                         group,
                         source: Some(src),
@@ -617,9 +658,8 @@ impl ProtocolState {
                 } else {
                     // (*,G) expired
                     self.pim_state.star_g.remove(&group);
-                    self.mrib.remove_star_g_route(group);
-                    // Emit event for route removal
-                    self.emit_event(crate::ProtocolEventNotification::PimRouteChange {
+                    result.add_action(MribAction::RemoveStarGRoute { group });
+                    result.notify(crate::ProtocolEventNotification::PimRouteChange {
                         route_type: crate::PimTreeType::StarG,
                         group,
                         source: None,
@@ -627,17 +667,15 @@ impl ProtocolState {
                         timestamp: unix_timestamp(),
                     });
                 }
-                Vec::new()
             }
             PimEvent::SetStaticRp { group, rp } => {
                 self.pim_state.config.static_rp.insert(group, rp);
-                Vec::new()
             }
             PimEvent::SetRpAddress { rp } => {
                 self.pim_state.config.rp_address = Some(rp);
-                Vec::new()
             }
         }
+        result
     }
 
     /// Process MSDP flood requests by sending them via the TCP command channel
@@ -657,9 +695,13 @@ impl ProtocolState {
         }
     }
 
-    fn handle_msdp_event(&mut self, event: crate::protocols::msdp::MsdpEvent) -> Vec<TimerRequest> {
+    fn handle_msdp_event(
+        &mut self,
+        event: crate::protocols::msdp::MsdpEvent,
+    ) -> ProtocolHandlerResult {
         use crate::protocols::msdp::MsdpEvent;
         let now = Instant::now();
+        let mut result = ProtocolHandlerResult::new();
 
         match event {
             MsdpEvent::TcpConnectionEstablished { peer, is_active } => {
@@ -672,7 +714,7 @@ impl ProtocolState {
                         if is_active { "active" } else { "passive" }
                     )
                 );
-                self.msdp_state.connection_established(peer, is_active, now)
+                result.add_timers(self.msdp_state.connection_established(peer, is_active, now));
             }
             MsdpEvent::TcpConnectionFailed { peer, reason } => {
                 log_warning!(
@@ -680,7 +722,7 @@ impl ProtocolState {
                     Facility::Supervisor,
                     &format!("MSDP peer {} connection failed: {}", peer, reason)
                 );
-                self.msdp_state.connection_failed(peer, now)
+                result.add_timers(self.msdp_state.connection_failed(peer, now));
             }
             MsdpEvent::TcpConnectionClosed { peer, reason } => {
                 log_info!(
@@ -688,7 +730,7 @@ impl ProtocolState {
                     Facility::Supervisor,
                     &format!("MSDP peer {} connection closed: {}", peer, reason)
                 );
-                self.msdp_state.connection_closed(peer, now)
+                result.add_timers(self.msdp_state.connection_closed(peer, now));
             }
             MsdpEvent::MessageReceived {
                 peer,
@@ -715,29 +757,30 @@ impl ProtocolState {
                                     entries.len()
                                 )
                             );
-                            let result = self.msdp_state.process_sa_message(peer, entries, now);
+                            let msdp_result =
+                                self.msdp_state.process_sa_message(peer, entries, now);
 
                             // Process flood requests
-                            if !result.floods.is_empty() {
+                            if !msdp_result.floods.is_empty() {
                                 log_debug!(
                                     self.logger,
                                     Facility::Supervisor,
                                     &format!(
                                         "MSDP: flooding {} SA entries to peers",
-                                        result
+                                        msdp_result
                                             .floods
                                             .iter()
                                             .map(|f| f.entries.len())
                                             .sum::<usize>()
                                     )
                                 );
-                                self.process_msdp_floods(result.floods);
+                                self.process_msdp_floods(msdp_result.floods);
                             }
 
                             // Process learned sources - create (S,G) routes for groups with local receivers
-                            for (source, group) in &result.learned_sources {
+                            for (source, group) in &msdp_result.learned_sources {
                                 // Emit event for new SA entry
-                                self.emit_event(
+                                result.notify(
                                     crate::ProtocolEventNotification::MsdpSaCacheChange {
                                         source: *source,
                                         group: *group,
@@ -747,6 +790,7 @@ impl ProtocolState {
                                     },
                                 );
 
+                                // Read access to MRIB is kept
                                 let receivers = self.mrib.get_igmp_interfaces_for_group(*group);
                                 if !receivers.is_empty() {
                                     log_info!(
@@ -768,13 +812,11 @@ impl ProtocolState {
                                     // Set expiry to match SA cache timeout
                                     route.expires_at =
                                         Some(now + self.msdp_state.config.sa_cache_timeout);
-                                    self.mrib.add_sg_route(route);
+                                    result.add_action(MribAction::AddSgRoute(route));
                                 }
                             }
 
-                            result.timers
-                        } else {
-                            Vec::new()
+                            result.add_timers(msdp_result.timers);
                         }
                     }
                     MSDP_KEEPALIVE => {
@@ -783,7 +825,7 @@ impl ProtocolState {
                             Facility::Supervisor,
                             &format!("MSDP: received keepalive from {}", peer)
                         );
-                        self.msdp_state.process_keepalive(peer, now)
+                        result.add_timers(self.msdp_state.process_keepalive(peer, now));
                     }
                     _ => {
                         log_debug!(
@@ -794,7 +836,6 @@ impl ProtocolState {
                                 msg_type, peer
                             )
                         );
-                        Vec::new()
                     }
                 }
             }
@@ -805,26 +846,23 @@ impl ProtocolState {
                         Facility::Supervisor,
                         &format!("MSDP: local source active ({}, {})", source, group)
                     );
-                    let result = self.msdp_state.local_source_active(source, group, rp, now);
+                    let msdp_result = self.msdp_state.local_source_active(source, group, rp, now);
 
                     // Process flood requests (originating SA for local source)
-                    if !result.floods.is_empty() {
+                    if !msdp_result.floods.is_empty() {
                         log_debug!(
                             self.logger,
                             Facility::Supervisor,
                             &format!("MSDP: originating SA for ({}, {}) to peers", source, group)
                         );
-                        self.process_msdp_floods(result.floods);
+                        self.process_msdp_floods(msdp_result.floods);
                     }
 
-                    result.timers
-                } else {
-                    Vec::new()
+                    result.add_timers(msdp_result.timers);
                 }
             }
             MsdpEvent::LocalSourceInactive { source, group } => {
                 self.msdp_state.local_source_inactive(source, group);
-                Vec::new()
             }
             MsdpEvent::ConnectRetryExpired { peer } => {
                 // This timer triggers a connection attempt
@@ -834,7 +872,6 @@ impl ProtocolState {
                     Facility::Supervisor,
                     &format!("MSDP: connect retry timer expired for {}", peer)
                 );
-                Vec::new()
             }
             MsdpEvent::KeepaliveTimerExpired { peer } => {
                 // Need to send keepalive to peer
@@ -843,7 +880,6 @@ impl ProtocolState {
                     Facility::Supervisor,
                     &format!("MSDP: keepalive timer expired for {}", peer)
                 );
-                Vec::new()
             }
             MsdpEvent::HoldTimerExpired { peer } => {
                 // Peer timed out - disconnect
@@ -852,7 +888,7 @@ impl ProtocolState {
                     Facility::Supervisor,
                     &format!("MSDP: hold timer expired for {} - disconnecting", peer)
                 );
-                self.msdp_state.connection_closed(peer, now)
+                result.add_timers(self.msdp_state.connection_closed(peer, now));
             }
             MsdpEvent::SaCacheExpired {
                 source,
@@ -860,15 +896,13 @@ impl ProtocolState {
                 origin_rp,
             } => {
                 self.msdp_state.sa_cache_expired(source, group, origin_rp);
-                // Emit event for SA cache removal
-                self.emit_event(crate::ProtocolEventNotification::MsdpSaCacheChange {
+                result.notify(crate::ProtocolEventNotification::MsdpSaCacheChange {
                     source,
                     group,
                     rp: origin_rp,
                     action: crate::SaCacheAction::Remove,
                     timestamp: unix_timestamp(),
                 });
-                Vec::new()
             }
             MsdpEvent::AddPeer { config } => {
                 log_info!(
@@ -876,7 +910,7 @@ impl ProtocolState {
                     Facility::Supervisor,
                     &format!("MSDP: adding peer {}", config.address)
                 );
-                self.msdp_state.add_peer(config)
+                result.add_timers(self.msdp_state.add_peer(config));
             }
             MsdpEvent::RemovePeer { peer } => {
                 log_info!(
@@ -885,61 +919,55 @@ impl ProtocolState {
                     &format!("MSDP: removing peer {}", peer)
                 );
                 self.msdp_state.remove_peer(peer);
-                Vec::new()
             }
             MsdpEvent::Enable => {
                 log_info!(self.logger, Facility::Supervisor, "MSDP: enabled");
                 self.msdp_enabled = true;
-                self.msdp_state.enable()
+                result.add_timers(self.msdp_state.enable());
             }
             MsdpEvent::Disable => {
                 log_info!(self.logger, Facility::Supervisor, "MSDP: disabled");
                 self.msdp_enabled = false;
                 self.msdp_state.disable();
-                Vec::new()
             }
         }
+        result
     }
 
-    fn handle_timer_expired(&mut self, timer_type: TimerType) -> Vec<TimerRequest> {
+    fn handle_timer_expired(&mut self, timer_type: TimerType) -> ProtocolHandlerResult {
         let now = Instant::now();
+        let mut result = ProtocolHandlerResult::new();
 
         match timer_type {
             TimerType::IgmpGeneralQuery { interface } => {
                 if let Some(igmp_state) = self.igmp_state.get_mut(&interface) {
-                    igmp_state.query_timer_expired(now)
-                } else {
-                    Vec::new()
+                    result.add_timers(igmp_state.query_timer_expired(now));
                 }
             }
             TimerType::IgmpGroupQuery { interface, group } => {
                 if let Some(igmp_state) = self.igmp_state.get_mut(&interface) {
                     let (timers, _expired) = igmp_state.group_query_expired(group, now);
-                    timers
-                } else {
-                    Vec::new()
+                    result.add_timers(timers);
                 }
             }
             TimerType::IgmpGroupExpiry { interface, group } => {
                 if let Some(igmp_state) = self.igmp_state.get_mut(&interface) {
                     if igmp_state.group_expired(group, now) {
-                        self.mrib.remove_igmp_membership(&interface, group);
+                        result.add_action(MribAction::RemoveIgmpMembership {
+                            interface: interface.clone(),
+                            group,
+                        });
                     }
                 }
-                Vec::new()
             }
             TimerType::IgmpOtherQuerierPresent { interface } => {
                 if let Some(igmp_state) = self.igmp_state.get_mut(&interface) {
-                    igmp_state.other_querier_expired(now)
-                } else {
-                    Vec::new()
+                    result.add_timers(igmp_state.other_querier_expired(now));
                 }
             }
             TimerType::PimHello { interface } => {
                 if let Some(iface_state) = self.pim_state.get_interface_mut(&interface) {
-                    iface_state.hello_timer_expired(now)
-                } else {
-                    Vec::new()
+                    result.add_timers(iface_state.hello_timer_expired(now));
                 }
             }
             TimerType::PimNeighborExpiry {
@@ -956,22 +984,18 @@ impl ProtocolState {
                         iface_state.elect_dr();
                     }
                 }
-                Vec::new()
             }
             TimerType::PimJoinPrune {
                 interface: _,
                 group: _,
             } => {
                 // TODO: Send periodic Join/Prune refresh
-                Vec::new()
             }
             TimerType::PimStarGExpiry { group } => {
-                self.mrib.remove_star_g_route(group);
-                Vec::new()
+                result.add_action(MribAction::RemoveStarGRoute { group });
             }
             TimerType::PimSGExpiry { source, group } => {
-                self.mrib.remove_sg_route(source, group);
-                Vec::new()
+                result.add_action(MribAction::RemoveSgRoute { source, group });
             }
             // MSDP timer handling
             TimerType::MsdpConnectRetry { peer } => {
@@ -989,74 +1013,73 @@ impl ProtocolState {
                 }
 
                 // Reschedule connect retry timer
-                vec![TimerRequest {
+                result.add_timer(TimerRequest {
                     timer_type: TimerType::MsdpConnectRetry { peer },
                     fire_at: now + self.msdp_state.config.connect_retry_period,
                     replace_existing: true,
-                }]
+                });
             }
             TimerType::MsdpKeepalive { peer } => {
                 use crate::protocols::msdp_tcp::MsdpTcpCommand;
 
                 // Check if keepalive is needed and get the interval
-                let (needs_keepalive, keepalive_interval) = {
-                    if let Some(msdp_peer) = self.msdp_state.get_peer(peer) {
-                        (
-                            msdp_peer.needs_keepalive(now),
-                            msdp_peer.config.keepalive_interval,
-                        )
-                    } else {
-                        return Vec::new();
+                let keepalive_info = self.msdp_state.get_peer(peer).map(|msdp_peer| {
+                    (
+                        msdp_peer.needs_keepalive(now),
+                        msdp_peer.config.keepalive_interval,
+                    )
+                });
+
+                if let Some((needs_keepalive, keepalive_interval)) = keepalive_info {
+                    if needs_keepalive {
+                        log_debug!(
+                            self.logger,
+                            Facility::Supervisor,
+                            &format!("MSDP: sending keepalive to {}", peer)
+                        );
+
+                        // Send keepalive command to TCP runner
+                        if let Some(ref tcp_tx) = self.msdp_tcp_tx {
+                            let _ = tcp_tx.try_send(MsdpTcpCommand::SendKeepalive { peer });
+                        }
+
+                        // Update last_sent time
+                        if let Some(msdp_peer) = self.msdp_state.get_peer_mut(peer) {
+                            msdp_peer.record_sent(now);
+                            msdp_peer.keepalives_sent += 1;
+                        }
+
+                        // Reschedule keepalive timer
+                        result.add_timer(TimerRequest {
+                            timer_type: TimerType::MsdpKeepalive { peer },
+                            fire_at: now + keepalive_interval,
+                            replace_existing: true,
+                        });
                     }
-                };
-
-                if needs_keepalive {
-                    log_debug!(
-                        self.logger,
-                        Facility::Supervisor,
-                        &format!("MSDP: sending keepalive to {}", peer)
-                    );
-
-                    // Send keepalive command to TCP runner
-                    if let Some(ref tcp_tx) = self.msdp_tcp_tx {
-                        let _ = tcp_tx.try_send(MsdpTcpCommand::SendKeepalive { peer });
-                    }
-
-                    // Update last_sent time
-                    if let Some(msdp_peer) = self.msdp_state.get_peer_mut(peer) {
-                        msdp_peer.record_sent(now);
-                        msdp_peer.keepalives_sent += 1;
-                    }
-
-                    // Reschedule keepalive timer
-                    return vec![TimerRequest {
-                        timer_type: TimerType::MsdpKeepalive { peer },
-                        fire_at: now + keepalive_interval,
-                        replace_existing: true,
-                    }];
                 }
-                Vec::new()
             }
             TimerType::MsdpHold { peer } => {
                 use crate::protocols::msdp_tcp::MsdpTcpCommand;
 
-                if let Some(msdp_peer) = self.msdp_state.get_peer(peer) {
-                    if msdp_peer.is_timed_out(now) {
-                        log_warning!(
-                            self.logger,
-                            Facility::Supervisor,
-                            &format!("MSDP: peer {} hold timer expired - disconnecting", peer)
-                        );
+                let is_timed_out = self
+                    .msdp_state
+                    .get_peer(peer)
+                    .is_some_and(|p| p.is_timed_out(now));
 
-                        // Send disconnect command to TCP runner
-                        if let Some(ref tcp_tx) = self.msdp_tcp_tx {
-                            let _ = tcp_tx.try_send(MsdpTcpCommand::Disconnect { peer });
-                        }
+                if is_timed_out {
+                    log_warning!(
+                        self.logger,
+                        Facility::Supervisor,
+                        &format!("MSDP: peer {} hold timer expired - disconnecting", peer)
+                    );
 
-                        return self.msdp_state.connection_closed(peer, now);
+                    // Send disconnect command to TCP runner
+                    if let Some(ref tcp_tx) = self.msdp_tcp_tx {
+                        let _ = tcp_tx.try_send(MsdpTcpCommand::Disconnect { peer });
                     }
+
+                    result.add_timers(self.msdp_state.connection_closed(peer, now));
                 }
-                Vec::new()
             }
             TimerType::MsdpSaCacheExpiry {
                 source,
@@ -1064,9 +1087,9 @@ impl ProtocolState {
                 origin_rp,
             } => {
                 self.msdp_state.sa_cache_expired(source, group, origin_rp);
-                Vec::new()
             }
         }
+        result
     }
 
     /// Compile current MRIB state into forwarding rules
