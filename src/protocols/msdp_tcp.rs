@@ -558,9 +558,29 @@ impl MsdpTcpRunner {
             return;
         }
 
-        let socket_addr = SocketAddr::V4(SocketAddrV4::new(peer, MSDP_PORT));
+        let peer_addr = SocketAddr::V4(SocketAddrV4::new(peer, MSDP_PORT));
 
-        match TcpStream::connect(socket_addr).await {
+        // Bind to our local address to ensure correct source IP
+        // This is important in shared namespaces where multiple IPs are available
+        let local_addr = SocketAddr::V4(SocketAddrV4::new(self.local_address, 0));
+
+        let connect_result = async {
+            let socket = socket2::Socket::new(
+                socket2::Domain::IPV4,
+                socket2::Type::STREAM,
+                Some(socket2::Protocol::TCP),
+            )?;
+            socket.set_nonblocking(true)?;
+            socket.bind(&local_addr.into())?;
+
+            // Convert to tokio TcpStream via std
+            let std_stream: std::net::TcpStream = socket.into();
+            let tokio_socket = tokio::net::TcpSocket::from_std_stream(std_stream);
+            tokio_socket.connect(peer_addr).await
+        }
+        .await;
+
+        match connect_result {
             Ok(stream) => {
                 let conn = MsdpConnection::new(peer, stream, true);
                 let conn = Arc::new(Mutex::new(conn));
