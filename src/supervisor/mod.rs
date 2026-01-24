@@ -106,6 +106,9 @@ pub struct ProtocolState {
     pub pim_enabled: bool,
     pub msdp_enabled: bool,
 
+    /// Whether MRT_INIT was enabled on IGMP socket (for cleanup with MRT_DONE)
+    pub mrt_init_enabled: bool,
+
     /// Logger for protocol events
     logger: Logger,
 
@@ -138,6 +141,7 @@ impl ProtocolState {
             igmp_enabled: false,
             pim_enabled: false,
             msdp_enabled: false,
+            mrt_init_enabled: false,
             logger,
             event_manager: None,
             event_buffer_size: 256, // Default
@@ -1883,32 +1887,54 @@ impl ProtocolState {
             ));
         }
 
-        // Set IP_MULTICAST_ALL to receive all multicast packets, not just those
-        // for groups we've joined. This is essential for IGMP queriers/routers
-        // to receive Membership Reports sent to group addresses.
-        // IP_MULTICAST_ALL = 49 (not in libc crate)
-        const IP_MULTICAST_ALL: libc::c_int = 49;
-        let multicast_all: libc::c_int = 1;
+        // Enable MRT_INIT to receive ALL IGMP packets regardless of destination.
+        // This is the standard kernel interface for multicast routing daemons.
+        // Without this, raw sockets only receive IGMP packets destined to addresses
+        // the kernel has joined (e.g., 224.0.0.22), missing IGMPv2 reports sent
+        // to group addresses (e.g., 239.1.1.1).
+        //
+        // MRT_INIT = 200 (from linux/mroute.h, not in libc crate)
+        const MRT_INIT: libc::c_int = 200;
+        let mrt_init: libc::c_int = 1;
         let result = unsafe {
             libc::setsockopt(
                 fd,
                 libc::IPPROTO_IP,
-                IP_MULTICAST_ALL,
-                &multicast_all as *const _ as *const libc::c_void,
+                MRT_INIT,
+                &mrt_init as *const _ as *const libc::c_void,
                 std::mem::size_of::<libc::c_int>() as libc::socklen_t,
             )
         };
 
         if result < 0 {
-            // Not fatal - may not be supported on all kernels
-            log_warning!(
+            let err = std::io::Error::last_os_error();
+            // EADDRINUSE means another process has MRT_INIT (e.g., pimd, mrouted)
+            // EPERM means we don't have CAP_NET_ADMIN
+            if err.raw_os_error() == Some(libc::EADDRINUSE) {
+                log_warning!(
+                    self.logger,
+                    Facility::Supervisor,
+                    "MRT_INIT failed (EADDRINUSE) - another multicast routing daemon is active. \
+                     IGMP reports to group addresses will not be received."
+                );
+            } else {
+                log_warning!(
+                    self.logger,
+                    Facility::Supervisor,
+                    &format!(
+                        "Failed to set MRT_INIT on IGMP socket: {}. \
+                         IGMP reports to group addresses may not be received.",
+                        err
+                    )
+                );
+            }
+        } else {
+            log_info!(
                 self.logger,
                 Facility::Supervisor,
-                &format!(
-                    "Failed to set IP_MULTICAST_ALL on IGMP socket (non-fatal): {}",
-                    std::io::Error::last_os_error()
-                )
+                "MRT_INIT enabled - receiving all IGMP packets"
             );
+            self.mrt_init_enabled = true;
         }
 
         let sock = unsafe { OwnedFd::from_raw_fd(fd) };
@@ -2469,6 +2495,33 @@ impl ProtocolState {
         }
 
         Ok(())
+    }
+}
+
+impl Drop for ProtocolState {
+    fn drop(&mut self) {
+        // Clean up MRT_INIT if it was enabled
+        if self.mrt_init_enabled {
+            if let Some(ref sock) = self.igmp_socket {
+                const MRT_DONE: libc::c_int = 201;
+                let result = unsafe {
+                    libc::setsockopt(
+                        sock.as_raw_fd(),
+                        libc::IPPROTO_IP,
+                        MRT_DONE,
+                        std::ptr::null(),
+                        0,
+                    )
+                };
+                if result < 0 {
+                    // Log at warning level since this is during shutdown
+                    eprintln!(
+                        "Warning: Failed to disable MRT_INIT (MRT_DONE): {}",
+                        std::io::Error::last_os_error()
+                    );
+                }
+            }
+        }
     }
 }
 
