@@ -4252,10 +4252,24 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::logging::{MPSCRingBuffer, Severity};
+    use std::sync::atomic::AtomicU8;
+    use std::sync::{Arc, RwLock};
+
+    /// Create a test logger for unit tests
+    fn create_test_logger() -> Logger {
+        let ringbuffer = Arc::new(MPSCRingBuffer::new(16));
+        let global_min_level = Arc::new(AtomicU8::new(Severity::Info as u8));
+        let facility_min_levels = Arc::new(RwLock::new(std::collections::HashMap::new()));
+        Logger::from_mpsc(ringbuffer, global_min_level, facility_min_levels)
+    }
+
+    // ===========================================
+    // get_source_addr_for_dest tests
+    // ===========================================
 
     #[test]
     fn test_get_source_addr_for_dest_localhost() {
-        // Connecting to localhost should return localhost
         let result = get_source_addr_for_dest(Ipv4Addr::LOCALHOST);
         assert!(result.is_some());
         assert_eq!(result.unwrap(), Ipv4Addr::LOCALHOST);
@@ -4263,22 +4277,481 @@ mod tests {
 
     #[test]
     fn test_get_source_addr_for_dest_external() {
-        // Connecting to an external address should return a non-loopback address
-        // (assuming the machine has a default route)
         let result = get_source_addr_for_dest(Ipv4Addr::new(8, 8, 8, 8));
-        // This may fail in isolated network namespaces without routing
         if let Some(addr) = result {
-            // Should not be 0.0.0.0
             assert_ne!(addr, Ipv4Addr::UNSPECIFIED);
         }
     }
 
     #[test]
     fn test_get_source_addr_for_dest_link_local() {
-        // Link-local destination - kernel will choose appropriate source
         let result = get_source_addr_for_dest(Ipv4Addr::new(169, 254, 1, 1));
-        // May or may not succeed depending on network config
-        // Just verify it doesn't panic
-        let _ = result;
+        let _ = result; // Just verify no panic
+    }
+
+    // ===========================================
+    // ProtocolState initialization tests
+    // ===========================================
+
+    #[test]
+    fn test_protocol_state_new() {
+        let logger = create_test_logger();
+        let state = ProtocolState::new(logger);
+
+        // Verify initial state
+        assert!(!state.igmp_enabled);
+        assert!(!state.pim_enabled);
+        assert!(!state.msdp_enabled);
+        assert!(state.igmp_socket.is_none());
+        assert!(state.pim_socket.is_none());
+        assert!(state.timer_tx.is_none());
+        assert!(state.msdp_tcp_tx.is_none());
+        assert!(state.igmp_state.is_empty());
+        assert!(state.event_manager.is_none());
+    }
+
+    #[test]
+    fn test_protocol_state_enable_event_subscriptions() {
+        let logger = create_test_logger();
+        let mut state = ProtocolState::new(logger);
+
+        assert!(state.event_manager.is_none());
+        assert_eq!(state.event_buffer_size(), 256); // Default
+
+        state.enable_event_subscriptions(512);
+
+        assert!(state.event_manager.is_some());
+        assert_eq!(state.event_buffer_size(), 512);
+    }
+
+    // ===========================================
+    // MRIB action tests
+    // ===========================================
+
+    #[test]
+    fn test_apply_mrib_action_add_igmp_membership() {
+        let logger = create_test_logger();
+        let mut state = ProtocolState::new(logger);
+
+        let group = Ipv4Addr::new(239, 1, 1, 1);
+        let membership = crate::mroute::IgmpMembership {
+            group,
+            expires_at: Instant::now() + std::time::Duration::from_secs(260),
+            last_reporter: Some(Ipv4Addr::new(10, 0, 0, 100)),
+        };
+
+        let actions = vec![MribAction::AddIgmpMembership {
+            interface: "eth0".to_string(),
+            group,
+            membership: membership.clone(),
+        }];
+
+        state.apply_mrib_actions(actions);
+
+        // Verify membership was added
+        let interfaces = state.mrib.get_igmp_interfaces_for_group(group);
+        assert!(interfaces.contains(&"eth0".to_string()));
+    }
+
+    #[test]
+    fn test_apply_mrib_action_remove_igmp_membership() {
+        let logger = create_test_logger();
+        let mut state = ProtocolState::new(logger);
+
+        let group = Ipv4Addr::new(239, 1, 1, 1);
+        let membership = crate::mroute::IgmpMembership {
+            group,
+            expires_at: Instant::now() + std::time::Duration::from_secs(260),
+            last_reporter: Some(Ipv4Addr::new(10, 0, 0, 100)),
+        };
+
+        // First add
+        state.mrib.add_igmp_membership("eth0", group, membership);
+        assert!(!state.mrib.get_igmp_interfaces_for_group(group).is_empty());
+
+        // Then remove via action
+        let actions = vec![MribAction::RemoveIgmpMembership {
+            interface: "eth0".to_string(),
+            group,
+        }];
+
+        state.apply_mrib_actions(actions);
+
+        // Verify removal
+        let interfaces = state.mrib.get_igmp_interfaces_for_group(group);
+        assert!(interfaces.is_empty());
+    }
+
+    #[test]
+    fn test_apply_mrib_action_add_sg_route() {
+        let logger = create_test_logger();
+        let mut state = ProtocolState::new(logger);
+
+        let source = Ipv4Addr::new(10, 0, 0, 1);
+        let group = Ipv4Addr::new(239, 1, 1, 1);
+
+        let mut downstream = std::collections::HashSet::new();
+        downstream.insert("eth1".to_string());
+
+        let route = crate::mroute::SGRoute {
+            source,
+            group,
+            upstream_interface: Some("eth0".to_string()),
+            downstream_interfaces: downstream,
+            spt_bit: false,
+            created_at: Instant::now(),
+            expires_at: None,
+        };
+
+        let actions = vec![MribAction::AddSgRoute(route)];
+        state.apply_mrib_actions(actions);
+
+        // Verify route was added
+        assert!(state.mrib.get_sg_route(source, group).is_some());
+    }
+
+    #[test]
+    fn test_apply_mrib_action_remove_sg_route() {
+        let logger = create_test_logger();
+        let mut state = ProtocolState::new(logger);
+
+        let source = Ipv4Addr::new(10, 0, 0, 1);
+        let group = Ipv4Addr::new(239, 1, 1, 1);
+
+        // Add first
+        let mut downstream = std::collections::HashSet::new();
+        downstream.insert("eth1".to_string());
+
+        let route = crate::mroute::SGRoute {
+            source,
+            group,
+            upstream_interface: Some("eth0".to_string()),
+            downstream_interfaces: downstream,
+            spt_bit: false,
+            created_at: Instant::now(),
+            expires_at: None,
+        };
+        state.mrib.add_sg_route(route);
+        assert!(state.mrib.get_sg_route(source, group).is_some());
+
+        // Remove via action
+        let actions = vec![MribAction::RemoveSgRoute { source, group }];
+        state.apply_mrib_actions(actions);
+
+        assert!(state.mrib.get_sg_route(source, group).is_none());
+    }
+
+    // ===========================================
+    // PIM state tests
+    // ===========================================
+
+    #[test]
+    fn test_protocol_state_enable_pim_interface() {
+        let logger = create_test_logger();
+        let mut state = ProtocolState::new(logger);
+
+        let interface_ip = Ipv4Addr::new(10, 0, 0, 1);
+        let config = crate::protocols::pim::PimInterfaceConfig::default();
+
+        let timers = state
+            .pim_state
+            .enable_interface("eth0", interface_ip, config);
+
+        // Should return Hello timer
+        assert!(!timers.is_empty());
+        assert!(matches!(timers[0].timer_type, TimerType::PimHello { .. }));
+
+        // Verify interface is enabled
+        assert!(state.pim_state.interfaces.contains_key("eth0"));
+        let iface_state = state.pim_state.interfaces.get("eth0").unwrap();
+        assert_eq!(iface_state.address, interface_ip);
+    }
+
+    #[test]
+    fn test_protocol_state_disable_pim_interface() {
+        let logger = create_test_logger();
+        let mut state = ProtocolState::new(logger);
+
+        // Enable first
+        let interface_ip = Ipv4Addr::new(10, 0, 0, 1);
+        let config = crate::protocols::pim::PimInterfaceConfig::default();
+        state
+            .pim_state
+            .enable_interface("eth0", interface_ip, config);
+        assert!(state.pim_state.interfaces.contains_key("eth0"));
+
+        // Disable
+        state.pim_state.disable_interface("eth0");
+        assert!(!state.pim_state.interfaces.contains_key("eth0"));
+    }
+
+    #[test]
+    fn test_get_pim_neighbors_empty() {
+        let logger = create_test_logger();
+        let state = ProtocolState::new(logger);
+
+        let neighbors = state.get_pim_neighbors();
+        assert!(neighbors.is_empty());
+    }
+
+    #[test]
+    fn test_get_pim_neighbors_with_data() {
+        let logger = create_test_logger();
+        let mut state = ProtocolState::new(logger);
+
+        // Enable interface
+        let interface_ip = Ipv4Addr::new(10, 0, 0, 1);
+        let config = crate::protocols::pim::PimInterfaceConfig::default();
+        state
+            .pim_state
+            .enable_interface("eth0", interface_ip, config);
+
+        // Add a neighbor manually
+        let neighbor_addr = Ipv4Addr::new(10, 0, 0, 2);
+        if let Some(iface_state) = state.pim_state.interfaces.get_mut("eth0") {
+            iface_state.neighbors.insert(
+                neighbor_addr,
+                crate::protocols::pim::PimNeighbor {
+                    address: neighbor_addr,
+                    interface: "eth0".to_string(),
+                    dr_priority: 100,
+                    generation_id: Some(12345),
+                    expires_at: Some(Instant::now() + std::time::Duration::from_secs(105)),
+                    source: crate::NeighborSource::PimHello,
+                },
+            );
+        }
+
+        let neighbors = state.get_pim_neighbors();
+        assert_eq!(neighbors.len(), 1);
+        assert_eq!(neighbors[0].address, neighbor_addr);
+        assert_eq!(neighbors[0].interface, "eth0");
+    }
+
+    // ===========================================
+    // IGMP state tests
+    // ===========================================
+
+    #[test]
+    fn test_get_igmp_groups_empty() {
+        let logger = create_test_logger();
+        let state = ProtocolState::new(logger);
+
+        let groups = state.get_igmp_groups();
+        assert!(groups.is_empty());
+    }
+
+    #[test]
+    fn test_mrib_igmp_membership() {
+        // Note: get_igmp_groups() reads from igmp_state, not mrib
+        // This test verifies MRIB membership tracking separately
+        let logger = create_test_logger();
+        let mut state = ProtocolState::new(logger);
+
+        let group = Ipv4Addr::new(239, 1, 1, 1);
+        let membership = crate::mroute::IgmpMembership {
+            group,
+            expires_at: Instant::now() + std::time::Duration::from_secs(260),
+            last_reporter: Some(Ipv4Addr::new(10, 0, 0, 100)),
+        };
+
+        state.mrib.add_igmp_membership("eth0", group, membership);
+
+        // Verify via MRIB interface query (not get_igmp_groups which uses igmp_state)
+        let interfaces = state.mrib.get_igmp_interfaces_for_group(group);
+        assert_eq!(interfaces.len(), 1);
+        assert!(interfaces.contains(&"eth0".to_string()));
+    }
+
+    // ===========================================
+    // MSDP state tests
+    // ===========================================
+
+    #[test]
+    fn test_get_msdp_peers_empty() {
+        let logger = create_test_logger();
+        let state = ProtocolState::new(logger);
+
+        let peers = state.get_msdp_peers();
+        assert!(peers.is_empty());
+    }
+
+    #[test]
+    fn test_get_msdp_peers_with_data() {
+        let logger = create_test_logger();
+        let mut state = ProtocolState::new(logger);
+
+        // Enable MSDP first (required for add_peer to schedule timers)
+        state.msdp_state.config.enabled = true;
+
+        let peer_config = crate::protocols::msdp::MsdpPeerConfig {
+            address: Ipv4Addr::new(10, 0, 0, 2),
+            description: Some("Test peer".to_string()),
+            mesh_group: None,
+            default_peer: false,
+            keepalive_interval: std::time::Duration::from_secs(60),
+            hold_time: std::time::Duration::from_secs(90),
+        };
+
+        let timers = state.msdp_state.add_peer(peer_config);
+
+        // With config.enabled = true, should get connection timer
+        assert!(!timers.is_empty());
+
+        let peers = state.get_msdp_peers();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].address, Ipv4Addr::new(10, 0, 0, 2));
+        assert_eq!(peers[0].description, Some("Test peer".to_string()));
+    }
+
+    #[test]
+    fn test_msdp_add_peer_without_enabled_returns_no_timers() {
+        let logger = create_test_logger();
+        let mut state = ProtocolState::new(logger);
+
+        // Don't enable MSDP - config.enabled defaults to false
+        assert!(!state.msdp_state.config.enabled);
+
+        let peer_config = crate::protocols::msdp::MsdpPeerConfig {
+            address: Ipv4Addr::new(10, 0, 0, 2),
+            description: None,
+            mesh_group: None,
+            default_peer: false,
+            keepalive_interval: std::time::Duration::from_secs(60),
+            hold_time: std::time::Duration::from_secs(90),
+        };
+
+        let timers = state.msdp_state.add_peer(peer_config);
+
+        // Without config.enabled, should get NO timers (this was the bug!)
+        assert!(
+            timers.is_empty(),
+            "add_peer should return no timers when config.enabled=false"
+        );
+
+        // Peer is still added to state
+        let peers = state.get_msdp_peers();
+        assert_eq!(peers.len(), 1);
+
+        // But state should be "disabled"
+        assert_eq!(peers[0].state.to_lowercase(), "disabled");
+    }
+
+    #[test]
+    fn test_msdp_add_peer_with_enabled_returns_timers() {
+        let logger = create_test_logger();
+        let mut state = ProtocolState::new(logger);
+
+        // Enable MSDP
+        state.msdp_state.config.enabled = true;
+
+        let peer_config = crate::protocols::msdp::MsdpPeerConfig {
+            address: Ipv4Addr::new(10, 0, 0, 2),
+            description: None,
+            mesh_group: None,
+            default_peer: false,
+            keepalive_interval: std::time::Duration::from_secs(60),
+            hold_time: std::time::Duration::from_secs(90),
+        };
+
+        let timers = state.msdp_state.add_peer(peer_config);
+
+        // With config.enabled, should get connection timer
+        assert!(
+            !timers.is_empty(),
+            "add_peer should return timers when config.enabled=true"
+        );
+        assert!(matches!(
+            timers[0].timer_type,
+            TimerType::MsdpConnectRetry { .. }
+        ));
+    }
+
+    // ===========================================
+    // MSDP SA cache tests
+    // ===========================================
+
+    #[test]
+    fn test_get_msdp_sa_cache_empty() {
+        let logger = create_test_logger();
+        let state = ProtocolState::new(logger);
+
+        let cache = state.get_msdp_sa_cache();
+        assert!(cache.is_empty());
+    }
+
+    // ===========================================
+    // Mroute entry tests
+    // ===========================================
+
+    #[test]
+    fn test_get_mroute_entries_empty() {
+        let logger = create_test_logger();
+        let state = ProtocolState::new(logger);
+
+        let entries = state.get_mroute_entries();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_get_mroute_entries_with_sg_route() {
+        let logger = create_test_logger();
+        let mut state = ProtocolState::new(logger);
+
+        let source = Ipv4Addr::new(10, 0, 0, 1);
+        let group = Ipv4Addr::new(239, 1, 1, 1);
+
+        // get_mroute_entries() reads from pim_state.sg, not mrib
+        let mut sg_state = crate::protocols::pim::SGState::new(source, group);
+        sg_state.upstream_interface = Some("eth0".to_string());
+        sg_state.downstream_interfaces.insert("eth1".to_string());
+
+        state.pim_state.sg.insert((source, group), sg_state);
+
+        let entries = state.get_mroute_entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].source, Some(source));
+        assert_eq!(entries[0].group, group);
+    }
+
+    // ===========================================
+    // Rule compilation tests
+    // ===========================================
+
+    #[test]
+    fn test_compile_forwarding_rules_empty() {
+        let logger = create_test_logger();
+        let state = ProtocolState::new(logger);
+
+        let rules = state.compile_forwarding_rules();
+        assert!(rules.is_empty());
+    }
+
+    #[test]
+    fn test_compile_forwarding_rules_with_sg_route() {
+        let logger = create_test_logger();
+        let mut state = ProtocolState::new(logger);
+
+        let source = Ipv4Addr::new(10, 0, 0, 1);
+        let group = Ipv4Addr::new(239, 1, 1, 1);
+
+        let mut downstream = std::collections::HashSet::new();
+        downstream.insert("eth1".to_string());
+
+        let route = crate::mroute::SGRoute {
+            source,
+            group,
+            upstream_interface: Some("eth0".to_string()),
+            downstream_interfaces: downstream,
+            spt_bit: false,
+            created_at: Instant::now(),
+            expires_at: None,
+        };
+        state.mrib.add_sg_route(route);
+
+        let rules = state.compile_forwarding_rules();
+
+        // Should have rules for downstream interface
+        assert!(!rules.is_empty());
     }
 }
