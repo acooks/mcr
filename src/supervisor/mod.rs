@@ -36,7 +36,7 @@ use crate::protocols::igmp::InterfaceIgmpState;
 use crate::protocols::msdp::MsdpState;
 use crate::protocols::pim::PimState;
 use crate::protocols::{ProtocolEvent, TimerRequest, TimerType};
-use crate::{log_debug, log_info, log_warning, ForwardingRule, RelayCommand};
+use crate::{log_debug, log_error, log_info, log_warning, ForwardingRule, RelayCommand};
 use std::net::Ipv4Addr;
 use std::os::fd::OwnedFd;
 use std::time::Instant;
@@ -2811,6 +2811,7 @@ async fn handle_client(
     startup_config_path: Option<PathBuf>,
     startup_config: Arc<Option<Config>>,
     protocol_coordinator: Arc<Mutex<Option<ProtocolCoordinator>>>,
+    logger: Logger,
 ) -> Result<()> {
     use crate::{Response, SupervisorCommand};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -2872,7 +2873,11 @@ async fn handle_client(
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                         // Log lag but continue - subscriber missed some events
-                        log::warn!("Event subscriber lagged by {} events", n);
+                        log_warning!(
+                            logger,
+                            Facility::Supervisor,
+                            &format!("Event subscriber lagged by {} events", n)
+                        );
                     }
                 }
             }
@@ -2957,10 +2962,13 @@ async fn handle_client(
                 SupervisorCommand::AddExternalNeighbor { ref neighbor } => {
                     // Validate and add in one atomic operation
                     if coordinator.state.pim_state.add_external_neighbor(neighbor) {
-                        log::info!(
-                            "External PIM neighbor {} added on {}",
-                            neighbor.address,
-                            neighbor.interface
+                        log_info!(
+                            logger,
+                            Facility::Supervisor,
+                            &format!(
+                                "External PIM neighbor {} added on {}",
+                                neighbor.address, neighbor.interface
+                            )
                         );
                         // Emit event for external neighbor up
                         coordinator.state.emit_event(
@@ -2992,10 +3000,13 @@ async fn handle_client(
                         .pim_state
                         .remove_external_neighbor(*address, interface)
                     {
-                        log::info!(
-                            "External PIM neighbor {} removed from {}",
-                            address,
-                            interface
+                        log_info!(
+                            logger,
+                            Facility::Supervisor,
+                            &format!(
+                                "External PIM neighbor {} removed from {}",
+                                address, interface
+                            )
                         );
                         // Emit event for external neighbor down
                         coordinator.state.emit_event(
@@ -3032,7 +3043,7 @@ async fn handle_client(
                             format!("Cleared {} external neighbors from all interfaces", removed)
                         }
                     };
-                    log::info!("{}", msg);
+                    log_info!(logger, Facility::Supervisor, &msg);
                     Some(Response::Success(msg))
                 }
                 SupervisorCommand::EnablePim {
@@ -3067,7 +3078,11 @@ async fn handle_client(
                             if let Some(ref timer_tx) = coordinator.state.timer_tx {
                                 for timer in timers {
                                     if let Err(e) = timer_tx.try_send(timer) {
-                                        log::warn!("Failed to schedule PIM timer: {}", e);
+                                        log_warning!(
+                                            logger,
+                                            Facility::Supervisor,
+                                            &format!("Failed to schedule PIM timer: {}", e)
+                                        );
                                     }
                                 }
                             }
@@ -3076,7 +3091,11 @@ async fn handle_client(
                             coordinator.state.pim_enabled = true;
                             if coordinator.state.pim_socket.is_none() {
                                 if let Err(e) = coordinator.state.create_pim_socket() {
-                                    log::error!("Failed to create PIM socket: {}", e);
+                                    log_error!(
+                                        logger,
+                                        Facility::Supervisor,
+                                        &format!("Failed to create PIM socket: {}", e)
+                                    );
                                 }
                                 // Spawn receiver loop if this is the first socket
                                 coordinator.state.spawn_receiver_loop_if_needed();
@@ -3084,18 +3103,20 @@ async fn handle_client(
                             if let Err(e) =
                                 coordinator.state.join_pim_multicast_on_interface(interface)
                             {
-                                log::warn!(
-                                    "Failed to join PIM multicast on {}: {} (may already be joined)",
-                                    interface,
-                                    e
+                                log_warning!(
+                                    logger,
+                                    Facility::Supervisor,
+                                    &format!("Failed to join PIM multicast on {}: {} (may already be joined)", interface, e)
                                 );
                             }
 
-                            log::info!(
-                                "PIM enabled on interface {} (IP: {}, DR priority: {:?})",
-                                interface,
-                                interface_ip,
-                                dr_priority
+                            log_info!(
+                                logger,
+                                Facility::Supervisor,
+                                &format!(
+                                    "PIM enabled on interface {} (IP: {}, DR priority: {:?})",
+                                    interface, interface_ip, dr_priority
+                                )
                             );
                             Some(Response::Success(format!(
                                 "PIM enabled on {} (IP: {}, DR priority: {})",
@@ -3109,7 +3130,11 @@ async fn handle_client(
                 SupervisorCommand::DisablePim { ref interface } => {
                     // Disable PIM on the interface
                     coordinator.state.pim_state.disable_interface(interface);
-                    log::info!("PIM disabled on interface {}", interface);
+                    log_info!(
+                        logger,
+                        Facility::Supervisor,
+                        &format!("PIM disabled on interface {}", interface)
+                    );
                     Some(Response::Success(format!("PIM disabled on {}", interface)))
                 }
                 _ => None,
@@ -3425,14 +3450,26 @@ async fn handle_client(
                                 runner_task.await;
                             });
 
-                            log::info!("MSDP TCP subsystem initialized on {}:639", local_addr);
+                            log_info!(
+                                logger,
+                                Facility::Supervisor,
+                                &format!("MSDP TCP subsystem initialized on {}:639", local_addr)
+                            );
                         }
                         Err(e) => {
-                            log::warn!("Failed to initialize MSDP TCP: {}", e);
+                            log_warning!(
+                                logger,
+                                Facility::Supervisor,
+                                &format!("Failed to initialize MSDP TCP: {}", e)
+                            );
                         }
                     }
                 } else {
-                    log::warn!("Cannot initialize MSDP TCP: event_tx not available");
+                    log_warning!(
+                        logger,
+                        Facility::Supervisor,
+                        "Cannot initialize MSDP TCP: event_tx not available"
+                    );
                 }
             }
 
@@ -3453,17 +3490,25 @@ async fn handle_client(
                 // Schedule connection timers
                 for timer in timers {
                     if let Err(e) = coordinator.timer_tx.try_send(timer) {
-                        log::warn!("Failed to schedule MSDP timer: {}", e);
+                        log_warning!(
+                            logger,
+                            Facility::Supervisor,
+                            &format!("Failed to schedule MSDP timer: {}", e)
+                        );
                     }
                 }
 
-                log::info!(
-                    "MSDP peer {} added{}",
-                    address,
-                    description
-                        .as_ref()
-                        .map(|d| format!(" ({})", d))
-                        .unwrap_or_default()
+                log_info!(
+                    logger,
+                    Facility::Supervisor,
+                    &format!(
+                        "MSDP peer {} added{}",
+                        address,
+                        description
+                            .as_ref()
+                            .map(|d| format!(" ({})", d))
+                            .unwrap_or_default()
+                    )
                 );
             }
         }
@@ -3471,24 +3516,31 @@ async fn handle_client(
             let mut coordinator_guard = protocol_coordinator.lock().unwrap();
             if let Some(ref mut coordinator) = *coordinator_guard {
                 coordinator.state.msdp_state.remove_peer(address);
-                log::info!("MSDP peer {} removed", address);
+                log_info!(
+                    logger,
+                    Facility::Supervisor,
+                    &format!("MSDP peer {} removed", address)
+                );
             }
         }
         CommandAction::ClearMsdpSaCache => {
             let mut coordinator_guard = protocol_coordinator.lock().unwrap();
             if let Some(ref mut coordinator) = *coordinator_guard {
                 coordinator.state.msdp_state.sa_cache.clear();
-                log::info!("MSDP SA cache cleared");
+                log_info!(logger, Facility::Supervisor, "MSDP SA cache cleared");
             }
         }
         CommandAction::AddExternalNeighbor { neighbor } => {
             let mut coordinator_guard = protocol_coordinator.lock().unwrap();
             if let Some(ref mut coordinator) = *coordinator_guard {
                 if coordinator.state.pim_state.add_external_neighbor(&neighbor) {
-                    log::info!(
-                        "External PIM neighbor {} added on {}",
-                        neighbor.address,
-                        neighbor.interface
+                    log_info!(
+                        logger,
+                        Facility::Supervisor,
+                        &format!(
+                            "External PIM neighbor {} added on {}",
+                            neighbor.address, neighbor.interface
+                        )
                     );
                     // Emit event for external neighbor up
                     coordinator.state.emit_event(
@@ -3503,10 +3555,13 @@ async fn handle_client(
                         },
                     );
                 } else {
-                    log::warn!(
-                        "Failed to add external neighbor {}: interface {} not enabled for PIM",
-                        neighbor.address,
-                        neighbor.interface
+                    log_warning!(
+                        logger,
+                        Facility::Supervisor,
+                        &format!(
+                            "Failed to add external neighbor {}: interface {} not enabled for PIM",
+                            neighbor.address, neighbor.interface
+                        )
                     );
                     final_response = Response::Error(format!(
                         "Interface {} not enabled for PIM",
@@ -3523,10 +3578,13 @@ async fn handle_client(
                     .pim_state
                     .remove_external_neighbor(address, &interface)
                 {
-                    log::info!(
-                        "External PIM neighbor {} removed from {}",
-                        address,
-                        interface
+                    log_info!(
+                        logger,
+                        Facility::Supervisor,
+                        &format!(
+                            "External PIM neighbor {} removed from {}",
+                            address, interface
+                        )
                     );
                     // Emit event for external neighbor down
                     coordinator.state.emit_event(
@@ -3539,10 +3597,13 @@ async fn handle_client(
                         },
                     );
                 } else {
-                    log::warn!(
-                        "External neighbor {} not found on {} (or not external)",
-                        address,
-                        interface
+                    log_warning!(
+                        logger,
+                        Facility::Supervisor,
+                        &format!(
+                            "External neighbor {} not found on {} (or not external)",
+                            address, interface
+                        )
                     );
                     final_response = Response::Error(format!(
                         "External neighbor {} not found on {}",
@@ -3558,13 +3619,17 @@ async fn handle_client(
                     .state
                     .pim_state
                     .clear_external_neighbors(interface.as_deref());
-                log::info!(
-                    "Cleared {} external PIM neighbor(s){}",
-                    count,
-                    interface
-                        .as_ref()
-                        .map(|i| format!(" from {}", i))
-                        .unwrap_or_default()
+                log_info!(
+                    logger,
+                    Facility::Supervisor,
+                    &format!(
+                        "Cleared {} external PIM neighbor(s){}",
+                        count,
+                        interface
+                            .as_ref()
+                            .map(|i| format!(" from {}", i))
+                            .unwrap_or_default()
+                    )
                 );
             }
         }
@@ -3575,7 +3640,11 @@ async fn handle_client(
                     .state
                     .pim_state
                     .set_rpf_provider(provider.clone());
-                log::info!("RPF provider set to {}", provider);
+                log_info!(
+                    logger,
+                    Facility::Supervisor,
+                    &format!("RPF provider set to {}", provider)
+                );
             }
         }
         CommandAction::AddRpfRoute { source, rpf } => {
@@ -3585,10 +3654,13 @@ async fn handle_client(
                     .state
                     .pim_state
                     .add_rpf_route(source, rpf.clone());
-                log::info!(
-                    "Static RPF route added for {} via {}",
-                    source,
-                    rpf.upstream_interface
+                log_info!(
+                    logger,
+                    Facility::Supervisor,
+                    &format!(
+                        "Static RPF route added for {} via {}",
+                        source, rpf.upstream_interface
+                    )
                 );
             }
         }
@@ -3596,9 +3668,17 @@ async fn handle_client(
             let mut coordinator_guard = protocol_coordinator.lock().unwrap();
             if let Some(ref mut coordinator) = *coordinator_guard {
                 if coordinator.state.pim_state.remove_rpf_route(source) {
-                    log::info!("Static RPF route removed for {}", source);
+                    log_info!(
+                        logger,
+                        Facility::Supervisor,
+                        &format!("Static RPF route removed for {}", source)
+                    );
                 } else {
-                    log::warn!("Static RPF route not found for {}", source);
+                    log_warning!(
+                        logger,
+                        Facility::Supervisor,
+                        &format!("Static RPF route not found for {}", source)
+                    );
                     final_response =
                         Response::Error(format!("Static RPF route not found for {}", source));
                 }
@@ -3608,7 +3688,11 @@ async fn handle_client(
             let mut coordinator_guard = protocol_coordinator.lock().unwrap();
             if let Some(ref mut coordinator) = *coordinator_guard {
                 let count = coordinator.state.pim_state.clear_rpf_routes();
-                log::info!("Cleared {} static RPF route(s)", count);
+                log_info!(
+                    logger,
+                    Facility::Supervisor,
+                    &format!("Cleared {} static RPF route(s)", count)
+                );
             }
         }
     }
@@ -3990,6 +4074,7 @@ pub async fn run(
                     startup_config_path.clone(),
                     Arc::clone(&startup_config),
                     Arc::clone(&protocol_coordinator),
+                    supervisor_logger.clone(),
                 )
                 .await
                 {
