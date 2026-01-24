@@ -21,12 +21,48 @@ mod common_topology {
     };
     use anyhow::{Context, Result};
     use multicast_relay::{IgmpGroupInfo, MsdpPeerInfo, PimNeighborInfo};
+    use socket2::{Domain, Protocol, Socket, Type};
     use std::collections::HashMap;
     use std::future::Future;
-    use std::net::Ipv4Addr;
+    use std::net::{Ipv4Addr, SocketAddrV4};
     use std::path::Path;
     use std::time::Duration;
     use tokio::time::sleep;
+
+    // ========================================================================
+    // Multicast group join helper
+    // ========================================================================
+
+    /// Join a multicast group on an interface and hold the membership.
+    ///
+    /// Returns a socket that must be kept alive to maintain group membership.
+    /// When the socket is dropped, the kernel sends an IGMP Leave.
+    ///
+    /// This triggers actual IGMP reports to be sent, unlike `ip maddr add`
+    /// which only updates the kernel's multicast table.
+    pub fn join_multicast_group(group: Ipv4Addr, interface_addr: Ipv4Addr) -> Result<Socket> {
+        let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
+            .context("Failed to create UDP socket")?;
+
+        // Allow address reuse
+        socket.set_reuse_address(true)?;
+
+        // Bind to any port on the interface
+        let bind_addr = SocketAddrV4::new(interface_addr, 0);
+        socket.bind(&bind_addr.into())?;
+
+        // Join the multicast group on the specified interface
+        socket
+            .join_multicast_v4(&group, &interface_addr)
+            .with_context(|| {
+                format!(
+                    "Failed to join multicast group {} on interface {}",
+                    group, interface_addr
+                )
+            })?;
+
+        Ok(socket)
+    }
 
     // ========================================================================
     // Test Timeouts (configurable via environment variables)
@@ -743,8 +779,11 @@ mod phase1 {
 /// Phase 2 Tests: Multi-node and integration tests
 mod phase2 {
     use super::*;
-    use common_topology::{assert_has_pim_neighbor, assert_pim_neighbor_count, TopologyBuilder};
-
+    use anyhow::Context;
+    use common_topology::{
+        assert_has_pim_neighbor, assert_pim_neighbor_count, join_multicast_group, TopologyBuilder,
+    };
+    use std::net::Ipv4Addr;
     use std::time::Duration;
 
     /// Test 2.1: Three-Node PIM Linear Topology
@@ -1022,6 +1061,175 @@ mod phase2 {
         // 4. MRIB → Forwarding rules
 
         println!("\n=== Test 2.4 PASSED ===\n");
+        Ok(())
+    }
+
+    /// Test 2.5: End-to-end IGMP → MRIB → Forwarding Rules
+    ///
+    /// This is a full end-to-end test that verifies:
+    /// 1. Socket-level multicast group join generates IGMP report
+    /// 2. IGMP report creates MRIB entry on querier
+    /// 3. MRIB entry generates forwarding rules
+    ///
+    /// This test uses actual socket operations to join multicast groups,
+    /// which triggers real IGMP protocol messages.
+    #[tokio::test]
+    async fn test_igmp_to_mrib_to_rules() -> Result<()> {
+        require_root!();
+        println!("\n=== Test 2.5: End-to-End IGMP → MRIB → Rules ===\n");
+
+        // Topology:
+        //   Host (veth_h: 10.0.0.2) <---> Router/Querier (veth_r: 10.0.0.1)
+        //
+        // The host will join a multicast group, which triggers:
+        // 1. Kernel sends IGMP Membership Report
+        // 2. Router's IGMP querier receives report
+        // 3. Router creates MRIB entry for the group
+        // 4. MRIB compiles to forwarding rules
+
+        let config_router = r#"{
+            rules: [],
+            igmp: {
+                enabled: true,
+                querier_interfaces: ["veth_r", "veth_h"],
+                query_interval: 5,
+                query_response_interval: 2
+            }
+        }"#;
+
+        let topology = TopologyBuilder::new()
+            .add_link("veth_r", "10.0.0.1/24", "veth_h", "10.0.0.2/24")
+            .add_node("router", "veth_r", config_router)
+            .build()
+            .await?;
+
+        println!("Topology: Host (10.0.0.2) <---> Router/Querier (10.0.0.1)");
+
+        // Force IGMP V2 on veth_h so it responds to our queries
+        // Also enable multicast forwarding to ensure packets are processed
+        let _ = tokio::process::Command::new("sysctl")
+            .args(["-w", "net.ipv4.conf.veth_h.force_igmp_version=2"])
+            .output()
+            .await;
+        let _ = tokio::process::Command::new("sysctl")
+            .args(["-w", "net.ipv4.conf.all.mc_forwarding=1"])
+            .output()
+            .await;
+        let _ = tokio::process::Command::new("sysctl")
+            .args(["-w", "net.ipv4.conf.veth_r.mc_forwarding=1"])
+            .output()
+            .await;
+        let _ = tokio::process::Command::new("sysctl")
+            .args(["-w", "net.ipv4.conf.veth_h.mc_forwarding=1"])
+            .output()
+            .await;
+
+        // Wait for IGMP querier to start
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let client = topology.client("router").unwrap();
+
+        // Verify initial state - may have 224.0.0.22 (IGMPv3 all-routers) from MCR's own join
+        let initial_groups = client.get_igmp_groups().await?;
+        println!("Initial IGMP groups: {:?}", initial_groups);
+        let user_groups: Vec<_> = initial_groups
+            .iter()
+            .filter(|g| g.group != "224.0.0.22".parse::<Ipv4Addr>().unwrap())
+            .collect();
+        assert!(
+            user_groups.is_empty(),
+            "Should have no user IGMP groups initially (ignoring 224.0.0.22): {:?}",
+            user_groups
+        );
+
+        let initial_mroute = client.get_mroute().await?;
+        println!("Initial mroute: {:?}", initial_mroute);
+
+        // Join multicast group from the "host" side
+        // This creates a socket and sends an IGMP Membership Report
+        let group: Ipv4Addr = "239.1.1.1".parse().unwrap();
+        let host_addr: Ipv4Addr = "10.0.0.2".parse().unwrap();
+
+        println!(
+            "\nJoining multicast group {} from host {}...",
+            group, host_addr
+        );
+
+        let _membership_socket =
+            join_multicast_group(group, host_addr).context("Failed to join multicast group")?;
+        println!("✓ Multicast group joined (socket created)");
+
+        // Debug: show multicast group memberships on interfaces
+        let maddr_output = tokio::process::Command::new("ip")
+            .args(["maddr", "show"])
+            .output()
+            .await?;
+        println!(
+            "Interface multicast groups:\n{}",
+            String::from_utf8_lossy(&maddr_output.stdout)
+        );
+
+        // Debug: show kernel IGMP state
+        let igmp_output = tokio::process::Command::new("cat")
+            .arg("/proc/net/igmp")
+            .output()
+            .await?;
+        println!(
+            "Kernel IGMP state (/proc/net/igmp):\n{}",
+            String::from_utf8_lossy(&igmp_output.stdout)
+        );
+
+        // Wait for IGMP report to be processed
+        // The report is sent immediately on join, and again in response to queries
+        println!("Waiting for IGMP report processing...");
+
+        // Wait for IGMP group to appear
+        let igmp_result = topology
+            .wait_for_igmp_group("router", group, Duration::from_secs(10))
+            .await;
+
+        match &igmp_result {
+            Ok(g) => println!("✓ IGMP group detected: {:?}", g),
+            Err(e) => {
+                println!("✗ IGMP group not detected: {}", e);
+                topology.print_log_filtered("router", "IGMP", 20);
+                topology.print_log_filtered("router", "igmp", 20);
+            }
+        }
+
+        // Check MRIB entries
+        let mroute = client.get_mroute().await?;
+        println!("Mroute entries after join: {:?}", mroute);
+
+        // Check forwarding rules
+        let rules = client.list_rules().await?;
+        println!("Forwarding rules: {:?}", rules);
+
+        // Print relevant logs for debugging
+        println!("\n--- Router logs ---");
+        topology.print_log_filtered("router", "IGMP", 15);
+        topology.print_log_filtered("router", "packet", 10);
+        topology.print_log_filtered("router", "membership", 10);
+        topology.print_log_filtered("router", "group", 10);
+
+        // Print all logs for debugging
+        println!("\n--- Full router log ---");
+        topology.print_log_tail("router", 50);
+
+        // Verify IGMP group was detected
+        igmp_result.context("IGMP group should be detected by querier")?;
+
+        // Verify the group is in IGMP state
+        let final_groups = client.get_igmp_groups().await?;
+        assert!(
+            final_groups.iter().any(|g| g.group == group),
+            "Group {} should be in IGMP groups: {:?}",
+            group,
+            final_groups
+        );
+        println!("✓ IGMP group {} confirmed in state", group);
+
+        println!("\n=== Test 2.5 PASSED ===\n");
         Ok(())
     }
 

@@ -108,6 +108,9 @@ pub struct ProtocolState {
 
     /// Event buffer size for subscription manager
     event_buffer_size: usize,
+
+    /// Pending timers from protocol init (processed after timer_tx is available)
+    pending_igmp_timers: Vec<TimerRequest>,
 }
 
 impl ProtocolState {
@@ -130,6 +133,7 @@ impl ProtocolState {
             logger,
             event_manager: None,
             event_buffer_size: 256, // Default
+            pending_igmp_timers: Vec::new(),
         }
     }
 
@@ -206,6 +210,17 @@ impl ProtocolState {
             if let Some(ip) = get_interface_ipv4(iface) {
                 let state = InterfaceIgmpState::new(iface.clone(), ip, igmp_config.clone());
                 self.igmp_state.insert(iface.clone(), state);
+
+                // Schedule initial General Query for this interface
+                // The query will trigger hosts to send Membership Reports
+                self.pending_igmp_timers.push(TimerRequest {
+                    timer_type: TimerType::IgmpGeneralQuery {
+                        interface: iface.clone(),
+                    },
+                    fire_at: Instant::now(), // Send immediately
+                    replace_existing: true,
+                });
+
                 log_info!(
                     self.logger,
                     Facility::Supervisor,
@@ -1713,6 +1728,34 @@ impl ProtocolState {
             ));
         }
 
+        // Set IP_MULTICAST_ALL to receive all multicast packets, not just those
+        // for groups we've joined. This is essential for IGMP queriers/routers
+        // to receive Membership Reports sent to group addresses.
+        // IP_MULTICAST_ALL = 49 (not in libc crate)
+        const IP_MULTICAST_ALL: libc::c_int = 49;
+        let multicast_all: libc::c_int = 1;
+        let result = unsafe {
+            libc::setsockopt(
+                fd,
+                libc::IPPROTO_IP,
+                IP_MULTICAST_ALL,
+                &multicast_all as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+
+        if result < 0 {
+            // Not fatal - may not be supported on all kernels
+            log_warning!(
+                self.logger,
+                Facility::Supervisor,
+                &format!(
+                    "Failed to set IP_MULTICAST_ALL on IGMP socket (non-fatal): {}",
+                    std::io::Error::last_os_error()
+                )
+            );
+        }
+
         let sock = unsafe { OwnedFd::from_raw_fd(fd) };
 
         log_info!(
@@ -1863,10 +1906,155 @@ impl ProtocolState {
         Ok(())
     }
 
+    /// Enable ALLMULTI mode on an interface for IGMP querier functionality.
+    ///
+    /// IGMP queriers need to receive Membership Reports for all multicast groups,
+    /// not just those the interface has joined. Reports are sent to the group
+    /// address (e.g., 239.1.1.1) and would be filtered at L2 without ALLMULTI.
+    pub fn enable_allmulti_on_interface(&self, interface: &str) -> Result<()> {
+        use std::ffi::CString;
+
+        let iface_cstr = CString::new(interface)
+            .map_err(|_| anyhow::anyhow!("Invalid interface name: {}", interface))?;
+
+        // Create a temporary socket for ioctl
+        let sock = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
+        if sock < 0 {
+            return Err(anyhow::anyhow!(
+                "Failed to create socket for ALLMULTI: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+
+        // Get current flags
+        let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
+        let name_bytes = iface_cstr.as_bytes_with_nul();
+        let copy_len = std::cmp::min(name_bytes.len(), ifr.ifr_name.len());
+        for (i, &b) in name_bytes[..copy_len].iter().enumerate() {
+            ifr.ifr_name[i] = b as i8;
+        }
+
+        let result = unsafe { libc::ioctl(sock, libc::SIOCGIFFLAGS as _, &mut ifr) };
+        if result < 0 {
+            unsafe { libc::close(sock) };
+            return Err(anyhow::anyhow!(
+                "Failed to get interface flags for {}: {}",
+                interface,
+                std::io::Error::last_os_error()
+            ));
+        }
+
+        // Set ALLMULTI flag
+        let flags = unsafe { ifr.ifr_ifru.ifru_flags };
+        if flags & (libc::IFF_ALLMULTI as i16) != 0 {
+            // Already set
+            unsafe { libc::close(sock) };
+            return Ok(());
+        }
+
+        ifr.ifr_ifru.ifru_flags = flags | (libc::IFF_ALLMULTI as i16);
+        let result = unsafe { libc::ioctl(sock, libc::SIOCSIFFLAGS as _, &ifr) };
+        unsafe { libc::close(sock) };
+
+        if result < 0 {
+            return Err(anyhow::anyhow!(
+                "Failed to set ALLMULTI on {}: {}",
+                interface,
+                std::io::Error::last_os_error()
+            ));
+        }
+
+        log_info!(
+            self.logger,
+            Facility::Supervisor,
+            &format!("Enabled ALLMULTI on interface {} for IGMP", interface)
+        );
+
+        Ok(())
+    }
+
+    /// Join the IGMPv3 all-routers multicast group (224.0.0.22) on an interface.
+    ///
+    /// This is required to receive IGMPv3 Membership Reports, which are sent to
+    /// 224.0.0.22 instead of the group address (unlike IGMPv2).
+    pub fn join_igmp_v3_all_routers(&self, interface: &str) -> Result<()> {
+        let fd = self
+            .igmp_socket
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("IGMP socket not created"))?
+            .as_raw_fd();
+
+        // Get interface index
+        let iface_index = socket_helpers::get_interface_index(interface)?;
+
+        // IGMPv3 all-routers multicast group (224.0.0.22)
+        let igmp_v3_all_routers = Ipv4Addr::new(224, 0, 0, 22);
+
+        // Use ip_mreqn to specify the interface by index
+        let mreqn = libc::ip_mreqn {
+            imr_multiaddr: libc::in_addr {
+                s_addr: u32::from(igmp_v3_all_routers).to_be(),
+            },
+            imr_address: libc::in_addr { s_addr: 0 },
+            imr_ifindex: iface_index,
+        };
+
+        let result = unsafe {
+            libc::setsockopt(
+                fd,
+                libc::IPPROTO_IP,
+                libc::IP_ADD_MEMBERSHIP,
+                &mreqn as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::ip_mreqn>() as libc::socklen_t,
+            )
+        };
+
+        if result < 0 {
+            return Err(anyhow::anyhow!(
+                "Failed to join IGMPv3 all-routers on {}: {}",
+                interface,
+                std::io::Error::last_os_error()
+            ));
+        }
+
+        log_info!(
+            self.logger,
+            Facility::Supervisor,
+            &format!(
+                "Joined IGMPv3 all-routers ({}) on interface {}",
+                igmp_v3_all_routers, interface
+            )
+        );
+
+        Ok(())
+    }
+
     /// Create both protocol sockets if protocols are enabled
     pub fn create_protocol_sockets(&mut self) -> Result<()> {
         if self.igmp_enabled && self.igmp_socket.is_none() {
             self.create_igmp_socket()?;
+
+            // Enable ALLMULTI and join IGMPv3 all-routers on each IGMP-enabled interface
+            let interfaces: Vec<String> = self.igmp_state.keys().cloned().collect();
+            for interface in &interfaces {
+                // Enable ALLMULTI to receive all multicast at L2
+                if let Err(e) = self.enable_allmulti_on_interface(interface) {
+                    log_warning!(
+                        self.logger,
+                        Facility::Supervisor,
+                        &format!("Failed to enable ALLMULTI on {}: {}", interface, e)
+                    );
+                }
+
+                // Join 224.0.0.22 to receive IGMPv3 Membership Reports
+                if let Err(e) = self.join_igmp_v3_all_routers(interface) {
+                    log_warning!(
+                        self.logger,
+                        Facility::Supervisor,
+                        &format!("Failed to join IGMPv3 all-routers on {}: {}", interface, e)
+                    );
+                }
+            }
         }
         if self.pim_enabled && self.pim_socket.is_none() {
             self.create_pim_socket()?;
@@ -2094,18 +2282,21 @@ impl ProtocolState {
 /// Build an IP packet with the given payload
 ///
 /// Creates a complete IP packet with:
-/// - 20-byte IP header (no options)
+/// - 24-byte IP header (with Router Alert option for IGMP/PIM)
 /// - Payload data
 ///
+/// The Router Alert option (RFC 2113) is required for IGMP packets.
 /// The kernel will fill in some fields (like checksum) when IP_HDRINCL is set.
 fn build_ip_packet(source: Ipv4Addr, dest: Ipv4Addr, protocol: u8, payload: &[u8]) -> Vec<u8> {
-    let total_len = 20 + payload.len();
+    // Use 24-byte IP header with Router Alert option
+    let header_len = 24;
+    let total_len = header_len + payload.len();
 
     let mut packet = vec![0u8; total_len];
 
-    // IP header (20 bytes, no options)
-    packet[0] = 0x45; // Version 4, IHL 5 (20 bytes)
-    packet[1] = 0x00; // TOS (DSCP + ECN)
+    // IP header (24 bytes, with Router Alert option)
+    packet[0] = 0x46; // Version 4, IHL 6 (24 bytes = 6 * 4)
+    packet[1] = 0xc0; // TOS: DSCP=48 (CS6), ECN=0 - used for routing protocols
     packet[2..4].copy_from_slice(&(total_len as u16).to_be_bytes()); // Total length
     packet[4..6].copy_from_slice(&[0x00, 0x00]); // Identification (kernel fills)
     packet[6..8].copy_from_slice(&[0x00, 0x00]); // Flags + Fragment offset
@@ -2115,8 +2306,16 @@ fn build_ip_packet(source: Ipv4Addr, dest: Ipv4Addr, protocol: u8, payload: &[u8
     packet[12..16].copy_from_slice(&source.octets()); // Source IP
     packet[16..20].copy_from_slice(&dest.octets()); // Destination IP
 
+    // IP Options: Router Alert (RFC 2113)
+    // Option type 0x94 (copied=1, class=0, number=20)
+    // Length 4, Value 0x0000 (Router shall examine packet)
+    packet[20] = 0x94; // Router Alert option type
+    packet[21] = 0x04; // Option length (4 bytes)
+    packet[22] = 0x00; // Router Alert value high byte
+    packet[23] = 0x00; // Router Alert value low byte
+
     // Copy payload
-    packet[20..].copy_from_slice(payload);
+    packet[header_len..].copy_from_slice(payload);
 
     packet
 }
@@ -2268,6 +2467,14 @@ pub async fn protocol_receiver_loop(
                     match guard.get_inner().try_read_with_pktinfo(&mut buf) {
                         Ok(recv) if recv.len > 0 => {
                             let interface = interface_name_from_index(recv.iface_index);
+                            log_info!(
+                                logger,
+                                Facility::Supervisor,
+                                &format!(
+                                    "IGMP packet received: {} bytes on iface_index={}, interface={:?}",
+                                    recv.len, recv.iface_index, interface
+                                )
+                            );
                             if let Some(event) = parse_igmp_packet(&buf[..recv.len], interface, &logger) {
                                 if event_tx.send(event).await.is_err() {
                                     log_warning!(
@@ -2385,15 +2592,96 @@ fn parse_igmp_packet(
     }
 
     let msg_type = igmp[0];
+
+    // Handle IGMPv3 Membership Report (type 0x22 = 34)
+    if msg_type == 0x22 {
+        // IGMPv3 Report format:
+        // byte 0: type (0x22)
+        // byte 1: reserved
+        // bytes 2-3: checksum
+        // bytes 4-5: reserved
+        // bytes 6-7: number of group records
+        // bytes 8+: group records
+        if igmp.len() < 8 {
+            return None;
+        }
+
+        let num_records = u16::from_be_bytes([igmp[6], igmp[7]]) as usize;
+
+        log_info!(
+            logger,
+            Facility::Supervisor,
+            &format!(
+                "Received IGMPv3 Report: {} group records from {} on {}",
+                num_records, src_ip, interface
+            )
+        );
+
+        // Parse group records and generate events for each
+        let mut offset = 8;
+        for _i in 0..num_records {
+            if offset + 8 > igmp.len() {
+                break;
+            }
+            let record_type = igmp[offset];
+            let aux_data_len = igmp[offset + 1] as usize;
+            let num_sources = u16::from_be_bytes([igmp[offset + 2], igmp[offset + 3]]) as usize;
+            let group = Ipv4Addr::new(
+                igmp[offset + 4],
+                igmp[offset + 5],
+                igmp[offset + 6],
+                igmp[offset + 7],
+            );
+
+            // IGMPv3 record types:
+            // 1 = MODE_IS_INCLUDE (current state)
+            // 2 = MODE_IS_EXCLUDE (current state, i.e., joined)
+            // 3 = CHANGE_TO_INCLUDE_MODE
+            // 4 = CHANGE_TO_EXCLUDE_MODE (join)
+            // 5 = ALLOW_NEW_SOURCES
+            // 6 = BLOCK_OLD_SOURCES
+            let is_join = record_type == 2 || record_type == 4;
+
+            log_info!(
+                logger,
+                Facility::Supervisor,
+                &format!(
+                    "IGMPv3 record: type={}, group={}, sources={}, is_join={}",
+                    record_type, group, num_sources, is_join
+                )
+            );
+
+            // Move to next record
+            // Record size = 8 bytes header + (num_sources * 4 bytes) + (aux_data_len * 4 bytes)
+            offset += 8 + (num_sources * 4) + (aux_data_len * 4);
+
+            // Only process joins (MODE_IS_EXCLUDE or CHANGE_TO_EXCLUDE_MODE with empty source list)
+            // These indicate the host wants to receive all traffic for the group
+            if is_join && !group.is_unspecified() {
+                // Return event for this group - convert to IGMPv2-style event
+                // type 0x16 = IGMPv2 Membership Report
+                return Some(ProtocolEvent::Igmp(IgmpEvent::PacketReceived {
+                    interface,
+                    src_ip,
+                    msg_type: 0x16, // Treat as IGMPv2 report for state machine
+                    max_resp_time: 0,
+                    group,
+                }));
+            }
+        }
+        return None;
+    }
+
+    // Handle IGMPv1/v2 format
     let max_resp_time = igmp[1];
     let group = Ipv4Addr::new(igmp[4], igmp[5], igmp[6], igmp[7]);
 
-    log_debug!(
+    log_info!(
         logger,
         Facility::Supervisor,
         &format!(
-            "Received IGMP packet: type={:#x}, src={}, group={}, interface={}",
-            msg_type, src_ip, group, interface
+            "Received IGMPv2 packet: type={:#x}, src={}, group={}, interface={}, ihl={}",
+            msg_type, src_ip, group, interface, ihl
         )
     );
 
@@ -2675,6 +2963,18 @@ pub fn initialize_protocol_subsystem(
     // Create protocol sockets if needed
     if state.igmp_enabled || state.pim_enabled {
         state.create_protocol_sockets()?;
+    }
+
+    // Schedule any pending timers from protocol initialization
+    // This must happen AFTER socket creation so timers can send packets
+    for timer in state.pending_igmp_timers.drain(..) {
+        if let Err(e) = timer_tx.try_send(timer) {
+            log_warning!(
+                logger,
+                Facility::Supervisor,
+                &format!("Failed to schedule pending IGMP timer: {}", e)
+            );
+        }
     }
 
     // Store event_tx in state for later use (e.g., spawning receiver loop via CLI)
