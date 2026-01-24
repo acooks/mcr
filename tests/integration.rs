@@ -49,6 +49,9 @@ mod protocol_pim; // PIM neighbor management and configuration tests (requires r
 #[path = "integration/protocol_msdp.rs"]
 mod protocol_msdp; // MSDP peer management and SA cache tests (requires root)
 
+#[path = "integration/protocol_cli.rs"]
+mod protocol_cli; // Protocol enable via CLI without config file (requires root)
+
 // Topology tests - multi-node protocol validation
 #[path = "integration/topology.rs"]
 mod topology; // PIM Hello exchange, IGMP querier election, MSDP TCP session (requires root)
