@@ -677,13 +677,136 @@ impl ProtocolState {
                         if let Some((upstream, joins, prunes, holdtime)) =
                             parse_pim_join_prune(&payload)
                         {
-                            let _ = self.pim_state.process_join_prune(
+                            log_info!(
+                                self.logger,
+                                Facility::Supervisor,
+                                &format!(
+                                    "PIM: Received Join/Prune from {} on {}: {} joins, {} prunes",
+                                    src_ip,
+                                    reported_interface,
+                                    joins.len(),
+                                    prunes.len()
+                                )
+                            );
+
+                            // Track which routes exist before processing prunes
+                            // so we can detect removals
+                            let prune_targets: Vec<_> =
+                                prunes.iter().map(|(src, grp)| (*src, *grp)).collect();
+
+                            // Process joins and prunes, get timers
+                            let timers = self.pim_state.process_join_prune(
                                 &reported_interface,
                                 upstream,
                                 &joins,
                                 &prunes,
                                 Duration::from_secs(holdtime as u64),
                             );
+                            result.add_timers(timers);
+
+                            // Generate MRIB actions for joins
+                            for (source, group) in &joins {
+                                match source {
+                                    None => {
+                                        // (*,G) join - look up the resulting state
+                                        if let Some(star_g_state) = self.pim_state.star_g.get(group)
+                                        {
+                                            let route = crate::mroute::StarGRoute {
+                                                group: *group,
+                                                rp: star_g_state.rp,
+                                                upstream_interface: star_g_state
+                                                    .upstream_interface
+                                                    .clone(),
+                                                downstream_interfaces: star_g_state
+                                                    .downstream_interfaces
+                                                    .clone(),
+                                                created_at: star_g_state.created_at,
+                                                expires_at: star_g_state.expires_at,
+                                            };
+                                            result.add_action(MribAction::AddStarGRoute(route));
+                                            result.notify(
+                                                crate::ProtocolEventNotification::PimRouteChange {
+                                                    route_type: crate::PimTreeType::StarG,
+                                                    group: *group,
+                                                    source: None,
+                                                    action: crate::RouteAction::Add,
+                                                    timestamp: unix_timestamp(),
+                                                },
+                                            );
+                                        }
+                                    }
+                                    Some(src) => {
+                                        // (S,G) join - look up the resulting state
+                                        if let Some(sg_state) =
+                                            self.pim_state.sg.get(&(*src, *group))
+                                        {
+                                            let route = crate::mroute::SGRoute {
+                                                source: *src,
+                                                group: *group,
+                                                upstream_interface: sg_state
+                                                    .upstream_interface
+                                                    .clone(),
+                                                downstream_interfaces: sg_state
+                                                    .downstream_interfaces
+                                                    .clone(),
+                                                spt_bit: sg_state.spt_bit,
+                                                created_at: sg_state.created_at,
+                                                expires_at: sg_state.expires_at,
+                                            };
+                                            result.add_action(MribAction::AddSgRoute(route));
+                                            result.notify(
+                                                crate::ProtocolEventNotification::PimRouteChange {
+                                                    route_type: crate::PimTreeType::SG,
+                                                    group: *group,
+                                                    source: Some(*src),
+                                                    action: crate::RouteAction::Add,
+                                                    timestamp: unix_timestamp(),
+                                                },
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Check for routes removed by prunes
+                            for (source, group) in prune_targets {
+                                match source {
+                                    None => {
+                                        // (*,G) prune - check if route was removed
+                                        if !self.pim_state.star_g.contains_key(&group) {
+                                            result
+                                                .add_action(MribAction::RemoveStarGRoute { group });
+                                            result.notify(
+                                                crate::ProtocolEventNotification::PimRouteChange {
+                                                    route_type: crate::PimTreeType::StarG,
+                                                    group,
+                                                    source: None,
+                                                    action: crate::RouteAction::Remove,
+                                                    timestamp: unix_timestamp(),
+                                                },
+                                            );
+                                        }
+                                    }
+                                    Some(src) => {
+                                        // (S,G) prune - check if route was removed
+                                        if !self.pim_state.sg.contains_key(&(src, group)) {
+                                            result.add_action(MribAction::RemoveSgRoute {
+                                                source: src,
+                                                group,
+                                            });
+                                            result.notify(
+                                                crate::ProtocolEventNotification::PimRouteChange {
+                                                    route_type: crate::PimTreeType::SG,
+                                                    group,
+                                                    source: Some(src),
+                                                    action: crate::RouteAction::Remove,
+                                                    timestamp: unix_timestamp(),
+                                                },
+                                            );
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                     _ => {}
@@ -4753,5 +4876,169 @@ mod tests {
 
         // Should have rules for downstream interface
         assert!(!rules.is_empty());
+    }
+
+    // ===========================================
+    // PIM Join/Prune → MRIB action tests
+    // ===========================================
+
+    #[test]
+    fn test_pim_join_creates_star_g_route_action() {
+        let logger = create_test_logger();
+        let mut state = ProtocolState::new(logger);
+
+        // Enable PIM on interface
+        let interface_ip = Ipv4Addr::new(10, 0, 0, 1);
+        let config = crate::protocols::pim::PimInterfaceConfig::default();
+        state
+            .pim_state
+            .enable_interface("eth0", interface_ip, config);
+
+        // Configure an RP for the group
+        let group = Ipv4Addr::new(239, 1, 1, 1);
+        let rp = Ipv4Addr::new(10, 0, 0, 100);
+        state.pim_state.config.static_rp.insert(group, rp);
+
+        // Process a (*,G) join
+        let joins = vec![(None, group)]; // None source = (*,G)
+        let prunes = vec![];
+        let timers = state.pim_state.process_join_prune(
+            "eth0",
+            Ipv4Addr::new(10, 0, 0, 2),
+            &joins,
+            &prunes,
+            std::time::Duration::from_secs(210),
+        );
+
+        // Should have created (*,G) state
+        assert!(state.pim_state.star_g.contains_key(&group));
+        let star_g = state.pim_state.star_g.get(&group).unwrap();
+        assert!(star_g.downstream_interfaces.contains("eth0"));
+        assert!(!timers.is_empty()); // Should have expiry timer
+    }
+
+    #[test]
+    fn test_pim_join_creates_sg_route_action() {
+        let logger = create_test_logger();
+        let mut state = ProtocolState::new(logger);
+
+        // Enable PIM on interface
+        let interface_ip = Ipv4Addr::new(10, 0, 0, 1);
+        let config = crate::protocols::pim::PimInterfaceConfig::default();
+        state
+            .pim_state
+            .enable_interface("eth0", interface_ip, config);
+
+        // Process an (S,G) join
+        let source = Ipv4Addr::new(192, 168, 1, 100);
+        let group = Ipv4Addr::new(239, 1, 1, 1);
+        let joins = vec![(Some(source), group)];
+        let prunes = vec![];
+        let timers = state.pim_state.process_join_prune(
+            "eth0",
+            Ipv4Addr::new(10, 0, 0, 2),
+            &joins,
+            &prunes,
+            std::time::Duration::from_secs(210),
+        );
+
+        // Should have created (S,G) state
+        assert!(state.pim_state.sg.contains_key(&(source, group)));
+        let sg = state.pim_state.sg.get(&(source, group)).unwrap();
+        assert!(sg.downstream_interfaces.contains("eth0"));
+        assert!(!timers.is_empty()); // Should have expiry timer
+    }
+
+    #[test]
+    fn test_pim_prune_removes_route_when_no_downstream() {
+        let logger = create_test_logger();
+        let mut state = ProtocolState::new(logger);
+
+        // Enable PIM on interface
+        let interface_ip = Ipv4Addr::new(10, 0, 0, 1);
+        let config = crate::protocols::pim::PimInterfaceConfig::default();
+        state
+            .pim_state
+            .enable_interface("eth0", interface_ip, config);
+
+        // First add an (S,G) via join
+        let source = Ipv4Addr::new(192, 168, 1, 100);
+        let group = Ipv4Addr::new(239, 1, 1, 1);
+        let joins = vec![(Some(source), group)];
+        state.pim_state.process_join_prune(
+            "eth0",
+            Ipv4Addr::new(10, 0, 0, 2),
+            &joins,
+            &[],
+            std::time::Duration::from_secs(210),
+        );
+        assert!(state.pim_state.sg.contains_key(&(source, group)));
+
+        // Now prune it
+        let prunes = vec![(Some(source), group)];
+        state.pim_state.process_join_prune(
+            "eth0",
+            Ipv4Addr::new(10, 0, 0, 2),
+            &[],
+            &prunes,
+            std::time::Duration::from_secs(210),
+        );
+
+        // Route should be removed (no more downstreams)
+        assert!(!state.pim_state.sg.contains_key(&(source, group)));
+    }
+
+    #[test]
+    fn test_pim_prune_keeps_route_with_other_downstream() {
+        let logger = create_test_logger();
+        let mut state = ProtocolState::new(logger);
+
+        // Enable PIM on two interfaces
+        let config = crate::protocols::pim::PimInterfaceConfig::default();
+        state
+            .pim_state
+            .enable_interface("eth0", Ipv4Addr::new(10, 0, 0, 1), config.clone());
+        state
+            .pim_state
+            .enable_interface("eth1", Ipv4Addr::new(10, 0, 1, 1), config);
+
+        // Add (S,G) via join on eth0
+        let source = Ipv4Addr::new(192, 168, 1, 100);
+        let group = Ipv4Addr::new(239, 1, 1, 1);
+        state.pim_state.process_join_prune(
+            "eth0",
+            Ipv4Addr::new(10, 0, 0, 2),
+            &[(Some(source), group)],
+            &[],
+            std::time::Duration::from_secs(210),
+        );
+
+        // Also add on eth1
+        state.pim_state.process_join_prune(
+            "eth1",
+            Ipv4Addr::new(10, 0, 1, 2),
+            &[(Some(source), group)],
+            &[],
+            std::time::Duration::from_secs(210),
+        );
+
+        // Route should have both downstreams
+        let sg = state.pim_state.sg.get(&(source, group)).unwrap();
+        assert_eq!(sg.downstream_interfaces.len(), 2);
+
+        // Prune on eth0
+        state.pim_state.process_join_prune(
+            "eth0",
+            Ipv4Addr::new(10, 0, 0, 2),
+            &[],
+            &[(Some(source), group)],
+            std::time::Duration::from_secs(210),
+        );
+
+        // Route should still exist with eth1 downstream
+        assert!(state.pim_state.sg.contains_key(&(source, group)));
+        let sg = state.pim_state.sg.get(&(source, group)).unwrap();
+        assert_eq!(sg.downstream_interfaces.len(), 1);
+        assert!(sg.downstream_interfaces.contains("eth1"));
     }
 }
