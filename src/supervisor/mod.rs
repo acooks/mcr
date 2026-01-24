@@ -95,6 +95,9 @@ pub struct ProtocolState {
     /// Whether the protocol receiver loop has been started
     pub receiver_loop_running: std::sync::Arc<std::sync::atomic::AtomicBool>,
 
+    /// Shutdown signal for the protocol receiver loop (to restart with new sockets)
+    pub receiver_loop_shutdown_tx: Option<tokio::sync::watch::Sender<bool>>,
+
     /// Whether protocols are enabled
     pub igmp_enabled: bool,
     pub pim_enabled: bool,
@@ -127,6 +130,7 @@ impl ProtocolState {
             msdp_tcp_tx: None,
             event_tx: None,
             receiver_loop_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            receiver_loop_shutdown_tx: None,
             igmp_enabled: false,
             pim_enabled: false,
             msdp_enabled: false,
@@ -2235,7 +2239,7 @@ impl ProtocolState {
     ///
     /// This is used when creating protocol sockets via CLI after startup.
     /// Returns true if a new receiver loop was spawned.
-    pub fn spawn_receiver_loop_if_needed(&self) -> bool {
+    pub fn spawn_receiver_loop_if_needed(&mut self) -> bool {
         use std::sync::atomic::Ordering;
 
         // Check if already running
@@ -2264,13 +2268,22 @@ impl ProtocolState {
             }
         };
 
+        // Create shutdown channel for this loop instance
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        self.receiver_loop_shutdown_tx = Some(shutdown_tx);
+
         // Mark as running before spawning
         self.receiver_loop_running.store(true, Ordering::SeqCst);
+
+        // Clone the running flag for the loop to reset on exit
+        let running_flag = self.receiver_loop_running.clone();
 
         // Spawn the receiver loop
         let receiver_logger = self.logger.clone();
         tokio::spawn(async move {
-            protocol_receiver_loop(igmp_fd, pim_fd, event_tx, receiver_logger).await;
+            protocol_receiver_loop(igmp_fd, pim_fd, event_tx, shutdown_rx, receiver_logger).await;
+            // Reset running flag when loop exits
+            running_flag.store(false, Ordering::SeqCst);
         });
 
         log_info!(
@@ -2284,6 +2297,32 @@ impl ProtocolState {
         );
 
         true
+    }
+
+    /// Restart the protocol receiver loop with current sockets.
+    ///
+    /// This is needed when a new protocol socket is added after the loop is already running
+    /// (e.g., enabling IGMP after PIM is already running).
+    pub fn restart_receiver_loop(&mut self) {
+        use std::sync::atomic::Ordering;
+
+        // Signal shutdown if loop is running
+        if self.receiver_loop_running.load(Ordering::SeqCst) {
+            if let Some(tx) = &self.receiver_loop_shutdown_tx {
+                let _ = tx.send(true);
+            }
+            log_info!(
+                self.logger,
+                Facility::Supervisor,
+                "Signaling protocol receiver loop to restart"
+            );
+            // Reset the flag - the spawned task will also do this, but we do it here
+            // to allow immediate respawn
+            self.receiver_loop_running.store(false, Ordering::SeqCst);
+        }
+
+        // Spawn new loop with current sockets
+        self.spawn_receiver_loop_if_needed();
     }
 
     /// Send outgoing packets using the appropriate protocol sockets
@@ -2562,6 +2601,7 @@ pub async fn protocol_receiver_loop(
     igmp_fd: Option<RawFd>,
     pim_fd: Option<RawFd>,
     event_tx: mpsc::Sender<ProtocolEvent>,
+    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
     logger: Logger,
 ) {
     use tokio::io::unix::AsyncFd;
@@ -2599,8 +2639,20 @@ pub async fn protocol_receiver_loop(
     );
 
     loop {
-        // Wait for either socket to be readable
+        // Wait for either socket to be readable or shutdown signal
         tokio::select! {
+            // Shutdown signal
+            _ = shutdown_rx.changed() => {
+                if *shutdown_rx.borrow() {
+                    log_info!(
+                        logger,
+                        Facility::Supervisor,
+                        "Protocol receiver loop received shutdown signal, exiting for restart"
+                    );
+                    return;
+                }
+            }
+
             // IGMP socket readable
             result = async {
                 if let Some(ref async_fd) = igmp_async {
@@ -3133,6 +3185,14 @@ pub fn initialize_protocol_subsystem(
 
     // Mark receiver loop as running if we have sockets
     let receiver_will_run = igmp_fd.is_some() || pim_fd.is_some();
+
+    // Create shutdown channel for the receiver loop
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    state.receiver_loop_shutdown_tx = Some(shutdown_tx);
+
+    // Clone the running flag for the receiver loop to reset on exit
+    let running_flag = state.receiver_loop_running.clone();
+
     if receiver_will_run {
         state
             .receiver_loop_running
@@ -3143,7 +3203,16 @@ pub fn initialize_protocol_subsystem(
     let receiver_logger = logger.clone();
     let receiver_event_tx = event_tx.clone();
     let receiver_task = async move {
-        protocol_receiver_loop(igmp_fd, pim_fd, receiver_event_tx, receiver_logger).await;
+        protocol_receiver_loop(
+            igmp_fd,
+            pim_fd,
+            receiver_event_tx,
+            shutdown_rx,
+            receiver_logger,
+        )
+        .await;
+        // Reset running flag when loop exits
+        running_flag.store(false, std::sync::atomic::Ordering::SeqCst);
     };
 
     // Clone event_tx before giving it to timer manager
@@ -3698,7 +3767,8 @@ async fn handle_client(
 
                             // Ensure PIM socket exists and join multicast on this interface
                             coordinator.state.pim_enabled = true;
-                            if coordinator.state.pim_socket.is_none() {
+                            let need_socket = coordinator.state.pim_socket.is_none();
+                            if need_socket {
                                 if let Err(e) = coordinator.state.create_pim_socket() {
                                     log_error!(
                                         logger,
@@ -3706,9 +3776,10 @@ async fn handle_client(
                                         &format!("Failed to create PIM socket: {}", e)
                                     );
                                 }
-                                // Spawn receiver loop if this is the first socket
-                                coordinator.state.spawn_receiver_loop_if_needed();
                             }
+                            // Restart receiver loop to include PIM socket
+                            // (this handles both initial spawn and restart after IGMP-only)
+                            coordinator.state.restart_receiver_loop();
                             if let Err(e) =
                                 coordinator.state.join_pim_multicast_on_interface(interface)
                             {
@@ -3786,7 +3857,8 @@ async fn handle_client(
 
                             // Ensure IGMP socket exists
                             coordinator.state.igmp_enabled = true;
-                            if coordinator.state.igmp_socket.is_none() {
+                            let need_socket = coordinator.state.igmp_socket.is_none();
+                            if need_socket {
                                 if let Err(e) = coordinator.state.create_igmp_socket() {
                                     log_error!(
                                         logger,
@@ -3794,9 +3866,10 @@ async fn handle_client(
                                         &format!("Failed to create IGMP socket: {}", e)
                                     );
                                 }
-                                // Spawn receiver loop if this is the first socket
-                                coordinator.state.spawn_receiver_loop_if_needed();
                             }
+                            // Restart receiver loop to include IGMP socket
+                            // (this handles both initial spawn and restart after PIM-only)
+                            coordinator.state.restart_receiver_loop();
 
                             // Enable ALLMULTI and join IGMPv3 all-routers on this interface
                             if let Err(e) =
