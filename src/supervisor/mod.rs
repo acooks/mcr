@@ -2918,6 +2918,81 @@ async fn handle_client(
                     log::info!("{}", msg);
                     Some(Response::Success(msg))
                 }
+                SupervisorCommand::EnablePim {
+                    ref interface,
+                    dr_priority,
+                } => {
+                    // Look up interface IP
+                    match get_interface_ipv4(interface) {
+                        None => Some(Response::Error(format!(
+                            "Interface {} not found or has no IPv4 address",
+                            interface
+                        ))),
+                        Some(interface_ip) => {
+                            // Create PIM interface config
+                            let pim_config = if let Some(priority) = *dr_priority {
+                                crate::protocols::pim::PimInterfaceConfig {
+                                    dr_priority: priority,
+                                    ..Default::default()
+                                }
+                            } else {
+                                crate::protocols::pim::PimInterfaceConfig::default()
+                            };
+
+                            // Enable PIM on the interface
+                            let timers = coordinator.state.pim_state.enable_interface(
+                                interface,
+                                interface_ip,
+                                pim_config,
+                            );
+
+                            // Schedule the returned timers (Hello timer)
+                            if let Some(ref timer_tx) = coordinator.state.timer_tx {
+                                for timer in timers {
+                                    if let Err(e) = timer_tx.try_send(timer) {
+                                        log::warn!("Failed to schedule PIM timer: {}", e);
+                                    }
+                                }
+                            }
+
+                            // Ensure PIM socket exists and join multicast on this interface
+                            coordinator.state.pim_enabled = true;
+                            if coordinator.state.pim_socket.is_none() {
+                                if let Err(e) = coordinator.state.create_pim_socket() {
+                                    log::error!("Failed to create PIM socket: {}", e);
+                                }
+                            }
+                            if let Err(e) =
+                                coordinator.state.join_pim_multicast_on_interface(interface)
+                            {
+                                log::warn!(
+                                    "Failed to join PIM multicast on {}: {} (may already be joined)",
+                                    interface,
+                                    e
+                                );
+                            }
+
+                            log::info!(
+                                "PIM enabled on interface {} (IP: {}, DR priority: {:?})",
+                                interface,
+                                interface_ip,
+                                dr_priority
+                            );
+                            Some(Response::Success(format!(
+                                "PIM enabled on {} (IP: {}, DR priority: {})",
+                                interface,
+                                interface_ip,
+                                dr_priority.unwrap_or(1)
+                            )))
+                        }
+                    }
+                }
+                SupervisorCommand::DisablePim { ref interface } => {
+                    // Disable PIM on the interface
+                    coordinator.state.pim_state.disable_interface(interface);
+                    log::info!("PIM disabled on interface {}", interface);
+                    Some(Response::Success(format!("PIM disabled on {}", interface)))
+                }
                 _ => None,
             }
         } else {

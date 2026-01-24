@@ -545,39 +545,15 @@ pub fn handle_supervisor_command(
             (Response::PimNeighbors(Vec::new()), CommandAction::None)
         }
 
-        SupervisorCommand::EnablePim {
-            interface,
-            dr_priority,
-        } => {
-            // Validate interface name
-            if let Err(e) = validate_interface_name(&interface) {
-                return (
-                    Response::Error(format!("Invalid interface: {}", e)),
-                    CommandAction::None,
-                );
-            }
+        // EnablePim and DisablePim are handled in mod.rs protocol_response section
+        // They need access to ProtocolCoordinator state (timer_tx, pim_socket, etc.)
+        SupervisorCommand::EnablePim { .. } | SupervisorCommand::DisablePim { .. } => {
+            // This should never be reached - handled earlier in mod.rs
             (
-                Response::Success(format!(
-                    "PIM enable requested for interface {} (dr_priority: {:?}). \
-                     Note: Full protocol integration pending.",
-                    interface, dr_priority
-                )),
-                CommandAction::None,
-            )
-        }
-
-        SupervisorCommand::DisablePim { interface } => {
-            if let Err(e) = validate_interface_name(&interface) {
-                return (
-                    Response::Error(format!("Invalid interface: {}", e)),
-                    CommandAction::None,
-                );
-            }
-            (
-                Response::Success(format!(
-                    "PIM disable requested for interface {}. Note: Full protocol integration pending.",
-                    interface
-                )),
+                Response::Error(
+                    "Internal error: PIM commands should be handled by protocol coordinator"
+                        .to_string(),
+                ),
                 CommandAction::None,
             )
         }
