@@ -378,6 +378,21 @@ impl ProtocolState {
                         }
                         _ => {}
                     }
+                } else {
+                    log_warning!(
+                        self.logger,
+                        Facility::Supervisor,
+                        &format!(
+                            "Received IGMP {} from {} for group {} on interface '{}' which is not IGMP-enabled",
+                            match msg_type {
+                                0x11 => "Query",
+                                0x16 => "V2 Report",
+                                0x17 => "Leave",
+                                _ => "Unknown",
+                            },
+                            src_ip, group, interface
+                        )
+                    );
                 }
             }
             IgmpEvent::QueryTimerExpired { interface } => {
@@ -1524,6 +1539,26 @@ impl ProtocolState {
             ));
         }
 
+        // Set IP_PKTINFO to receive the interface index on incoming packets
+        let pktinfo: libc::c_int = 1;
+        let result = unsafe {
+            libc::setsockopt(
+                fd,
+                libc::IPPROTO_IP,
+                libc::IP_PKTINFO,
+                &pktinfo as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+
+        if result < 0 {
+            unsafe { libc::close(fd) };
+            return Err(anyhow::anyhow!(
+                "Failed to set IP_PKTINFO on IGMP socket: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+
         let sock = unsafe { OwnedFd::from_raw_fd(fd) };
 
         log_info!(
@@ -1581,6 +1616,26 @@ impl ProtocolState {
             unsafe { libc::close(fd) };
             return Err(anyhow::anyhow!(
                 "Failed to set IP_HDRINCL on PIM socket: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+
+        // Set IP_PKTINFO to receive the interface index on incoming packets
+        let pktinfo: libc::c_int = 1;
+        let result = unsafe {
+            libc::setsockopt(
+                fd,
+                libc::IPPROTO_IP,
+                libc::IP_PKTINFO,
+                &pktinfo as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+
+        if result < 0 {
+            unsafe { libc::close(fd) };
+            return Err(anyhow::anyhow!(
+                "Failed to set IP_PKTINFO on PIM socket: {}",
                 std::io::Error::last_os_error()
             ));
         }
@@ -1864,28 +1919,77 @@ struct AsyncRawSocket {
     fd: RawFd,
 }
 
+/// Result of reading a packet with interface information
+struct RecvResult {
+    /// Number of bytes read
+    len: usize,
+    /// Interface index from IP_PKTINFO (0 if not available)
+    iface_index: i32,
+}
+
+/// Convert interface index to interface name
+fn interface_name_from_index(index: i32) -> Option<String> {
+    if index <= 0 {
+        return None;
+    }
+    let mut buf = [0u8; libc::IF_NAMESIZE];
+    let result = unsafe { libc::if_indextoname(index as u32, buf.as_mut_ptr() as *mut i8) };
+    if result.is_null() {
+        None
+    } else {
+        let name = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr() as *const i8) };
+        name.to_str().ok().map(|s| s.to_string())
+    }
+}
+
 impl AsyncRawSocket {
     fn new(fd: RawFd) -> Self {
         Self { fd }
     }
 
-    /// Read a packet from the socket (non-blocking)
-    fn try_read(&self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let n = unsafe {
-            libc::recvfrom(
-                self.fd,
-                buf.as_mut_ptr() as *mut libc::c_void,
-                buf.len(),
-                0,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
+    /// Read a packet from the socket with IP_PKTINFO to get interface index
+    fn try_read_with_pktinfo(&self, buf: &mut [u8]) -> std::io::Result<RecvResult> {
+        // Control message buffer for IP_PKTINFO
+        // IP_PKTINFO is struct in_pktinfo (12 bytes) plus cmsg header
+        let mut cmsg_buf = [0u8; 64];
+
+        let mut iov = libc::iovec {
+            iov_base: buf.as_mut_ptr() as *mut libc::c_void,
+            iov_len: buf.len(),
         };
+
+        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+        msg.msg_iov = &mut iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = cmsg_buf.as_mut_ptr() as *mut libc::c_void;
+        msg.msg_controllen = cmsg_buf.len();
+
+        let n = unsafe { libc::recvmsg(self.fd, &mut msg, 0) };
         if n < 0 {
-            Err(std::io::Error::last_os_error())
-        } else {
-            Ok(n as usize)
+            return Err(std::io::Error::last_os_error());
         }
+
+        // Extract interface index from IP_PKTINFO control message
+        let mut iface_index: i32 = 0;
+
+        // Walk through control messages
+        let mut cmsg = unsafe { libc::CMSG_FIRSTHDR(&msg) };
+        while !cmsg.is_null() {
+            let cmsg_ref = unsafe { &*cmsg };
+            if cmsg_ref.cmsg_level == libc::IPPROTO_IP && cmsg_ref.cmsg_type == libc::IP_PKTINFO {
+                // struct in_pktinfo { int ipi_ifindex; struct in_addr ipi_spec_dst; struct in_addr ipi_addr; }
+                let data = unsafe { libc::CMSG_DATA(cmsg) };
+                // ipi_ifindex is the first field (4 bytes)
+                iface_index = unsafe { *(data as *const i32) };
+                break;
+            }
+            cmsg = unsafe { libc::CMSG_NXTHDR(&msg, cmsg) };
+        }
+
+        Ok(RecvResult {
+            len: n as usize,
+            iface_index,
+        })
     }
 }
 
@@ -1952,9 +2056,10 @@ pub async fn protocol_receiver_loop(
                 }
             } => {
                 if let Ok(mut guard) = result {
-                    match guard.get_inner().try_read(&mut buf) {
-                        Ok(n) if n > 0 => {
-                            if let Some(event) = parse_igmp_packet(&buf[..n], &logger) {
+                    match guard.get_inner().try_read_with_pktinfo(&mut buf) {
+                        Ok(recv) if recv.len > 0 => {
+                            let interface = interface_name_from_index(recv.iface_index);
+                            if let Some(event) = parse_igmp_packet(&buf[..recv.len], interface, &logger) {
                                 if event_tx.send(event).await.is_err() {
                                     log_warning!(
                                         logger,
@@ -1990,9 +2095,10 @@ pub async fn protocol_receiver_loop(
                 }
             } => {
                 if let Ok(mut guard) = result {
-                    match guard.get_inner().try_read(&mut buf) {
-                        Ok(n) if n > 0 => {
-                            if let Some(event) = parse_pim_packet(&buf[..n], &logger) {
+                    match guard.get_inner().try_read_with_pktinfo(&mut buf) {
+                        Ok(recv) if recv.len > 0 => {
+                            let interface = interface_name_from_index(recv.iface_index);
+                            if let Some(event) = parse_pim_packet(&buf[..recv.len], interface, &logger) {
                                 if event_tx.send(event).await.is_err() {
                                     log_warning!(
                                         logger,
@@ -2023,7 +2129,14 @@ pub async fn protocol_receiver_loop(
 }
 
 /// Parse a raw IGMP packet into a ProtocolEvent
-fn parse_igmp_packet(packet: &[u8], logger: &Logger) -> Option<ProtocolEvent> {
+///
+/// The interface parameter should be provided from IP_PKTINFO when available.
+/// If None, falls back to subnet-based lookup (which may fail for hosts outside our subnets).
+fn parse_igmp_packet(
+    packet: &[u8],
+    interface: Option<String>,
+    logger: &Logger,
+) -> Option<ProtocolEvent> {
     use crate::protocols::igmp::IgmpEvent;
 
     // IP header is at least 20 bytes
@@ -2052,8 +2165,9 @@ fn parse_igmp_packet(packet: &[u8], logger: &Logger) -> Option<ProtocolEvent> {
     // Extract source IP
     let src_ip = Ipv4Addr::new(packet[12], packet[13], packet[14], packet[15]);
 
-    // Find interface by source IP (simplified - in real implementation would use recvmsg)
-    let interface = find_interface_by_ip(src_ip).unwrap_or_else(|| "unknown".to_string());
+    // Use provided interface from IP_PKTINFO, or fall back to subnet lookup
+    let interface = interface
+        .unwrap_or_else(|| find_interface_by_ip(src_ip).unwrap_or_else(|| "unknown".to_string()));
 
     // Parse IGMP header (after IP header)
     let igmp = &packet[ihl..];
@@ -2084,7 +2198,14 @@ fn parse_igmp_packet(packet: &[u8], logger: &Logger) -> Option<ProtocolEvent> {
 }
 
 /// Parse a raw PIM packet into a ProtocolEvent
-fn parse_pim_packet(packet: &[u8], logger: &Logger) -> Option<ProtocolEvent> {
+///
+/// The interface parameter should be provided from IP_PKTINFO when available.
+/// If None, falls back to subnet-based lookup.
+fn parse_pim_packet(
+    packet: &[u8],
+    interface: Option<String>,
+    logger: &Logger,
+) -> Option<ProtocolEvent> {
     use crate::protocols::pim::PimEvent;
 
     // IP header is at least 20 bytes
@@ -2137,8 +2258,9 @@ fn parse_pim_packet(packet: &[u8], logger: &Logger) -> Option<ProtocolEvent> {
     // Extract source IP
     let src_ip = Ipv4Addr::new(packet[12], packet[13], packet[14], packet[15]);
 
-    // Find interface by source IP
-    let interface = find_interface_by_ip(src_ip).unwrap_or_else(|| "unknown".to_string());
+    // Use provided interface from IP_PKTINFO, or fall back to subnet lookup
+    let interface = interface
+        .unwrap_or_else(|| find_interface_by_ip(src_ip).unwrap_or_else(|| "unknown".to_string()));
 
     // Parse PIM header (after IP header)
     let pim = &packet[ihl..];
