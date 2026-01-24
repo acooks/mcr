@@ -3732,6 +3732,54 @@ pub async fn run(
         }
     }
 
+    // If no protocol subsystem was created from config, create a minimal one
+    // This allows CLI commands like `pim enable` to work without a config file
+    if protocol_coordinator.lock().unwrap().is_none() {
+        log_info!(
+            supervisor_logger,
+            Facility::Supervisor,
+            "Initializing minimal protocol subsystem for CLI commands"
+        );
+
+        // Create a minimal empty config
+        let empty_config = Config {
+            rules: vec![],
+            pinning: std::collections::HashMap::new(),
+            pim: None,
+            igmp: None,
+            msdp: None,
+            control_plane: None,
+        };
+
+        match initialize_protocol_subsystem(&empty_config, supervisor_logger.clone()) {
+            Ok((coordinator, receiver_task, timer_task)) => {
+                // Spawn protocol background tasks
+                tokio::spawn(async move {
+                    receiver_task.await;
+                });
+                tokio::spawn(async move {
+                    timer_task.await;
+                });
+
+                // Store coordinator
+                *protocol_coordinator.lock().unwrap() = Some(coordinator);
+
+                log_info!(
+                    supervisor_logger,
+                    Facility::Supervisor,
+                    "Minimal protocol subsystem initialized"
+                );
+            }
+            Err(e) => {
+                log_warning!(
+                    supervisor_logger,
+                    Facility::Supervisor,
+                    &format!("Failed to initialize minimal protocol subsystem: {}", e)
+                );
+            }
+        }
+    }
+
     // Wrap startup_config in Arc for sharing with handle_client
     let startup_config: Arc<Option<Config>> = Arc::new(startup_config);
 
