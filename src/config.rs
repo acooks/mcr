@@ -75,10 +75,18 @@ pub struct PimInterfaceConfig {
     /// DR priority (higher wins, default 1)
     #[serde(default = "default_dr_priority")]
     pub dr_priority: u32,
+
+    /// Hello period in seconds (default 30)
+    #[serde(default = "default_hello_period")]
+    pub hello_period: u64,
 }
 
 fn default_dr_priority() -> u32 {
     1
+}
+
+fn default_hello_period() -> u64 {
+    30
 }
 
 /// Static RP configuration
@@ -1364,6 +1372,7 @@ mod tests {
                 interfaces: vec![PimInterfaceConfig {
                     name: "eth0".to_string(),
                     dr_priority: 100,
+                    hello_period: 30,
                 }],
                 static_rp: vec![StaticRpConfig {
                     group: "239.0.0.0/8".to_string(),
@@ -1433,10 +1442,12 @@ mod tests {
                     PimInterfaceConfig {
                         name: "eth0".to_string(),
                         dr_priority: 100,
+                        hello_period: 30,
                     },
                     PimInterfaceConfig {
                         name: "eth0".to_string(), // Duplicate
                         dr_priority: 50,
+                        hello_period: 30,
                     },
                 ],
                 static_rp: vec![],
@@ -1462,6 +1473,7 @@ mod tests {
                 interfaces: vec![PimInterfaceConfig {
                     name: "".to_string(), // Empty name
                     dr_priority: 100,
+                    hello_period: 30,
                 }],
                 static_rp: vec![],
                 rp_address: None,

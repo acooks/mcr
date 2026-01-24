@@ -250,6 +250,7 @@ impl ProtocolState {
             if let Some(ip) = get_interface_ipv4(&iface_config.name) {
                 let pim_iface_config = PimInterfaceConfig {
                     dr_priority: iface_config.dr_priority,
+                    hello_period: std::time::Duration::from_secs(iface_config.hello_period),
                     ..PimInterfaceConfig::default()
                 };
                 let timers =
