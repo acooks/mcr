@@ -4159,3 +4159,37 @@ pub async fn run(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_source_addr_for_dest_localhost() {
+        // Connecting to localhost should return localhost
+        let result = get_source_addr_for_dest(Ipv4Addr::LOCALHOST);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), Ipv4Addr::LOCALHOST);
+    }
+
+    #[test]
+    fn test_get_source_addr_for_dest_external() {
+        // Connecting to an external address should return a non-loopback address
+        // (assuming the machine has a default route)
+        let result = get_source_addr_for_dest(Ipv4Addr::new(8, 8, 8, 8));
+        // This may fail in isolated network namespaces without routing
+        if let Some(addr) = result {
+            // Should not be 0.0.0.0
+            assert_ne!(addr, Ipv4Addr::UNSPECIFIED);
+        }
+    }
+
+    #[test]
+    fn test_get_source_addr_for_dest_link_local() {
+        // Link-local destination - kernel will choose appropriate source
+        let result = get_source_addr_for_dest(Ipv4Addr::new(169, 254, 1, 1));
+        // May or may not succeed depending on network config
+        // Just verify it doesn't panic
+        let _ = result;
+    }
+}
