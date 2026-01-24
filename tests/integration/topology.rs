@@ -10,7 +10,9 @@
 use anyhow::Result;
 
 mod common_topology {
-    use crate::common::{binary_path, McrInstance, McrInstanceBuilder, NetworkNamespace, VethPair};
+    use crate::common::{
+        ControlClient, McrInstance, McrInstanceBuilder, NetworkNamespace, VethPair,
+    };
     use anyhow::{Context, Result};
     use std::collections::HashMap;
     use std::path::Path;
@@ -39,33 +41,24 @@ mod common_topology {
         /// that has PIM enabled.
         pub async fn wait_for_pim_neighbors(&self, timeout: Duration) -> Result<()> {
             let start = std::time::Instant::now();
-            let control_bin = binary_path("mcrctl");
 
             while start.elapsed() < timeout {
                 let mut all_have_neighbors = true;
 
                 for (name, mcr) in &self.nodes {
-                    let output = std::process::Command::new(&control_bin)
-                        .arg("--socket-path")
-                        .arg(mcr.control_socket())
-                        .arg("pim")
-                        .arg("neighbors")
-                        .arg("--json")
-                        .output()
-                        .context("Failed to run mcrctl")?;
-
-                    if output.status.success() {
-                        let stdout = String::from_utf8_lossy(&output.stdout);
-                        // Check if we got a non-empty array
-                        if stdout.trim() == "[]" {
+                    let client = ControlClient::new(mcr.control_socket());
+                    match client.get_pim_neighbors().await {
+                        Ok(neighbors) => {
+                            if neighbors.is_empty() {
+                                all_have_neighbors = false;
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            println!("Node {} PIM neighbors query failed: {}", name, e);
                             all_have_neighbors = false;
                             break;
                         }
-                    } else {
-                        // Command failed, node might not have PIM enabled
-                        println!("Node {} PIM neighbors query failed", name);
-                        all_have_neighbors = false;
-                        break;
                     }
                 }
 
@@ -82,36 +75,34 @@ mod common_topology {
         /// Wait for MSDP peers to reach established state.
         pub async fn wait_for_msdp_established(&self, timeout: Duration) -> Result<()> {
             let start = std::time::Instant::now();
-            let control_bin = binary_path("mcrctl");
 
             while start.elapsed() < timeout {
                 let mut all_established = true;
 
                 for (name, mcr) in &self.nodes {
-                    let output = std::process::Command::new(&control_bin)
-                        .arg("--socket-path")
-                        .arg(mcr.control_socket())
-                        .arg("msdp")
-                        .arg("peers")
-                        .arg("--json")
-                        .output()
-                        .context("Failed to run mcrctl")?;
-
-                    if output.status.success() {
-                        let stdout = String::from_utf8_lossy(&output.stdout);
-                        // Check for "Established" state
-                        if !stdout.contains("Established") && !stdout.contains("established") {
-                            println!(
-                                "Node {} MSDP peers not established: {}",
-                                name,
-                                stdout.trim()
-                            );
+                    let client = ControlClient::new(mcr.control_socket());
+                    match client.get_msdp_peers().await {
+                        Ok(peers) => {
+                            // Check if all peers are established
+                            let all_peers_established = peers.iter().all(|p| {
+                                let state = p.state.to_lowercase();
+                                state.contains("established")
+                            });
+                            if !all_peers_established {
+                                println!(
+                                    "Node {} MSDP peers not established: {:?}",
+                                    name,
+                                    peers.iter().map(|p| &p.state).collect::<Vec<_>>()
+                                );
+                                all_established = false;
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            println!("Node {} MSDP peers query failed: {}", name, e);
                             all_established = false;
                             break;
                         }
-                    } else {
-                        all_established = false;
-                        break;
                     }
                 }
 

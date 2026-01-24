@@ -252,8 +252,23 @@ impl ProtocolState {
                     dr_priority: iface_config.dr_priority,
                     ..PimInterfaceConfig::default()
                 };
-                self.pim_state
-                    .enable_interface(&iface_config.name, ip, pim_iface_config);
+                let timers =
+                    self.pim_state
+                        .enable_interface(&iface_config.name, ip, pim_iface_config);
+
+                // Schedule PIM Hello timer (if timer channel is available)
+                if let Some(ref timer_tx) = self.timer_tx {
+                    for timer in timers {
+                        if let Err(e) = timer_tx.try_send(timer) {
+                            log_warning!(
+                                self.logger,
+                                Facility::Supervisor,
+                                &format!("Failed to schedule PIM Hello timer: {}", e)
+                            );
+                        }
+                    }
+                }
+
                 log_info!(
                     self.logger,
                     Facility::Supervisor,
@@ -452,6 +467,14 @@ impl ProtocolState {
                         let (timers, is_new_neighbor, dr_changed, is_dr) =
                             if let Some(iface_state) = self.pim_state.get_interface_mut(&interface)
                             {
+                                log_info!(
+                                    self.logger,
+                                    Facility::Supervisor,
+                                    &format!(
+                                        "PIM: Processing Hello from {} on interface {}",
+                                        src_ip, interface
+                                    )
+                                );
                                 use crate::protocols::pim::PimHelloOption;
                                 use std::time::Duration;
 
@@ -489,6 +512,14 @@ impl ProtocolState {
 
                                 (timers, is_new, dr_changed, is_dr)
                             } else {
+                                log_warning!(
+                                    self.logger,
+                                    Facility::Supervisor,
+                                    &format!(
+                                        "PIM: Ignored Hello from {} - interface {} not PIM-enabled",
+                                        src_ip, interface
+                                    )
+                                );
                                 (Vec::new(), false, false, false)
                             };
 
@@ -496,6 +527,14 @@ impl ProtocolState {
 
                         // Emit event for new neighbor (outside mutable borrow)
                         if is_new_neighbor {
+                            log_info!(
+                                self.logger,
+                                Facility::Supervisor,
+                                &format!(
+                                    "PIM: Added neighbor {} on interface {}",
+                                    src_ip, interface
+                                )
+                            );
                             result.notify(crate::ProtocolEventNotification::PimNeighborChange {
                                 interface: interface.clone(),
                                 neighbor: src_ip,
@@ -1050,7 +1089,7 @@ impl ProtocolState {
                         data: packet_data,
                     });
 
-                    log_debug!(
+                    log_info!(
                         self.logger,
                         Facility::Supervisor,
                         &format!("PIM: Sending Hello on {}", interface)
@@ -1502,6 +1541,9 @@ impl ProtocolState {
     /// - Send and receive PIM Hello messages
     /// - Send and receive PIM Join/Prune messages
     /// - Receive PIM Register messages (when we're the RP)
+    ///
+    /// Note: This creates the socket but does NOT join multicast groups.
+    /// Call `join_pim_multicast_on_interface()` for each PIM-enabled interface.
     pub fn create_pim_socket(&mut self) -> Result<()> {
         // PIM is IP protocol 103
         const IPPROTO_PIM: i32 = 103;
@@ -1522,31 +1564,22 @@ impl ProtocolState {
             ));
         }
 
-        // Join ALL-PIM-ROUTERS multicast group (224.0.0.13) on all interfaces
-        let all_pim_routers = Ipv4Addr::new(224, 0, 0, 13);
-        let mreq = libc::ip_mreq {
-            imr_multiaddr: libc::in_addr {
-                s_addr: u32::from(all_pim_routers).to_be(),
-            },
-            imr_interface: libc::in_addr {
-                s_addr: libc::INADDR_ANY,
-            },
-        };
-
+        // Set IP_HDRINCL so we can craft our own IP headers for PIM messages
+        let hdrincl: libc::c_int = 1;
         let result = unsafe {
             libc::setsockopt(
                 fd,
                 libc::IPPROTO_IP,
-                libc::IP_ADD_MEMBERSHIP,
-                &mreq as *const _ as *const libc::c_void,
-                std::mem::size_of::<libc::ip_mreq>() as libc::socklen_t,
+                libc::IP_HDRINCL,
+                &hdrincl as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
             )
         };
 
         if result < 0 {
             unsafe { libc::close(fd) };
             return Err(anyhow::anyhow!(
-                "Failed to join ALL-PIM-ROUTERS multicast group: {}",
+                "Failed to set IP_HDRINCL on PIM socket: {}",
                 std::io::Error::last_os_error()
             ));
         }
@@ -1556,14 +1589,67 @@ impl ProtocolState {
         log_info!(
             self.logger,
             Facility::Supervisor,
-            &format!(
-                "Created PIM raw socket (fd: {}), joined {}",
-                sock.as_raw_fd(),
-                all_pim_routers
-            )
+            &format!("Created PIM raw socket (fd: {})", sock.as_raw_fd())
         );
 
         self.pim_socket = Some(sock);
+        Ok(())
+    }
+
+    /// Join the ALL-PIM-ROUTERS multicast group (224.0.0.13) on a specific interface
+    ///
+    /// This must be called for each interface where PIM is enabled. Link-local
+    /// multicast groups like 224.0.0.13 require explicit per-interface joins
+    /// because they are not routed.
+    pub fn join_pim_multicast_on_interface(&self, interface: &str) -> Result<()> {
+        let fd = self
+            .pim_socket
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("PIM socket not created"))?
+            .as_raw_fd();
+
+        // Get interface index
+        let iface_index = socket_helpers::get_interface_index(interface)?;
+
+        // ALL-PIM-ROUTERS multicast group (224.0.0.13)
+        let all_pim_routers = Ipv4Addr::new(224, 0, 0, 13);
+
+        // Use ip_mreqn to specify the interface by index
+        let mreqn = libc::ip_mreqn {
+            imr_multiaddr: libc::in_addr {
+                s_addr: u32::from(all_pim_routers).to_be(),
+            },
+            imr_address: libc::in_addr { s_addr: 0 },
+            imr_ifindex: iface_index,
+        };
+
+        let result = unsafe {
+            libc::setsockopt(
+                fd,
+                libc::IPPROTO_IP,
+                libc::IP_ADD_MEMBERSHIP,
+                &mreqn as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::ip_mreqn>() as libc::socklen_t,
+            )
+        };
+
+        if result < 0 {
+            return Err(anyhow::anyhow!(
+                "Failed to join ALL-PIM-ROUTERS on {}: {}",
+                interface,
+                std::io::Error::last_os_error()
+            ));
+        }
+
+        log_info!(
+            self.logger,
+            Facility::Supervisor,
+            &format!(
+                "Joined ALL-PIM-ROUTERS ({}) on interface {}",
+                all_pim_routers, interface
+            )
+        );
+
         Ok(())
     }
 
@@ -1574,6 +1660,18 @@ impl ProtocolState {
         }
         if self.pim_enabled && self.pim_socket.is_none() {
             self.create_pim_socket()?;
+
+            // Join ALL-PIM-ROUTERS multicast group on each PIM-enabled interface
+            let interfaces: Vec<String> = self.pim_state.interfaces.keys().cloned().collect();
+            for interface in interfaces {
+                if let Err(e) = self.join_pim_multicast_on_interface(&interface) {
+                    log_warning!(
+                        self.logger,
+                        Facility::Supervisor,
+                        &format!("Failed to join PIM multicast on {}: {}", interface, e)
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -1598,7 +1696,7 @@ impl ProtocolState {
             match self.send_packet(&packet) {
                 Ok(()) => {
                     sent += 1;
-                    log_debug!(
+                    log_info!(
                         self.logger,
                         Facility::Supervisor,
                         &format!(
@@ -1643,6 +1741,49 @@ impl ProtocolState {
         let source_ip = packet.source.unwrap_or_else(|| {
             get_interface_ipv4(&packet.interface).unwrap_or(Ipv4Addr::UNSPECIFIED)
         });
+
+        // For multicast destinations, set the outgoing interface
+        if packet.destination.is_multicast() {
+            let iface_index = socket_helpers::get_interface_index(&packet.interface)?;
+
+            // Use ip_mreqn to specify outgoing interface by index
+            let mreqn = libc::ip_mreqn {
+                imr_multiaddr: libc::in_addr { s_addr: 0 },
+                imr_address: libc::in_addr { s_addr: 0 },
+                imr_ifindex: iface_index,
+            };
+
+            let result = unsafe {
+                libc::setsockopt(
+                    fd,
+                    libc::IPPROTO_IP,
+                    libc::IP_MULTICAST_IF,
+                    &mreqn as *const _ as *const libc::c_void,
+                    std::mem::size_of::<libc::ip_mreqn>() as libc::socklen_t,
+                )
+            };
+
+            if result < 0 {
+                return Err(anyhow::anyhow!(
+                    "Failed to set multicast interface: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+
+            // Set TTL to 1 for link-local multicast (224.0.0.x)
+            if packet.destination.octets()[0..2] == [224, 0] {
+                let ttl: libc::c_int = 1;
+                unsafe {
+                    libc::setsockopt(
+                        fd,
+                        libc::IPPROTO_IP,
+                        libc::IP_MULTICAST_TTL,
+                        &ttl as *const _ as *const libc::c_void,
+                        std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                    );
+                }
+            }
+        }
 
         // Build IP header + payload
         let ip_packet = build_ip_packet(
@@ -1948,23 +2089,47 @@ fn parse_pim_packet(packet: &[u8], logger: &Logger) -> Option<ProtocolEvent> {
     // IP header is at least 20 bytes
     if packet.len() < 24 {
         // 20 IP + 4 PIM minimum
+        log_warning!(
+            logger,
+            Facility::Supervisor,
+            &format!("PIM parse: packet too short ({} bytes)", packet.len())
+        );
         return None;
     }
 
     // Check IP version
     let version = packet[0] >> 4;
     if version != 4 {
+        log_warning!(
+            logger,
+            Facility::Supervisor,
+            &format!("PIM parse: wrong IP version ({})", version)
+        );
         return None;
     }
 
     // Get IP header length
     let ihl = ((packet[0] & 0x0F) as usize) * 4;
     if packet.len() < ihl + 4 {
+        log_warning!(
+            logger,
+            Facility::Supervisor,
+            &format!(
+                "PIM parse: packet too short for IHL ({} bytes, IHL={})",
+                packet.len(),
+                ihl
+            )
+        );
         return None;
     }
 
     // Check protocol is PIM (103)
     if packet[9] != 103 {
+        log_warning!(
+            logger,
+            Facility::Supervisor,
+            &format!("PIM parse: wrong protocol ({})", packet[9])
+        );
         return None;
     }
 
@@ -1986,6 +2151,11 @@ fn parse_pim_packet(packet: &[u8], logger: &Logger) -> Option<ProtocolEvent> {
 
     // Validate PIM version (should be 2)
     if pim_version != 2 {
+        log_warning!(
+            logger,
+            Facility::Supervisor,
+            &format!("PIM parse: wrong PIM version ({})", pim_version)
+        );
         return None;
     }
 
@@ -2017,20 +2187,34 @@ fn parse_pim_packet(packet: &[u8], logger: &Logger) -> Option<ProtocolEvent> {
 }
 
 /// Find interface name by IP address
+///
+/// For incoming packets, we want to find the interface where the source IP
+/// is a neighbor (in the same subnet but not our own IP). This handles the
+/// case where multiple interfaces are in the same network namespace.
 fn find_interface_by_ip(ip: Ipv4Addr) -> Option<String> {
+    let mut subnet_match = None;
+
     for iface in pnet::datalink::interfaces() {
         for ip_net in &iface.ips {
             if let std::net::IpAddr::V4(v4) = ip_net.ip() {
-                // Check if this IP is on the same subnet
-                // For simplicity, we check if it's the same interface IP
-                // In production, would check subnet membership
-                if v4 == ip || ip_net.contains(std::net::IpAddr::V4(ip)) {
-                    return Some(iface.name.clone());
+                // If source IP matches interface IP exactly, this is our own
+                // interface sending - skip it and prefer subnet matches
+                if v4 == ip {
+                    continue;
+                }
+
+                // If source IP is in the interface's subnet, it's a neighbor
+                if ip_net.contains(std::net::IpAddr::V4(ip)) {
+                    // Prefer first subnet match found
+                    if subnet_match.is_none() {
+                        subnet_match = Some(iface.name.clone());
+                    }
                 }
             }
         }
     }
-    None
+
+    subnet_match
 }
 
 /// Protocol coordinator that manages the integration between

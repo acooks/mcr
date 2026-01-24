@@ -335,8 +335,9 @@ mod privileged {
         // - "disabled" if MSDP isn't fully enabled (no TCP listener)
         // - "Idle" or "Connect" if attempting connections
         // - "Active" if connection in progress
+        // - "connecting" if timer fired but TCP channel not ready yet
         // The important thing is we can query the state and get a valid response
-        let valid_states = ["disabled", "Idle", "Connect", "Active"];
+        let valid_states = ["disabled", "Idle", "Connect", "Active", "connecting"];
         assert!(
             valid_states.contains(&peer.state.as_str()),
             "Expected peer state to be one of {:?}, got: {}",
