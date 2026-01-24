@@ -3360,6 +3360,58 @@ async fn handle_client(
             mesh_group,
             default_peer,
         } => {
+            // First, check if MSDP TCP needs to be initialized
+            let needs_msdp_tcp = {
+                let coordinator_guard = protocol_coordinator.lock().unwrap();
+                if let Some(ref coordinator) = *coordinator_guard {
+                    coordinator.state.msdp_tcp_tx.is_none()
+                } else {
+                    false
+                }
+            };
+
+            // Initialize MSDP TCP if needed (must be done outside the lock since it's async)
+            if needs_msdp_tcp {
+                let event_tx = {
+                    let coordinator_guard = protocol_coordinator.lock().unwrap();
+                    coordinator_guard
+                        .as_ref()
+                        .and_then(|c| c.state.event_tx.clone())
+                };
+
+                if let Some(event_tx) = event_tx {
+                    // Use the peer address as local address for MSDP (or find a suitable one)
+                    let local_addr = get_interface_ipv4("lo").unwrap_or(Ipv4Addr::LOCALHOST);
+
+                    match crate::protocols::msdp_tcp::start_msdp_tcp(local_addr, event_tx).await {
+                        Ok((tcp_cmd_tx, listener_task, runner_task)) => {
+                            // Store the command channel
+                            {
+                                let mut coordinator_guard = protocol_coordinator.lock().unwrap();
+                                if let Some(ref mut coordinator) = *coordinator_guard {
+                                    coordinator.state.msdp_tcp_tx = Some(tcp_cmd_tx);
+                                    coordinator.state.msdp_enabled = true;
+                                }
+                            }
+
+                            // Spawn MSDP TCP tasks
+                            tokio::spawn(async move {
+                                listener_task.await;
+                            });
+                            tokio::spawn(async move {
+                                runner_task.await;
+                            });
+
+                            log::info!("MSDP TCP subsystem initialized on {}:639", local_addr);
+                        }
+                        Err(e) => {
+                            log::warn!("Failed to initialize MSDP TCP: {}", e);
+                        }
+                    }
+                }
+            }
+
+            // Now add the peer
             let mut coordinator_guard = protocol_coordinator.lock().unwrap();
             if let Some(ref mut coordinator) = *coordinator_guard {
                 use crate::protocols::msdp::MsdpPeerConfig;
