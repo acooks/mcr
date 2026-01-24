@@ -3408,6 +3408,8 @@ async fn handle_client(
                             log::warn!("Failed to initialize MSDP TCP: {}", e);
                         }
                     }
+                } else {
+                    log::warn!("Cannot initialize MSDP TCP: event_tx not available");
                 }
             }
 

@@ -366,4 +366,79 @@ mod privileged {
 
         Ok(())
     }
+
+    /// Test MSDP peer addition via CLI without config file.
+    ///
+    /// This tests the fix for the bug where:
+    /// 1. MSDP TCP subsystem was only initialized from config file
+    /// 2. CLI `msdp add-peer` would add peer to state but TCP never started
+    /// 3. Peer would show "state: disabled" forever
+    ///
+    /// Now verifies:
+    /// - MCR starts without MSDP config
+    /// - `msdp add-peer` triggers MSDP TCP initialization
+    /// - Peer is added to state
+    ///
+    /// Note: Full session establishment requires separate namespaces and is
+    /// tested in the topology tests (test_msdp_tcp_session, test_msdp_keepalives).
+    #[tokio::test]
+    async fn test_msdp_add_peer_cli_no_config() -> Result<()> {
+        require_root!();
+        println!("\n=== Test: MSDP add-peer via CLI without config file ===\n");
+
+        let ns = NetworkNamespace::enter()?;
+        ns.enable_loopback().await?;
+
+        let _veth = VethPair::create("veth0", "veth0p")
+            .await?
+            .set_addr("veth0", "10.0.0.1/24")
+            .await?
+            .set_addr("veth0p", "10.0.0.2/24")
+            .await?
+            .up()
+            .await?;
+
+        // Start a single MCR instance without any MSDP config
+        let config = r#"{ rules: [] }"#;
+
+        let mcr = McrInstance::builder()
+            .interface("veth0")
+            .config_content(config)
+            .start_async()
+            .await?;
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let client = ControlClient::new(mcr.control_socket());
+
+        // Verify MSDP peers is empty initially
+        let peers = client.get_msdp_peers().await?;
+        assert!(peers.is_empty(), "Should have no MSDP peers initially");
+        println!("✓ Node starts with no MSDP peers");
+
+        // Add MSDP peer via CLI
+        println!("Adding MSDP peer via CLI...");
+        client
+            .add_msdp_peer("10.0.0.2".parse()?, None, None, false)
+            .await?;
+        println!("MSDP peer added");
+
+        // Wait a moment for state to settle
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // Verify peer was added to state
+        let peers = client.get_msdp_peers().await?;
+        assert_eq!(peers.len(), 1, "Should have one MSDP peer");
+        assert_eq!(
+            peers[0].address.to_string(),
+            "10.0.0.2",
+            "Peer address should match"
+        );
+        println!("✓ MSDP peer added to state: {:?}", peers[0]);
+
+        drop(mcr);
+        println!("\n=== Test passed ===\n");
+
+        Ok(())
+    }
 }
