@@ -465,8 +465,10 @@ impl ProtocolState {
                 } else {
                     crate::protocols::pim::PimInterfaceConfig::default()
                 };
-                self.pim_state
+                let timers = self
+                    .pim_state
                     .enable_interface(&interface, interface_ip, config);
+                result.add_timers(timers);
             }
             PimEvent::DisableInterface { interface } => {
                 self.pim_state.disable_interface(&interface);
