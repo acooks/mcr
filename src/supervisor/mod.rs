@@ -98,6 +98,9 @@ pub struct ProtocolState {
     /// Shutdown signal for the protocol receiver loop (to restart with new sockets)
     pub receiver_loop_shutdown_tx: Option<tokio::sync::watch::Sender<bool>>,
 
+    /// Handle for the protocol receiver task (needed to abort on restart)
+    pub receiver_loop_handle: Option<tokio::task::JoinHandle<()>>,
+
     /// Whether protocols are enabled
     pub igmp_enabled: bool,
     pub pim_enabled: bool,
@@ -131,6 +134,7 @@ impl ProtocolState {
             event_tx: None,
             receiver_loop_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             receiver_loop_shutdown_tx: None,
+            receiver_loop_handle: None,
             igmp_enabled: false,
             pim_enabled: false,
             msdp_enabled: false,
@@ -2278,13 +2282,14 @@ impl ProtocolState {
         // Clone the running flag for the loop to reset on exit
         let running_flag = self.receiver_loop_running.clone();
 
-        // Spawn the receiver loop
+        // Spawn the receiver loop and store the handle
         let receiver_logger = self.logger.clone();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             protocol_receiver_loop(igmp_fd, pim_fd, event_tx, shutdown_rx, receiver_logger).await;
             // Reset running flag when loop exits
             running_flag.store(false, Ordering::SeqCst);
         });
+        self.receiver_loop_handle = Some(handle);
 
         log_info!(
             self.logger,
@@ -2306,20 +2311,22 @@ impl ProtocolState {
     pub fn restart_receiver_loop(&mut self) {
         use std::sync::atomic::Ordering;
 
-        // Signal shutdown if loop is running
-        if self.receiver_loop_running.load(Ordering::SeqCst) {
-            if let Some(tx) = &self.receiver_loop_shutdown_tx {
-                let _ = tx.send(true);
-            }
+        // Abort old task if running - this ensures AsyncFd resources are released
+        if let Some(handle) = self.receiver_loop_handle.take() {
             log_info!(
                 self.logger,
                 Facility::Supervisor,
-                "Signaling protocol receiver loop to restart"
+                "Aborting old protocol receiver loop for restart"
             );
-            // Reset the flag - the spawned task will also do this, but we do it here
-            // to allow immediate respawn
-            self.receiver_loop_running.store(false, Ordering::SeqCst);
+            handle.abort();
+            // Small delay to allow tokio to process the cancellation and release AsyncFd resources
+            // This is necessary because AsyncFd::new() will fail if there's already an AsyncFd
+            // registered for the same fd
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
+
+        // Reset the running flag
+        self.receiver_loop_running.store(false, Ordering::SeqCst);
 
         // Spawn new loop with current sockets
         self.spawn_receiver_loop_if_needed();
@@ -4701,9 +4708,11 @@ pub async fn run(
             match initialize_protocol_subsystem(config, supervisor_logger.clone()) {
                 Ok((mut coordinator, receiver_task, timer_task)) => {
                     // Spawn protocol background tasks
-                    tokio::spawn(async move {
+                    // Store the handle so we can abort it on restart
+                    let receiver_handle = tokio::spawn(async move {
                         receiver_task.await;
                     });
+                    coordinator.state.receiver_loop_handle = Some(receiver_handle);
                     tokio::spawn(async move {
                         timer_task.await;
                     });
@@ -4797,11 +4806,13 @@ pub async fn run(
         };
 
         match initialize_protocol_subsystem(&empty_config, supervisor_logger.clone()) {
-            Ok((coordinator, receiver_task, timer_task)) => {
+            Ok((mut coordinator, receiver_task, timer_task)) => {
                 // Spawn protocol background tasks
-                tokio::spawn(async move {
+                // Store the handle so we can abort it on restart
+                let receiver_handle = tokio::spawn(async move {
                     receiver_task.await;
                 });
+                coordinator.state.receiver_loop_handle = Some(receiver_handle);
                 tokio::spawn(async move {
                     timer_task.await;
                 });
