@@ -3477,6 +3477,10 @@ async fn handle_client(
             let mut coordinator_guard = protocol_coordinator.lock().unwrap();
             if let Some(ref mut coordinator) = *coordinator_guard {
                 use crate::protocols::msdp::MsdpPeerConfig;
+
+                // Enable MSDP in the state config (required for add_peer to schedule timers)
+                coordinator.state.msdp_state.config.enabled = true;
+
                 let peer_config = MsdpPeerConfig {
                     address,
                     description: description.clone(),
