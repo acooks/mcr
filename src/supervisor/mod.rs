@@ -89,6 +89,12 @@ pub struct ProtocolState {
     /// Channel to send MSDP TCP commands
     pub msdp_tcp_tx: Option<mpsc::Sender<crate::protocols::msdp_tcp::MsdpTcpCommand>>,
 
+    /// Channel to send protocol events (for spawning receiver loop)
+    pub event_tx: Option<mpsc::Sender<ProtocolEvent>>,
+
+    /// Whether the protocol receiver loop has been started
+    pub receiver_loop_running: std::sync::Arc<std::sync::atomic::AtomicBool>,
+
     /// Whether protocols are enabled
     pub igmp_enabled: bool,
     pub pim_enabled: bool,
@@ -116,6 +122,8 @@ impl ProtocolState {
             pim_socket: None,
             timer_tx: None,
             msdp_tcp_tx: None,
+            event_tx: None,
+            receiver_loop_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             igmp_enabled: false,
             pim_enabled: false,
             msdp_enabled: false,
@@ -1765,6 +1773,61 @@ impl ProtocolState {
         self.pim_socket.as_ref().map(|s| s.as_raw_fd())
     }
 
+    /// Spawn the protocol receiver loop if it's not already running and we have sockets.
+    ///
+    /// This is used when creating protocol sockets via CLI after startup.
+    /// Returns true if a new receiver loop was spawned.
+    pub fn spawn_receiver_loop_if_needed(&self) -> bool {
+        use std::sync::atomic::Ordering;
+
+        // Check if already running
+        if self.receiver_loop_running.load(Ordering::SeqCst) {
+            return false;
+        }
+
+        // Check if we have any sockets to receive on
+        let igmp_fd = self.igmp_socket_fd();
+        let pim_fd = self.pim_socket_fd();
+
+        if igmp_fd.is_none() && pim_fd.is_none() {
+            return false;
+        }
+
+        // Get event_tx for the receiver loop
+        let event_tx = match &self.event_tx {
+            Some(tx) => tx.clone(),
+            None => {
+                log_warning!(
+                    self.logger,
+                    Facility::Supervisor,
+                    "Cannot spawn receiver loop: event_tx not available"
+                );
+                return false;
+            }
+        };
+
+        // Mark as running before spawning
+        self.receiver_loop_running.store(true, Ordering::SeqCst);
+
+        // Spawn the receiver loop
+        let receiver_logger = self.logger.clone();
+        tokio::spawn(async move {
+            protocol_receiver_loop(igmp_fd, pim_fd, event_tx, receiver_logger).await;
+        });
+
+        log_info!(
+            self.logger,
+            Facility::Supervisor,
+            &format!(
+                "Spawned protocol receiver loop (IGMP: {}, PIM: {})",
+                igmp_fd.is_some(),
+                pim_fd.is_some()
+            )
+        );
+
+        true
+    }
+
     /// Send outgoing packets using the appropriate protocol sockets
     ///
     /// Returns the number of packets successfully sent
@@ -2491,9 +2554,20 @@ pub fn initialize_protocol_subsystem(
         state.create_protocol_sockets()?;
     }
 
+    // Store event_tx in state for later use (e.g., spawning receiver loop via CLI)
+    state.event_tx = Some(event_tx.clone());
+
     // Get socket file descriptors for the receiver loop
     let igmp_fd = state.igmp_socket_fd();
     let pim_fd = state.pim_socket_fd();
+
+    // Mark receiver loop as running if we have sockets
+    let receiver_will_run = igmp_fd.is_some() || pim_fd.is_some();
+    if receiver_will_run {
+        state
+            .receiver_loop_running
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
 
     // Create background tasks
     let receiver_logger = logger.clone();
@@ -2982,6 +3056,8 @@ async fn handle_client(
                                 if let Err(e) = coordinator.state.create_pim_socket() {
                                     log::error!("Failed to create PIM socket: {}", e);
                                 }
+                                // Spawn receiver loop if this is the first socket
+                                coordinator.state.spawn_receiver_loop_if_needed();
                             }
                             if let Err(e) =
                                 coordinator.state.join_pim_multicast_on_interface(interface)
