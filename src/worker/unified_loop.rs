@@ -810,16 +810,21 @@ impl UnifiedDataPlane {
         };
 
         // Lookup forwarding rule based on (multicast_group, port)
-        let key = (headers.ipv4.dst_ip, headers.udp.dst_port);
-        let rule = match self.rules.get(&key) {
+        // First try exact match, then try wildcard port (0) for protocol-learned routes
+        let exact_key = (headers.ipv4.dst_ip, headers.udp.dst_port);
+        let wildcard_key = (headers.ipv4.dst_ip, 0u16);
+        let rule = match self.rules.get(&exact_key) {
             Some(r) => r,
-            None => {
-                // No matching rule
-                if self.config.track_stats {
-                    self.stats.rules_not_matched += 1;
+            None => match self.rules.get(&wildcard_key) {
+                Some(r) => r, // Wildcard port match (protocol-learned route)
+                None => {
+                    // No matching rule
+                    if self.config.track_stats {
+                        self.stats.rules_not_matched += 1;
+                    }
+                    return Ok(Vec::new());
                 }
-                return Ok(Vec::new());
-            }
+            },
         };
 
         // Check source filter for PIM (S,G) matching
@@ -840,20 +845,29 @@ impl UnifiedDataPlane {
         }
 
         // Create forwarding targets for ALL outputs (fan-out support)
+        // For protocol-learned routes (port=0), preserve the original packet's port
+        let original_port = headers.udp.dst_port;
         let targets: Vec<ForwardingTarget> = rule
             .outputs
             .iter()
-            .map(|output| ForwardingTarget {
-                payload_offset: headers.payload_offset,
-                payload_len: headers.payload_len,
-                dest_addr: SocketAddr::new(output.group.into(), output.port),
-                interface_name: output.interface.clone(),
+            .map(|output| {
+                let dest_port = if output.port == 0 {
+                    original_port // Preserve original port for wildcard rules
+                } else {
+                    output.port
+                };
+                ForwardingTarget {
+                    payload_offset: headers.payload_offset,
+                    payload_len: headers.payload_len,
+                    dest_addr: SocketAddr::new(output.group.into(), dest_port),
+                    interface_name: output.interface.clone(),
+                }
             })
             .collect();
 
-        // Update per-flow counters
+        // Update per-flow counters (use exact packet key for granular stats)
         if self.config.track_stats && !targets.is_empty() {
-            let counter = self.flow_counters.entry(key).or_default();
+            let counter = self.flow_counters.entry(exact_key).or_default();
             counter.packets_relayed += 1;
             counter.bytes_relayed += headers.payload_len as u64;
         }

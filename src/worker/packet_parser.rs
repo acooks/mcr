@@ -218,18 +218,26 @@ impl PacketHeaders {
     }
 
     /// Check if this packet matches a multicast relay rule
+    ///
+    /// Port 0 is treated as a wildcard (matches any port). This is used for
+    /// protocol-learned routes (PIM/IGMP) which operate at layer 3 and don't
+    /// track specific ports.
     pub fn matches(&self, group: Ipv4Addr, port: u16) -> bool {
-        self.ipv4.dst_ip == group && self.udp.dst_port == port
+        self.ipv4.dst_ip == group && (port == 0 || self.udp.dst_port == port)
     }
 
     /// Check if this packet matches a multicast relay rule with optional source filter
+    ///
+    /// Port 0 is treated as a wildcard (matches any port). This is used for
+    /// protocol-learned routes (PIM/IGMP) which operate at layer 3 and don't
+    /// track specific ports.
     pub fn matches_with_source(
         &self,
         group: Ipv4Addr,
         port: u16,
         source: Option<Ipv4Addr>,
     ) -> bool {
-        let basic_match = self.ipv4.dst_ip == group && self.udp.dst_port == port;
+        let basic_match = self.ipv4.dst_ip == group && (port == 0 || self.udp.dst_port == port);
         match source {
             Some(required_source) => basic_match && self.ipv4.src_ip == required_source,
             None => basic_match,
