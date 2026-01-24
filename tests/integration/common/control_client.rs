@@ -4,8 +4,8 @@
 use anyhow::Result;
 use multicast_relay::config::Config;
 use multicast_relay::{
-    ExternalNeighbor, FlowStats, ForwardingRule, IgmpGroupInfo, MsdpPeerInfo, MsdpSaCacheInfo,
-    OutputDestination, PimNeighborInfo, Response, SupervisorCommand, WorkerInfo,
+    ExternalNeighbor, FlowStats, ForwardingRule, IgmpGroupInfo, MrouteEntry, MsdpPeerInfo,
+    MsdpSaCacheInfo, OutputDestination, PimNeighborInfo, Response, SupervisorCommand, WorkerInfo,
 };
 use std::net::Ipv4Addr;
 use std::path::Path;
@@ -332,6 +332,15 @@ impl<'a> ControlClient<'a> {
             Response::Success(_) => Ok(()),
             Response::Error(e) => anyhow::bail!("Failed to clear MSDP SA cache: {}", e),
             other => anyhow::bail!("Unexpected response for ClearMsdpSaCache: {:?}", other),
+        }
+    }
+
+    /// Get multicast routing table entries
+    pub async fn get_mroute(&self) -> Result<Vec<MrouteEntry>> {
+        match self.send_command(SupervisorCommand::GetMroute).await? {
+            Response::Mroute(entries) => Ok(entries),
+            Response::Error(e) => anyhow::bail!("Failed to get mroute: {}", e),
+            other => anyhow::bail!("Unexpected response for GetMroute: {:?}", other),
         }
     }
 }

@@ -902,6 +902,129 @@ mod phase2 {
         Ok(())
     }
 
+    /// Test 2.3: Mroute API verification
+    ///
+    /// Verifies that the mroute API works and returns the expected format.
+    /// This is a basic sanity test for the API.
+    ///
+    /// Note: Full IGMP → MRIB testing requires socket-level group joins
+    /// which generate actual IGMP reports. The `ip maddr add` command
+    /// only updates the kernel's multicast table without sending IGMP.
+    #[tokio::test]
+    async fn test_mroute_api() -> Result<()> {
+        require_root!();
+        println!("\n=== Test 2.3: Mroute API Verification ===\n");
+
+        let config = r#"{
+            rules: [],
+            igmp: {
+                querier_interfaces: ["veth0"]
+            }
+        }"#;
+
+        let topology = TopologyBuilder::new()
+            .add_link("veth0", "10.0.0.1/24", "veth0p", "10.0.0.2/24")
+            .add_node("router", "veth0", config)
+            .build()
+            .await?;
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let client = topology.client("router").unwrap();
+
+        // Verify mroute API works
+        let mroute = client.get_mroute().await?;
+        println!("Mroute entries: {:?}", mroute);
+
+        // API should return successfully (even if empty)
+        // This verifies the GetMroute command is handled properly
+
+        println!("\n=== Test 2.3 PASSED ===\n");
+        Ok(())
+    }
+
+    /// Test 2.4: PIM neighbor formation with mroute verification
+    ///
+    /// Tests that PIM neighbors form correctly and verifies the mroute API
+    /// is accessible on both nodes. Full Join/Prune → MRIB testing requires
+    /// actual IGMP reports from hosts joining multicast groups.
+    #[tokio::test]
+    async fn test_pim_neighbors_with_mroute() -> Result<()> {
+        require_root!();
+        println!("\n=== Test 2.4: PIM Neighbors + Mroute API ===\n");
+
+        let config_router = r#"{
+            rules: [],
+            pim: {
+                enabled: true,
+                router_id: "10.0.0.1",
+                rp_address: "10.0.0.1",
+                interfaces: [{ name: "veth_rcv", dr_priority: 100, hello_period: 5 }]
+            }
+        }"#;
+
+        let config_receiver = r#"{
+            rules: [],
+            pim: {
+                enabled: true,
+                router_id: "10.0.1.2",
+                rp_address: "10.0.0.1",
+                interfaces: [{ name: "veth_r", dr_priority: 50, hello_period: 5 }]
+            }
+        }"#;
+
+        let topology = TopologyBuilder::new()
+            .add_link("veth_rcv", "10.0.1.1/24", "veth_r", "10.0.1.2/24")
+            .add_node("router", "veth_rcv", config_router)
+            .add_node("receiver", "veth_r", config_receiver)
+            .build()
+            .await?;
+
+        println!("Topology: Router (RP) <-> Receiver");
+
+        // Wait for PIM neighbors
+        topology
+            .wait_for_pim_neighbors(Duration::from_secs(20))
+            .await?;
+        println!("✓ PIM neighbors formed");
+
+        let client_router = topology.client("router").unwrap();
+        let client_receiver = topology.client("receiver").unwrap();
+
+        // Verify neighbors
+        let router_neighbors = client_router.get_pim_neighbors().await?;
+        assert_eq!(router_neighbors.len(), 1, "Router should have 1 neighbor");
+        println!("✓ Router has neighbor: {:?}", router_neighbors[0].address);
+
+        let receiver_neighbors = client_receiver.get_pim_neighbors().await?;
+        assert_eq!(
+            receiver_neighbors.len(),
+            1,
+            "Receiver should have 1 neighbor"
+        );
+        println!(
+            "✓ Receiver has neighbor: {:?}",
+            receiver_neighbors[0].address
+        );
+
+        // Verify mroute API works on both nodes
+        let router_mroute = client_router.get_mroute().await?;
+        println!("Router mroute: {:?}", router_mroute);
+
+        let receiver_mroute = client_receiver.get_mroute().await?;
+        println!("Receiver mroute: {:?}", receiver_mroute);
+
+        // Note: mroute will be empty until actual IGMP reports trigger joins
+        // Full data path testing requires:
+        // 1. Socket-level multicast group join (generates IGMP report)
+        // 2. IGMP → PIM Join propagation
+        // 3. PIM state → MRIB action
+        // 4. MRIB → Forwarding rules
+
+        println!("\n=== Test 2.4 PASSED ===\n");
+        Ok(())
+    }
+
     /// Test 5.2: MSDP with Keepalives
     ///
     /// Tests that MSDP sessions stay up with keepalive exchange.
