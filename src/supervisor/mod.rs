@@ -77,8 +77,11 @@ pub struct ProtocolState {
     /// Multicast Routing Information Base - merges static + dynamic routes
     pub mrib: MulticastRib,
 
-    /// Raw socket for IGMP packets (protocol 2)
-    pub igmp_socket: Option<OwnedFd>,
+    /// Raw socket for sending IGMP packets (protocol 2)
+    pub igmp_send_socket: Option<OwnedFd>,
+
+    /// AF_PACKET socket for receiving IGMP packets (captures at L2)
+    pub igmp_recv_socket: Option<OwnedFd>,
 
     /// Raw socket for PIM packets (protocol 103)
     pub pim_socket: Option<OwnedFd>,
@@ -106,9 +109,6 @@ pub struct ProtocolState {
     pub pim_enabled: bool,
     pub msdp_enabled: bool,
 
-    /// Whether MRT_INIT was enabled on IGMP socket (for cleanup with MRT_DONE)
-    pub mrt_init_enabled: bool,
-
     /// Logger for protocol events
     logger: Logger,
 
@@ -130,7 +130,8 @@ impl ProtocolState {
             pim_state: PimState::new(),
             msdp_state: MsdpState::new(),
             mrib: MulticastRib::new(),
-            igmp_socket: None,
+            igmp_send_socket: None,
+            igmp_recv_socket: None,
             pim_socket: None,
             timer_tx: None,
             msdp_tcp_tx: None,
@@ -141,7 +142,6 @@ impl ProtocolState {
             igmp_enabled: false,
             pim_enabled: false,
             msdp_enabled: false,
-            mrt_init_enabled: false,
             logger,
             event_manager: None,
             event_buffer_size: 256, // Default
@@ -1822,17 +1822,21 @@ impl ProtocolState {
         }
     }
 
-    /// Create a raw socket for IGMP (IP protocol 2)
+    /// Create sockets for IGMP
     ///
-    /// This socket is used to:
-    /// - Send IGMP queries (General and Group-Specific)
-    /// - Receive IGMP reports and leaves from hosts
+    /// Creates two sockets:
+    /// - Raw IP socket for sending IGMP queries (with IP_HDRINCL)
+    /// - AF_PACKET socket for receiving IGMP packets (captures at L2, sees all IGMP)
+    ///
+    /// The AF_PACKET approach is required because:
+    /// - Raw IP sockets only receive packets destined to addresses the kernel has joined
+    /// - MRT_INIT requires MRT_ADD_VIF for each interface, limited to 32 VIFs
+    /// - AF_PACKET captures at L2 and sees ALL packets, including IGMP from other hosts
     pub fn create_igmp_socket(&mut self) -> Result<()> {
-        // IGMP is IP protocol 2
+        // === Create raw IP socket for SENDING IGMP ===
         const IPPROTO_IGMP: i32 = 2;
 
-        // Create raw socket for IGMP
-        let fd = unsafe {
+        let send_fd = unsafe {
             libc::socket(
                 libc::AF_INET,
                 libc::SOCK_RAW | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
@@ -1840,9 +1844,9 @@ impl ProtocolState {
             )
         };
 
-        if fd < 0 {
+        if send_fd < 0 {
             return Err(anyhow::anyhow!(
-                "Failed to create IGMP raw socket: {}",
+                "Failed to create IGMP send socket: {}",
                 std::io::Error::last_os_error()
             ));
         }
@@ -1851,7 +1855,7 @@ impl ProtocolState {
         let hdrincl: libc::c_int = 1;
         let result = unsafe {
             libc::setsockopt(
-                fd,
+                send_fd,
                 libc::IPPROTO_IP,
                 libc::IP_HDRINCL,
                 &hdrincl as *const _ as *const libc::c_void,
@@ -1860,92 +1864,76 @@ impl ProtocolState {
         };
 
         if result < 0 {
-            unsafe { libc::close(fd) };
+            unsafe { libc::close(send_fd) };
             return Err(anyhow::anyhow!(
-                "Failed to set IP_HDRINCL on IGMP socket: {}",
+                "Failed to set IP_HDRINCL on IGMP send socket: {}",
                 std::io::Error::last_os_error()
             ));
         }
 
-        // Set IP_PKTINFO to receive the interface index on incoming packets
-        let pktinfo: libc::c_int = 1;
-        let result = unsafe {
-            libc::setsockopt(
-                fd,
-                libc::IPPROTO_IP,
-                libc::IP_PKTINFO,
-                &pktinfo as *const _ as *const libc::c_void,
-                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-            )
-        };
-
-        if result < 0 {
-            unsafe { libc::close(fd) };
-            return Err(anyhow::anyhow!(
-                "Failed to set IP_PKTINFO on IGMP socket: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
-
-        // Enable MRT_INIT to receive ALL IGMP packets regardless of destination.
-        // This is the standard kernel interface for multicast routing daemons.
-        // Without this, raw sockets only receive IGMP packets destined to addresses
-        // the kernel has joined (e.g., 224.0.0.22), missing IGMPv2 reports sent
-        // to group addresses (e.g., 239.1.1.1).
-        //
-        // MRT_INIT = 200 (from linux/mroute.h, not in libc crate)
-        const MRT_INIT: libc::c_int = 200;
-        let mrt_init: libc::c_int = 1;
-        let result = unsafe {
-            libc::setsockopt(
-                fd,
-                libc::IPPROTO_IP,
-                MRT_INIT,
-                &mrt_init as *const _ as *const libc::c_void,
-                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-            )
-        };
-
-        if result < 0 {
-            let err = std::io::Error::last_os_error();
-            // EADDRINUSE means another process has MRT_INIT (e.g., pimd, mrouted)
-            // EPERM means we don't have CAP_NET_ADMIN
-            if err.raw_os_error() == Some(libc::EADDRINUSE) {
-                log_warning!(
-                    self.logger,
-                    Facility::Supervisor,
-                    "MRT_INIT failed (EADDRINUSE) - another multicast routing daemon is active. \
-                     IGMP reports to group addresses will not be received."
-                );
-            } else {
-                log_warning!(
-                    self.logger,
-                    Facility::Supervisor,
-                    &format!(
-                        "Failed to set MRT_INIT on IGMP socket: {}. \
-                         IGMP reports to group addresses may not be received.",
-                        err
-                    )
-                );
-            }
-        } else {
-            log_info!(
-                self.logger,
-                Facility::Supervisor,
-                "MRT_INIT enabled - receiving all IGMP packets"
-            );
-            self.mrt_init_enabled = true;
-        }
-
-        let sock = unsafe { OwnedFd::from_raw_fd(fd) };
-
+        let send_sock = unsafe { OwnedFd::from_raw_fd(send_fd) };
         log_info!(
             self.logger,
             Facility::Supervisor,
-            &format!("Created IGMP raw socket (fd: {})", sock.as_raw_fd())
+            &format!("Created IGMP send socket (fd: {})", send_sock.as_raw_fd())
         );
 
-        self.igmp_socket = Some(sock);
+        // === Create AF_PACKET socket for RECEIVING IGMP ===
+        // ETH_P_IP = 0x0800, but we need to filter for IGMP at IP layer
+        // Use ETH_P_ALL to receive all packets, then filter for IGMP in userspace
+        let recv_fd = unsafe {
+            libc::socket(
+                libc::AF_PACKET,
+                libc::SOCK_DGRAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+                (libc::ETH_P_IP as u16).to_be() as i32,
+            )
+        };
+
+        if recv_fd < 0 {
+            return Err(anyhow::anyhow!(
+                "Failed to create IGMP AF_PACKET recv socket: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+
+        // Don't bind to a specific interface - receive from all interfaces
+        // The sockaddr_ll in recvfrom will tell us which interface the packet came from
+
+        // Set PACKET_AUXDATA to get packet metadata including interface index
+        let auxdata: libc::c_int = 1;
+        let result = unsafe {
+            libc::setsockopt(
+                recv_fd,
+                libc::SOL_PACKET,
+                libc::PACKET_AUXDATA,
+                &auxdata as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+
+        if result < 0 {
+            log_warning!(
+                self.logger,
+                Facility::Supervisor,
+                &format!(
+                    "Failed to set PACKET_AUXDATA on IGMP recv socket (non-fatal): {}",
+                    std::io::Error::last_os_error()
+                )
+            );
+        }
+
+        let recv_sock = unsafe { OwnedFd::from_raw_fd(recv_fd) };
+        log_info!(
+            self.logger,
+            Facility::Supervisor,
+            &format!(
+                "Created IGMP AF_PACKET recv socket (fd: {})",
+                recv_sock.as_raw_fd()
+            )
+        );
+
+        self.igmp_send_socket = Some(send_sock);
+        self.igmp_recv_socket = Some(recv_sock);
         Ok(())
     }
 
@@ -2159,10 +2147,12 @@ impl ProtocolState {
     /// This is required to receive IGMPv3 Membership Reports, which are sent to
     /// 224.0.0.22 instead of the group address (unlike IGMPv2).
     pub fn join_igmp_v3_all_routers(&self, interface: &str) -> Result<()> {
+        // Use the send socket to join the multicast group
+        // (AF_PACKET recv socket doesn't need group membership - it sees all L2 traffic)
         let fd = self
-            .igmp_socket
+            .igmp_send_socket
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("IGMP socket not created"))?
+            .ok_or_else(|| anyhow::anyhow!("IGMP send socket not created"))?
             .as_raw_fd();
 
         // Get interface index
@@ -2212,7 +2202,7 @@ impl ProtocolState {
 
     /// Create both protocol sockets if protocols are enabled
     pub fn create_protocol_sockets(&mut self) -> Result<()> {
-        if self.igmp_enabled && self.igmp_socket.is_none() {
+        if self.igmp_enabled && self.igmp_recv_socket.is_none() {
             self.create_igmp_socket()?;
 
             // Enable ALLMULTI and join IGMPv3 all-routers on each IGMP-enabled interface
@@ -2256,8 +2246,14 @@ impl ProtocolState {
     }
 
     /// Get the IGMP socket fd for async monitoring
+    /// Get the IGMP receive socket fd for async monitoring (AF_PACKET)
     pub fn igmp_socket_fd(&self) -> Option<RawFd> {
-        self.igmp_socket.as_ref().map(|s| s.as_raw_fd())
+        self.igmp_recv_socket.as_ref().map(|s| s.as_raw_fd())
+    }
+
+    /// Get the IGMP send socket fd for sending packets (raw IP)
+    pub fn igmp_send_socket_fd(&self) -> Option<RawFd> {
+        self.igmp_send_socket.as_ref().map(|s| s.as_raw_fd())
     }
 
     /// Get the PIM socket fd for async monitoring
@@ -2398,10 +2394,10 @@ impl ProtocolState {
         // Get the appropriate socket
         let fd = match packet.protocol {
             ProtocolType::Igmp => self
-                .igmp_socket
+                .igmp_send_socket
                 .as_ref()
                 .map(|s| s.as_raw_fd())
-                .ok_or_else(|| anyhow::anyhow!("IGMP socket not available"))?,
+                .ok_or_else(|| anyhow::anyhow!("IGMP send socket not available"))?,
             ProtocolType::Pim => self
                 .pim_socket
                 .as_ref()
@@ -2498,32 +2494,7 @@ impl ProtocolState {
     }
 }
 
-impl Drop for ProtocolState {
-    fn drop(&mut self) {
-        // Clean up MRT_INIT if it was enabled
-        if self.mrt_init_enabled {
-            if let Some(ref sock) = self.igmp_socket {
-                const MRT_DONE: libc::c_int = 201;
-                let result = unsafe {
-                    libc::setsockopt(
-                        sock.as_raw_fd(),
-                        libc::IPPROTO_IP,
-                        MRT_DONE,
-                        std::ptr::null(),
-                        0,
-                    )
-                };
-                if result < 0 {
-                    // Log at warning level since this is during shutdown
-                    eprintln!(
-                        "Warning: Failed to disable MRT_INIT (MRT_DONE): {}",
-                        std::io::Error::last_os_error()
-                    );
-                }
-            }
-        }
-    }
-}
+// No explicit Drop needed - OwnedFd handles socket cleanup automatically
 
 /// Build an IP packet with the given payload
 ///
@@ -2645,6 +2616,36 @@ impl AsyncRawSocket {
             iface_index,
         })
     }
+
+    /// Read a packet from AF_PACKET socket, getting interface index from sockaddr_ll
+    ///
+    /// AF_PACKET with SOCK_DGRAM returns IP packets (no ethernet header).
+    /// The interface index comes from sockaddr_ll.sll_ifindex.
+    fn try_read_af_packet(&self, buf: &mut [u8]) -> std::io::Result<RecvResult> {
+        let mut sockaddr: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
+        let mut sockaddr_len: libc::socklen_t =
+            std::mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t;
+
+        let n = unsafe {
+            libc::recvfrom(
+                self.fd,
+                buf.as_mut_ptr() as *mut libc::c_void,
+                buf.len(),
+                0,
+                &mut sockaddr as *mut libc::sockaddr_ll as *mut libc::sockaddr,
+                &mut sockaddr_len,
+            )
+        };
+
+        if n < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        Ok(RecvResult {
+            len: n as usize,
+            iface_index: sockaddr.sll_ifindex,
+        })
+    }
 }
 
 impl std::os::unix::io::AsRawFd for AsyncRawSocket {
@@ -2713,7 +2714,7 @@ pub async fn protocol_receiver_loop(
                 }
             }
 
-            // IGMP socket readable
+            // IGMP socket readable (AF_PACKET)
             result = async {
                 if let Some(ref async_fd) = igmp_async {
                     async_fd.readable().await
@@ -2723,25 +2724,31 @@ pub async fn protocol_receiver_loop(
                 }
             } => {
                 if let Ok(mut guard) = result {
-                    match guard.get_inner().try_read_with_pktinfo(&mut buf) {
+                    // Use AF_PACKET read for IGMP - gets interface from sockaddr_ll
+                    // Note: AF_PACKET with ETH_P_IP receives ALL IP packets, not just IGMP
+                    match guard.get_inner().try_read_af_packet(&mut buf) {
                         Ok(recv) if recv.len > 0 => {
-                            let interface = interface_name_from_index(recv.iface_index);
-                            log_info!(
-                                logger,
-                                Facility::Supervisor,
-                                &format!(
-                                    "IGMP packet received: {} bytes on iface_index={}, interface={:?}",
-                                    recv.len, recv.iface_index, interface
-                                )
-                            );
-                            if let Some(event) = parse_igmp_packet(&buf[..recv.len], interface, &logger) {
-                                if event_tx.send(event).await.is_err() {
-                                    log_warning!(
-                                        logger,
-                                        Facility::Supervisor,
-                                        "Protocol event channel closed, receiver loop exiting"
-                                    );
-                                    return;
+                            // Quick check: only process if this is an IGMP packet (IP protocol 2)
+                            // This avoids log spam from multicast data traffic
+                            if recv.len >= 20 && buf[9] == 2 {
+                                let interface = interface_name_from_index(recv.iface_index);
+                                log_info!(
+                                    logger,
+                                    Facility::Supervisor,
+                                    &format!(
+                                        "IGMP packet received: {} bytes on iface_index={}, interface={:?}",
+                                        recv.len, recv.iface_index, interface
+                                    )
+                                );
+                                if let Some(event) = parse_igmp_packet(&buf[..recv.len], interface, &logger) {
+                                    if event_tx.send(event).await.is_err() {
+                                        log_warning!(
+                                            logger,
+                                            Facility::Supervisor,
+                                            "Protocol event channel closed, receiver loop exiting"
+                                        );
+                                        return;
+                                    }
                                 }
                             }
                         }
@@ -3917,7 +3924,7 @@ async fn handle_client(
 
                             // Ensure IGMP socket exists
                             coordinator.state.igmp_enabled = true;
-                            let need_socket = coordinator.state.igmp_socket.is_none();
+                            let need_socket = coordinator.state.igmp_recv_socket.is_none();
                             if need_socket {
                                 if let Err(e) = coordinator.state.create_igmp_socket() {
                                     log_error!(
@@ -5181,7 +5188,8 @@ mod tests {
         assert!(!state.igmp_enabled);
         assert!(!state.pim_enabled);
         assert!(!state.msdp_enabled);
-        assert!(state.igmp_socket.is_none());
+        assert!(state.igmp_send_socket.is_none());
+        assert!(state.igmp_recv_socket.is_none());
         assert!(state.pim_socket.is_none());
         assert!(state.timer_tx.is_none());
         assert!(state.msdp_tcp_tx.is_none());

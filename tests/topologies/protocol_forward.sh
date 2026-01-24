@@ -97,19 +97,19 @@ MCR_CONFIG=/tmp/mcr_protocol.json5
 rm -f "$MCR_SOCK" "$MCR_LOG" "$MCR_CONFIG"
 
 # Create config file with IGMP and PIM enabled
-# Note: In a single-namespace test, IGMP reports are received on the interface
-# where the socket is bound (veth_recv), not the peer interface (veth_out).
-# So we enable IGMP on veth_recv to process the receiver's IGMP reports.
+# Note: With AF_PACKET, packets are captured at L2 and appear on the local
+# interface (veth_out), not the peer interface (veth_recv).
+# MCR should be configured on the interface it owns (veth_out).
 cat > "$MCR_CONFIG" << 'EOF'
 {
     // No static rules - using protocol-learned routes
     rules: [],
 
-    // IGMP querier on the interface where receiver's IGMP reports arrive
-    // In single-namespace test, this is veth_recv (receiver's interface)
+    // IGMP querier on MCR's downstream interface (toward receiver)
+    // AF_PACKET receives IGMP reports on veth_out (local side of veth pair)
     igmp: {
         enabled: true,
-        querier_interfaces: ["veth_recv"],
+        querier_interfaces: ["veth_out"],
         query_interval: 5,
         query_response_interval: 2
     },
