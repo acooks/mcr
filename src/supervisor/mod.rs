@@ -474,7 +474,7 @@ impl ProtocolState {
                 self.pim_state.disable_interface(&interface);
             }
             PimEvent::PacketReceived {
-                interface,
+                interface: reported_interface,
                 src_ip,
                 msg_type,
                 payload,
@@ -482,9 +482,30 @@ impl ProtocolState {
                 match msg_type {
                     0 => {
                         // Hello - parse options and process
+                        // Find the correct PIM-enabled interface for this source IP.
+                        // In shared namespace setups, IP_PKTINFO may report the wrong interface,
+                        // so we look for a PIM-enabled interface in the same subnet as src_ip.
+                        let interface = self
+                            .pim_state
+                            .find_interface_for_neighbor(src_ip)
+                            .unwrap_or(reported_interface);
+
                         let (timers, is_new_neighbor, dr_changed, is_dr) =
                             if let Some(iface_state) = self.pim_state.get_interface_mut(&interface)
                             {
+                                // Skip self-originated packets (multicast loop)
+                                if src_ip == iface_state.address {
+                                    log_debug!(
+                                        self.logger,
+                                        Facility::Supervisor,
+                                        &format!(
+                                            "PIM: Ignoring self-originated Hello on interface {}",
+                                            interface
+                                        )
+                                    );
+                                    return result;
+                                }
+
                                 log_info!(
                                     self.logger,
                                     Facility::Supervisor,
@@ -649,7 +670,7 @@ impl ProtocolState {
                             parse_pim_join_prune(&payload)
                         {
                             let _ = self.pim_state.process_join_prune(
-                                &interface,
+                                &reported_interface,
                                 upstream,
                                 &joins,
                                 &prunes,

@@ -567,6 +567,33 @@ impl PimState {
         self.interfaces.get_mut(interface)
     }
 
+    /// Find the PIM-enabled interface that's in the same subnet as the given neighbor IP.
+    ///
+    /// This is used to handle cases where IP_PKTINFO reports the wrong interface,
+    /// such as in shared namespace test setups.
+    pub fn find_interface_for_neighbor(&self, neighbor_ip: Ipv4Addr) -> Option<String> {
+        use pnet::datalink::interfaces;
+
+        // Get all system interfaces and their IP configurations
+        let system_ifaces = interfaces();
+
+        for iface_name in self.interfaces.keys() {
+            // Find the system interface with this name
+            if let Some(sys_iface) = system_ifaces.iter().find(|i| &i.name == iface_name) {
+                // Check if neighbor_ip is in the same subnet as any of the interface's IPs
+                for ip_net in &sys_iface.ips {
+                    if ip_net.ip().is_ipv4() {
+                        // Check if neighbor IP is in this subnet
+                        if ip_net.contains(std::net::IpAddr::V4(neighbor_ip)) {
+                            return Some(iface_name.clone());
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Process a received Join/Prune message
     pub fn process_join_prune(
         &mut self,
