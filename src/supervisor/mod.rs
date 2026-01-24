@@ -2653,6 +2653,28 @@ fn get_interface_ipv4(interface: &str) -> Option<Ipv4Addr> {
     None
 }
 
+/// Get the local source address that would be used to reach a destination.
+///
+/// Uses the UDP connect trick: connect a UDP socket to the destination
+/// (without sending anything), then getsockname() to see which local
+/// address the kernel chose based on the routing table.
+fn get_source_addr_for_dest(dest: Ipv4Addr) -> Option<Ipv4Addr> {
+    use std::net::{SocketAddr, UdpSocket};
+
+    // Create a UDP socket and "connect" to the destination
+    // This doesn't send anything, just sets the route
+    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket
+        .connect(SocketAddr::from((dest, 9))) // Port doesn't matter
+        .ok()?;
+
+    // Get the local address the kernel chose
+    match socket.local_addr().ok()? {
+        SocketAddr::V4(addr) => Some(*addr.ip()),
+        _ => None,
+    }
+}
+
 /// Parse a group prefix like "239.0.0.0/8" or "239.1.1.1" into a base address
 pub(super) fn parse_group_prefix(prefix: &str) -> Result<Ipv4Addr> {
     if let Some((addr_str, _)) = prefix.split_once('/') {
@@ -3380,8 +3402,9 @@ async fn handle_client(
                 };
 
                 if let Some(event_tx) = event_tx {
-                    // Use the peer address as local address for MSDP (or find a suitable one)
-                    let local_addr = get_interface_ipv4("lo").unwrap_or(Ipv4Addr::LOCALHOST);
+                    // Find local address that can reach the peer
+                    let local_addr = get_source_addr_for_dest(address)
+                        .unwrap_or_else(|| get_interface_ipv4("lo").unwrap_or(Ipv4Addr::LOCALHOST));
 
                     match crate::protocols::msdp_tcp::start_msdp_tcp(local_addr, event_tx).await {
                         Ok((tcp_cmd_tx, listener_task, runner_task)) => {
