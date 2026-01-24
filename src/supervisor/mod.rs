@@ -3746,6 +3746,107 @@ async fn handle_client(
                     );
                     Some(Response::Success(format!("PIM disabled on {}", interface)))
                 }
+                SupervisorCommand::EnableIgmpQuerier { ref interface } => {
+                    // Look up interface IP
+                    match get_interface_ipv4(interface) {
+                        None => Some(Response::Error(format!(
+                            "Interface {} not found or has no IPv4 address",
+                            interface
+                        ))),
+                        Some(interface_ip) => {
+                            // Create IGMP interface state
+                            let igmp_config = crate::protocols::igmp::IgmpConfig::default();
+                            let state = crate::protocols::igmp::InterfaceIgmpState::new(
+                                interface.clone(),
+                                interface_ip,
+                                igmp_config,
+                            );
+                            coordinator
+                                .state
+                                .igmp_state
+                                .insert(interface.clone(), state);
+
+                            // Schedule initial General Query timer
+                            if let Some(ref timer_tx) = coordinator.state.timer_tx {
+                                let timer = crate::protocols::TimerRequest {
+                                    timer_type: crate::protocols::TimerType::IgmpGeneralQuery {
+                                        interface: interface.clone(),
+                                    },
+                                    fire_at: std::time::Instant::now(),
+                                    replace_existing: true,
+                                };
+                                if let Err(e) = timer_tx.try_send(timer) {
+                                    log_warning!(
+                                        logger,
+                                        Facility::Supervisor,
+                                        &format!("Failed to schedule IGMP timer: {}", e)
+                                    );
+                                }
+                            }
+
+                            // Ensure IGMP socket exists
+                            coordinator.state.igmp_enabled = true;
+                            if coordinator.state.igmp_socket.is_none() {
+                                if let Err(e) = coordinator.state.create_igmp_socket() {
+                                    log_error!(
+                                        logger,
+                                        Facility::Supervisor,
+                                        &format!("Failed to create IGMP socket: {}", e)
+                                    );
+                                }
+                                // Spawn receiver loop if this is the first socket
+                                coordinator.state.spawn_receiver_loop_if_needed();
+                            }
+
+                            // Enable ALLMULTI and join IGMPv3 all-routers on this interface
+                            if let Err(e) =
+                                coordinator.state.enable_allmulti_on_interface(interface)
+                            {
+                                log_warning!(
+                                    logger,
+                                    Facility::Supervisor,
+                                    &format!("Failed to enable ALLMULTI on {}: {}", interface, e)
+                                );
+                            }
+                            if let Err(e) = coordinator.state.join_igmp_v3_all_routers(interface) {
+                                log_warning!(
+                                    logger,
+                                    Facility::Supervisor,
+                                    &format!(
+                                        "Failed to join IGMPv3 all-routers on {}: {} (may already be joined)",
+                                        interface, e
+                                    )
+                                );
+                            }
+
+                            log_info!(
+                                logger,
+                                Facility::Supervisor,
+                                &format!(
+                                    "IGMP querier enabled on interface {} (IP: {})",
+                                    interface, interface_ip
+                                )
+                            );
+                            Some(Response::Success(format!(
+                                "IGMP querier enabled on {} (IP: {})",
+                                interface, interface_ip
+                            )))
+                        }
+                    }
+                }
+                SupervisorCommand::DisableIgmpQuerier { ref interface } => {
+                    // Remove IGMP state for the interface
+                    coordinator.state.igmp_state.remove(interface);
+                    log_info!(
+                        logger,
+                        Facility::Supervisor,
+                        &format!("IGMP querier disabled on interface {}", interface)
+                    );
+                    Some(Response::Success(format!(
+                        "IGMP querier disabled on {}",
+                        interface
+                    )))
+                }
                 _ => None,
             }
         } else {
