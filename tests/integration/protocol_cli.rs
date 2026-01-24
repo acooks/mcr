@@ -369,15 +369,16 @@ mod privileged {
 
     /// Test MSDP peer addition via CLI without config file.
     ///
-    /// This tests the fix for the bug where:
+    /// This tests the fix for the bugs where:
     /// 1. MSDP TCP subsystem was only initialized from config file
     /// 2. CLI `msdp add-peer` would add peer to state but TCP never started
-    /// 3. Peer would show "state: disabled" forever
+    /// 3. Peer would show "state: disabled" forever (config.enabled not set)
     ///
     /// Now verifies:
     /// - MCR starts without MSDP config
     /// - `msdp add-peer` triggers MSDP TCP initialization
-    /// - Peer is added to state
+    /// - Peer is added to state with correct initial state
+    /// - Peer state transitions to "connecting" (timers are scheduled)
     ///
     /// Note: Full session establishment requires separate namespaces and is
     /// tested in the topology tests (test_msdp_tcp_session, test_msdp_keepalives).
@@ -423,7 +424,7 @@ mod privileged {
             .await?;
         println!("MSDP peer added");
 
-        // Wait a moment for state to settle
+        // Wait for state to settle (timer fires almost immediately)
         tokio::time::sleep(Duration::from_millis(500)).await;
 
         // Verify peer was added to state
@@ -435,6 +436,29 @@ mod privileged {
             "Peer address should match"
         );
         println!("✓ MSDP peer added to state: {:?}", peers[0]);
+
+        // CRITICAL: Verify peer state is NOT "disabled"
+        // This catches the bug where msdp_state.config.enabled wasn't set
+        assert_ne!(
+            peers[0].state.to_lowercase(),
+            "disabled",
+            "Peer state should NOT be 'disabled' - this indicates config.enabled wasn't set"
+        );
+        println!("✓ Peer state is not 'disabled': {}", peers[0].state);
+
+        // Verify peer state transitions to "connecting" (timers were scheduled)
+        // The connection will fail (no peer listening) but state should change
+        let valid_states = ["idle", "connecting", "active", "established"];
+        assert!(
+            valid_states.contains(&peers[0].state.to_lowercase().as_str()),
+            "Peer state '{}' should be one of {:?}",
+            peers[0].state,
+            valid_states
+        );
+        println!(
+            "✓ Peer state '{}' indicates state machine is active",
+            peers[0].state
+        );
 
         drop(mcr);
         println!("\n=== Test passed ===\n");
