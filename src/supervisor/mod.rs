@@ -393,6 +393,102 @@ impl ProtocolState {
                                         timestamp: unix_timestamp(),
                                     },
                                 );
+
+                                // If PIM is enabled, create (*,G) route towards RP
+                                if self.pim_enabled {
+                                    // Check if we already have a (*,G) route for this group
+                                    if !self.pim_state.star_g.contains_key(&group) {
+                                        // Look up RP for this group
+                                        if let Some(rp) =
+                                            self.pim_state.config.get_rp_for_group(group)
+                                        {
+                                            // Do RPF lookup towards RP to get upstream interface
+                                            let upstream_interface = lookup_rpf_interface(rp);
+
+                                            if let Some(ref upstream) = upstream_interface {
+                                                log_info!(
+                                                    self.logger,
+                                                    Facility::Supervisor,
+                                                    &format!(
+                                                        "IGMP triggered (*,{}) route creation: RP={}, upstream={}",
+                                                        group, rp, upstream
+                                                    )
+                                                );
+                                            }
+
+                                            // Create (*,G) state in PIM
+                                            let mut star_g_state =
+                                                crate::protocols::pim::StarGState::new(group, rp);
+                                            star_g_state.upstream_interface = upstream_interface;
+                                            // The IGMP interface is a downstream
+                                            star_g_state
+                                                .downstream_interfaces
+                                                .insert(interface.clone());
+                                            star_g_state.expires_at =
+                                                Some(now + Duration::from_secs(210)); // Default PIM holdtime
+
+                                            // Add route to MRIB
+                                            let route = crate::mroute::StarGRoute {
+                                                group,
+                                                rp,
+                                                upstream_interface: star_g_state
+                                                    .upstream_interface
+                                                    .clone(),
+                                                downstream_interfaces: star_g_state
+                                                    .downstream_interfaces
+                                                    .clone(),
+                                                created_at: star_g_state.created_at,
+                                                expires_at: star_g_state.expires_at,
+                                            };
+                                            result.add_action(MribAction::AddStarGRoute(route));
+
+                                            // Store in PIM state
+                                            self.pim_state.star_g.insert(group, star_g_state);
+
+                                            result.notify(
+                                                crate::ProtocolEventNotification::PimRouteChange {
+                                                    route_type: crate::PimTreeType::StarG,
+                                                    group,
+                                                    source: None,
+                                                    action: crate::RouteAction::Add,
+                                                    timestamp: unix_timestamp(),
+                                                },
+                                            );
+
+                                            // TODO: Send PIM Join towards RP
+                                            // This requires building a PIM Join/Prune packet
+                                            // and sending it on the upstream interface
+                                        }
+                                    } else {
+                                        // Route exists - add this interface as downstream
+                                        if let Some(star_g_state) =
+                                            self.pim_state.star_g.get_mut(&group)
+                                        {
+                                            if !star_g_state
+                                                .downstream_interfaces
+                                                .contains(&interface)
+                                            {
+                                                star_g_state
+                                                    .downstream_interfaces
+                                                    .insert(interface.clone());
+                                                // Update MRIB with new downstream
+                                                let route = crate::mroute::StarGRoute {
+                                                    group,
+                                                    rp: star_g_state.rp,
+                                                    upstream_interface: star_g_state
+                                                        .upstream_interface
+                                                        .clone(),
+                                                    downstream_interfaces: star_g_state
+                                                        .downstream_interfaces
+                                                        .clone(),
+                                                    created_at: star_g_state.created_at,
+                                                    expires_at: star_g_state.expires_at,
+                                                };
+                                                result.add_action(MribAction::AddStarGRoute(route));
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                         0x17 => {
@@ -718,6 +814,57 @@ impl ProtocolState {
                                 Duration::from_secs(holdtime as u64),
                             );
                             result.add_timers(timers);
+
+                            // Populate upstream_interface via RPF lookup for any routes that need it
+                            for (source, group) in &joins {
+                                match source {
+                                    None => {
+                                        // (*,G) - RPF towards RP
+                                        if let Some(star_g_state) =
+                                            self.pim_state.star_g.get_mut(group)
+                                        {
+                                            if star_g_state.upstream_interface.is_none() {
+                                                star_g_state.upstream_interface =
+                                                    lookup_rpf_interface(star_g_state.rp);
+                                                if let Some(ref iface) =
+                                                    star_g_state.upstream_interface
+                                                {
+                                                    log_debug!(
+                                                        self.logger,
+                                                        Facility::Supervisor,
+                                                        &format!(
+                                                            "RPF lookup for (*,{}) towards RP {}: upstream={}",
+                                                            group, star_g_state.rp, iface
+                                                        )
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Some(src) => {
+                                        // (S,G) - RPF towards source
+                                        if let Some(sg_state) =
+                                            self.pim_state.sg.get_mut(&(*src, *group))
+                                        {
+                                            if sg_state.upstream_interface.is_none() {
+                                                sg_state.upstream_interface =
+                                                    lookup_rpf_interface(*src);
+                                                if let Some(ref iface) = sg_state.upstream_interface
+                                                {
+                                                    log_debug!(
+                                                        self.logger,
+                                                        Facility::Supervisor,
+                                                        &format!(
+                                                            "RPF lookup for ({},{}) towards source: upstream={}",
+                                                            src, group, iface
+                                                        )
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
 
                             // Generate MRIB actions for joins
                             for (source, group) in &joins {
@@ -3098,6 +3245,38 @@ fn get_source_addr_for_dest(dest: Ipv4Addr) -> Option<Ipv4Addr> {
     }
 }
 
+/// Get the interface name for an IP address.
+///
+/// Iterates through all interfaces to find one with the given IP address.
+fn get_interface_for_ip(ip: Ipv4Addr) -> Option<String> {
+    for iface in pnet::datalink::interfaces() {
+        for ip_net in &iface.ips {
+            if let std::net::IpAddr::V4(iface_ip) = ip_net.ip() {
+                if iface_ip == ip {
+                    return Some(iface.name.clone());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Perform RPF (Reverse Path Forwarding) lookup for a destination.
+///
+/// Returns the interface that would be used to reach the destination,
+/// based on the kernel's routing table. This uses the UDP connect trick
+/// to query the kernel's route selection.
+///
+/// For PIM:
+/// - For (*,G) routes: lookup RPF towards the RP
+/// - For (S,G) routes: lookup RPF towards the source
+fn lookup_rpf_interface(dest: Ipv4Addr) -> Option<String> {
+    // Get the source IP the kernel would use to reach this destination
+    let source_ip = get_source_addr_for_dest(dest)?;
+    // Find which interface has this IP
+    get_interface_for_ip(source_ip)
+}
+
 /// Parse a group prefix like "239.0.0.0/8" or "239.1.1.1" into a base address
 pub(super) fn parse_group_prefix(prefix: &str) -> Result<Ipv4Addr> {
     if let Some((addr_str, _)) = prefix.split_once('/') {
@@ -4645,6 +4824,38 @@ pub async fn run(
 
                         // Drop the lock before the async call
                         drop(coordinator_guard);
+
+                        // Ensure workers exist for all interfaces with rules
+                        let interfaces_needing_workers: Vec<String> =
+                            all_rules.iter().map(|r| r.input_interface.clone()).collect();
+                        let interfaces_needing_workers: std::collections::HashSet<String> =
+                            interfaces_needing_workers.into_iter().collect();
+
+                        // Check which interfaces need workers (quick check with lock)
+                        let interfaces_to_spawn: Vec<String> = {
+                            let manager = worker_manager.lock().unwrap();
+                            interfaces_needing_workers
+                                .into_iter()
+                                .filter(|iface| !manager.has_workers_for_interface(iface))
+                                .collect()
+                        };
+
+                        // Spawn workers without holding the lock
+                        for interface in interfaces_to_spawn {
+                            let mut manager = worker_manager.lock().unwrap();
+                            if let Err(e) =
+                                manager.ensure_workers_for_interface(&interface, false).await
+                            {
+                                log_warning!(
+                                    supervisor_logger,
+                                    Facility::Supervisor,
+                                    &format!(
+                                        "Failed to spawn workers for interface '{}': {}",
+                                        interface, e
+                                    )
+                                );
+                            }
+                        }
 
                         // Sync merged rules to all workers
                         sync_rules_to_workers(&all_rules, &worker_manager, &supervisor_logger).await;

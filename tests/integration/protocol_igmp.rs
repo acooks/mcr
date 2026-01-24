@@ -10,6 +10,7 @@ use anyhow::Result;
 mod privileged {
     use super::*;
     use crate::common::{ControlClient, McrInstance, NetworkNamespace, VethPair};
+    use std::net::Ipv4Addr;
     use std::time::Duration;
 
     /// Test that IGMP group tracking works via control plane API.
@@ -61,14 +62,25 @@ mod privileged {
         // Create control client
         let client = ControlClient::new(mcr.control_socket());
 
-        // Get IGMP groups - should be empty initially
+        // Get IGMP groups - may have protocol groups from MCR's own joins
         let groups = client.get_igmp_groups().await?;
         println!("Initial IGMP groups: {:?}", groups);
 
-        // Verify we get a response (even if empty)
+        // Filter out protocol groups (224.0.0.22 = IGMPv3 all-routers, 224.0.0.13 = ALL-PIM-ROUTERS)
+        let protocol_groups: [Ipv4Addr; 2] = [
+            "224.0.0.22".parse().unwrap(), // IGMPv3 all-routers
+            "224.0.0.13".parse().unwrap(), // ALL-PIM-ROUTERS
+        ];
+        let user_groups: Vec<_> = groups
+            .iter()
+            .filter(|g| !protocol_groups.contains(&g.group))
+            .collect();
+
+        // Verify no user groups initially (only protocol groups may exist)
         assert!(
-            groups.is_empty(),
-            "Expected empty IGMP group table initially"
+            user_groups.is_empty(),
+            "Expected no user IGMP groups initially (ignoring protocol groups): {:?}",
+            user_groups
         );
 
         // Enable querier on interface via API

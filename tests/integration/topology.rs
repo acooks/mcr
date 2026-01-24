@@ -1094,6 +1094,15 @@ mod phase2 {
                 querier_interfaces: ["veth_r", "veth_h"],
                 query_interval: 5,
                 query_response_interval: 2
+            },
+            pim: {
+                enabled: true,
+                interfaces: [
+                    { name: "veth_r" }
+                ],
+                static_rp: [
+                    { rp: "10.0.0.1", group: "239.0.0.0/8" }
+                ]
             }
         }"#;
 
@@ -1129,16 +1138,22 @@ mod phase2 {
 
         let client = topology.client("router").unwrap();
 
-        // Verify initial state - may have 224.0.0.22 (IGMPv3 all-routers) from MCR's own join
+        // Verify initial state - may have protocol groups from MCR's own joins:
+        // - 224.0.0.22 (IGMPv3 all-routers)
+        // - 224.0.0.13 (ALL-PIM-ROUTERS)
         let initial_groups = client.get_igmp_groups().await?;
         println!("Initial IGMP groups: {:?}", initial_groups);
+        let protocol_groups: [Ipv4Addr; 2] = [
+            "224.0.0.22".parse().unwrap(), // IGMPv3 all-routers
+            "224.0.0.13".parse().unwrap(), // ALL-PIM-ROUTERS
+        ];
         let user_groups: Vec<_> = initial_groups
             .iter()
-            .filter(|g| g.group != "224.0.0.22".parse::<Ipv4Addr>().unwrap())
+            .filter(|g| !protocol_groups.contains(&g.group))
             .collect();
         assert!(
             user_groups.is_empty(),
-            "Should have no user IGMP groups initially (ignoring 224.0.0.22): {:?}",
+            "Should have no user IGMP groups initially (ignoring protocol groups): {:?}",
             user_groups
         );
 
