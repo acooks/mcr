@@ -348,6 +348,15 @@ impl WorkerManager {
             },
         );
 
+        log_debug!(
+            self.logger,
+            Facility::Supervisor,
+            &format!(
+                "Worker spawned for interface '{}' (PID={}, core={})",
+                interface, pid, core_id
+            )
+        );
+
         self.backoff_counters
             .insert((interface.to_string(), core_id), INITIAL_BACKOFF_MS);
 

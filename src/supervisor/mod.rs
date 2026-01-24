@@ -3191,12 +3191,19 @@ async fn sync_rules_to_workers(
 
         let sync_cmd = RelayCommand::SyncRules(interface_rules);
         if let Ok(cmd_bytes) = serde_json::to_vec(&sync_cmd) {
-            let mut ingress = ingress_stream.lock().await;
-            let mut egress = egress_stream.lock().await;
+            // Send to ingress worker using length-delimited framing
+            {
+                let mut stream = ingress_stream.lock().await;
+                let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
+                let _ = framed.send(cmd_bytes.clone().into()).await;
+            }
 
-            // Fire-and-forget: ignore errors
-            let _ = ingress.write_all(&cmd_bytes).await;
-            let _ = egress.write_all(&cmd_bytes).await;
+            // Send to egress worker using length-delimited framing
+            {
+                let mut stream = egress_stream.lock().await;
+                let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
+                let _ = framed.send(cmd_bytes.into()).await;
+            }
         }
     }
 
