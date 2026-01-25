@@ -345,8 +345,19 @@ impl MulticastRib {
     /// - Static rule outputs + PIM downstream interfaces
     /// - (S,G) is more specific than (*,G) for the same group
     ///
+    /// The `pim_interfaces` parameter specifies which interfaces are PIM-enabled.
+    /// The `local_rp_address` is this router's RP address (if it is an RP).
+    ///
+    /// When this router is the RP for a (*,G) route (route.rp == local_rp_address),
+    /// forwarding rules are generated for each PIM interface as a potential input
+    /// interface, since multicast traffic can arrive from any direction when at the RP.
+    ///
     /// The resulting rules can be sent to workers via SyncRules command.
-    pub fn compile_forwarding_rules(&self) -> Vec<ForwardingRule> {
+    pub fn compile_forwarding_rules_with_pim_interfaces(
+        &self,
+        pim_interfaces: &HashSet<String>,
+        local_rp_address: Option<std::net::Ipv4Addr>,
+    ) -> Vec<ForwardingRule> {
         let mut rules = Vec::new();
 
         // Build a map of group -> IGMP-learned interfaces for efficient lookup
@@ -441,8 +452,40 @@ impl MulticastRib {
                 }
 
                 let port = 0;
-                let mut star_g_rules = route.to_forwarding_rules(upstream, port);
-                rules.append(&mut star_g_rules);
+
+                // Check if this router is the RP for this (*,G) route.
+                // When we ARE the RP, traffic can arrive from any PIM-enabled interface
+                // and needs to be forwarded to downstream receivers.
+                let is_local_rp = local_rp_address.is_some() && local_rp_address == Some(route.rp);
+
+                if is_local_rp && !pim_interfaces.is_empty() {
+                    // We are the RP - generate rules for each PIM interface as input
+                    for pim_iface in pim_interfaces {
+                        // Create rule with this PIM interface as input, but exclude it
+                        // from outputs (no hairpin forwarding)
+                        let outputs_without_input: HashSet<String> = route
+                            .downstream_interfaces
+                            .iter()
+                            .filter(|&iface| iface != pim_iface)
+                            .cloned()
+                            .collect();
+
+                        if outputs_without_input.is_empty() {
+                            continue;
+                        }
+
+                        // Create a temporary route with filtered outputs
+                        let mut route_for_iface = route.clone();
+                        route_for_iface.downstream_interfaces = outputs_without_input;
+
+                        let mut iface_rules = route_for_iface.to_forwarding_rules(pim_iface, port);
+                        rules.append(&mut iface_rules);
+                    }
+                } else {
+                    // Not the RP - use the upstream interface directly
+                    let mut star_g_rules = route.to_forwarding_rules(upstream, port);
+                    rules.append(&mut star_g_rules);
+                }
             }
         }
 
@@ -453,6 +496,14 @@ impl MulticastRib {
         // new IGMP memberships.
 
         rules
+    }
+
+    /// Compile forwarding rules without PIM interface expansion.
+    ///
+    /// This is a convenience method for backward compatibility. For proper RP behavior,
+    /// use `compile_forwarding_rules_with_pim_interfaces` instead.
+    pub fn compile_forwarding_rules(&self) -> Vec<ForwardingRule> {
+        self.compile_forwarding_rules_with_pim_interfaces(&HashSet::new(), None)
     }
 
     /// Filter forwarding rules to only those relevant for a specific interface.
@@ -985,5 +1036,104 @@ mod tests {
         assert!(output_interfaces.contains("eth2"));
         assert!(output_interfaces.contains("eth3"));
         assert!(output_interfaces.contains("eth4"));
+    }
+
+    #[test]
+    fn test_compile_rules_rp_case() {
+        // Test that when this router is the RP for a (*,G) route,
+        // forwarding rules are generated for each PIM interface as input
+        let mut mrib = MulticastRib::new();
+
+        // Create a (*,G) route where RP = 10.1.0.1
+        let rp_addr: Ipv4Addr = "10.1.0.1".parse().unwrap();
+        let mut route = StarGRoute::new("239.1.1.1".parse().unwrap(), rp_addr);
+        // Set upstream to something (in real code this would be set by RPF lookup)
+        route.upstream_interface = Some("veth_r".to_string());
+        // Add downstream interface where receiver is
+        route.add_downstream("veth_r");
+        mrib.add_star_g_route(route);
+
+        // PIM interfaces we're running on
+        let mut pim_interfaces = HashSet::new();
+        pim_interfaces.insert("veth_s_p".to_string());
+        pim_interfaces.insert("veth_r".to_string());
+
+        // Case 1: We ARE the RP (local_rp_address matches route.rp)
+        let rules =
+            mrib.compile_forwarding_rules_with_pim_interfaces(&pim_interfaces, Some(rp_addr));
+
+        // Should generate a rule with input=veth_s_p and output=veth_r
+        // (traffic from source arrives on veth_s_p, forwards to receiver on veth_r)
+        assert_eq!(
+            rules.len(),
+            1,
+            "Expected 1 rule for RP case, got {}",
+            rules.len()
+        );
+        let rule = &rules[0];
+        assert_eq!(rule.input_interface, "veth_s_p");
+        assert_eq!(rule.outputs.len(), 1);
+        assert_eq!(rule.outputs[0].interface, "veth_r");
+
+        // Case 2: We are NOT the RP (different local_rp_address)
+        let other_rp: Ipv4Addr = "10.2.0.1".parse().unwrap();
+        let rules_not_rp =
+            mrib.compile_forwarding_rules_with_pim_interfaces(&pim_interfaces, Some(other_rp));
+
+        // Should generate a rule using the upstream interface (veth_r)
+        // But since input == output, the rule would have empty outputs after filtering
+        // Actually, let's check what happens...
+        assert_eq!(
+            rules_not_rp.len(),
+            1,
+            "Expected 1 rule for non-RP case, got {}",
+            rules_not_rp.len()
+        );
+        let rule = &rules_not_rp[0];
+        // In non-RP case, we use upstream_interface as input
+        assert_eq!(rule.input_interface, "veth_r");
+    }
+
+    #[test]
+    fn test_compile_rules_rp_multiple_downstreams() {
+        // Test RP case with multiple downstream interfaces
+        let mut mrib = MulticastRib::new();
+
+        let rp_addr: Ipv4Addr = "10.1.0.1".parse().unwrap();
+        let mut route = StarGRoute::new("239.1.1.1".parse().unwrap(), rp_addr);
+        route.upstream_interface = Some("veth_r".to_string());
+        route.add_downstream("veth_r");
+        route.add_downstream("veth_r2"); // Second receiver interface
+        mrib.add_star_g_route(route);
+
+        let mut pim_interfaces = HashSet::new();
+        pim_interfaces.insert("veth_s_p".to_string());
+        pim_interfaces.insert("veth_r".to_string());
+        pim_interfaces.insert("veth_r2".to_string());
+
+        let rules =
+            mrib.compile_forwarding_rules_with_pim_interfaces(&pim_interfaces, Some(rp_addr));
+
+        // Should generate rules for each PIM interface as input (except when outputs would be empty)
+        // - veth_s_p as input -> outputs: veth_r, veth_r2 (2 outputs)
+        // - veth_r as input -> outputs: veth_r2 (1 output, veth_r excluded)
+        // - veth_r2 as input -> outputs: veth_r (1 output, veth_r2 excluded)
+        assert_eq!(
+            rules.len(),
+            3,
+            "Expected 3 rules for RP case with 3 PIM interfaces"
+        );
+
+        // Verify each rule has correct input/output relationships
+        for rule in &rules {
+            // Output should never contain the input interface
+            for output in &rule.outputs {
+                assert_ne!(
+                    output.interface, rule.input_interface,
+                    "Output {} should not equal input {}",
+                    output.interface, rule.input_interface
+                );
+            }
+        }
     }
 }

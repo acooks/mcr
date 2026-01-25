@@ -1998,8 +1998,20 @@ impl ProtocolState {
     }
 
     /// Compile current MRIB state into forwarding rules
+    ///
+    /// This includes expansion for RP scenarios: when this router is the RP
+    /// for a (*,G) route, forwarding rules are generated for each
+    /// PIM-enabled interface as a potential input interface.
     pub fn compile_forwarding_rules(&self) -> Vec<ForwardingRule> {
-        self.mrib.compile_forwarding_rules()
+        // Collect all PIM-enabled interfaces for RP rule expansion
+        let pim_interfaces: std::collections::HashSet<String> =
+            self.pim_state.interfaces.keys().cloned().collect();
+
+        // Get this router's RP address (if configured)
+        let local_rp_address = self.pim_state.config.rp_address;
+
+        self.mrib
+            .compile_forwarding_rules_with_pim_interfaces(&pim_interfaces, local_rp_address)
     }
 
     /// Get PIM neighbor information for CLI queries
