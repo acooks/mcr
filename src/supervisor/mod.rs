@@ -431,7 +431,8 @@ impl ProtocolState {
                                             // Create (*,G) state in PIM
                                             let mut star_g_state =
                                                 crate::protocols::pim::StarGState::new(group, rp);
-                                            star_g_state.upstream_interface = upstream_interface;
+                                            star_g_state.upstream_interface =
+                                                upstream_interface.clone();
                                             // The IGMP interface is a downstream
                                             star_g_state
                                                 .downstream_interfaces
@@ -467,9 +468,63 @@ impl ProtocolState {
                                                 },
                                             );
 
-                                            // TODO: Send PIM Join towards RP
-                                            // This requires building a PIM Join/Prune packet
-                                            // and sending it on the upstream interface
+                                            // Send PIM Join towards RP on the upstream interface
+                                            if let Some(ref upstream_iface) = upstream_interface {
+                                                // Check if we have PIM enabled on the upstream interface
+                                                if let Some(upstream_state) =
+                                                    self.pim_state.get_interface(upstream_iface)
+                                                {
+                                                    use crate::protocols::pim::{
+                                                        PimJoinPruneBuilder, ALL_PIM_ROUTERS,
+                                                    };
+                                                    use crate::protocols::PacketBuilder;
+
+                                                    // The upstream neighbor is the RPF neighbor towards the RP
+                                                    // For directly connected RPs, this is the RP itself
+                                                    // For non-directly-connected RPs, use the DR on the upstream interface
+                                                    // (or any neighbor if no DR yet)
+                                                    let upstream_neighbor = upstream_state
+                                                        .designated_router
+                                                        .unwrap_or(rp);
+
+                                                    let builder = PimJoinPruneBuilder::star_g_join(
+                                                        upstream_neighbor,
+                                                        group,
+                                                        rp,
+                                                    );
+                                                    let packet_data = builder.build();
+
+                                                    result.send_packet(OutgoingPacket {
+                                                        protocol: ProtocolType::Pim,
+                                                        interface: upstream_iface.clone(),
+                                                        destination: ALL_PIM_ROUTERS,
+                                                        source: Some(upstream_state.address),
+                                                        data: packet_data,
+                                                    });
+
+                                                    log_info!(
+                                                        self.logger,
+                                                        Facility::Supervisor,
+                                                        &format!(
+                                                            "PIM: Sending (*,{}) Join to {} on {}",
+                                                            group,
+                                                            upstream_neighbor,
+                                                            upstream_iface
+                                                        )
+                                                    );
+
+                                                    // Schedule Join/Prune refresh timer
+                                                    result.add_timers(vec![TimerRequest {
+                                                        timer_type: TimerType::PimJoinPrune {
+                                                            interface: upstream_iface.clone(),
+                                                            group,
+                                                        },
+                                                        fire_at: now
+                                                            + crate::protocols::pim::DEFAULT_JOIN_PRUNE_PERIOD,
+                                                        replace_existing: true,
+                                                    }]);
+                                                }
+                                            }
                                         }
                                     } else {
                                         // Route exists - add this interface as downstream
@@ -1617,11 +1672,51 @@ impl ProtocolState {
                     }
                 }
             }
-            TimerType::PimJoinPrune {
-                interface: _,
-                group: _,
-            } => {
-                // TODO: Send periodic Join/Prune refresh
+            TimerType::PimJoinPrune { interface, group } => {
+                // Send periodic Join/Prune refresh for (*,G) routes
+                if let Some(star_g_state) = self.pim_state.star_g.get(&group) {
+                    // Only refresh if the route is still valid and has downstream interest
+                    if star_g_state.has_downstream() {
+                        if let Some(upstream_state) = self.pim_state.get_interface(&interface) {
+                            use crate::protocols::pim::{PimJoinPruneBuilder, ALL_PIM_ROUTERS};
+                            use crate::protocols::PacketBuilder;
+
+                            let rp = star_g_state.rp;
+                            let upstream_neighbor = upstream_state.designated_router.unwrap_or(rp);
+
+                            let builder =
+                                PimJoinPruneBuilder::star_g_join(upstream_neighbor, group, rp);
+                            let packet_data = builder.build();
+
+                            result.send_packet(OutgoingPacket {
+                                protocol: ProtocolType::Pim,
+                                interface: interface.clone(),
+                                destination: ALL_PIM_ROUTERS,
+                                source: Some(upstream_state.address),
+                                data: packet_data,
+                            });
+
+                            log_debug!(
+                                self.logger,
+                                Facility::Supervisor,
+                                &format!(
+                                    "PIM: Refreshing (*,{}) Join to {} on {}",
+                                    group, upstream_neighbor, interface
+                                )
+                            );
+
+                            // Reschedule the refresh timer
+                            result.add_timers(vec![TimerRequest {
+                                timer_type: TimerType::PimJoinPrune {
+                                    interface: interface.clone(),
+                                    group,
+                                },
+                                fire_at: now + crate::protocols::pim::DEFAULT_JOIN_PRUNE_PERIOD,
+                                replace_existing: true,
+                            }]);
+                        }
+                    }
+                }
             }
             TimerType::PimStarGExpiry { group } => {
                 result.add_action(MribAction::RemoveStarGRoute { group });

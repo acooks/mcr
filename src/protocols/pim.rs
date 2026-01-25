@@ -1047,6 +1047,232 @@ impl PacketBuilder for PimHelloBuilder {
     }
 }
 
+/// A join or prune entry for a specific group
+#[derive(Debug, Clone)]
+pub struct JoinPruneGroup {
+    /// The multicast group address
+    pub group: Ipv4Addr,
+    /// Joined sources: None = (*,G), Some(source) = (S,G)
+    pub joins: Vec<Option<Ipv4Addr>>,
+    /// Pruned sources: None = (*,G), Some(source) = (S,G)
+    pub prunes: Vec<Option<Ipv4Addr>>,
+    /// RP address (used for (*,G) joins where "source" field contains RP)
+    pub rp: Option<Ipv4Addr>,
+}
+
+impl JoinPruneGroup {
+    /// Create a (*,G) Join entry
+    pub fn star_g_join(group: Ipv4Addr, rp: Ipv4Addr) -> Self {
+        Self {
+            group,
+            joins: vec![None], // None indicates (*,G)
+            prunes: vec![],
+            rp: Some(rp),
+        }
+    }
+
+    /// Create an (S,G) Join entry
+    pub fn sg_join(group: Ipv4Addr, source: Ipv4Addr) -> Self {
+        Self {
+            group,
+            joins: vec![Some(source)],
+            prunes: vec![],
+            rp: None,
+        }
+    }
+
+    /// Create a (*,G) Prune entry
+    pub fn star_g_prune(group: Ipv4Addr, rp: Ipv4Addr) -> Self {
+        Self {
+            group,
+            joins: vec![],
+            prunes: vec![None],
+            rp: Some(rp),
+        }
+    }
+
+    /// Create an (S,G) Prune entry
+    pub fn sg_prune(group: Ipv4Addr, source: Ipv4Addr) -> Self {
+        Self {
+            group,
+            joins: vec![],
+            prunes: vec![Some(source)],
+            rp: None,
+        }
+    }
+}
+
+/// Builder for PIM Join/Prune packets (RFC 7761 Section 4.9.5)
+///
+/// Join/Prune packet format:
+/// ```text
+///  0                   1                   2                   3
+///  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// |PIM Ver| Type  |   Reserved    |           Checksum            |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// |        Upstream Neighbor Address (Encoded-Unicast format)     |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// |  Reserved     | Num groups    |          Holdtime             |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// |         Multicast Group Address 1 (Encoded-Group format)      |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// |   Number of Joined Sources    |   Number of Pruned Sources    |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// |        Joined Source Address 1 (Encoded-Source format)        |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// |                             .                                 |
+/// |                             .                                 |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// |        Pruned Source Address 1 (Encoded-Source format)        |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// ```
+#[derive(Debug)]
+pub struct PimJoinPruneBuilder {
+    /// Upstream neighbor address (next hop towards RP)
+    pub upstream_neighbor: Ipv4Addr,
+    /// Holdtime in seconds (default 210 = 3.5 * 60s JP period)
+    pub holdtime: u16,
+    /// Groups with their join/prune entries
+    pub groups: Vec<JoinPruneGroup>,
+}
+
+impl PimJoinPruneBuilder {
+    /// Create a new Join/Prune builder
+    pub fn new(upstream_neighbor: Ipv4Addr, holdtime: u16) -> Self {
+        Self {
+            upstream_neighbor,
+            holdtime,
+            groups: Vec::new(),
+        }
+    }
+
+    /// Add a group entry to the message
+    pub fn add_group(&mut self, group: JoinPruneGroup) {
+        self.groups.push(group);
+    }
+
+    /// Create a (*,G) Join message
+    pub fn star_g_join(upstream_neighbor: Ipv4Addr, group: Ipv4Addr, rp: Ipv4Addr) -> Self {
+        let mut builder = Self::new(
+            upstream_neighbor,
+            DEFAULT_JOIN_PRUNE_HOLDTIME.as_secs() as u16,
+        );
+        builder.add_group(JoinPruneGroup::star_g_join(group, rp));
+        builder
+    }
+
+    /// Create an (S,G) Join message
+    pub fn sg_join(upstream_neighbor: Ipv4Addr, group: Ipv4Addr, source: Ipv4Addr) -> Self {
+        let mut builder = Self::new(
+            upstream_neighbor,
+            DEFAULT_JOIN_PRUNE_HOLDTIME.as_secs() as u16,
+        );
+        builder.add_group(JoinPruneGroup::sg_join(group, source));
+        builder
+    }
+
+    /// Encode a unicast address (IPv4)
+    /// Format: addr_family(1) + encoding_type(1) + address(4)
+    fn encode_unicast(addr: Ipv4Addr) -> [u8; 6] {
+        let octets = addr.octets();
+        [
+            1, // Address family: IPv4
+            0, // Encoding type: native
+            octets[0], octets[1], octets[2], octets[3],
+        ]
+    }
+
+    /// Encode a group address (IPv4)
+    /// Format: addr_family(1) + encoding_type(1) + reserved(1) + mask_len(1) + group(4)
+    fn encode_group(group: Ipv4Addr) -> [u8; 8] {
+        let octets = group.octets();
+        [
+            1,  // Address family: IPv4
+            0,  // Encoding type: native
+            0,  // Reserved (B=0, reserved=0, Z=0)
+            32, // Mask length: /32 for specific group
+            octets[0], octets[1], octets[2], octets[3],
+        ]
+    }
+
+    /// Encode a source address (IPv4)
+    /// Format: addr_family(1) + encoding_type(1) + flags(1) + mask_len(1) + source(4)
+    /// Flags: S=Sparse(0x04), W=WildCard(0x02), R=RPT(0x01)
+    fn encode_source(source: Option<Ipv4Addr>, rp: Option<Ipv4Addr>) -> [u8; 8] {
+        let (addr, flags) = match source {
+            Some(s) => {
+                // (S,G) entry: use actual source, S bit set
+                (s, 0x04) // S=1, W=0, R=0
+            }
+            None => {
+                // (*,G) entry: use RP address, W and R bits set
+                let rp_addr = rp.unwrap_or(Ipv4Addr::UNSPECIFIED);
+                (rp_addr, 0x06) // S=0, W=1, R=1 (0x04 | 0x02)
+            }
+        };
+        let octets = addr.octets();
+        [
+            1, // Address family: IPv4
+            0, // Encoding type: native
+            flags, 32, // Mask length: /32
+            octets[0], octets[1], octets[2], octets[3],
+        ]
+    }
+}
+
+impl PacketBuilder for PimJoinPruneBuilder {
+    fn build(&self) -> Vec<u8> {
+        // Estimate size: header(4) + upstream(6) + header2(4) + groups*(group(8) + counts(4) + sources*8)
+        let estimated_size = 4 + 6 + 4 + self.groups.len() * 20;
+        let mut packet = Vec::with_capacity(estimated_size);
+
+        // PIM header: Version 2, Type 3 (Join/Prune)
+        packet.push((2 << 4) | PIM_JOIN_PRUNE);
+        packet.push(0); // Reserved
+        packet.push(0); // Checksum placeholder
+        packet.push(0);
+
+        // Encoded unicast upstream neighbor address
+        packet.extend_from_slice(&Self::encode_unicast(self.upstream_neighbor));
+
+        // Reserved (1 byte) + Number of groups (1 byte)
+        packet.push(0); // Reserved
+        packet.push(self.groups.len() as u8);
+
+        // Holdtime (2 bytes)
+        packet.extend_from_slice(&self.holdtime.to_be_bytes());
+
+        // Encode each group
+        for group in &self.groups {
+            // Encoded group address
+            packet.extend_from_slice(&Self::encode_group(group.group));
+
+            // Number of joined sources (2 bytes)
+            packet.extend_from_slice(&(group.joins.len() as u16).to_be_bytes());
+            // Number of pruned sources (2 bytes)
+            packet.extend_from_slice(&(group.prunes.len() as u16).to_be_bytes());
+
+            // Encode joined sources
+            for source in &group.joins {
+                packet.extend_from_slice(&Self::encode_source(*source, group.rp));
+            }
+
+            // Encode pruned sources
+            for source in &group.prunes {
+                packet.extend_from_slice(&Self::encode_source(*source, group.rp));
+            }
+        }
+
+        // Calculate and insert checksum
+        let checksum = self.calculate_checksum(&packet);
+        packet[2] = (checksum >> 8) as u8;
+        packet[3] = (checksum & 0xFF) as u8;
+
+        packet
+    }
+}
+
 /// Helper to generate random u32 for generation ID
 mod rand {
     use std::time::SystemTime;
@@ -1209,6 +1435,73 @@ mod tests {
         // Parse options (skip 4-byte header)
         let options = PimHelloOption::parse_all(&packet[4..]);
         assert_eq!(options.len(), 3); // Holdtime, DR Priority, Generation ID
+    }
+
+    #[test]
+    fn test_pim_join_prune_builder_star_g() {
+        let upstream: Ipv4Addr = "10.0.0.1".parse().unwrap();
+        let group: Ipv4Addr = "239.1.1.1".parse().unwrap();
+        let rp: Ipv4Addr = "10.0.0.1".parse().unwrap();
+
+        let builder = PimJoinPruneBuilder::star_g_join(upstream, group, rp);
+        let packet = builder.build();
+
+        // Parse the header
+        let header = PimHeader::parse(&packet).unwrap();
+        assert_eq!(header.version, 2);
+        assert_eq!(header.msg_type, PIM_JOIN_PRUNE);
+
+        // Verify structure: header(4) + upstream(6) + reserved(1) + num_groups(1) + holdtime(2) = 14 bytes
+        // + group(8) + num_joined(2) + num_pruned(2) + joined_source(8) = 20 bytes
+        // Total minimum: 34 bytes
+        assert!(packet.len() >= 34);
+
+        // Check upstream neighbor (after 4-byte header)
+        assert_eq!(packet[4], 1); // IPv4 family
+        assert_eq!(packet[5], 0); // Encoding type
+        assert_eq!(&packet[6..10], upstream.octets());
+
+        // Check number of groups
+        assert_eq!(packet[11], 1); // 1 group
+
+        // Check holdtime (210 seconds = 0x00D2)
+        let holdtime = u16::from_be_bytes([packet[12], packet[13]]);
+        assert_eq!(holdtime, 210);
+
+        // Check group address (starts at offset 14)
+        assert_eq!(packet[14], 1); // IPv4 family
+        assert_eq!(&packet[18..22], group.octets());
+
+        // Check num joined (1) and num pruned (0)
+        let num_joined = u16::from_be_bytes([packet[22], packet[23]]);
+        let num_pruned = u16::from_be_bytes([packet[24], packet[25]]);
+        assert_eq!(num_joined, 1);
+        assert_eq!(num_pruned, 0);
+
+        // Check joined source flags (WC=1, RPT=1 means flags=0x06)
+        assert_eq!(packet[28], 0x06); // W=1, R=1
+    }
+
+    #[test]
+    fn test_pim_join_prune_builder_sg() {
+        let upstream: Ipv4Addr = "10.0.0.2".parse().unwrap();
+        let group: Ipv4Addr = "239.2.2.2".parse().unwrap();
+        let source: Ipv4Addr = "192.168.1.100".parse().unwrap();
+
+        let builder = PimJoinPruneBuilder::sg_join(upstream, group, source);
+        let packet = builder.build();
+
+        // Parse the header
+        let header = PimHeader::parse(&packet).unwrap();
+        assert_eq!(header.version, 2);
+        assert_eq!(header.msg_type, PIM_JOIN_PRUNE);
+
+        // Check source flags (S=1 means flags=0x04)
+        // Source is at offset 26 (flags at offset 28)
+        assert_eq!(packet[28], 0x04); // S=1, W=0, R=0
+
+        // Check source address
+        assert_eq!(&packet[30..34], source.octets());
     }
 
     #[test]
