@@ -545,44 +545,18 @@ pub fn handle_supervisor_command(
             (Response::PimNeighbors(Vec::new()), CommandAction::None)
         }
 
-        // EnablePim, DisablePim, and SetRpAddress are handled in mod.rs protocol_response section
+        // EnablePim, DisablePim, SetRpAddress, and SetStaticRp are handled in mod.rs protocol_response section
         // They need access to ProtocolCoordinator state (timer_tx, pim_socket, etc.)
         SupervisorCommand::EnablePim { .. }
         | SupervisorCommand::DisablePim { .. }
-        | SupervisorCommand::SetRpAddress { .. } => {
+        | SupervisorCommand::SetRpAddress { .. }
+        | SupervisorCommand::SetStaticRp { .. } => {
             // This should never be reached - handled earlier in mod.rs
             (
                 Response::Error(
                     "Internal error: PIM commands should be handled by protocol coordinator"
                         .to_string(),
                 ),
-                CommandAction::None,
-            )
-        }
-
-        SupervisorCommand::SetStaticRp {
-            group_prefix,
-            rp_address,
-        } => {
-            // Validate RP address is unicast
-            if rp_address.is_multicast() {
-                return (
-                    Response::Error("RP address must be unicast".to_string()),
-                    CommandAction::None,
-                );
-            }
-            // Validate group prefix
-            if let Err(e) = super::parse_group_prefix(&group_prefix) {
-                return (
-                    Response::Error(format!("Invalid group prefix: {}", e)),
-                    CommandAction::None,
-                );
-            }
-            (
-                Response::Success(format!(
-                    "Static RP {} set for group {}. Note: Full protocol integration pending.",
-                    rp_address, group_prefix
-                )),
                 CommandAction::None,
             )
         }

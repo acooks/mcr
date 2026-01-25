@@ -4270,6 +4270,41 @@ async fn handle_client(
                         )))
                     }
                 }
+                SupervisorCommand::SetStaticRp {
+                    ref group_prefix,
+                    rp_address,
+                } => {
+                    // Validate RP address is unicast
+                    if rp_address.is_multicast() {
+                        Some(Response::Error("RP address must be unicast".to_string()))
+                    } else {
+                        // Parse group prefix to get base address
+                        match parse_group_prefix(group_prefix) {
+                            Err(e) => Some(Response::Error(format!("Invalid group prefix: {}", e))),
+                            Ok(group) => {
+                                // Set the static RP mapping
+                                coordinator
+                                    .state
+                                    .pim_state
+                                    .config
+                                    .static_rp
+                                    .insert(group, *rp_address);
+                                log_info!(
+                                    logger,
+                                    Facility::Supervisor,
+                                    &format!(
+                                        "Static RP {} configured for group prefix {}",
+                                        rp_address, group_prefix
+                                    )
+                                );
+                                Some(Response::Success(format!(
+                                    "Static RP {} set for group prefix {}",
+                                    rp_address, group_prefix
+                                )))
+                            }
+                        }
+                    }
+                }
                 SupervisorCommand::EnableIgmpQuerier { ref interface } => {
                     // Look up interface IP
                     match get_interface_ipv4(interface) {
