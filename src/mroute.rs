@@ -456,7 +456,13 @@ impl MulticastRib {
                 // Check if this router is the RP for this (*,G) route.
                 // When we ARE the RP, traffic can arrive from any PIM-enabled interface
                 // and needs to be forwarded to downstream receivers.
-                let is_local_rp = local_rp_address.is_some() && local_rp_address == Some(route.rp);
+                //
+                // Detection methods:
+                // 1. Explicit: local_rp_address matches route.rp (config has rp_address set)
+                // 2. Fallback: upstream is "lo" (RPF lookup returned loopback, meaning RP is local)
+                let is_local_rp = (local_rp_address.is_some()
+                    && local_rp_address == Some(route.rp))
+                    || upstream == "lo";
 
                 if is_local_rp && !pim_interfaces.is_empty() {
                     // We are the RP - generate rules for each PIM interface as input
@@ -1135,5 +1141,42 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_compile_rules_rp_fallback_loopback() {
+        // Test that RP is detected when upstream=lo (fallback case)
+        // This happens when config has static_rp but NOT rp_address
+        let mut mrib = MulticastRib::new();
+
+        let rp_addr: Ipv4Addr = "10.1.0.1".parse().unwrap();
+        let mut route = StarGRoute::new("239.1.1.1".parse().unwrap(), rp_addr);
+        // When the RP is a local address, RPF lookup returns "lo"
+        route.upstream_interface = Some("lo".to_string());
+        route.add_downstream("veth_r");
+        mrib.add_star_g_route(route);
+
+        let mut pim_interfaces = HashSet::new();
+        pim_interfaces.insert("veth_s".to_string());
+        pim_interfaces.insert("veth_r".to_string());
+
+        // Case: local_rp_address is None (user didn't set rp_address in config)
+        // but upstream=lo should trigger RP expansion
+        let rules = mrib.compile_forwarding_rules_with_pim_interfaces(&pim_interfaces, None);
+
+        // Should still generate rules for PIM interfaces (fallback detection via upstream=lo)
+        // - veth_s as input -> outputs: veth_r (1 rule)
+        // - veth_r as input -> outputs: [] (skipped, only downstream is veth_r itself)
+        assert_eq!(
+            rules.len(),
+            1,
+            "Expected 1 rule for RP fallback case (veth_r as input is skipped)"
+        );
+
+        // Verify the rule has input=veth_s and output=veth_r
+        let rule = &rules[0];
+        assert_eq!(rule.input_interface, "veth_s");
+        assert_eq!(rule.outputs.len(), 1);
+        assert_eq!(rule.outputs[0].interface, "veth_r");
     }
 }
