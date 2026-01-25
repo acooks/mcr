@@ -26,7 +26,6 @@ use std::collections::HashMap;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use tokio::io::AsyncWriteExt;
 use tokio::time::Duration;
 
 use crate::config::Config;
@@ -481,11 +480,21 @@ impl ProtocolState {
 
                                                     // The upstream neighbor is the RPF neighbor towards the RP
                                                     // For directly connected RPs, this is the RP itself
-                                                    // For non-directly-connected RPs, use the DR on the upstream interface
-                                                    // (or any neighbor if no DR yet)
-                                                    let upstream_neighbor = upstream_state
-                                                        .designated_router
-                                                        .unwrap_or(rp);
+                                                    // For non-directly-connected RPs, use any neighbor as next-hop
+                                                    // Note: DO NOT use designated_router - that could be ourselves!
+                                                    let upstream_neighbor = if upstream_state
+                                                        .neighbors
+                                                        .contains_key(&rp)
+                                                    {
+                                                        rp // RP is directly connected
+                                                    } else {
+                                                        upstream_state
+                                                            .neighbors
+                                                            .keys()
+                                                            .next()
+                                                            .copied()
+                                                            .unwrap_or(rp)
+                                                    };
 
                                                     let builder = PimJoinPruneBuilder::star_g_join(
                                                         upstream_neighbor,
@@ -671,8 +680,23 @@ impl ProtocolState {
                                             };
                                             use crate::protocols::PacketBuilder;
 
+                                            // The upstream neighbor should be:
+                                            // 1. The RP if it's a neighbor on this interface (directly connected)
+                                            // 2. Any neighbor on this interface (as RPF next-hop)
+                                            // 3. Fallback to RP address (won't reach if not directly connected)
+                                            // Note: DO NOT use designated_router - that could be ourselves!
                                             let upstream_neighbor =
-                                                upstream_state.designated_router.unwrap_or(rp);
+                                                if upstream_state.neighbors.contains_key(&rp) {
+                                                    rp // RP is directly connected
+                                                } else {
+                                                    // Use first neighbor as RPF next-hop, or fallback to RP
+                                                    upstream_state
+                                                        .neighbors
+                                                        .keys()
+                                                        .next()
+                                                        .copied()
+                                                        .unwrap_or(rp)
+                                                };
 
                                             let builder = PimJoinPruneBuilder::star_g_join(
                                                 upstream_neighbor,
@@ -1018,48 +1042,67 @@ impl ProtocolState {
                         if let Some((upstream, joins, prunes, holdtime)) =
                             parse_pim_join_prune(&payload)
                         {
-                            log_info!(
-                                self.logger,
-                                Facility::Supervisor,
-                                &format!(
+                            // Ignore our own Join/Prune messages (can happen due to multicast loopback)
+                            let is_own_message = if let Some(iface_state) =
+                                self.pim_state.get_interface(&reported_interface)
+                            {
+                                src_ip == iface_state.address
+                            } else {
+                                false
+                            };
+
+                            if is_own_message {
+                                log_debug!(
+                                    self.logger,
+                                    Facility::Supervisor,
+                                    &format!(
+                                        "PIM: Ignoring own Join/Prune on {}",
+                                        reported_interface
+                                    )
+                                );
+                            } else {
+                                log_info!(
+                                    self.logger,
+                                    Facility::Supervisor,
+                                    &format!(
                                     "PIM: Received Join/Prune from {} on {}: {} joins, {} prunes",
                                     src_ip,
                                     reported_interface,
                                     joins.len(),
                                     prunes.len()
                                 )
-                            );
+                                );
 
-                            // Track which routes exist before processing prunes
-                            // so we can detect removals
-                            let prune_targets: Vec<_> =
-                                prunes.iter().map(|(src, grp)| (*src, *grp)).collect();
+                                // Track which routes exist before processing prunes
+                                // so we can detect removals
+                                let prune_targets: Vec<_> =
+                                    prunes.iter().map(|(src, grp)| (*src, *grp)).collect();
 
-                            // Process joins and prunes, get timers
-                            let timers = self.pim_state.process_join_prune(
-                                &reported_interface,
-                                upstream,
-                                &joins,
-                                &prunes,
-                                Duration::from_secs(holdtime as u64),
-                            );
-                            result.add_timers(timers);
+                                // Process joins and prunes, get timers
+                                let timers = self.pim_state.process_join_prune(
+                                    &reported_interface,
+                                    upstream,
+                                    &joins,
+                                    &prunes,
+                                    Duration::from_secs(holdtime as u64),
+                                );
+                                result.add_timers(timers);
 
-                            // Populate upstream_interface via RPF lookup for any routes that need it
-                            for (source, group) in &joins {
-                                match source {
-                                    None => {
-                                        // (*,G) - RPF towards RP
-                                        if let Some(star_g_state) =
-                                            self.pim_state.star_g.get_mut(group)
-                                        {
-                                            if star_g_state.upstream_interface.is_none() {
-                                                star_g_state.upstream_interface =
-                                                    lookup_rpf_interface(star_g_state.rp);
-                                                if let Some(ref iface) =
-                                                    star_g_state.upstream_interface
-                                                {
-                                                    log_debug!(
+                                // Populate upstream_interface via RPF lookup for any routes that need it
+                                for (source, group) in &joins {
+                                    match source {
+                                        None => {
+                                            // (*,G) - RPF towards RP
+                                            if let Some(star_g_state) =
+                                                self.pim_state.star_g.get_mut(group)
+                                            {
+                                                if star_g_state.upstream_interface.is_none() {
+                                                    star_g_state.upstream_interface =
+                                                        lookup_rpf_interface(star_g_state.rp);
+                                                    if let Some(ref iface) =
+                                                        star_g_state.upstream_interface
+                                                    {
+                                                        log_debug!(
                                                         self.logger,
                                                         Facility::Supervisor,
                                                         &format!(
@@ -1067,21 +1110,22 @@ impl ProtocolState {
                                                             group, star_g_state.rp, iface
                                                         )
                                                     );
+                                                    }
                                                 }
                                             }
                                         }
-                                    }
-                                    Some(src) => {
-                                        // (S,G) - RPF towards source
-                                        if let Some(sg_state) =
-                                            self.pim_state.sg.get_mut(&(*src, *group))
-                                        {
-                                            if sg_state.upstream_interface.is_none() {
-                                                sg_state.upstream_interface =
-                                                    lookup_rpf_interface(*src);
-                                                if let Some(ref iface) = sg_state.upstream_interface
-                                                {
-                                                    log_debug!(
+                                        Some(src) => {
+                                            // (S,G) - RPF towards source
+                                            if let Some(sg_state) =
+                                                self.pim_state.sg.get_mut(&(*src, *group))
+                                            {
+                                                if sg_state.upstream_interface.is_none() {
+                                                    sg_state.upstream_interface =
+                                                        lookup_rpf_interface(*src);
+                                                    if let Some(ref iface) =
+                                                        sg_state.upstream_interface
+                                                    {
+                                                        log_debug!(
                                                         self.logger,
                                                         Facility::Supervisor,
                                                         &format!(
@@ -1089,34 +1133,35 @@ impl ProtocolState {
                                                             src, group, iface
                                                         )
                                                     );
+                                                    }
                                                 }
                                             }
                                         }
                                     }
                                 }
-                            }
 
-                            // Generate MRIB actions for joins
-                            for (source, group) in &joins {
-                                match source {
-                                    None => {
-                                        // (*,G) join - look up the resulting state
-                                        if let Some(star_g_state) = self.pim_state.star_g.get(group)
-                                        {
-                                            let route = crate::mroute::StarGRoute {
-                                                group: *group,
-                                                rp: star_g_state.rp,
-                                                upstream_interface: star_g_state
-                                                    .upstream_interface
-                                                    .clone(),
-                                                downstream_interfaces: star_g_state
-                                                    .downstream_interfaces
-                                                    .clone(),
-                                                created_at: star_g_state.created_at,
-                                                expires_at: star_g_state.expires_at,
-                                            };
-                                            result.add_action(MribAction::AddStarGRoute(route));
-                                            result.notify(
+                                // Generate MRIB actions for joins
+                                for (source, group) in &joins {
+                                    match source {
+                                        None => {
+                                            // (*,G) join - look up the resulting state
+                                            if let Some(star_g_state) =
+                                                self.pim_state.star_g.get(group)
+                                            {
+                                                let route = crate::mroute::StarGRoute {
+                                                    group: *group,
+                                                    rp: star_g_state.rp,
+                                                    upstream_interface: star_g_state
+                                                        .upstream_interface
+                                                        .clone(),
+                                                    downstream_interfaces: star_g_state
+                                                        .downstream_interfaces
+                                                        .clone(),
+                                                    created_at: star_g_state.created_at,
+                                                    expires_at: star_g_state.expires_at,
+                                                };
+                                                result.add_action(MribAction::AddStarGRoute(route));
+                                                result.notify(
                                                 crate::ProtocolEventNotification::PimRouteChange {
                                                     route_type: crate::PimTreeType::StarG,
                                                     group: *group,
@@ -1125,28 +1170,28 @@ impl ProtocolState {
                                                     timestamp: unix_timestamp(),
                                                 },
                                             );
+                                            }
                                         }
-                                    }
-                                    Some(src) => {
-                                        // (S,G) join - look up the resulting state
-                                        if let Some(sg_state) =
-                                            self.pim_state.sg.get(&(*src, *group))
-                                        {
-                                            let route = crate::mroute::SGRoute {
-                                                source: *src,
-                                                group: *group,
-                                                upstream_interface: sg_state
-                                                    .upstream_interface
-                                                    .clone(),
-                                                downstream_interfaces: sg_state
-                                                    .downstream_interfaces
-                                                    .clone(),
-                                                spt_bit: sg_state.spt_bit,
-                                                created_at: sg_state.created_at,
-                                                expires_at: sg_state.expires_at,
-                                            };
-                                            result.add_action(MribAction::AddSgRoute(route));
-                                            result.notify(
+                                        Some(src) => {
+                                            // (S,G) join - look up the resulting state
+                                            if let Some(sg_state) =
+                                                self.pim_state.sg.get(&(*src, *group))
+                                            {
+                                                let route = crate::mroute::SGRoute {
+                                                    source: *src,
+                                                    group: *group,
+                                                    upstream_interface: sg_state
+                                                        .upstream_interface
+                                                        .clone(),
+                                                    downstream_interfaces: sg_state
+                                                        .downstream_interfaces
+                                                        .clone(),
+                                                    spt_bit: sg_state.spt_bit,
+                                                    created_at: sg_state.created_at,
+                                                    expires_at: sg_state.expires_at,
+                                                };
+                                                result.add_action(MribAction::AddSgRoute(route));
+                                                result.notify(
                                                 crate::ProtocolEventNotification::PimRouteChange {
                                                     route_type: crate::PimTreeType::SG,
                                                     group: *group,
@@ -1155,20 +1200,21 @@ impl ProtocolState {
                                                     timestamp: unix_timestamp(),
                                                 },
                                             );
+                                            }
                                         }
                                     }
                                 }
-                            }
 
-                            // Check for routes removed by prunes
-                            for (source, group) in prune_targets {
-                                match source {
-                                    None => {
-                                        // (*,G) prune - check if route was removed
-                                        if !self.pim_state.star_g.contains_key(&group) {
-                                            result
-                                                .add_action(MribAction::RemoveStarGRoute { group });
-                                            result.notify(
+                                // Check for routes removed by prunes
+                                for (source, group) in prune_targets {
+                                    match source {
+                                        None => {
+                                            // (*,G) prune - check if route was removed
+                                            if !self.pim_state.star_g.contains_key(&group) {
+                                                result.add_action(MribAction::RemoveStarGRoute {
+                                                    group,
+                                                });
+                                                result.notify(
                                                 crate::ProtocolEventNotification::PimRouteChange {
                                                     route_type: crate::PimTreeType::StarG,
                                                     group,
@@ -1177,16 +1223,16 @@ impl ProtocolState {
                                                     timestamp: unix_timestamp(),
                                                 },
                                             );
+                                            }
                                         }
-                                    }
-                                    Some(src) => {
-                                        // (S,G) prune - check if route was removed
-                                        if !self.pim_state.sg.contains_key(&(src, group)) {
-                                            result.add_action(MribAction::RemoveSgRoute {
-                                                source: src,
-                                                group,
-                                            });
-                                            result.notify(
+                                        Some(src) => {
+                                            // (S,G) prune - check if route was removed
+                                            if !self.pim_state.sg.contains_key(&(src, group)) {
+                                                result.add_action(MribAction::RemoveSgRoute {
+                                                    source: src,
+                                                    group,
+                                                });
+                                                result.notify(
                                                 crate::ProtocolEventNotification::PimRouteChange {
                                                     route_type: crate::PimTreeType::SG,
                                                     group,
@@ -1195,10 +1241,11 @@ impl ProtocolState {
                                                     timestamp: unix_timestamp(),
                                                 },
                                             );
+                                            }
                                         }
                                     }
                                 }
-                            }
+                            } // end else (not own message)
                         }
                     }
                     _ => {}
@@ -1845,7 +1892,17 @@ impl ProtocolState {
                             use crate::protocols::PacketBuilder;
 
                             let rp = star_g_state.rp;
-                            let upstream_neighbor = upstream_state.designated_router.unwrap_or(rp);
+                            // Use RPF neighbor, not DR (DR could be ourselves)
+                            let upstream_neighbor = if upstream_state.neighbors.contains_key(&rp) {
+                                rp // RP is directly connected
+                            } else {
+                                upstream_state
+                                    .neighbors
+                                    .keys()
+                                    .next()
+                                    .copied()
+                                    .unwrap_or(rp)
+                            };
 
                             let builder =
                                 PimJoinPruneBuilder::star_g_join(upstream_neighbor, group, rp);
@@ -2009,6 +2066,20 @@ impl ProtocolState {
 
         // Get this router's RP address (if configured)
         let local_rp_address = self.pim_state.config.rp_address;
+
+        // Debug: log MRIB state
+        log_info!(
+            self.logger,
+            Facility::Supervisor,
+            &format!(
+                "compile_forwarding_rules: mrib has {} star_g, {} sg, {} static, pim_interfaces={:?}, local_rp={:?}",
+                self.mrib.star_g_routes.len(),
+                self.mrib.sg_routes.len(),
+                self.mrib.static_rules.len(),
+                pim_interfaces,
+                local_rp_address
+            )
+        );
 
         self.mrib
             .compile_forwarding_rules_with_pim_interfaces(&pim_interfaces, local_rp_address)
@@ -3695,11 +3766,13 @@ impl ProtocolCoordinator {
     /// Returns true if the MRIB was modified and rules need syncing
     pub async fn process_pending_events(&mut self) -> bool {
         let mut mrib_modified = false;
+        let mut event_count = 0;
 
         // Process all available events without blocking
         loop {
             match self.event_rx.try_recv() {
                 Ok(event) => {
+                    event_count += 1;
                     let timer_requests = self.state.process_event(event);
 
                     // Schedule any timer requests
@@ -3718,6 +3791,14 @@ impl ProtocolCoordinator {
 
         if mrib_modified {
             self.rules_dirty = true;
+            log_info!(
+                self.state.logger,
+                Facility::Supervisor,
+                &format!(
+                    "process_pending_events: {} events processed, rules_dirty=true",
+                    event_count
+                )
+            );
         }
 
         mrib_modified
@@ -3862,6 +3943,15 @@ async fn sync_rules_to_workers(
         let manager = worker_manager.lock().unwrap();
         manager.get_all_dp_cmd_streams_with_interface()
     };
+
+    log_info!(
+        logger,
+        Facility::Supervisor,
+        &format!(
+            "sync_rules_to_workers: {} workers available",
+            stream_pairs_with_iface.len()
+        )
+    );
 
     for (interface, ingress_stream, egress_stream) in stream_pairs_with_iface {
         // Filter rules to only include those matching this worker's input interface
@@ -5345,12 +5435,18 @@ pub async fn run(
 
                 let sync_cmd = RelayCommand::SyncRules(interface_rules);
                 if let Ok(cmd_bytes) = serde_json::to_vec(&sync_cmd) {
-                    let mut ingress = ingress_stream.lock().await;
-                    let mut egress = egress_stream.lock().await;
-
-                    // Send to both ingress and egress workers (fire-and-forget)
-                    let _ = ingress.write_all(&cmd_bytes).await;
-                    let _ = egress.write_all(&cmd_bytes).await;
+                    // Send to ingress worker using length-delimited framing
+                    {
+                        let mut stream = ingress_stream.lock().await;
+                        let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
+                        let _ = framed.send(cmd_bytes.clone().into()).await;
+                    }
+                    // Send to egress worker using length-delimited framing
+                    {
+                        let mut stream = egress_stream.lock().await;
+                        let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
+                        let _ = framed.send(cmd_bytes.into()).await;
+                    }
                 }
             }
         } else {
@@ -5596,12 +5692,20 @@ pub async fn run(
 
                                 let sync_cmd = RelayCommand::SyncRules(interface_rules);
                                 if let Ok(cmd_bytes) = serde_json::to_vec(&sync_cmd) {
-                                    let mut ingress = ingress_stream.lock().await;
-                                    let mut egress = egress_stream.lock().await;
-
-                                    // Fire-and-forget: ignore errors
-                                    let _ = ingress.write_all(&cmd_bytes).await;
-                                    let _ = egress.write_all(&cmd_bytes).await;
+                                    // Send to ingress worker using length-delimited framing
+                                    {
+                                        let mut stream = ingress_stream.lock().await;
+                                        let mut framed =
+                                            Framed::new(&mut *stream, LengthDelimitedCodec::new());
+                                        let _ = framed.send(cmd_bytes.clone().into()).await;
+                                    }
+                                    // Send to egress worker using length-delimited framing
+                                    {
+                                        let mut stream = egress_stream.lock().await;
+                                        let mut framed =
+                                            Framed::new(&mut *stream, LengthDelimitedCodec::new());
+                                        let _ = framed.send(cmd_bytes.into()).await;
+                                    }
                                 }
                             }
                         }
@@ -5651,12 +5755,20 @@ pub async fn run(
 
                         let sync_cmd = RelayCommand::SyncRules(interface_rules);
                         if let Ok(cmd_bytes) = serde_json::to_vec(&sync_cmd) {
-                            let mut ingress = ingress_stream.lock().await;
-                            let mut egress = egress_stream.lock().await;
-
-                            // Fire-and-forget: ignore errors (recovery will happen on next periodic sync)
-                            let _ = ingress.write_all(&cmd_bytes).await;
-                            let _ = egress.write_all(&cmd_bytes).await;
+                            // Send to ingress worker using length-delimited framing
+                            {
+                                let mut stream = ingress_stream.lock().await;
+                                let mut framed =
+                                    Framed::new(&mut *stream, LengthDelimitedCodec::new());
+                                let _ = framed.send(cmd_bytes.clone().into()).await;
+                            }
+                            // Send to egress worker using length-delimited framing
+                            {
+                                let mut stream = egress_stream.lock().await;
+                                let mut framed =
+                                    Framed::new(&mut *stream, LengthDelimitedCodec::new());
+                                let _ = framed.send(cmd_bytes.into()).await;
+                            }
                         }
                     }
                 } else {
@@ -5676,10 +5788,31 @@ pub async fn run(
                     // Process any pending protocol events
                     let mrib_modified = coordinator.process_pending_events().await;
 
+                    // Debug: log the condition values
+                    if mrib_modified {
+                        log_info!(
+                            supervisor_logger,
+                            Facility::Supervisor,
+                            &format!(
+                                "MRIB modified, rules_dirty={}",
+                                coordinator.rules_dirty()
+                            )
+                        );
+                    }
+
                     // If MRIB was modified, sync rules to workers
                     if mrib_modified && coordinator.rules_dirty() {
                         // Compile rules from MRIB (merges static + protocol-learned)
                         let protocol_rules = coordinator.compile_rules();
+
+                        log_info!(
+                            supervisor_logger,
+                            Facility::Supervisor,
+                            &format!(
+                                "Compiling rules: {} protocol rules from MRIB",
+                                protocol_rules.len()
+                            )
+                        );
 
                         // Merge with static rules from master_rules
                         let mut all_rules: Vec<ForwardingRule> = {
@@ -5692,6 +5825,14 @@ pub async fn run(
                             all_rules.iter().map(|r| r.rule_id.clone()).collect();
                         for rule in protocol_rules {
                             if !static_rule_ids.contains(&rule.rule_id) {
+                                log_info!(
+                                    supervisor_logger,
+                                    Facility::Supervisor,
+                                    &format!(
+                                        "Adding protocol rule: input={}, group={}, outputs={:?}",
+                                        rule.input_interface, rule.input_group, rule.outputs
+                                    )
+                                );
                                 all_rules.push(rule);
                             }
                         }
@@ -5715,6 +5856,15 @@ pub async fn run(
                         };
 
                         // Spawn workers without holding the lock
+                        log_info!(
+                            supervisor_logger,
+                            Facility::Supervisor,
+                            &format!(
+                                "Spawning workers for {} interfaces: {:?}",
+                                interfaces_to_spawn.len(),
+                                interfaces_to_spawn
+                            )
+                        );
                         for interface in interfaces_to_spawn {
                             let mut manager = worker_manager.lock().unwrap();
                             if let Err(e) =
@@ -5732,6 +5882,11 @@ pub async fn run(
                         }
 
                         // Sync merged rules to all workers
+                        log_info!(
+                            supervisor_logger,
+                            Facility::Supervisor,
+                            &format!("Syncing {} rules to workers", all_rules.len())
+                        );
                         sync_rules_to_workers(&all_rules, &worker_manager, &supervisor_logger).await;
 
                         // Re-acquire lock to clear dirty flag

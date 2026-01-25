@@ -73,6 +73,9 @@ RECEIVER_PID=""
 # Cleanup function
 cleanup() {
     log_info "Running cleanup..."
+    # Save logs for debugging before cleanup
+    cp "$LOG_RP" /tmp/mcr_pim_rp_saved.log 2>/dev/null || true
+    cp "$LOG_LHR" /tmp/mcr_pim_lhr_saved.log 2>/dev/null || true
     [ -n "$RECEIVER_PID" ] && sudo kill "$RECEIVER_PID" 2>/dev/null || true
     [ -n "$MCR_RP_PID" ] && sudo kill -TERM "$MCR_RP_PID" 2>/dev/null || true
     [ -n "$MCR_LHR_PID" ] && sudo kill -TERM "$MCR_LHR_PID" 2>/dev/null || true
