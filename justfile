@@ -129,6 +129,45 @@ test-topology NAME: build-release
     @echo "--- Running {{NAME}} topology test ---"
     @sudo -E tests/topologies/{{NAME}}.sh
 
+# Run PIM protocol tests
+test-topology-pim: build-release
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "--- Running PIM protocol tests ---"
+    for test in pim_neighbor pim_join; do
+        echo ""
+        echo "=== Running $test.sh ==="
+        sudo -E tests/topologies/$test.sh || exit 1
+    done
+    echo ""
+    echo "All PIM tests passed!"
+
+# Run MSDP protocol tests
+test-topology-msdp: build-release
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "--- Running MSDP protocol tests ---"
+    for test in msdp_peer msdp_sa; do
+        echo ""
+        echo "=== Running $test.sh ==="
+        sudo -E tests/topologies/$test.sh || exit 1
+    done
+    echo ""
+    echo "All MSDP tests passed!"
+
+# Run all protocol integration tests (PIM + MSDP)
+test-topology-protocol: build-release
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "--- Running protocol integration tests ---"
+    for test in pim_neighbor msdp_peer pim_join msdp_sa protocol_e2e; do
+        echo ""
+        echo "=== Running $test.sh ==="
+        sudo -E tests/topologies/$test.sh || exit 1
+    done
+    echo ""
+    echo "All protocol integration tests passed!"
+
 # Run performance tests (calls sudo internally)
 test-performance: build-release
     @echo "--- Running performance tests ---"
