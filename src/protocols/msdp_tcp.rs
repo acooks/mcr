@@ -11,7 +11,7 @@ use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::Arc;
 use std::time::Instant;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
@@ -24,6 +24,137 @@ const MAX_MESSAGE_SIZE: usize = 65535;
 
 /// Buffer size for reading from TCP socket
 const READ_BUFFER_SIZE: usize = 8192;
+
+/// Read half of an MSDP connection (used by reader task)
+pub struct MsdpConnectionReader {
+    /// The peer's address
+    pub peer_addr: Ipv4Addr,
+    /// Read half of TCP stream
+    pub reader: ReadHalf<TcpStream>,
+    /// Read buffer for incomplete messages
+    pub read_buffer: Vec<u8>,
+}
+
+impl MsdpConnectionReader {
+    /// Read and parse MSDP messages from the connection
+    ///
+    /// Returns a vector of (message_type, payload) tuples for complete messages
+    pub async fn read_messages(&mut self) -> io::Result<Vec<(u8, Vec<u8>)>> {
+        let mut buf = [0u8; READ_BUFFER_SIZE];
+        let n = self.reader.read(&mut buf).await?;
+
+        if n == 0 {
+            // Connection closed
+            return Err(io::Error::new(
+                io::ErrorKind::ConnectionReset,
+                "connection closed",
+            ));
+        }
+
+        // Append to read buffer
+        self.read_buffer.extend_from_slice(&buf[..n]);
+
+        // Parse complete messages
+        let mut messages = Vec::new();
+        while self.read_buffer.len() >= MsdpHeader::SIZE {
+            // Parse header
+            let header = match MsdpHeader::parse(&self.read_buffer) {
+                Some(h) => h,
+                None => break,
+            };
+
+            // Check if we have the complete message
+            let msg_len = header.length as usize;
+            if msg_len > MAX_MESSAGE_SIZE {
+                // Message too large - protocol error
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("message too large: {} bytes", msg_len),
+                ));
+            }
+
+            if self.read_buffer.len() < msg_len {
+                // Incomplete message, wait for more data
+                break;
+            }
+
+            // Extract the complete message
+            let msg_type = header.msg_type;
+            let payload = self.read_buffer[MsdpHeader::SIZE..msg_len].to_vec();
+            messages.push((msg_type, payload));
+
+            // Remove processed message from buffer
+            self.read_buffer.drain(..msg_len);
+        }
+
+        Ok(messages)
+    }
+}
+
+/// Write half of an MSDP connection (used by runner for sending)
+pub struct MsdpConnectionWriter {
+    /// The peer's address
+    pub peer_addr: Ipv4Addr,
+    /// Write half of TCP stream
+    pub writer: WriteHalf<TcpStream>,
+    /// Whether we initiated this connection (active) or received it (passive)
+    pub is_active: bool,
+    /// When the connection was established
+    pub established_at: Instant,
+}
+
+impl MsdpConnectionWriter {
+    /// Send an MSDP message
+    pub async fn send_message(&mut self, data: &[u8]) -> io::Result<()> {
+        self.writer.write_all(data).await?;
+        self.writer.flush().await
+    }
+
+    /// Send a keepalive message
+    pub async fn send_keepalive(&mut self) -> io::Result<()> {
+        let builder = MsdpKeepaliveBuilder::new();
+        let packet = builder.build();
+        self.send_message(&packet).await
+    }
+
+    /// Send an SA message
+    pub async fn send_sa(
+        &mut self,
+        rp_address: Ipv4Addr,
+        entries: &[(Ipv4Addr, Ipv4Addr)],
+    ) -> io::Result<()> {
+        let mut builder = MsdpSaBuilder::new(rp_address);
+        for &(source, group) in entries {
+            builder.add_entry(source, group);
+        }
+        let packet = builder.build();
+        self.send_message(&packet).await
+    }
+}
+
+/// Split a TcpStream into reader and writer parts for an MSDP connection
+fn split_connection(
+    peer_addr: Ipv4Addr,
+    stream: TcpStream,
+    is_active: bool,
+) -> (MsdpConnectionReader, MsdpConnectionWriter) {
+    let (reader, writer) = tokio::io::split(stream);
+
+    let conn_reader = MsdpConnectionReader {
+        peer_addr,
+        reader,
+        read_buffer: Vec::with_capacity(READ_BUFFER_SIZE),
+    };
+
+    let conn_writer = MsdpConnectionWriter {
+        peer_addr,
+        writer,
+        is_active,
+        established_at: Instant::now(),
+    };
+
+    (conn_reader, conn_writer)
+}
 
 /// A single MSDP peer TCP connection
 pub struct MsdpConnection {
@@ -107,7 +238,8 @@ impl MsdpConnection {
 
     /// Send an MSDP message
     pub async fn send_message(&mut self, data: &[u8]) -> io::Result<()> {
-        self.stream.write_all(data).await
+        self.stream.write_all(data).await?;
+        self.stream.flush().await
     }
 
     /// Send a keepalive message
@@ -400,9 +532,46 @@ pub async fn start_msdp_listener(
     Ok((handle, stop_tx, conn_rx))
 }
 
-/// Process messages from an MSDP connection
+/// Process messages from an MSDP connection reader
+///
+/// This function reads messages from a connection reader and sends events to the state machine.
+/// The reader is owned directly (not shared), so no locking is needed.
+pub async fn process_reader_messages(
+    mut reader: MsdpConnectionReader,
+    event_tx: mpsc::Sender<ProtocolEvent>,
+) -> io::Result<()> {
+    let peer_addr = reader.peer_addr;
+
+    loop {
+        let messages = match reader.read_messages().await {
+            Ok(msgs) => msgs,
+            Err(e) => {
+                return Err(e);
+            }
+        };
+
+        for (msg_type, payload) in messages {
+            let event = ProtocolEvent::Msdp(super::msdp::MsdpEvent::MessageReceived {
+                peer: peer_addr,
+                msg_type,
+                payload,
+            });
+
+            if event_tx.send(event).await.is_err() {
+                // Event channel closed
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "event channel closed",
+                ));
+            }
+        }
+    }
+}
+
+/// Process messages from an MSDP connection (legacy, uses Arc<Mutex>)
 ///
 /// This function reads messages from a connection and sends events to the state machine.
+#[allow(dead_code)]
 pub async fn process_connection_messages(
     conn: Arc<Mutex<MsdpConnection>>,
     event_tx: mpsc::Sender<ProtocolEvent>,
@@ -415,7 +584,12 @@ pub async fn process_connection_messages(
     loop {
         let messages = {
             let mut conn = conn.lock().await;
-            conn.read_messages().await?
+            match conn.read_messages().await {
+                Ok(msgs) => msgs,
+                Err(e) => {
+                    return Err(e);
+                }
+            }
         };
 
         for (msg_type, payload) in messages {
@@ -475,8 +649,8 @@ pub struct MsdpTcpRunner {
     cmd_rx: mpsc::Receiver<MsdpTcpCommand>,
     /// Channel to send protocol events
     event_tx: mpsc::Sender<ProtocolEvent>,
-    /// Active connections
-    connections: HashMap<Ipv4Addr, Arc<Mutex<MsdpConnection>>>,
+    /// Write halves of active connections (for sending)
+    writers: HashMap<Ipv4Addr, MsdpConnectionWriter>,
     /// Handles to connection reader tasks
     reader_tasks: HashMap<Ipv4Addr, tokio::task::JoinHandle<()>>,
 }
@@ -492,7 +666,7 @@ impl MsdpTcpRunner {
             local_address,
             cmd_rx,
             event_tx,
-            connections: HashMap::new(),
+            writers: HashMap::new(),
             reader_tasks: HashMap::new(),
         }
     }
@@ -511,7 +685,7 @@ impl MsdpTcpRunner {
                     match cmd {
                         MsdpTcpCommand::Shutdown => {
                             // Close all connections and exit
-                            for (peer, _) in self.connections.drain() {
+                            for (peer, _) in self.writers.drain() {
                                 if let Some(handle) = self.reader_tasks.remove(&peer) {
                                     handle.abort();
                                 }
@@ -549,7 +723,7 @@ impl MsdpTcpRunner {
 
     async fn handle_connect(&mut self, peer: Ipv4Addr) {
         // Check if already connected
-        if self.connections.contains_key(&peer) {
+        if self.writers.contains_key(&peer) {
             return;
         }
 
@@ -582,14 +756,14 @@ impl MsdpTcpRunner {
 
         match connect_result {
             Ok(stream) => {
-                let conn = MsdpConnection::new(peer, stream, true);
-                let conn = Arc::new(Mutex::new(conn));
-                self.connections.insert(peer, conn.clone());
+                // Split the connection into reader and writer
+                let (reader, writer) = split_connection(peer, stream, true);
+                self.writers.insert(peer, writer);
 
-                // Spawn reader task
+                // Spawn reader task - owns the reader half directly, no lock needed
                 let event_tx = self.event_tx.clone();
                 let handle = tokio::spawn(async move {
-                    if let Err(e) = process_connection_messages(conn, event_tx.clone()).await {
+                    if let Err(e) = process_reader_messages(reader, event_tx.clone()).await {
                         // Connection closed or error - send event
                         let _ = event_tx
                             .send(ProtocolEvent::Msdp(
@@ -636,7 +810,7 @@ impl MsdpTcpRunner {
         };
 
         // Check for connection collision
-        if self.connections.contains_key(&peer) {
+        if self.writers.contains_key(&peer) {
             // Connection collision resolution: higher IP initiates
             if self.should_initiate_connection(peer) {
                 // We have higher IP, our active connection wins - reject incoming
@@ -646,19 +820,19 @@ impl MsdpTcpRunner {
                 if let Some(handle) = self.reader_tasks.remove(&peer) {
                     handle.abort();
                 }
-                self.connections.remove(&peer);
+                self.writers.remove(&peer);
             }
         }
 
         // Accept the connection
-        let conn = MsdpConnection::new(peer, stream, false);
-        let conn = Arc::new(Mutex::new(conn));
-        self.connections.insert(peer, conn.clone());
+        // Split the connection into reader and writer
+        let (reader, writer) = split_connection(peer, stream, false);
+        self.writers.insert(peer, writer);
 
-        // Spawn reader task
+        // Spawn reader task - owns the reader half directly, no lock needed
         let event_tx = self.event_tx.clone();
         let handle = tokio::spawn(async move {
-            if let Err(e) = process_connection_messages(conn, event_tx.clone()).await {
+            if let Err(e) = process_reader_messages(reader, event_tx.clone()).await {
                 let _ = event_tx
                     .send(ProtocolEvent::Msdp(
                         super::msdp::MsdpEvent::TcpConnectionClosed {
@@ -683,10 +857,9 @@ impl MsdpTcpRunner {
             .await;
     }
 
-    async fn handle_send_keepalive(&self, peer: Ipv4Addr) {
-        if let Some(conn) = self.connections.get(&peer) {
-            let mut conn = conn.lock().await;
-            if let Err(e) = conn.send_keepalive().await {
+    async fn handle_send_keepalive(&mut self, peer: Ipv4Addr) {
+        if let Some(writer) = self.writers.get_mut(&peer) {
+            if let Err(e) = writer.send_keepalive().await {
                 // Send failure event
                 let _ = self
                     .event_tx
@@ -702,14 +875,13 @@ impl MsdpTcpRunner {
     }
 
     async fn handle_send_sa(
-        &self,
+        &mut self,
         peer: Ipv4Addr,
         rp_address: Ipv4Addr,
         entries: &[(Ipv4Addr, Ipv4Addr)],
     ) {
-        if let Some(conn) = self.connections.get(&peer) {
-            let mut conn = conn.lock().await;
-            if let Err(e) = conn.send_sa(rp_address, entries).await {
+        if let Some(writer) = self.writers.get_mut(&peer) {
+            if let Err(e) = writer.send_sa(rp_address, entries).await {
                 let _ = self
                     .event_tx
                     .send(ProtocolEvent::Msdp(
@@ -724,18 +896,24 @@ impl MsdpTcpRunner {
     }
 
     async fn handle_flood_sa(
-        &self,
+        &mut self,
         rp_address: Ipv4Addr,
         entries: &[(Ipv4Addr, Ipv4Addr)],
         exclude_peer: Option<Ipv4Addr>,
     ) {
-        for (&peer, conn) in &self.connections {
-            if Some(peer) == exclude_peer {
-                continue;
+        // Collect peers to send to (can't mutably borrow while iterating)
+        let peers_to_send: Vec<Ipv4Addr> = self
+            .writers
+            .keys()
+            .filter(|&&peer| Some(peer) != exclude_peer)
+            .copied()
+            .collect();
+
+        for peer in peers_to_send {
+            if let Some(writer) = self.writers.get_mut(&peer) {
+                // Fire and forget - don't fail the flood for one peer
+                let _ = writer.send_sa(rp_address, entries).await;
             }
-            let mut conn = conn.lock().await;
-            // Fire and forget - don't fail the flood for one peer
-            let _ = conn.send_sa(rp_address, entries).await;
         }
     }
 
@@ -743,7 +921,7 @@ impl MsdpTcpRunner {
         if let Some(handle) = self.reader_tasks.remove(&peer) {
             handle.abort();
         }
-        self.connections.remove(&peer);
+        self.writers.remove(&peer);
 
         // Notify state machine
         let _ = self

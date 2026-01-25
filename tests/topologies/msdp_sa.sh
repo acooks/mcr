@@ -311,6 +311,10 @@ if [ $VALIDATION_PASSED -eq 0 ]; then
     log_info "  - PIM neighbor discovery on inter-RP link"
     log_info "  - Source traffic triggers SA consideration"
     log_info "  - MSDP TCP session maintained for SA exchange"
+    # Show logs even on success for debugging
+    log_info ""
+    log_info "RP1 log (source detection debug):"
+    grep -E "(Direct source|Source check|DirectSourceDetected|Notifying MSDP)" "$LOG_RP1" 2>/dev/null | head -30 || log_info "  (no source detection logs)"
     echo ""
     echo "=== PASS ==="
     exit 0

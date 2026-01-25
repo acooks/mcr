@@ -1058,6 +1058,127 @@ impl ProtocolState {
             PimEvent::SetRpAddress { rp } => {
                 self.pim_state.config.rp_address = Some(rp);
             }
+            PimEvent::DirectSourceDetected {
+                interface,
+                source,
+                group,
+            } => {
+                // Direct-connect source detection: when we receive multicast traffic
+                // on an interface where we are both the DR and the RP for the group,
+                // we can shortcut the PIM Register process and directly create (S,G) state.
+
+                // Check if we're the RP for this group
+                let is_rp_for_group =
+                    self.pim_state.config.rp_address.is_some_and(|rp| {
+                        self.pim_state.config.get_rp_for_group(group) == Some(rp)
+                    });
+
+                // Check if we're the DR on this interface
+                let is_dr = self
+                    .pim_state
+                    .get_interface(&interface)
+                    .is_some_and(|iface_state| iface_state.is_dr());
+
+                // Check if we already have (S,G) state for this source
+                let already_has_sg = self.pim_state.sg.contains_key(&(source, group));
+
+                log_info!(
+                    self.logger,
+                    Facility::Supervisor,
+                    &format!(
+                        "PIM: DirectSourceDetected check: ({}, {}) on {} - is_rp={}, is_dr={}, has_sg={}",
+                        source, group, interface, is_rp_for_group, is_dr, already_has_sg
+                    )
+                );
+
+                if is_rp_for_group && is_dr && !already_has_sg {
+                    log_info!(
+                        self.logger,
+                        Facility::Supervisor,
+                        &format!(
+                            "PIM: Direct-connect source active ({}, {}) on {} - creating (S,G) state",
+                            source, group, interface
+                        )
+                    );
+
+                    let now = Instant::now();
+
+                    // Create (S,G) state
+                    let sg_state = crate::protocols::pim::SGState {
+                        source,
+                        group,
+                        upstream_interface: Some(interface.clone()), // Source is directly connected
+                        downstream_interfaces: std::collections::HashSet::new(),
+                        spt_bit: true, // We're on the SPT since source is direct
+                        created_at: now,
+                        expires_at: Some(now + Duration::from_secs(210)), // PIM holdtime
+                    };
+
+                    // Store in PIM state
+                    self.pim_state.sg.insert((source, group), sg_state.clone());
+
+                    // Add route to MRIB
+                    let route = crate::mroute::SGRoute {
+                        source,
+                        group,
+                        upstream_interface: Some(interface.clone()),
+                        downstream_interfaces: std::collections::HashSet::new(),
+                        spt_bit: true,
+                        created_at: now,
+                        expires_at: Some(now + Duration::from_secs(210)),
+                    };
+                    result.add_action(MribAction::AddSgRoute(route));
+
+                    // Notify of route change
+                    result.notify(crate::ProtocolEventNotification::PimRouteChange {
+                        route_type: crate::PimTreeType::SG,
+                        group,
+                        source: Some(source),
+                        action: crate::RouteAction::Add,
+                        timestamp: unix_timestamp(),
+                    });
+
+                    // Schedule expiry timer
+                    result.add_timer(TimerRequest {
+                        timer_type: TimerType::PimSGExpiry { source, group },
+                        fire_at: now + Duration::from_secs(210),
+                        replace_existing: true,
+                    });
+
+                    // Notify MSDP of local source active
+                    if self.msdp_enabled {
+                        if let Some(rp_address) = self.pim_state.config.rp_address {
+                            log_info!(
+                                self.logger,
+                                Facility::Supervisor,
+                                &format!(
+                                    "PIM: Notifying MSDP of direct source ({}, {})",
+                                    source, group
+                                )
+                            );
+
+                            let msdp_result = self
+                                .msdp_state
+                                .local_source_active(source, group, rp_address, now);
+
+                            log_info!(
+                                self.logger,
+                                Facility::Supervisor,
+                                &format!(
+                                    "MSDP: local_source_active returned {} floods, {} timers",
+                                    msdp_result.floods.len(),
+                                    msdp_result.timers.len()
+                                )
+                            );
+
+                            // Process flood requests (originate SA to peers)
+                            self.process_msdp_floods(msdp_result.floods);
+
+                            result.add_timers(msdp_result.timers);
+                        }
+                    }
+                }
+            }
         }
         result
     }
@@ -1066,16 +1187,57 @@ impl ProtocolState {
     fn process_msdp_floods(&self, floods: Vec<crate::protocols::msdp::SaFloodRequest>) {
         use crate::protocols::msdp_tcp::MsdpTcpCommand;
 
+        log_info!(
+            self.logger,
+            Facility::Supervisor,
+            &format!(
+                "MSDP: Processing {} flood request(s), tcp_tx available: {}",
+                floods.len(),
+                self.msdp_tcp_tx.is_some()
+            )
+        );
+
         if let Some(ref tcp_tx) = self.msdp_tcp_tx {
             for flood in floods {
+                log_info!(
+                    self.logger,
+                    Facility::Supervisor,
+                    &format!(
+                        "MSDP: Sending FloodSa for {} entries from RP {}, exclude: {:?}",
+                        flood.entries.len(),
+                        flood.rp_address,
+                        flood.exclude_peer
+                    )
+                );
                 let cmd = MsdpTcpCommand::FloodSa {
                     rp_address: flood.rp_address,
                     entries: flood.entries,
                     exclude_peer: flood.exclude_peer,
                 };
                 // Fire and forget - don't block on channel send
-                let _ = tcp_tx.try_send(cmd);
+                match tcp_tx.try_send(cmd) {
+                    Ok(_) => {
+                        log_info!(
+                            self.logger,
+                            Facility::Supervisor,
+                            "MSDP: FloodSa command sent to TCP runner"
+                        );
+                    }
+                    Err(e) => {
+                        log_warning!(
+                            self.logger,
+                            Facility::Supervisor,
+                            &format!("MSDP: Failed to send FloodSa command: {}", e)
+                        );
+                    }
+                }
             }
+        } else {
+            log_warning!(
+                self.logger,
+                Facility::Supervisor,
+                "MSDP: Cannot process floods - msdp_tcp_tx is None"
+            );
         }
     }
 
@@ -2658,6 +2820,7 @@ impl std::os::unix::io::AsRawFd for AsyncRawSocket {
 ///
 /// This function monitors the IGMP and PIM raw sockets for incoming packets
 /// and dispatches them to the event channel for processing by ProtocolState.
+/// It also performs direct-connect source detection for multicast traffic.
 pub async fn protocol_receiver_loop(
     igmp_fd: Option<RawFd>,
     pim_fd: Option<RawFd>,
@@ -2665,9 +2828,18 @@ pub async fn protocol_receiver_loop(
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
     logger: Logger,
 ) {
+    use std::collections::HashMap;
     use tokio::io::unix::AsyncFd;
 
     let mut buf = vec![0u8; 65536]; // Maximum IP packet size
+
+    // Source detection cache: (source, group) -> last_seen timestamp
+    // This prevents sending duplicate DirectSourceDetected events
+    // Sources are re-detected after SOURCE_CACHE_TIMEOUT_SECS
+    const SOURCE_CACHE_TIMEOUT_SECS: u64 = 60;
+    const SOURCE_CACHE_CLEANUP_INTERVAL: u64 = 30;
+    let mut source_cache: HashMap<(Ipv4Addr, Ipv4Addr), Instant> = HashMap::new();
+    let mut last_cache_cleanup = Instant::now();
 
     // Create async fds for non-blocking socket I/O
     let igmp_async = igmp_fd.and_then(|fd| {
@@ -2726,28 +2898,126 @@ pub async fn protocol_receiver_loop(
                 if let Ok(mut guard) = result {
                     // Use AF_PACKET read for IGMP - gets interface from sockaddr_ll
                     // Note: AF_PACKET with ETH_P_IP receives ALL IP packets, not just IGMP
+                    // Periodic source cache cleanup
+                    let now = Instant::now();
+                    if now.duration_since(last_cache_cleanup).as_secs() >= SOURCE_CACHE_CLEANUP_INTERVAL {
+                        source_cache.retain(|_, last_seen| {
+                            now.duration_since(*last_seen).as_secs() < SOURCE_CACHE_TIMEOUT_SECS
+                        });
+                        last_cache_cleanup = now;
+                    }
+
                     match guard.get_inner().try_read_af_packet(&mut buf) {
                         Ok(recv) if recv.len > 0 => {
-                            // Quick check: only process if this is an IGMP packet (IP protocol 2)
-                            // This avoids log spam from multicast data traffic
-                            if recv.len >= 20 && buf[9] == 2 {
+                            // Minimum IP header is 20 bytes
+                            if recv.len >= 20 {
+                                let protocol = buf[9];
                                 let interface = interface_name_from_index(recv.iface_index);
-                                log_info!(
-                                    logger,
-                                    Facility::Supervisor,
-                                    &format!(
-                                        "IGMP packet received: {} bytes on iface_index={}, interface={:?}",
-                                        recv.len, recv.iface_index, interface
-                                    )
-                                );
-                                if let Some(event) = parse_igmp_packet(&buf[..recv.len], interface, &logger) {
-                                    if event_tx.send(event).await.is_err() {
-                                        log_warning!(
+
+                                // Log all multicast-destined packets for source detection debugging
+                                let dst_ip = Ipv4Addr::new(buf[16], buf[17], buf[18], buf[19]);
+                                if dst_ip.octets()[0] >= 224 && dst_ip.octets()[0] <= 239 && protocol != 2 {
+                                    // Log non-IGMP multicast (IGMP is logged separately)
+                                    let src_ip = Ipv4Addr::new(buf[12], buf[13], buf[14], buf[15]);
+                                    log_info!(
+                                        logger,
+                                        Facility::Supervisor,
+                                        &format!(
+                                            "Multicast data packet: proto={}, src={}, dst={}, iface={:?}",
+                                            protocol, src_ip, dst_ip, interface
+                                        )
+                                    );
+                                }
+
+                                // IGMP packet (protocol 2)
+                                if protocol == 2 {
+                                    log_info!(
+                                        logger,
+                                        Facility::Supervisor,
+                                        &format!(
+                                            "IGMP packet received: {} bytes on iface_index={}, interface={:?}",
+                                            recv.len, recv.iface_index, interface
+                                        )
+                                    );
+                                    if let Some(event) = parse_igmp_packet(&buf[..recv.len], interface, &logger) {
+                                        if event_tx.send(event).await.is_err() {
+                                            log_warning!(
+                                                logger,
+                                                Facility::Supervisor,
+                                                "Protocol event channel closed, receiver loop exiting"
+                                            );
+                                            return;
+                                        }
+                                    }
+                                }
+                                // UDP packet (protocol 17) - check for multicast destination
+                                else if protocol == 17 {
+                                    // Extract source and destination IPs
+                                    let src_ip = Ipv4Addr::new(buf[12], buf[13], buf[14], buf[15]);
+                                    let dst_ip = Ipv4Addr::new(buf[16], buf[17], buf[18], buf[19]);
+
+                                    // Check if destination is multicast (224.0.0.0/4)
+                                    // but not link-local (224.0.0.0/24)
+                                    if dst_ip.octets()[0] >= 224
+                                        && dst_ip.octets()[0] <= 239
+                                        && !(dst_ip.octets()[0] == 224
+                                            && dst_ip.octets()[1] == 0
+                                            && dst_ip.octets()[2] == 0)
+                                    {
+                                        let source_key = (src_ip, dst_ip);
+
+                                        // Check if this is a new source or cached entry expired
+                                        let is_new_source = match source_cache.get(&source_key) {
+                                            Some(last_seen) => {
+                                                now.duration_since(*last_seen).as_secs()
+                                                    >= SOURCE_CACHE_TIMEOUT_SECS
+                                            }
+                                            None => true,
+                                        };
+
+                                        log_info!(
                                             logger,
                                             Facility::Supervisor,
-                                            "Protocol event channel closed, receiver loop exiting"
+                                            &format!(
+                                                "Source check: ({}, {}) is_new={}, cache_size={}",
+                                                src_ip, dst_ip, is_new_source, source_cache.len()
+                                            )
                                         );
-                                        return;
+
+                                        if is_new_source {
+                                            // Update cache
+                                            source_cache.insert(source_key, now);
+
+                                            if let Some(ref iface_name) = interface {
+                                                log_info!(
+                                                    logger,
+                                                    Facility::Supervisor,
+                                                    &format!(
+                                                        "Direct source detected: ({}, {}) on {}",
+                                                        src_ip, dst_ip, iface_name
+                                                    )
+                                                );
+
+                                                // Send DirectSourceDetected event
+                                                use crate::protocols::pim::PimEvent;
+                                                let event = ProtocolEvent::Pim(
+                                                    PimEvent::DirectSourceDetected {
+                                                        interface: iface_name.clone(),
+                                                        source: src_ip,
+                                                        group: dst_ip,
+                                                    },
+                                                );
+
+                                                if event_tx.send(event).await.is_err() {
+                                                    log_warning!(
+                                                        logger,
+                                                        Facility::Supervisor,
+                                                        "Protocol event channel closed, receiver loop exiting"
+                                                    );
+                                                    return;
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }

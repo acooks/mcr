@@ -174,6 +174,13 @@ pub enum PimEvent {
     SetStaticRp { group: Ipv4Addr, rp: Ipv4Addr },
     /// Set our RP address
     SetRpAddress { rp: Ipv4Addr },
+    /// Direct-connect source detected (multicast traffic from source on DR interface)
+    /// This is used when the RP is also the DR for the source's subnet
+    DirectSourceDetected {
+        interface: String,
+        source: Ipv4Addr,
+        group: Ipv4Addr,
+    },
 }
 
 /// PIM neighbor state
@@ -523,7 +530,10 @@ impl PimState {
     ) -> Vec<TimerRequest> {
         let mut timers = Vec::new();
 
-        let state = PimInterfaceState::new(interface.to_string(), address, config.clone());
+        let mut state = PimInterfaceState::new(interface.to_string(), address, config.clone());
+
+        // Run initial DR election - with no neighbors, we become DR
+        state.elect_dr();
 
         // Schedule first Hello
         let hello_time = Instant::now();
