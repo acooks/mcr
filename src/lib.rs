@@ -233,6 +233,11 @@ pub enum SupervisorCommand {
         group_prefix: String,
         rp_address: Ipv4Addr,
     },
+    /// Declare this router as an RP at the specified address
+    SetRpAddress {
+        /// The RP address (must be a local interface address)
+        address: Ipv4Addr,
+    },
     /// Add an external PIM neighbor (injected by external control plane)
     AddExternalNeighbor {
         neighbor: ExternalNeighbor,

@@ -4249,6 +4249,27 @@ async fn handle_client(
                     );
                     Some(Response::Success(format!("PIM disabled on {}", interface)))
                 }
+                SupervisorCommand::SetRpAddress { address } => {
+                    // Validate address is unicast
+                    if address.is_multicast() {
+                        Some(Response::Error("RP address must be unicast".to_string()))
+                    } else {
+                        // Set this router's RP address
+                        coordinator.state.pim_state.config.rp_address = Some(*address);
+                        log_info!(
+                            logger,
+                            Facility::Supervisor,
+                            &format!(
+                                "This router is now an RP at address {} (MSDP SA origination enabled)",
+                                address
+                            )
+                        );
+                        Some(Response::Success(format!(
+                            "RP address set to {}. This router will originate MSDP SA messages for directly-connected sources.",
+                            address
+                        )))
+                    }
+                }
                 SupervisorCommand::EnableIgmpQuerier { ref interface } => {
                     // Look up interface IP
                     match get_interface_ipv4(interface) {

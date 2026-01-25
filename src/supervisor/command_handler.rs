@@ -545,9 +545,11 @@ pub fn handle_supervisor_command(
             (Response::PimNeighbors(Vec::new()), CommandAction::None)
         }
 
-        // EnablePim and DisablePim are handled in mod.rs protocol_response section
+        // EnablePim, DisablePim, and SetRpAddress are handled in mod.rs protocol_response section
         // They need access to ProtocolCoordinator state (timer_tx, pim_socket, etc.)
-        SupervisorCommand::EnablePim { .. } | SupervisorCommand::DisablePim { .. } => {
+        SupervisorCommand::EnablePim { .. }
+        | SupervisorCommand::DisablePim { .. }
+        | SupervisorCommand::SetRpAddress { .. } => {
             // This should never be reached - handled earlier in mod.rs
             (
                 Response::Error(

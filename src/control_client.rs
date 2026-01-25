@@ -152,6 +152,12 @@ pub enum PimAction {
         #[arg(long)]
         rp: Ipv4Addr,
     },
+    /// Declare this router as an RP (enables MSDP SA origination)
+    SetRpAddress {
+        /// RP address (should be a local interface address)
+        #[arg(long)]
+        address: Ipv4Addr,
+    },
     /// Add an external PIM neighbor (injected by external control plane)
     AddNeighbor {
         /// Neighbor's IP address
@@ -443,6 +449,9 @@ pub fn build_command(cli_command: CliCommand) -> Result<multicast_relay::Supervi
                 group_prefix: group,
                 rp_address: rp,
             },
+            PimAction::SetRpAddress { address } => {
+                multicast_relay::SupervisorCommand::SetRpAddress { address }
+            }
             PimAction::AddNeighbor {
                 address,
                 interface,
