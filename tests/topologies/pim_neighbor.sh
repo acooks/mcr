@@ -69,6 +69,7 @@ create_linked_namespaces "$NS1" "$NS2" "$VETH1" "$VETH2" "$IP1" "$IP2"
 log_section 'Creating MCR Configurations'
 
 # MCR-1 config: PIM enabled on veth1
+# Use short hello_period for faster neighbor discovery in tests
 cat > "$CONFIG1" << EOF
 {
     rules: [],
@@ -76,7 +77,7 @@ cat > "$CONFIG1" << EOF
         enabled: true,
         router_id: "$IP1_ADDR",
         interfaces: [
-            { name: "$VETH1", dr_priority: 1 }
+            { name: "$VETH1", dr_priority: 1, hello_period: 5 }
         ]
     }
 }
@@ -90,7 +91,7 @@ cat > "$CONFIG2" << EOF
         enabled: true,
         router_id: "$IP2_ADDR",
         interfaces: [
-            { name: "$VETH2", dr_priority: 1 }
+            { name: "$VETH2", dr_priority: 1, hello_period: 5 }
         ]
     }
 }

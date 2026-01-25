@@ -111,6 +111,7 @@ sudo ip netns exec "$NS_RP2" ip route add 10.0.0.0/24 via "${IP_RP1_DOWN%/*}"
 log_section 'Creating MCR Configurations'
 
 # MCR-RP1 config: RP for 239.1.0.0/16, MSDP peer to RP2
+# Use short hello_period for faster neighbor discovery in tests
 cat > "$CONFIG_RP1" << EOF
 {
     rules: [],
@@ -119,8 +120,8 @@ cat > "$CONFIG_RP1" << EOF
         router_id: "$IP_RP1_ADDR",
         rp_address: "$IP_RP1_ADDR",
         interfaces: [
-            { name: "$VETH_S_P" },
-            { name: "$VETH_M1" }
+            { name: "$VETH_S_P", hello_period: 5 },
+            { name: "$VETH_M1", hello_period: 5 }
         ],
         static_rp: [
             { rp: "$IP_RP1_ADDR", group: "239.1.0.0/16" }
@@ -151,8 +152,8 @@ cat > "$CONFIG_RP2" << EOF
         router_id: "$IP_RP2_ADDR",
         rp_address: "$IP_RP2_ADDR",
         interfaces: [
-            { name: "$VETH_M2" },
-            { name: "$VETH_R" }
+            { name: "$VETH_M2", hello_period: 5 },
+            { name: "$VETH_R", hello_period: 5 }
         ],
         static_rp: [
             { rp: "$IP_RP2_ADDR", group: "239.2.0.0/16" },

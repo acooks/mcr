@@ -176,6 +176,7 @@ sudo ip netns exec "$NS_DR2" ip route add 10.5.0.0/24 via "${IP_RP2_DOWN%/*}"
 log_section 'Creating MCR Configurations'
 
 # DR1 config: PIM towards RP1, IGMP on source side
+# Use short hello_period for faster neighbor discovery in tests
 cat > "$CONFIG_DR1" << EOF
 {
     rules: [],
@@ -183,8 +184,8 @@ cat > "$CONFIG_DR1" << EOF
         enabled: true,
         router_id: "$IP_DR1_DOWN_ADDR",
         interfaces: [
-            { name: "$VETH_S_P" },
-            { name: "$VETH_D1R1" }
+            { name: "$VETH_S_P", hello_period: 5 },
+            { name: "$VETH_D1R1", hello_period: 5 }
         ],
         static_rp: [
             { rp: "$IP_RP1_ADDR", group: "239.0.0.0/8" }
@@ -206,8 +207,8 @@ cat > "$CONFIG_RP1" << EOF
         router_id: "$IP_RP1_ADDR",
         rp_address: "$IP_RP1_ADDR",
         interfaces: [
-            { name: "$VETH_R1D1" },
-            { name: "$VETH_R1R2" }
+            { name: "$VETH_R1D1", hello_period: 5 },
+            { name: "$VETH_R1R2", hello_period: 5 }
         ],
         static_rp: [
             { rp: "$IP_RP1_ADDR", group: "239.0.0.0/8" }
@@ -234,8 +235,8 @@ cat > "$CONFIG_RP2" << EOF
         router_id: "$IP_RP2_ADDR",
         rp_address: "$IP_RP2_ADDR",
         interfaces: [
-            { name: "$VETH_R2R1" },
-            { name: "$VETH_R2D2" }
+            { name: "$VETH_R2R1", hello_period: 5 },
+            { name: "$VETH_R2D2", hello_period: 5 }
         ],
         static_rp: [
             { rp: "$IP_RP1_ADDR", group: "239.0.0.0/8" }
@@ -261,8 +262,8 @@ cat > "$CONFIG_DR2" << EOF
         enabled: true,
         router_id: "$IP_DR2_UP_ADDR",
         interfaces: [
-            { name: "$VETH_D2R2" },
-            { name: "$VETH_R" }
+            { name: "$VETH_D2R2", hello_period: 5 },
+            { name: "$VETH_R", hello_period: 5 }
         ],
         static_rp: [
             { rp: "$IP_RP2_ADDR", group: "239.0.0.0/8" }

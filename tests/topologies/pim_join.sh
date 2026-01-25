@@ -124,6 +124,7 @@ sudo ip netns exec "$NS_LHR" ip route add 10.0.0.0/24 via "${IP_RP_DOWN%/*}"
 log_section 'Creating MCR Configurations'
 
 # MCR-RP config: RP for 239.0.0.0/8, PIM on both interfaces
+# Use short hello_period for faster neighbor discovery in tests
 cat > "$CONFIG_RP" << EOF
 {
     rules: [],
@@ -132,8 +133,8 @@ cat > "$CONFIG_RP" << EOF
         router_id: "${IP_RP_DOWN%/*}",
         rp_address: "${IP_RP_DOWN%/*}",
         interfaces: [
-            { name: "$VETH_S_P" },
-            { name: "$VETH_R1" }
+            { name: "$VETH_S_P", hello_period: 5 },
+            { name: "$VETH_R1", hello_period: 5 }
         ],
         static_rp: [
             { rp: "${IP_RP_DOWN%/*}", group: "239.0.0.0/8" }
@@ -154,7 +155,7 @@ cat > "$CONFIG_LHR" << EOF
         enabled: true,
         router_id: "${IP_LHR_UP%/*}",
         interfaces: [
-            { name: "$VETH_R2" }
+            { name: "$VETH_R2", hello_period: 5 }
         ],
         static_rp: [
             { rp: "${IP_RP_DOWN%/*}", group: "239.0.0.0/8" }
