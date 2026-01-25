@@ -2458,29 +2458,39 @@ impl ProtocolState {
     }
 
     /// Create both protocol sockets if protocols are enabled
+    ///
+    /// The IGMP sockets (send and recv) are created when IGMP OR PIM is enabled because:
+    /// - The AF_PACKET recv socket is needed for source detection (used by both IGMP and PIM/MSDP)
+    /// - The IGMP send socket is only used when IGMP is enabled, but creating it is harmless
     pub fn create_protocol_sockets(&mut self) -> Result<()> {
-        if self.igmp_enabled && self.igmp_recv_socket.is_none() {
+        // Create IGMP/source-detection sockets when IGMP OR PIM is enabled
+        // The AF_PACKET recv socket is essential for direct source detection,
+        // which is needed for MSDP SA origination even in PIM-only deployments
+        if (self.igmp_enabled || self.pim_enabled) && self.igmp_recv_socket.is_none() {
             self.create_igmp_socket()?;
 
-            // Enable ALLMULTI and join IGMPv3 all-routers on each IGMP-enabled interface
-            let interfaces: Vec<String> = self.igmp_state.keys().cloned().collect();
-            for interface in &interfaces {
-                // Enable ALLMULTI to receive all multicast at L2
-                if let Err(e) = self.enable_allmulti_on_interface(interface) {
-                    log_warning!(
-                        self.logger,
-                        Facility::Supervisor,
-                        &format!("Failed to enable ALLMULTI on {}: {}", interface, e)
-                    );
-                }
+            // IGMP-specific interface setup: only when IGMP is enabled
+            if self.igmp_enabled {
+                // Enable ALLMULTI and join IGMPv3 all-routers on each IGMP-enabled interface
+                let interfaces: Vec<String> = self.igmp_state.keys().cloned().collect();
+                for interface in &interfaces {
+                    // Enable ALLMULTI to receive all multicast at L2
+                    if let Err(e) = self.enable_allmulti_on_interface(interface) {
+                        log_warning!(
+                            self.logger,
+                            Facility::Supervisor,
+                            &format!("Failed to enable ALLMULTI on {}: {}", interface, e)
+                        );
+                    }
 
-                // Join 224.0.0.22 to receive IGMPv3 Membership Reports
-                if let Err(e) = self.join_igmp_v3_all_routers(interface) {
-                    log_warning!(
-                        self.logger,
-                        Facility::Supervisor,
-                        &format!("Failed to join IGMPv3 all-routers on {}: {}", interface, e)
-                    );
+                    // Join 224.0.0.22 to receive IGMPv3 Membership Reports
+                    if let Err(e) = self.join_igmp_v3_all_routers(interface) {
+                        log_warning!(
+                            self.logger,
+                            Facility::Supervisor,
+                            &format!("Failed to join IGMPv3 all-routers on {}: {}", interface, e)
+                        );
+                    }
                 }
             }
         }
@@ -4199,8 +4209,8 @@ async fn handle_client(
 
                             // Ensure PIM socket exists and join multicast on this interface
                             coordinator.state.pim_enabled = true;
-                            let need_socket = coordinator.state.pim_socket.is_none();
-                            if need_socket {
+                            let need_pim_socket = coordinator.state.pim_socket.is_none();
+                            if need_pim_socket {
                                 if let Err(e) = coordinator.state.create_pim_socket() {
                                     log_error!(
                                         logger,
@@ -4209,6 +4219,22 @@ async fn handle_client(
                                     );
                                 }
                             }
+
+                            // Also create IGMP socket for source detection
+                            // The AF_PACKET recv socket is needed for detecting local sources
+                            // which triggers MSDP SA origination
+                            let need_source_detect_socket =
+                                coordinator.state.igmp_recv_socket.is_none();
+                            if need_source_detect_socket {
+                                if let Err(e) = coordinator.state.create_igmp_socket() {
+                                    log_error!(
+                                        logger,
+                                        Facility::Supervisor,
+                                        &format!("Failed to create source detection socket: {}", e)
+                                    );
+                                }
+                            }
+
                             // Restart receiver loop to include PIM socket
                             // (this handles both initial spawn and restart after IGMP-only)
                             coordinator.state.restart_receiver_loop();
