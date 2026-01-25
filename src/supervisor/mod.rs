@@ -565,20 +565,183 @@ impl ProtocolState {
                         _ => {}
                     }
                 } else {
-                    log_warning!(
-                        self.logger,
-                        Facility::Supervisor,
-                        &format!(
-                            "Received IGMP {} from {} for group {} on interface '{}' which is not IGMP-enabled",
-                            match msg_type {
-                                0x11 => "Query",
-                                0x16 => "V2 Report",
-                                0x17 => "Leave",
-                                _ => "Unknown",
-                            },
-                            src_ip, group, interface
-                        )
-                    );
+                    // IGMP not explicitly enabled on this interface - auto-enable in passive mode
+                    // for Membership Reports (0x16) to track group membership and trigger PIM joins
+                    if msg_type == 0x16 {
+                        // Look up interface IP for IGMP state
+                        if let Some(interface_ip) = get_interface_ipv4(&interface) {
+                            log_info!(
+                                self.logger,
+                                Facility::Supervisor,
+                                &format!(
+                                    "Auto-enabling IGMP (passive mode) on interface '{}' due to received report for group {}",
+                                    interface, group
+                                )
+                            );
+
+                            // Create IGMP state in passive mode (no query timer scheduled)
+                            let igmp_config = crate::protocols::igmp::IgmpConfig::default();
+                            let mut passive_state = InterfaceIgmpState::new(
+                                interface.clone(),
+                                interface_ip,
+                                igmp_config,
+                            );
+                            // Set as non-querier since we're in passive mode
+                            passive_state.is_querier = false;
+
+                            // Process the report
+                            let timers = passive_state.received_report(src_ip, group, now);
+                            result.add_timers(timers);
+
+                            // Add IGMP membership to MRIB
+                            let membership = crate::mroute::IgmpMembership {
+                                group,
+                                expires_at: now + passive_state.config.group_membership_interval(),
+                                last_reporter: Some(src_ip),
+                            };
+                            result.add_action(MribAction::AddIgmpMembership {
+                                interface: interface.clone(),
+                                group,
+                                membership,
+                            });
+                            result.notify(crate::ProtocolEventNotification::IgmpMembershipChange {
+                                interface: interface.clone(),
+                                group,
+                                action: crate::MembershipAction::Join,
+                                reporter: Some(src_ip),
+                                timestamp: unix_timestamp(),
+                            });
+
+                            // If PIM is enabled, create (*,G) route towards RP
+                            if self.pim_enabled && !self.pim_state.star_g.contains_key(&group) {
+                                if let Some(rp) = self.pim_state.config.get_rp_for_group(group) {
+                                    let upstream_interface = lookup_rpf_interface(rp);
+
+                                    if let Some(ref upstream) = upstream_interface {
+                                        log_info!(
+                                                self.logger,
+                                                Facility::Supervisor,
+                                                &format!(
+                                                    "IGMP (passive) triggered (*,{}) route creation: RP={}, upstream={}",
+                                                    group, rp, upstream
+                                                )
+                                            );
+                                    }
+
+                                    // Create (*,G) state in PIM
+                                    let mut star_g_state =
+                                        crate::protocols::pim::StarGState::new(group, rp);
+                                    star_g_state.upstream_interface = upstream_interface.clone();
+                                    star_g_state.downstream_interfaces.insert(interface.clone());
+                                    star_g_state.expires_at = Some(now + Duration::from_secs(210));
+
+                                    // Add route to MRIB
+                                    let route = crate::mroute::StarGRoute {
+                                        group,
+                                        rp,
+                                        upstream_interface: star_g_state.upstream_interface.clone(),
+                                        downstream_interfaces: star_g_state
+                                            .downstream_interfaces
+                                            .clone(),
+                                        created_at: star_g_state.created_at,
+                                        expires_at: star_g_state.expires_at,
+                                    };
+                                    result.add_action(MribAction::AddStarGRoute(route));
+
+                                    // Store in PIM state
+                                    self.pim_state.star_g.insert(group, star_g_state);
+
+                                    result.notify(
+                                        crate::ProtocolEventNotification::PimRouteChange {
+                                            route_type: crate::PimTreeType::StarG,
+                                            group,
+                                            source: None,
+                                            action: crate::RouteAction::Add,
+                                            timestamp: unix_timestamp(),
+                                        },
+                                    );
+
+                                    // Send PIM Join towards RP on the upstream interface
+                                    if let Some(ref upstream_iface) = upstream_interface {
+                                        if let Some(upstream_state) =
+                                            self.pim_state.get_interface(upstream_iface)
+                                        {
+                                            use crate::protocols::pim::{
+                                                PimJoinPruneBuilder, ALL_PIM_ROUTERS,
+                                            };
+                                            use crate::protocols::PacketBuilder;
+
+                                            let upstream_neighbor =
+                                                upstream_state.designated_router.unwrap_or(rp);
+
+                                            let builder = PimJoinPruneBuilder::star_g_join(
+                                                upstream_neighbor,
+                                                group,
+                                                rp,
+                                            );
+                                            let packet_data = builder.build();
+
+                                            result.send_packet(OutgoingPacket {
+                                                protocol: ProtocolType::Pim,
+                                                interface: upstream_iface.clone(),
+                                                destination: ALL_PIM_ROUTERS,
+                                                source: Some(upstream_state.address),
+                                                data: packet_data,
+                                            });
+
+                                            log_info!(
+                                                    self.logger,
+                                                    Facility::Supervisor,
+                                                    &format!(
+                                                        "PIM: Sending (*,{}) Join to {} on {} (passive IGMP trigger)",
+                                                        group, upstream_neighbor, upstream_iface
+                                                    )
+                                                );
+
+                                            // Schedule Join/Prune refresh timer
+                                            result.add_timers(vec![TimerRequest {
+                                                    timer_type: TimerType::PimJoinPrune {
+                                                        interface: upstream_iface.clone(),
+                                                        group,
+                                                    },
+                                                    fire_at: now
+                                                        + crate::protocols::pim::DEFAULT_JOIN_PRUNE_PERIOD,
+                                                    replace_existing: true,
+                                                }]);
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Store the passive IGMP state
+                            self.igmp_state.insert(interface.clone(), passive_state);
+                            self.igmp_enabled = true;
+                        } else {
+                            log_warning!(
+                                self.logger,
+                                Facility::Supervisor,
+                                &format!(
+                                    "Cannot auto-enable IGMP on interface '{}': no IPv4 address found",
+                                    interface
+                                )
+                            );
+                        }
+                    } else {
+                        // Ignore queries and leaves on interfaces without IGMP state
+                        log_debug!(
+                            self.logger,
+                            Facility::Supervisor,
+                            &format!(
+                                "Ignoring IGMP {} from {} for group {} on interface '{}' (IGMP not enabled)",
+                                match msg_type {
+                                    0x11 => "Query",
+                                    0x17 => "Leave",
+                                    _ => "Unknown",
+                                },
+                                src_ip, group, interface
+                            )
+                        );
+                    }
                 }
             }
             IgmpEvent::QueryTimerExpired { interface } => {
