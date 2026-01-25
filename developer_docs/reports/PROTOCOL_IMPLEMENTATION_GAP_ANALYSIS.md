@@ -4,22 +4,23 @@ Date: January 2026
 
 ## Executive Summary
 
-MCR's control plane protocols (PIM-SM, MSDP, IGMP) have state machines implemented but critical I/O pathways are missing or broken. The data plane forwarding works correctly, but automatic multicast routing via protocols is non-functional.
+MCR's control plane protocols (PIM-SM, MSDP, IGMP) are largely functional. The data plane forwarding works correctly, and protocol-driven multicast routing is operational for key scenarios including IGMP membership, PIM neighbor discovery, and MSDP SA exchange. Remaining gaps include PIM Join/Prune transmission and periodic refresh timers.
 
 ## Status by Component
 
 | Component | State Machine | Packet Rx | Packet Tx | MRIB Integration | Tests |
 |-----------|--------------|-----------|-----------|------------------|-------|
 | **Data Plane** | N/A | Working | Working | N/A | Integration |
-| **IGMP Rx** | Complete | Working | - | Working | Unit only |
-| **IGMP Tx (Queries)** | Complete | - | **MISSING** | - | None |
-| **PIM Hello Rx** | Complete | Working | - | - | Unit only |
-| **PIM Hello Tx** | Complete | - | **MISSING** | - | None |
-| **PIM Join/Prune Rx** | Complete | Working | - | **BROKEN** | Unit only |
-| **PIM Join/Prune Tx** | Partial | - | **MISSING** | - | None |
-| **PIM Register** | Partial | Working | **MISSING** | **BROKEN** | Unit only |
-| **MSDP State Machine** | Complete | Working | Working | Working | Unit only |
-| **MSDP TCP Sessions** | Complete | Working | Working | - | None |
+| **IGMP Rx** | Complete | Working | - | Working | Integration |
+| **IGMP Tx (Queries)** | Complete | - | Working | - | Integration |
+| **PIM Hello Rx** | Complete | Working | - | - | Integration |
+| **PIM Hello Tx** | Complete | - | Working | - | Integration |
+| **PIM Join/Prune Rx** | Complete | Working | - | Working | Unit only |
+| **PIM Join/Prune Tx** | Partial | - | **TODO** | - | None |
+| **PIM Source Detection** | Complete | Working | - | Working | Integration |
+| **MSDP State Machine** | Complete | Working | Working | Working | Integration |
+| **MSDP TCP Sessions** | Complete | Working | Working | - | Integration |
+| **MSDP SA Origination** | Complete | - | Working | Working | Integration |
 
 ## Critical Issues
 
@@ -211,6 +212,58 @@ IGMP Report → Add to MRIB → Done (no PIM interaction)
 3. **MSDP Sessions:** `mcrctl msdp peers` shows Established state
 4. **IGMP Querier:** tcpdump shows outgoing IGMP queries
 5. **End-to-End:** Traffic flows through protocol-learned routes
+
+## Current Status (January 2026 Update)
+
+Many issues from the original analysis have been addressed. Here's the current state:
+
+### Issues FIXED
+
+| Original Issue | Status | Evidence |
+|---------------|--------|----------|
+| MSDP Connection Timers | FIXED | MSDP peers connect successfully in tests |
+| Outgoing Packet Infrastructure | FIXED | `send_outgoing_packets()` implemented, PIM Hello/IGMP Query working |
+| PIM Routes Not Added to MRIB | FIXED | Join/Prune handler generates `MribAction` at lines 881-943 |
+| Upstream Interface Never Set | FIXED | RPF lookup via `lookup_rpf_interface()` at lines 830-879 |
+| IGMP → PIM Route Creation | FIXED | IGMP handler creates (*,G) routes in MRIB at lines 409-502 |
+
+### Remaining Gaps
+
+| Gap | Location | Impact |
+|-----|----------|--------|
+| PIM Join transmission | TODO at line 470 | (*,G) created locally but not sent to RP |
+| PIM Join/Prune refresh | TODO at line 1462 | Periodic refresh not implemented |
+
+### Recently Implemented
+
+| Feature | Commit | Evidence |
+|---------|--------|----------|
+| Direct-connect source detection | `06c8c14` | AF_PACKET receives multicast data, triggers DirectSourceDetected event |
+| MSDP SA origination | `06c8c14` | local_source_active() creates SA, floods to peers |
+| MSDP TCP split (fix deadlock) | `06c8c14` | Split read/write halves prevent lock contention |
+
+### Test Observations
+
+Protocol integration tests show:
+
+- `pim_neighbor.sh` - PIM Hello exchange works, neighbors discovered, DR election works
+- `msdp_peer.sh` - MSDP TCP peering works, sessions established
+- `msdp_sa.sh` - **PASSING** - SA originated at RP1, received at RP2 via MSDP
+- `protocol_forward.sh` - IGMP groups detected, forwarding works
+
+The msdp_sa.sh test validates the complete direct-connect source detection flow:
+
+1. Source sends multicast traffic to RP
+2. RP detects source via AF_PACKET socket
+3. (S,G) state created, MSDP notified
+4. SA message sent to MSDP peer
+5. Remote RP receives SA in cache
+
+### Next Steps
+
+1. **PIM Join transmission** - When (*,G) created from IGMP, send Join towards RP
+2. **PIM Join/Prune refresh** - Implement periodic refresh timers
+3. **PIM Register** - For non-RP first-hop routers (currently only direct-connect sources work)
 
 ## References
 
