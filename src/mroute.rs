@@ -501,7 +501,41 @@ impl MulticastRib {
         // which is handled separately by the PIM state machine when it observes
         // new IGMP memberships.
 
-        rules
+        // Deduplicate rules with the same (input_interface, input_group, input_port).
+        // This can happen when both (*,G) and (S,G) routes exist for the same group
+        // and the router is the RP - both generate rules for the same input interface.
+        // We merge outputs and prefer the (S,G) source filter if present.
+        let mut deduplicated: HashMap<(String, Ipv4Addr, u16), ForwardingRule> = HashMap::new();
+        for rule in rules {
+            let key = (
+                rule.input_interface.clone(),
+                rule.input_group,
+                rule.input_port,
+            );
+            if let Some(existing) = deduplicated.get_mut(&key) {
+                // Merge outputs (avoiding duplicates by interface)
+                let existing_output_ifaces: HashSet<String> = existing
+                    .outputs
+                    .iter()
+                    .map(|o| o.interface.clone())
+                    .collect();
+                let new_outputs: Vec<_> = rule
+                    .outputs
+                    .iter()
+                    .filter(|o| !existing_output_ifaces.contains(&o.interface))
+                    .cloned()
+                    .collect();
+                existing.outputs.extend(new_outputs);
+                // Prefer the source filter from (S,G) route if the existing rule doesn't have one
+                if existing.input_source.is_none() && rule.input_source.is_some() {
+                    existing.input_source = rule.input_source;
+                }
+            } else {
+                deduplicated.insert(key, rule);
+            }
+        }
+
+        deduplicated.into_values().collect()
     }
 
     /// Compile forwarding rules without PIM interface expansion.
@@ -1178,5 +1212,62 @@ mod tests {
         assert_eq!(rule.input_interface, "veth_s");
         assert_eq!(rule.outputs.len(), 1);
         assert_eq!(rule.outputs[0].interface, "veth_r");
+    }
+
+    #[test]
+    fn test_dedup_star_g_and_sg_routes_same_group() {
+        // Test that when both (*,G) and (S,G) routes exist for the same group,
+        // and the router is the RP, duplicate rules are deduplicated.
+        // This was a bug: both routes generated rules for the same input interface,
+        // causing collisions in worker rule storage keyed by (group, port).
+        let mut mrib = MulticastRib::new();
+
+        let rp_addr: Ipv4Addr = "10.1.0.1".parse().unwrap();
+        let source_addr: Ipv4Addr = "10.0.0.1".parse().unwrap();
+        let group: Ipv4Addr = "239.1.1.1".parse().unwrap();
+
+        // Add (*,G) route - when we're RP, this generates rules for each PIM interface
+        let mut star_g = StarGRoute::new(group, rp_addr);
+        star_g.upstream_interface = Some("veth_s".to_string());
+        star_g.add_downstream("veth_r");
+        mrib.add_star_g_route(star_g);
+
+        // Add (S,G) route - this also generates a rule for upstream interface
+        let mut sg = SGRoute::new(source_addr, group);
+        sg.upstream_interface = Some("veth_s".to_string());
+        sg.add_downstream("veth_r");
+        mrib.add_sg_route(sg);
+
+        // PIM interfaces
+        let mut pim_interfaces = HashSet::new();
+        pim_interfaces.insert("veth_s".to_string());
+        pim_interfaces.insert("veth_r".to_string());
+
+        // Compile with RP expansion - both routes would generate rules for veth_s
+        let rules =
+            mrib.compile_forwarding_rules_with_pim_interfaces(&pim_interfaces, Some(rp_addr));
+
+        // Should be deduplicated: only one rule per (interface, group, port) tuple
+        // veth_s -> veth_r (deduplicated from both (*,G) and (S,G))
+        // veth_r -> [] (skipped, output would be empty after excluding input)
+        assert_eq!(
+            rules.len(),
+            1,
+            "Expected 1 deduplicated rule, got {}: {:?}",
+            rules.len(),
+            rules
+                .iter()
+                .map(|r| format!("{}:{}", r.input_interface, r.input_group))
+                .collect::<Vec<_>>()
+        );
+
+        let rule = &rules[0];
+        assert_eq!(rule.input_interface, "veth_s");
+        assert_eq!(rule.input_group, group);
+        assert_eq!(rule.outputs.len(), 1);
+        assert_eq!(rule.outputs[0].interface, "veth_r");
+
+        // The (S,G) route has a source filter - verify it's preserved
+        assert_eq!(rule.input_source, Some(source_addr));
     }
 }
