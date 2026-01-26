@@ -97,6 +97,7 @@ This project provides separate documentation for users and developers.
 
 - **[User Guide](./user_docs/GUIDE.md):** A quick-start guide to get MCR up and running.
 - **[Reference Manual](./user_docs/REFERENCE.md):** The complete reference for configuring MCR, including kernel tuning, environment variables, and control plane commands.
+- **[Protocol Capabilities](./user_docs/PROTOCOL_CAPABILITIES.md):** IGMP, PIM-SM, and MSDP protocol support, including hybrid static + dynamic deployments.
 - **[WHY_USE_MCR.md](./user_docs/WHY_USE_MCR.md):** Explains the core problem MCR solves and compares it to other tools like `socat`.
 
 ### For Developers
