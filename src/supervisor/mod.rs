@@ -220,6 +220,15 @@ impl ProtocolState {
         };
 
         for iface in interfaces {
+            // Check multicast capability
+            if let Err(e) = socket_helpers::check_multicast_capability(iface) {
+                log_warning!(
+                    self.logger,
+                    Facility::Supervisor,
+                    &format!("IGMP on {}: {}", iface, e)
+                );
+            }
+
             // Get interface IP address
             if let Some(ip) = get_interface_ipv4(iface) {
                 let state = InterfaceIgmpState::new(iface.clone(), ip, igmp_config.clone());
@@ -284,6 +293,15 @@ impl ProtocolState {
 
         // Initialize per-interface PIM state
         for iface_config in &config.interfaces {
+            // Check multicast capability
+            if let Err(e) = socket_helpers::check_multicast_capability(&iface_config.name) {
+                log_warning!(
+                    self.logger,
+                    Facility::Supervisor,
+                    &format!("PIM on {}: {}", iface_config.name, e)
+                );
+            }
+
             if let Some(ip) = get_interface_ipv4(&iface_config.name) {
                 let pim_iface_config = PimInterfaceConfig {
                     dr_priority: iface_config.dr_priority,
@@ -4593,6 +4611,15 @@ async fn handle_client(
                     ref interface,
                     dr_priority,
                 } => {
+                    // Check multicast capability
+                    if let Err(e) = socket_helpers::check_multicast_capability(interface) {
+                        log_warning!(
+                            logger,
+                            Facility::Supervisor,
+                            &format!("PIM on {}: {}", interface, e)
+                        );
+                    }
+
                     // Look up interface IP
                     match get_interface_ipv4(interface) {
                         None => Some(Response::Error(format!(
@@ -4755,6 +4782,15 @@ async fn handle_client(
                     }
                 }
                 SupervisorCommand::EnableIgmpQuerier { ref interface } => {
+                    // Check multicast capability
+                    if let Err(e) = socket_helpers::check_multicast_capability(interface) {
+                        log_warning!(
+                            logger,
+                            Facility::Supervisor,
+                            &format!("IGMP on {}: {}", interface, e)
+                        );
+                    }
+
                     // Look up interface IP
                     match get_interface_ipv4(interface) {
                         None => Some(Response::Error(format!(

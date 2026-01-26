@@ -164,6 +164,138 @@ pub(crate) fn get_interface_index(interface_name: &str) -> Result<i32> {
     Err(anyhow::anyhow!("Interface not found: {}", interface_name))
 }
 
+/// Linux interface flags (from if.h)
+#[allow(dead_code)]
+pub mod interface_flags {
+    pub const IFF_UP: u32 = 0x1;
+    pub const IFF_BROADCAST: u32 = 0x2;
+    pub const IFF_LOOPBACK: u32 = 0x8;
+    pub const IFF_POINTOPOINT: u32 = 0x10;
+    pub const IFF_RUNNING: u32 = 0x40;
+    pub const IFF_MULTICAST: u32 = 0x1000;
+}
+
+/// Information about an interface's multicast capability
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct InterfaceCapability {
+    pub name: String,
+    pub index: u32,
+    pub flags: u32,
+    pub is_up: bool,
+    pub is_running: bool,
+    pub is_multicast: bool,
+    pub is_loopback: bool,
+    pub is_point_to_point: bool,
+}
+
+impl InterfaceCapability {
+    /// Check if interface is suitable for multicast forwarding
+    #[allow(dead_code)]
+    pub fn is_multicast_capable(&self) -> bool {
+        self.is_up && self.is_multicast
+    }
+
+    /// Get a human-readable reason why multicast is not supported
+    pub fn multicast_unsupported_reason(&self) -> Option<String> {
+        if !self.is_up {
+            Some("interface is down".to_string())
+        } else if !self.is_multicast {
+            if self.is_point_to_point {
+                Some("point-to-point interface without multicast support".to_string())
+            } else {
+                Some("interface lacks IFF_MULTICAST flag".to_string())
+            }
+        } else {
+            None
+        }
+    }
+}
+
+impl std::fmt::Display for InterfaceCapability {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut flags = Vec::new();
+        if self.is_up {
+            flags.push("UP");
+        }
+        if self.is_running {
+            flags.push("RUNNING");
+        }
+        if self.is_multicast {
+            flags.push("MULTICAST");
+        }
+        if self.is_loopback {
+            flags.push("LOOPBACK");
+        }
+        if self.is_point_to_point {
+            flags.push("POINTOPOINT");
+        }
+        write!(f, "{}: <{}>", self.name, flags.join(","))
+    }
+}
+
+/// Get capability information for a specific interface
+pub fn get_interface_capability(interface_name: &str) -> Option<InterfaceCapability> {
+    use interface_flags::*;
+
+    for iface in pnet::datalink::interfaces() {
+        if iface.name == interface_name {
+            return Some(InterfaceCapability {
+                name: iface.name,
+                index: iface.index,
+                flags: iface.flags,
+                is_up: iface.flags & IFF_UP != 0,
+                is_running: iface.flags & IFF_RUNNING != 0,
+                is_multicast: iface.flags & IFF_MULTICAST != 0,
+                is_loopback: iface.flags & IFF_LOOPBACK != 0,
+                is_point_to_point: iface.flags & IFF_POINTOPOINT != 0,
+            });
+        }
+    }
+    None
+}
+
+/// Check if an interface supports multicast
+///
+/// Returns Ok(()) if multicast is supported, or an error with details if not.
+pub fn check_multicast_capability(interface_name: &str) -> Result<()> {
+    match get_interface_capability(interface_name) {
+        Some(cap) => {
+            if let Some(reason) = cap.multicast_unsupported_reason() {
+                Err(anyhow::anyhow!(
+                    "Interface {} does not support multicast: {}",
+                    interface_name,
+                    reason
+                ))
+            } else {
+                Ok(())
+            }
+        }
+        None => Err(anyhow::anyhow!("Interface not found: {}", interface_name)),
+    }
+}
+
+/// Get all multicast-capable interfaces
+#[allow(dead_code)]
+pub fn get_multicast_capable_interfaces() -> Vec<InterfaceCapability> {
+    use interface_flags::*;
+
+    pnet::datalink::interfaces()
+        .into_iter()
+        .map(|iface| InterfaceCapability {
+            name: iface.name,
+            index: iface.index,
+            flags: iface.flags,
+            is_up: iface.flags & IFF_UP != 0,
+            is_running: iface.flags & IFF_RUNNING != 0,
+            is_multicast: iface.flags & IFF_MULTICAST != 0,
+            is_loopback: iface.flags & IFF_LOOPBACK != 0,
+            is_point_to_point: iface.flags & IFF_POINTOPOINT != 0,
+        })
+        .filter(|cap| cap.is_multicast_capable())
+        .collect()
+}
+
 /// Send a file descriptor to a worker process via SCM_RIGHTS
 ///
 /// # Safety
@@ -203,4 +335,125 @@ pub(crate) async fn create_and_send_socketpair(supervisor_sock: &UnixStream) -> 
     Ok(UnixStream::from_std(unsafe {
         std::os::unix::net::UnixStream::from_raw_fd(supervisor_fd.into_raw_fd())
     })?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_interface_flags_constants() {
+        // Verify flag constants match Linux kernel values
+        assert_eq!(interface_flags::IFF_UP, 0x1);
+        assert_eq!(interface_flags::IFF_BROADCAST, 0x2);
+        assert_eq!(interface_flags::IFF_LOOPBACK, 0x8);
+        assert_eq!(interface_flags::IFF_POINTOPOINT, 0x10);
+        assert_eq!(interface_flags::IFF_RUNNING, 0x40);
+        assert_eq!(interface_flags::IFF_MULTICAST, 0x1000);
+    }
+
+    #[test]
+    fn test_interface_capability_multicast_capable() {
+        use interface_flags::*;
+
+        // UP + MULTICAST = capable
+        let cap = InterfaceCapability {
+            name: "eth0".to_string(),
+            index: 1,
+            flags: IFF_UP | IFF_MULTICAST | IFF_RUNNING,
+            is_up: true,
+            is_running: true,
+            is_multicast: true,
+            is_loopback: false,
+            is_point_to_point: false,
+        };
+        assert!(cap.is_multicast_capable());
+        assert!(cap.multicast_unsupported_reason().is_none());
+
+        // DOWN = not capable
+        let cap_down = InterfaceCapability {
+            name: "eth1".to_string(),
+            index: 2,
+            flags: IFF_MULTICAST,
+            is_up: false,
+            is_running: false,
+            is_multicast: true,
+            is_loopback: false,
+            is_point_to_point: false,
+        };
+        assert!(!cap_down.is_multicast_capable());
+        assert!(cap_down
+            .multicast_unsupported_reason()
+            .unwrap()
+            .contains("down"));
+
+        // UP but no MULTICAST flag = not capable
+        let cap_no_mcast = InterfaceCapability {
+            name: "tun0".to_string(),
+            index: 3,
+            flags: IFF_UP | IFF_RUNNING | IFF_POINTOPOINT,
+            is_up: true,
+            is_running: true,
+            is_multicast: false,
+            is_loopback: false,
+            is_point_to_point: true,
+        };
+        assert!(!cap_no_mcast.is_multicast_capable());
+        assert!(cap_no_mcast
+            .multicast_unsupported_reason()
+            .unwrap()
+            .contains("point-to-point"));
+    }
+
+    #[test]
+    fn test_interface_capability_display() {
+        use interface_flags::*;
+
+        let cap = InterfaceCapability {
+            name: "eth0".to_string(),
+            index: 1,
+            flags: IFF_UP | IFF_MULTICAST | IFF_RUNNING,
+            is_up: true,
+            is_running: true,
+            is_multicast: true,
+            is_loopback: false,
+            is_point_to_point: false,
+        };
+        let display = format!("{}", cap);
+        assert!(display.contains("eth0"));
+        assert!(display.contains("UP"));
+        assert!(display.contains("MULTICAST"));
+    }
+
+    #[test]
+    fn test_get_interface_capability_loopback() {
+        // Loopback should always exist
+        if let Some(cap) = get_interface_capability("lo") {
+            assert!(cap.is_loopback);
+            assert!(cap.is_up);
+            // Note: Loopback may or may not have IFF_MULTICAST depending on the system
+        }
+        // If loopback doesn't exist (unlikely), test passes silently
+    }
+
+    #[test]
+    fn test_get_interface_capability_nonexistent() {
+        assert!(get_interface_capability("nonexistent_interface_xyz123").is_none());
+    }
+
+    #[test]
+    fn test_check_multicast_capability_nonexistent() {
+        let result = check_multicast_capability("nonexistent_interface_xyz123");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[test]
+    fn test_get_multicast_capable_interfaces() {
+        let interfaces = get_multicast_capable_interfaces();
+        // All returned interfaces should be multicast capable
+        for iface in &interfaces {
+            assert!(iface.is_multicast_capable());
+        }
+    }
 }
