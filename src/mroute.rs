@@ -371,7 +371,7 @@ impl MulticastRib {
             }
         }
 
-        // 1. Add all static rules, merging IGMP interfaces into outputs
+        // 1. Add all static rules, merging IGMP and PIM (*,G) interfaces into outputs
         for rule in self.static_rules.values() {
             let mut rule = rule.clone();
 
@@ -395,6 +395,31 @@ impl MulticastRib {
                             group: rule.input_group,
                             port: rule.input_port,
                             interface: igmp_iface.clone(),
+                        });
+                    }
+                }
+            }
+
+            // Merge PIM (*,G) downstream interfaces into static rule outputs (additive)
+            // This allows protocol-learned receivers to extend static rule forwarding
+            if let Some(star_g_route) = self.star_g_routes.get(&rule.input_group) {
+                for downstream_iface in &star_g_route.downstream_interfaces {
+                    // Don't add the input interface as an output (would create a loop)
+                    if downstream_iface == &rule.input_interface {
+                        continue;
+                    }
+
+                    // Check if this interface is already in outputs
+                    let already_present = rule
+                        .outputs
+                        .iter()
+                        .any(|o| &o.interface == downstream_iface);
+
+                    if !already_present {
+                        rule.outputs.push(OutputDestination {
+                            group: rule.input_group,
+                            port: rule.input_port,
+                            interface: downstream_iface.clone(),
                         });
                     }
                 }
@@ -430,13 +455,12 @@ impl MulticastRib {
             }
         }
 
-        // 3. Add PIM (*,G) routes where no static rule conflicts, merging IGMP interfaces
+        // 3. Add PIM (*,G) routes, merging IGMP interfaces
+        // Note: (*,G) downstream interfaces are also merged into static rules above,
+        // so protocol-learned receivers extend static rule forwarding (additive semantics).
+        // The (*,G) route is still created here for its own upstream interface, and
+        // deduplication will merge any overlapping rules.
         for star_g_route in self.star_g_routes.values() {
-            // Skip if there's a static rule for this group
-            if self.has_static_rule_for_group(star_g_route.group) {
-                continue;
-            }
-
             if let Some(ref upstream) = star_g_route.upstream_interface {
                 // Create a mutable copy to merge IGMP interfaces
                 let mut route = star_g_route.clone();
@@ -1269,5 +1293,162 @@ mod tests {
 
         // The (S,G) route has a source filter - verify it's preserved
         assert_eq!(rule.input_source, Some(source_addr));
+    }
+
+    #[test]
+    fn test_star_g_merged_into_static_rule() {
+        // Test that PIM (*,G) downstream interfaces are merged into static rule outputs.
+        // This is the "additive static" behavior - static rules serve as a base,
+        // and protocol-learned receivers extend the forwarding.
+        let mut mrib = MulticastRib::new();
+
+        let rp_addr: Ipv4Addr = "10.1.0.1".parse().unwrap();
+        let group: Ipv4Addr = "239.1.1.1".parse().unwrap();
+
+        // Add a static rule for group 239.1.1.1: eth0 -> eth1
+        mrib.add_static_rule(create_test_static_rule("rule1", "eth0", "239.1.1.1", 5000));
+
+        // Add (*,G) route with different downstream interfaces
+        let mut star_g = StarGRoute::new(group, rp_addr);
+        star_g.upstream_interface = Some("eth2".to_string());
+        star_g.add_downstream("eth3"); // New interface from PIM
+        star_g.add_downstream("eth4"); // Another new interface
+        mrib.add_star_g_route(star_g);
+
+        // Compile rules
+        let rules = mrib.compile_forwarding_rules();
+
+        // Should have 2 rules:
+        // 1. Static rule (eth0 -> [eth1, eth3, eth4]) - with (*,G) downstreams merged
+        // 2. (*,G) rule (eth2 -> [eth3, eth4]) - for traffic arriving on upstream
+        assert_eq!(rules.len(), 2, "Expected 2 rules, got {:?}", rules);
+
+        // Find the static rule (input interface eth0)
+        let static_rule = rules.iter().find(|r| r.input_interface == "eth0").unwrap();
+        assert_eq!(static_rule.input_port, 5000);
+
+        // Static rule should have outputs: eth1 (original) + eth3, eth4 (from *,G)
+        let static_outputs: HashSet<&str> = static_rule
+            .outputs
+            .iter()
+            .map(|o| o.interface.as_str())
+            .collect();
+        assert!(
+            static_outputs.contains("eth1"),
+            "Static rule missing original output eth1"
+        );
+        assert!(
+            static_outputs.contains("eth3"),
+            "Static rule missing merged output eth3"
+        );
+        assert!(
+            static_outputs.contains("eth4"),
+            "Static rule missing merged output eth4"
+        );
+        assert_eq!(static_outputs.len(), 3);
+
+        // Find the (*,G) rule (input interface eth2)
+        let star_g_rule = rules.iter().find(|r| r.input_interface == "eth2").unwrap();
+        assert_eq!(star_g_rule.input_port, 0); // Protocol-learned uses port=0
+
+        // (*,G) rule should have its own downstream outputs
+        let star_g_outputs: HashSet<&str> = star_g_rule
+            .outputs
+            .iter()
+            .map(|o| o.interface.as_str())
+            .collect();
+        assert!(star_g_outputs.contains("eth3"));
+        assert!(star_g_outputs.contains("eth4"));
+    }
+
+    #[test]
+    fn test_star_g_not_merged_when_would_create_loop() {
+        // Test that (*,G) downstream interfaces are NOT merged into static rule
+        // when it would create a loop (output == input interface)
+        let mut mrib = MulticastRib::new();
+
+        let rp_addr: Ipv4Addr = "10.1.0.1".parse().unwrap();
+        let group: Ipv4Addr = "239.1.1.1".parse().unwrap();
+
+        // Static rule: eth0 -> eth1
+        mrib.add_static_rule(create_test_static_rule("rule1", "eth0", "239.1.1.1", 5000));
+
+        // (*,G) route with eth0 as downstream (same as static rule input!)
+        let mut star_g = StarGRoute::new(group, rp_addr);
+        star_g.upstream_interface = Some("eth2".to_string());
+        star_g.add_downstream("eth0"); // Would create loop in static rule
+        star_g.add_downstream("eth3"); // Safe to add
+        mrib.add_star_g_route(star_g);
+
+        let rules = mrib.compile_forwarding_rules();
+
+        // Find the static rule
+        let static_rule = rules.iter().find(|r| r.input_interface == "eth0").unwrap();
+
+        // eth0 should NOT be in outputs (would be loop)
+        let static_outputs: HashSet<&str> = static_rule
+            .outputs
+            .iter()
+            .map(|o| o.interface.as_str())
+            .collect();
+        assert!(
+            !static_outputs.contains("eth0"),
+            "Static rule should not have input interface as output"
+        );
+        assert!(static_outputs.contains("eth1")); // Original
+        assert!(static_outputs.contains("eth3")); // Merged from (*,G)
+        assert_eq!(static_outputs.len(), 2);
+    }
+
+    #[test]
+    fn test_static_and_star_g_same_input_interface_dedup() {
+        // Test that when static rule and (*,G) route have the SAME input interface,
+        // they are deduplicated correctly with outputs merged.
+        let mut mrib = MulticastRib::new();
+
+        let rp_addr: Ipv4Addr = "10.1.0.1".parse().unwrap();
+        let group: Ipv4Addr = "239.1.1.1".parse().unwrap();
+
+        // Static rule: eth0 -> eth1
+        mrib.add_static_rule(create_test_static_rule("rule1", "eth0", "239.1.1.1", 5000));
+
+        // (*,G) route with same upstream as static rule input
+        let mut star_g = StarGRoute::new(group, rp_addr);
+        star_g.upstream_interface = Some("eth0".to_string()); // Same as static input!
+        star_g.add_downstream("eth2");
+        mrib.add_star_g_route(star_g);
+
+        let rules = mrib.compile_forwarding_rules();
+
+        // With deduplication, rules with same (interface, group, port) are merged.
+        // Static has port=5000, (*,G) has port=0, so these are different keys.
+        // Both rules should exist.
+        assert_eq!(rules.len(), 2);
+
+        // Find the static rule (port 5000)
+        let static_rule = rules
+            .iter()
+            .find(|r| r.input_interface == "eth0" && r.input_port == 5000)
+            .unwrap();
+        let static_outputs: HashSet<&str> = static_rule
+            .outputs
+            .iter()
+            .map(|o| o.interface.as_str())
+            .collect();
+        // Static rule gets (*,G) downstream merged
+        assert!(static_outputs.contains("eth1")); // Original
+        assert!(static_outputs.contains("eth2")); // From (*,G)
+
+        // Find the (*,G) rule (port 0)
+        let star_g_rule = rules
+            .iter()
+            .find(|r| r.input_interface == "eth0" && r.input_port == 0)
+            .unwrap();
+        let star_g_outputs: HashSet<&str> = star_g_rule
+            .outputs
+            .iter()
+            .map(|o| o.interface.as_str())
+            .collect();
+        assert!(star_g_outputs.contains("eth2")); // (*,G) downstream
     }
 }
