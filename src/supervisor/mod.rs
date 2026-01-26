@@ -35,7 +35,10 @@ use crate::protocols::igmp::InterfaceIgmpState;
 use crate::protocols::msdp::MsdpState;
 use crate::protocols::pim::PimState;
 use crate::protocols::{ProtocolEvent, TimerRequest, TimerType};
-use crate::{log_debug, log_error, log_info, log_warning, ForwardingRule, RelayCommand};
+use crate::{
+    log_debug, log_error, log_info, log_warning, ForwardingRule, RelayCommand, WorkerResponse,
+};
+use futures::StreamExt;
 use std::net::Ipv4Addr;
 use std::os::fd::OwnedFd;
 use std::time::Instant;
@@ -2881,17 +2884,29 @@ impl ProtocolState {
                 "Aborting old protocol receiver loop for restart"
             );
             handle.abort();
-            // Small delay to allow tokio to process the cancellation and release AsyncFd resources
+            // Delay to allow tokio to process the cancellation and release AsyncFd resources
             // This is necessary because AsyncFd::new() will fail if there's already an AsyncFd
-            // registered for the same fd
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            // registered for the same fd. The delay needs to be long enough for tokio's
+            // task scheduler to run the abort and drop the AsyncFd.
+            // Using 50ms instead of 10ms to be more robust.
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            log_info!(
+                self.logger,
+                Facility::Supervisor,
+                "Old receiver loop aborted, spawning new loop"
+            );
         }
 
         // Reset the running flag
         self.receiver_loop_running.store(false, Ordering::SeqCst);
 
         // Spawn new loop with current sockets
-        self.spawn_receiver_loop_if_needed();
+        let spawned = self.spawn_receiver_loop_if_needed();
+        log_info!(
+            self.logger,
+            Facility::Supervisor,
+            &format!("Receiver loop restart: spawned={}", spawned)
+        );
     }
 
     /// Send outgoing packets using the appropriate protocol sockets
@@ -3220,14 +3235,36 @@ pub async fn protocol_receiver_loop(
     let mut last_cache_cleanup = Instant::now();
 
     // Create async fds for non-blocking socket I/O
+    // Log errors instead of silently discarding them - AsyncFd creation can fail
+    // if the fd is already registered (race condition during restart)
     let igmp_async = igmp_fd.and_then(|fd| {
         let sock = AsyncRawSocket::new(fd);
-        AsyncFd::new(sock).ok()
+        match AsyncFd::new(sock) {
+            Ok(async_fd) => Some(async_fd),
+            Err(e) => {
+                log_warning!(
+                    logger,
+                    Facility::Supervisor,
+                    &format!("Failed to create AsyncFd for IGMP socket (fd={}): {} - IGMP packets will not be received", fd, e)
+                );
+                None
+            }
+        }
     });
 
     let pim_async = pim_fd.and_then(|fd| {
         let sock = AsyncRawSocket::new(fd);
-        AsyncFd::new(sock).ok()
+        match AsyncFd::new(sock) {
+            Ok(async_fd) => Some(async_fd),
+            Err(e) => {
+                log_warning!(
+                    logger,
+                    Facility::Supervisor,
+                    &format!("Failed to create AsyncFd for PIM socket (fd={}): {} - PIM packets will not be received", fd, e)
+                );
+                None
+            }
+        }
     });
 
     if igmp_async.is_none() && pim_async.is_none() {
@@ -3961,9 +3998,9 @@ async fn sync_rules_to_workers(
     rules: &[ForwardingRule],
     worker_manager: &Arc<Mutex<WorkerManager>>,
     logger: &Logger,
-) {
+) -> bool {
     if rules.is_empty() {
-        return;
+        return false;
     }
 
     let stream_pairs_with_iface = {
@@ -3979,6 +4016,9 @@ async fn sync_rules_to_workers(
             stream_pairs_with_iface.len()
         )
     );
+
+    // Track whether we synced rules to at least one worker
+    let mut synced_to_any = false;
 
     for (interface, ingress_stream, egress_stream) in stream_pairs_with_iface {
         // Filter rules to only include those matching this worker's input interface
@@ -4012,20 +4052,85 @@ async fn sync_rules_to_workers(
             continue;
         }
 
-        let sync_cmd = RelayCommand::SyncRules(interface_rules);
+        let sync_cmd = RelayCommand::SyncRules(interface_rules.clone());
         if let Ok(cmd_bytes) = serde_json::to_vec(&sync_cmd) {
-            // Send to ingress worker using length-delimited framing
-            {
+            // Send to worker via ingress stream and wait for ACK
+            // Note: In unified mode, the worker only monitors the ingress command stream,
+            // so we only need to send once and wait for one ACK.
+            // The egress_stream is kept for compatibility but not used here.
+            let _ = egress_stream; // Suppress unused variable warning
+
+            let worker_ack = {
                 let mut stream = ingress_stream.lock().await;
                 let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
-                let _ = framed.send(cmd_bytes.clone().into()).await;
-            }
+                if framed.send(cmd_bytes.into()).await.is_ok() {
+                    // Wait for ACK response with timeout
+                    match tokio::time::timeout(std::time::Duration::from_secs(5), framed.next())
+                        .await
+                    {
+                        Ok(Some(Ok(response_bytes))) => {
+                            match serde_json::from_slice::<WorkerResponse>(&response_bytes) {
+                                Ok(WorkerResponse::SyncRulesAck { rule_count, .. }) => {
+                                    log_debug!(
+                                        logger,
+                                        Facility::Supervisor,
+                                        &format!(
+                                            "Worker {} ACK: {} rules applied",
+                                            interface, rule_count
+                                        )
+                                    );
+                                    true
+                                }
+                                Ok(WorkerResponse::Error { message }) => {
+                                    log_warning!(
+                                        logger,
+                                        Facility::Supervisor,
+                                        &format!("Worker {} error: {}", interface, message)
+                                    );
+                                    false
+                                }
+                                Err(e) => {
+                                    log_warning!(
+                                        logger,
+                                        Facility::Supervisor,
+                                        &format!("Failed to parse worker response: {}", e)
+                                    );
+                                    false
+                                }
+                            }
+                        }
+                        Ok(Some(Err(e))) => {
+                            log_warning!(
+                                logger,
+                                Facility::Supervisor,
+                                &format!("Worker {} read error: {}", interface, e)
+                            );
+                            false
+                        }
+                        Ok(None) => {
+                            log_warning!(
+                                logger,
+                                Facility::Supervisor,
+                                &format!("Worker {} stream closed", interface)
+                            );
+                            false
+                        }
+                        Err(_) => {
+                            log_warning!(
+                                logger,
+                                Facility::Supervisor,
+                                &format!("Worker {} ACK timeout", interface)
+                            );
+                            false
+                        }
+                    }
+                } else {
+                    false
+                }
+            };
 
-            // Send to egress worker using length-delimited framing
-            {
-                let mut stream = egress_stream.lock().await;
-                let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
-                let _ = framed.send(cmd_bytes.into()).await;
+            if worker_ack {
+                synced_to_any = true;
             }
         }
     }
@@ -4033,8 +4138,14 @@ async fn sync_rules_to_workers(
     log_debug!(
         logger,
         Facility::Supervisor,
-        &format!("Synced {} rules to workers", rules.len())
+        &format!(
+            "Synced {} rules to workers (synced_to_any={})",
+            rules.len(),
+            synced_to_any
+        )
     );
+
+    synced_to_any
 }
 
 /// Get IPv4 address for an interface
@@ -5841,7 +5952,7 @@ pub async fn run(
                     // Process any pending protocol events
                     let mrib_modified = coordinator.process_pending_events().await;
 
-                    // Debug: log the condition values
+                    // Debug: log when MRIB is modified
                     if mrib_modified {
                         log_info!(
                             supervisor_logger,
@@ -5853,8 +5964,12 @@ pub async fn run(
                         );
                     }
 
-                    // If MRIB was modified, sync rules to workers
-                    if mrib_modified && coordinator.rules_dirty() {
+                    // Sync rules whenever the dirty flag is set
+                    // Previously required mrib_modified && rules_dirty(), but this caused
+                    // issues when workers didn't exist during the tick that modified MRIB.
+                    // Now we check only rules_dirty() to ensure rules are synced on the
+                    // next tick even if no new events are processed.
+                    if coordinator.rules_dirty() {
                         // Compile rules from MRIB (merges static + protocol-learned)
                         let protocol_rules = coordinator.compile_rules();
 
@@ -5940,22 +6055,31 @@ pub async fn run(
                             Facility::Supervisor,
                             &format!("Syncing {} rules to workers", all_rules.len())
                         );
-                        sync_rules_to_workers(&all_rules, &worker_manager, &supervisor_logger).await;
+                        let rules_synced = sync_rules_to_workers(&all_rules, &worker_manager, &supervisor_logger).await;
 
-                        // Re-acquire lock to clear dirty flag
-                        let mut coordinator_guard = protocol_coordinator.lock().unwrap();
-                        if let Some(ref mut coordinator) = *coordinator_guard {
-                            coordinator.clear_dirty();
+                        // Only clear dirty flag if rules were actually synced to workers
+                        // This ensures we retry on the next tick if no workers existed
+                        if rules_synced {
+                            let mut coordinator_guard = protocol_coordinator.lock().unwrap();
+                            if let Some(ref mut coordinator) = *coordinator_guard {
+                                coordinator.clear_dirty();
+                            }
+
+                            log_debug!(
+                                supervisor_logger,
+                                Facility::Supervisor,
+                                &format!(
+                                    "Protocol MRIB changed: synced {} rules to workers",
+                                    all_rules.len()
+                                )
+                            );
+                        } else {
+                            log_info!(
+                                supervisor_logger,
+                                Facility::Supervisor,
+                                "No workers available to sync rules, keeping dirty flag set"
+                            );
                         }
-
-                        log_debug!(
-                            supervisor_logger,
-                            Facility::Supervisor,
-                            &format!(
-                                "Protocol MRIB changed: synced {} rules to workers",
-                                all_rules.len()
-                            )
-                        );
                     }
                 }
             }

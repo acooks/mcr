@@ -579,12 +579,35 @@ impl UnifiedDataPlane {
                                         self.rules.len()
                                     ),
                                 );
+
+                                // Send ACK back to supervisor
+                                let response = crate::WorkerResponse::SyncRulesAck {
+                                    rule_count: self.rules.len(),
+                                    ruleset_hash,
+                                };
+                                if let Err(e) = self.send_response(&response) {
+                                    self.logger.error(
+                                        Facility::DataPlane,
+                                        &format!("Failed to send SyncRulesAck: {}", e),
+                                    );
+                                }
                             }
                             Err(e) => {
                                 self.logger.error(
                                     Facility::DataPlane,
                                     &format!("Failed to sync rules: {}", e),
                                 );
+
+                                // Send error response
+                                let response = crate::WorkerResponse::Error {
+                                    message: format!("Failed to sync rules: {}", e),
+                                };
+                                if let Err(e) = self.send_response(&response) {
+                                    self.logger.error(
+                                        Facility::DataPlane,
+                                        &format!("Failed to send error response: {}", e),
+                                    );
+                                }
                             }
                         }
                     }
@@ -1012,6 +1035,67 @@ impl UnifiedDataPlane {
         unsafe {
             self.ring.submission().push(&read_op)?;
         }
+        Ok(())
+    }
+
+    /// Send a response back to the supervisor using length-delimited framing.
+    /// This is a synchronous write - used only for infrequent ACK responses.
+    fn send_response(&self, response: &crate::WorkerResponse) -> Result<()> {
+        // Serialize response to JSON
+        let payload =
+            serde_json::to_vec(response).context("Failed to serialize worker response")?;
+
+        // Length-delimited framing: 4-byte big-endian length prefix + payload
+        let len = payload.len() as u32;
+        let len_bytes = len.to_be_bytes();
+
+        // Write to the command socket (same socket used for receiving commands)
+        // This is safe because the socket is bidirectional (Unix stream socket)
+        let fd = self.cmd_stream_fd.as_raw_fd();
+        let mut written = 0;
+
+        // Write length prefix
+        while written < 4 {
+            let result = unsafe {
+                libc::write(
+                    fd,
+                    len_bytes[written..].as_ptr() as *const libc::c_void,
+                    4 - written,
+                )
+            };
+            if result < 0 {
+                return Err(anyhow::anyhow!(
+                    "Failed to write response length: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            written += result as usize;
+        }
+
+        // Write payload
+        written = 0;
+        while written < payload.len() {
+            let result = unsafe {
+                libc::write(
+                    fd,
+                    payload[written..].as_ptr() as *const libc::c_void,
+                    payload.len() - written,
+                )
+            };
+            if result < 0 {
+                return Err(anyhow::anyhow!(
+                    "Failed to write response payload: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            written += result as usize;
+        }
+
+        self.logger.debug(
+            Facility::DataPlane,
+            &format!("Sent response: {} bytes", payload.len()),
+        );
+
         Ok(())
     }
 

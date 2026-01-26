@@ -859,6 +859,20 @@ pub enum RelayCommand {
     },
 }
 
+/// Response from worker to supervisor for commands that require acknowledgment
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum WorkerResponse {
+    /// Acknowledgment that SyncRules was processed successfully
+    SyncRulesAck {
+        /// Number of rules now in the worker's ruleset
+        rule_count: usize,
+        /// Hash of the ruleset for verification
+        ruleset_hash: u64,
+    },
+    /// Error response
+    Error { message: String },
+}
+
 impl RelayCommand {
     pub fn rule_id(&self) -> Option<String> {
         match self {
