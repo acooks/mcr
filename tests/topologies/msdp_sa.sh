@@ -354,6 +354,23 @@ done
 log_info 'IGMP groups after join (RP2):'
 "$CONTROL_CLIENT_BINARY" --socket-path "$SOCK_RP2" igmp groups 2>/dev/null || true
 
+# Wait for PIM Join to propagate from RP2 to RP1
+# RP1's (*,G) route needs veth_m1 as downstream so (S,G) inherits it
+log_info "Waiting for (*,G) route on RP1 (PIM Join from RP2)..."
+for i in $(seq 1 $ROUTE_TIMEOUT); do
+    RP1_ROUTES=$("$CONTROL_CLIENT_BINARY" --socket-path "$SOCK_RP1" mroute 2>/dev/null || echo "")
+    # Check for (*,G) route with veth_m1 as output (toward RP2)
+    if echo "$RP1_ROUTES" | grep -q "\"veth_m1\""; then
+        log_info "✓ RP1 (*,G) route with downstream interface after ${i}s"
+        break
+    fi
+    if [ "$i" -eq "$ROUTE_TIMEOUT" ]; then
+        log_info "Warning: RP1 (*,G) route not detected after ${ROUTE_TIMEOUT}s"
+        log_info "RP1 routes: $RP1_ROUTES"
+    fi
+    sleep 1
+done
+
 log_section 'Sending Source Traffic (Trigger SA)'
 
 # Send a few priming packets to trigger direct source detection and (S,G) route creation
