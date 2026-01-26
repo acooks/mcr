@@ -1469,20 +1469,18 @@ mod phase2 {
         println!("Waiting for keepalives (15 seconds)...");
         tokio::time::sleep(Duration::from_secs(15)).await;
 
-        // Session should still be up (either "established" or "active" state)
-        // After keepalives are exchanged, the state transitions from Established to Active
+        // Session should still be established (state remains Established per RFC 3618)
         let client_rp1 = topology.client("rp1").unwrap();
         let peers = client_rp1.get_msdp_peers().await?;
         let state = peers.iter().map(|p| &p.state).next();
         assert!(
-            peers.iter().any(|p| {
-                let s = p.state.to_lowercase();
-                s.contains("established") || s.contains("active")
-            }),
-            "Session should remain up after keepalives, got state: {:?}",
+            peers
+                .iter()
+                .any(|p| p.state.to_lowercase().contains("established")),
+            "Session should remain established after keepalives, got state: {:?}",
             state
         );
-        println!("✓ Session still up after 15 seconds (state: {:?})", state);
+        println!("✓ Session still established after 15 seconds");
 
         // Check for keepalive activity in logs
         topology.print_log_filtered("rp1", "keepalive", 10);

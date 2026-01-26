@@ -104,17 +104,21 @@ impl MsdpActionResult {
     }
 }
 
-/// MSDP peer state
+/// MSDP peer state per RFC 3618 Section 11.2
+///
+/// The state machine has 5 states per the RFC, but we only track the 3
+/// that are relevant after peering is enabled:
+/// - Disabled: not connected, waiting to connect
+/// - Connecting: actively attempting TCP connection
+/// - Established: TCP connection up, exchanging messages
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MsdpPeerState {
     /// Not connected, will attempt to connect
     Disabled,
     /// Attempting to establish TCP connection
     Connecting,
-    /// TCP connection established, waiting for first message
+    /// TCP connection established and operational
     Established,
-    /// Peer is active and exchanging messages
-    Active,
 }
 
 impl std::fmt::Display for MsdpPeerState {
@@ -123,7 +127,6 @@ impl std::fmt::Display for MsdpPeerState {
             MsdpPeerState::Disabled => write!(f, "disabled"),
             MsdpPeerState::Connecting => write!(f, "connecting"),
             MsdpPeerState::Established => write!(f, "established"),
-            MsdpPeerState::Active => write!(f, "active"),
         }
     }
 }
@@ -220,7 +223,7 @@ impl MsdpPeer {
 
     /// Check if we need to send a keepalive
     pub fn needs_keepalive(&self, now: Instant) -> bool {
-        if self.state != MsdpPeerState::Active && self.state != MsdpPeerState::Established {
+        if self.state != MsdpPeerState::Established {
             return false;
         }
 
@@ -248,11 +251,6 @@ impl MsdpPeer {
         self.established_at = Some(now);
         self.is_active = is_active;
         self.last_received = Some(now);
-    }
-
-    /// Transition to active state (after first message exchange)
-    pub fn activate(&mut self) {
-        self.state = MsdpPeerState::Active;
     }
 
     /// Disconnect the peer
@@ -578,11 +576,6 @@ impl MsdpState {
             peer.record_received(now);
             peer.sa_received += entries.len() as u64;
 
-            // Transition to active state
-            if peer.state == MsdpPeerState::Established {
-                peer.activate();
-            }
-
             // Reset hold timer
             result.timers.push(TimerRequest {
                 timer_type: TimerType::MsdpHold { peer: peer_addr },
@@ -654,11 +647,6 @@ impl MsdpState {
         if let Some(peer) = self.peers.get_mut(&peer_addr) {
             peer.record_received(now);
             peer.keepalives_received += 1;
-
-            // Transition to active state
-            if peer.state == MsdpPeerState::Established {
-                peer.activate();
-            }
 
             // Reset hold timer
             timers.push(TimerRequest {
@@ -739,8 +727,8 @@ impl MsdpState {
         self.peers
             .iter()
             .filter(|(&addr, peer)| {
-                // Must be active
-                if peer.state != MsdpPeerState::Active {
+                // Must be established
+                if peer.state != MsdpPeerState::Established {
                     return false;
                 }
 
@@ -806,11 +794,11 @@ impl MsdpState {
             .collect()
     }
 
-    /// Get all active peers
+    /// Get all established (active) peers
     pub fn get_active_peers(&self) -> Vec<Ipv4Addr> {
         self.peers
             .iter()
-            .filter(|(_, peer)| peer.state == MsdpPeerState::Active)
+            .filter(|(_, peer)| peer.state == MsdpPeerState::Established)
             .map(|(&addr, _)| addr)
             .collect()
     }
@@ -820,7 +808,7 @@ impl MsdpState {
         let active_peers = self
             .peers
             .values()
-            .filter(|p| p.state == MsdpPeerState::Active)
+            .filter(|p| p.state == MsdpPeerState::Established)
             .count();
         let local_entries = self.sa_cache.values().filter(|e| e.is_local).count();
         let learned_entries = self.sa_cache.len() - local_entries;
@@ -1084,14 +1072,13 @@ mod tests {
         let mut peer = MsdpPeer::new(config);
         let now = Instant::now();
 
-        // Connect
+        // Initial state
+        assert_eq!(peer.state, MsdpPeerState::Disabled);
+
+        // Connect (state goes to Established per RFC 3618)
         peer.connected(now, true);
         assert_eq!(peer.state, MsdpPeerState::Established);
-        assert!(peer.is_active);
-
-        // Activate
-        peer.activate();
-        assert_eq!(peer.state, MsdpPeerState::Active);
+        assert!(peer.is_active); // Note: is_active means we initiated the connection
 
         // Disconnect
         peer.disconnect();
@@ -1268,11 +1255,10 @@ mod tests {
         let config3 = MsdpPeerConfig::new("10.0.0.3".parse().unwrap());
         state.add_peer(config3);
 
-        // Activate all peers
+        // Establish all peers
         let now = Instant::now();
         for peer in state.peers.values_mut() {
             peer.connected(now, true);
-            peer.activate();
         }
 
         // Flood from peer1 (in mesh1) - should not go to peer2 (same mesh)
@@ -1403,12 +1389,9 @@ mod tests {
         let config = MsdpPeerConfig::new("10.0.0.1".parse().unwrap());
         state.add_peer(config);
 
-        // Activate the peer
+        // Establish the peer
         let now = Instant::now();
         state.connection_established("10.0.0.1".parse().unwrap(), true, now);
-        if let Some(peer) = state.peers.get_mut(&"10.0.0.1".parse().unwrap()) {
-            peer.activate();
-        }
 
         let peer: Ipv4Addr = "10.0.0.1".parse().unwrap();
         let entries = vec![
@@ -1448,9 +1431,6 @@ mod tests {
         state.add_peer(config);
         let now = Instant::now();
         state.connection_established("10.0.0.1".parse().unwrap(), true, now);
-        if let Some(peer) = state.peers.get_mut(&"10.0.0.1".parse().unwrap()) {
-            peer.activate();
-        }
 
         let peer: Ipv4Addr = "10.0.0.1".parse().unwrap();
         let entries = vec![(
