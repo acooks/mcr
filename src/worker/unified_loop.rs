@@ -1164,6 +1164,33 @@ fn create_connected_udp_socket(source_ip: Ipv4Addr, dest_addr: SocketAddr) -> Re
         .set_send_buffer_size(send_buffer_size)
         .context("Failed to set SO_SNDBUF")?;
 
+    // For multicast destinations, set IP_MULTICAST_IF to ensure packets egress
+    // on the correct interface. Without this, multicast packets may go out the
+    // wrong interface or be dropped in multi-interface/multi-namespace topologies.
+    if let std::net::IpAddr::V4(dest_ipv4) = dest_addr.ip() {
+        if dest_ipv4.is_multicast() {
+            let mcast_if = libc::in_addr {
+                s_addr: u32::from_ne_bytes(source_ip.octets()),
+            };
+            unsafe {
+                if libc::setsockopt(
+                    socket.as_raw_fd(),
+                    libc::IPPROTO_IP,
+                    libc::IP_MULTICAST_IF,
+                    &mcast_if as *const _ as *const libc::c_void,
+                    std::mem::size_of::<libc::in_addr>() as libc::socklen_t,
+                ) < 0
+                {
+                    return Err(anyhow::anyhow!(
+                        "Failed to set IP_MULTICAST_IF to {}: {}",
+                        source_ip,
+                        std::io::Error::last_os_error()
+                    ));
+                }
+            }
+        }
+    }
+
     socket.bind(&SocketAddr::new(source_ip.into(), 0).into())?;
     socket.connect(&dest_addr.into())?;
     Ok(socket.into())
