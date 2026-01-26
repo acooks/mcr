@@ -29,6 +29,7 @@ source "$SCRIPT_DIR/common.sh"
 # Test namespaces
 NS_RP1="mcr_msdp_rp1"
 NS_RP2="mcr_msdp_rp2"
+NS_RECV="mcr_msdp_recv"
 
 # Network configuration
 # Source side (in RP1 namespace)
@@ -69,21 +70,34 @@ CONFIG_RP2="/tmp/mcr_msdp_rp2.json5"
 MCR_RP1_PID=""
 MCR_RP2_PID=""
 SOURCE_PID=""
+RECEIVER_PID=""
+
+# Receiver output files
+RECV_FILE="/tmp/mcr_msdp_recv.dat"
+RECV_LOG="/tmp/mcr_msdp_recv.log"
 
 # Cleanup function
 cleanup() {
     log_info "Running cleanup..."
     [ -n "$SOURCE_PID" ] && sudo kill "$SOURCE_PID" 2>/dev/null || true
+    [ -n "$RECEIVER_PID" ] && sudo kill "$RECEIVER_PID" 2>/dev/null || true
     [ -n "$MCR_RP1_PID" ] && sudo kill -TERM "$MCR_RP1_PID" 2>/dev/null || true
     [ -n "$MCR_RP2_PID" ] && sudo kill -TERM "$MCR_RP2_PID" 2>/dev/null || true
     sleep 1
     cleanup_multi_ns "$NS_RP1" "$NS_RP2"
+    sudo ip netns delete "$NS_RECV" 2>/dev/null || true
     rm -f "$SOCK_RP1" "$SOCK_RP2" "$LOG_RP1" "$LOG_RP2" "$CONFIG_RP1" "$CONFIG_RP2"
+    rm -f "$RECV_FILE" "$RECV_LOG"
 }
 trap cleanup EXIT
 
 # Initialize test
 init_multi_ns_test "MSDP SA Exchange Test" "$NS_RP1" "$NS_RP2"
+
+# Create separate receiver namespace (required for multicast delivery)
+log_info "Creating receiver namespace: $NS_RECV"
+sudo ip netns add "$NS_RECV"
+sudo ip netns exec "$NS_RECV" ip link set lo up
 
 log_section 'Creating Network Topology'
 
@@ -97,12 +111,28 @@ sudo ip netns exec "$NS_RP1" ip link set "$VETH_S_P" up
 # Link RP1 and RP2 namespaces (MSDP peering link)
 create_linked_namespaces "$NS_RP1" "$NS_RP2" "$VETH_M1" "$VETH_M2" "$IP_RP1_DOWN" "$IP_RP2_UP"
 
-# Create veth pair for receiver side (within RP2 namespace)
+# Create veth pair for receiver side - crossing namespace boundary
+# veth_r stays in NS_RP2 (MCR downstream interface)
+# veth_r_p goes to NS_RECV (actual receiver endpoint)
 sudo ip netns exec "$NS_RP2" ip link add "$VETH_R" type veth peer name "$VETH_R_P"
+sudo ip netns exec "$NS_RP2" ip link set "$VETH_R_P" netns "$NS_RECV"
+
+# Configure RP2 side (MCR downstream)
 sudo ip netns exec "$NS_RP2" ip addr add "$IP_RP2_DOWN" dev "$VETH_R"
-sudo ip netns exec "$NS_RP2" ip addr add "$IP_RECV" dev "$VETH_R_P"
 sudo ip netns exec "$NS_RP2" ip link set "$VETH_R" up
-sudo ip netns exec "$NS_RP2" ip link set "$VETH_R_P" up
+
+# Configure receiver side (in separate namespace)
+sudo ip netns exec "$NS_RECV" ip addr add "$IP_RECV" dev "$VETH_R_P"
+sudo ip netns exec "$NS_RECV" ip link set "$VETH_R_P" up
+sudo ip netns exec "$NS_RECV" sysctl -w net.ipv4.conf.all.rp_filter=0 >/dev/null 2>&1 || true
+sudo ip netns exec "$NS_RECV" sysctl -w net.ipv4.conf."$VETH_R_P".rp_filter=0 >/dev/null 2>&1 || true
+
+# Force IGMPv2 for simpler reports
+sudo ip netns exec "$NS_RECV" sysctl -w net.ipv4.conf."$VETH_R_P".force_igmp_version=2 >/dev/null 2>&1 || true
+sudo ip netns exec "$NS_RP2" sysctl -w net.ipv4.conf."$VETH_R".force_igmp_version=2 >/dev/null 2>&1 || true
+
+# Add multicast route in receiver namespace
+sudo ip netns exec "$NS_RECV" ip route add 224.0.0.0/4 dev "$VETH_R_P" 2>/dev/null || true
 
 # Add routes between namespaces
 sudo ip netns exec "$NS_RP1" ip route add 10.2.0.0/24 via "${IP_RP2_UP%/*}"
@@ -234,14 +264,88 @@ else
     VALIDATION_PASSED=1
 fi
 
+log_section 'Starting Receiver (Multicast Group Join)'
+
+# Start receiver that joins multicast group in the receiver namespace
+log_info "Receiver joining $MCAST_GROUP:$MCAST_PORT in namespace $NS_RECV..."
+
+# Clean up any stale receiver files
+rm -f "$RECV_FILE" "$RECV_LOG"
+
+# Test parameters - more packets for reliable validation
+if [ "${CI:-}" = "true" ]; then
+    PACKET_COUNT=500
+    PACKET_SIZE=100
+    SEND_RATE=500
+else
+    PACKET_COUNT=1000
+    PACKET_SIZE=100
+    SEND_RATE=500
+fi
+
+# Start Python multicast receiver in separate namespace
+sudo ip netns exec "$NS_RECV" python3 -c "
+import socket
+import struct
+import sys
+import traceback
+
+try:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+    # Bind to wildcard to receive all multicast
+    sock.bind(('', $MCAST_PORT))
+    print(f'Bound to port $MCAST_PORT', file=sys.stderr)
+
+    # Join multicast group on veth_r_p ($IP_RECV_ADDR) in receiver namespace
+    mreq = struct.pack('4s4s', socket.inet_aton('$MCAST_GROUP'), socket.inet_aton('$IP_RECV_ADDR'))
+    sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+    print(f'Joined multicast group $MCAST_GROUP on $IP_RECV_ADDR', file=sys.stderr)
+
+    # Receive with timeout
+    sock.settimeout(10.0)
+    count = 0
+    total_bytes = 0
+    print('Waiting for packets...', file=sys.stderr)
+    try:
+        while count < 100000:  # Max packets
+            data, addr = sock.recvfrom(2048)
+            count += 1
+            total_bytes += len(data)
+            if count == 1:
+                print(f'First packet from {addr}', file=sys.stderr)
+    except socket.timeout:
+        print(f'Timeout after receiving {count} packets', file=sys.stderr)
+
+    # Write summary
+    with open('$RECV_FILE', 'w') as f:
+        f.write(f'packets={count} bytes={total_bytes}\n')
+    print(f'Done: {count} packets, {total_bytes} bytes', file=sys.stderr)
+
+except Exception as e:
+    print(f'Error: {e}', file=sys.stderr)
+    traceback.print_exc(file=sys.stderr)
+    with open('$RECV_FILE', 'w') as f:
+        f.write(f'error={e}\n')
+" > "$RECV_LOG" 2>&1 &
+RECEIVER_PID=$!
+
+log_info "Receiver started (PID: $RECEIVER_PID)"
+
+# Wait for IGMP report to be processed
+log_info 'Waiting for IGMP group detection...'
+sleep 3
+
+# Check if IGMP group was detected
+log_info 'IGMP groups after join (RP2):'
+"$CONTROL_CLIENT_BINARY" --socket-path "$SOCK_RP2" igmp groups 2>/dev/null || true
+
 log_section 'Sending Source Traffic (Trigger SA)'
 
 # Send traffic from source side in RP1 namespace
 # This should trigger RP1 to originate an SA message to RP2
 log_info "Sending multicast traffic to $MCAST_GROUP:$MCAST_PORT to trigger SA..."
-
-PACKET_COUNT=50
-PACKET_SIZE=100
 
 sudo ip netns exec "$NS_RP1" "$TRAFFIC_GENERATOR_BINARY" \
     --interface "$IP_SRC" \
@@ -249,12 +353,13 @@ sudo ip netns exec "$NS_RP1" "$TRAFFIC_GENERATOR_BINARY" \
     --port "$MCAST_PORT" \
     --count "$PACKET_COUNT" \
     --size "$PACKET_SIZE" \
-    --rate 50 2>/dev/null || true
+    --rate "$SEND_RATE" 2>/dev/null || true
 
 log_info "Traffic sent"
 
-# Wait for SA processing
-sleep 5
+# Wait for receiver to finish (10s timeout in receiver script)
+log_info 'Waiting for receiver to complete...'
+wait $RECEIVER_PID 2>/dev/null || true
 
 log_section 'Verifying SA Cache on RP2'
 
@@ -276,23 +381,6 @@ else
     log_info "This is expected - SA origination requires source registration at RP"
 fi
 
-# Send more traffic to ensure SA is triggered
-log_info ""
-log_info "Sending additional traffic burst..."
-sudo ip netns exec "$NS_RP1" "$TRAFFIC_GENERATOR_BINARY" \
-    --interface "$IP_SRC" \
-    --group "$MCAST_GROUP" \
-    --port "$MCAST_PORT" \
-    --count 100 \
-    --size "$PACKET_SIZE" \
-    --rate 100 2>/dev/null || true
-
-sleep 3
-
-log_info ""
-log_info "RP2 SA cache (after additional traffic):"
-"$CONTROL_CLIENT_BINARY" --socket-path "$SOCK_RP2" msdp sa-cache 2>/dev/null || true
-
 log_section 'Verifying Multicast Routes'
 
 log_info "RP1 multicast routes:"
@@ -301,6 +389,38 @@ log_info "RP1 multicast routes:"
 log_info ""
 log_info "RP2 multicast routes:"
 "$CONTROL_CLIENT_BINARY" --socket-path "$SOCK_RP2" mroute 2>/dev/null || true
+
+log_section 'Validating End-to-End Packet Delivery'
+
+# Check if receiver actually got packets
+if [ -f "$RECV_LOG" ]; then
+    log_info "Receiver log:"
+    cat "$RECV_LOG"
+fi
+
+if [ -f "$RECV_FILE" ] && [ -s "$RECV_FILE" ]; then
+    log_info "Receiver output: $(cat $RECV_FILE)"
+    RECV_PACKETS=$(grep -oP 'packets=\K[0-9]+' "$RECV_FILE" 2>/dev/null || echo 0)
+    EXPECTED_MIN=$((PACKET_COUNT * 80 / 100))  # Expect at least 80%
+    if [ "$RECV_PACKETS" -ge "$EXPECTED_MIN" ]; then
+        log_info "✓ Receiver got $RECV_PACKETS packets (expected >= $EXPECTED_MIN)"
+    else
+        log_error "✗ Receiver only got $RECV_PACKETS packets (expected >= $EXPECTED_MIN)"
+        VALIDATION_PASSED=1
+    fi
+else
+    log_error "✗ Receiver got NO packets (file empty or missing)"
+    VALIDATION_PASSED=1
+fi
+
+log_section 'MCR Stats'
+
+log_info "RP1 stats:"
+"$CONTROL_CLIENT_BINARY" --socket-path "$SOCK_RP1" stats 2>/dev/null || true
+
+log_info ""
+log_info "RP2 stats:"
+"$CONTROL_CLIENT_BINARY" --socket-path "$SOCK_RP2" stats 2>/dev/null || true
 
 log_section 'Test Summary'
 
@@ -312,6 +432,7 @@ if [ $VALIDATION_PASSED -eq 0 ]; then
     log_info "  - PIM neighbor discovery on inter-RP link"
     log_info "  - Source traffic triggers SA consideration"
     log_info "  - MSDP TCP session maintained for SA exchange"
+    log_info "  - End-to-end multicast delivery"
     # Show logs even on success for debugging
     log_info ""
     log_info "RP1 log (source detection debug):"
