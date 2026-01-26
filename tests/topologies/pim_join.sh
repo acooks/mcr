@@ -268,7 +268,7 @@ log_section 'Sending Multicast Traffic'
 # Send traffic from source side in RP namespace
 log_info "Sending test traffic to $MCAST_GROUP:$MCAST_PORT..."
 
-PACKET_COUNT=100
+PACKET_COUNT=20000
 PACKET_SIZE=100
 
 sudo ip netns exec "$NS_RP" "$TRAFFIC_GENERATOR_BINARY" \
@@ -277,7 +277,7 @@ sudo ip netns exec "$NS_RP" "$TRAFFIC_GENERATOR_BINARY" \
     --port "$MCAST_PORT" \
     --count "$PACKET_COUNT" \
     --size "$PACKET_SIZE" \
-    --rate 100 2>/dev/null || true
+    --rate 10000 2>/dev/null || true
 
 log_info "Traffic sent"
 

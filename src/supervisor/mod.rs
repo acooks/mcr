@@ -1368,12 +1368,39 @@ impl ProtocolState {
 
                     let now = Instant::now();
 
+                    // Inherit downstream interfaces from (*,G) route if it exists
+                    // This ensures traffic from this source is forwarded to existing receivers
+                    let inherited_downstream = self
+                        .pim_state
+                        .star_g
+                        .get(&group)
+                        .map(|star_g| {
+                            // Filter out the upstream interface (where traffic comes from)
+                            star_g
+                                .downstream_interfaces
+                                .iter()
+                                .filter(|&iface| iface != &interface)
+                                .cloned()
+                                .collect::<std::collections::HashSet<String>>()
+                        })
+                        .unwrap_or_default();
+
+                    log_info!(
+                        self.logger,
+                        Facility::Supervisor,
+                        &format!(
+                            "PIM: (S,G) inheriting {} downstream interfaces from (*,G): {:?}",
+                            inherited_downstream.len(),
+                            inherited_downstream
+                        )
+                    );
+
                     // Create (S,G) state
                     let sg_state = crate::protocols::pim::SGState {
                         source,
                         group,
                         upstream_interface: Some(interface.clone()), // Source is directly connected
-                        downstream_interfaces: std::collections::HashSet::new(),
+                        downstream_interfaces: inherited_downstream.clone(),
                         spt_bit: true, // We're on the SPT since source is direct
                         created_at: now,
                         expires_at: Some(now + Duration::from_secs(210)), // PIM holdtime
@@ -1387,7 +1414,7 @@ impl ProtocolState {
                         source,
                         group,
                         upstream_interface: Some(interface.clone()),
-                        downstream_interfaces: std::collections::HashSet::new(),
+                        downstream_interfaces: inherited_downstream,
                         spt_bit: true,
                         created_at: now,
                         expires_at: Some(now + Duration::from_secs(210)),
@@ -3961,7 +3988,27 @@ async fn sync_rules_to_workers(
             .cloned()
             .collect();
 
+        log_debug!(
+            logger,
+            Facility::Supervisor,
+            &format!(
+                "sync_rules_to_workers: worker interface={}, matched {} of {} rules",
+                interface,
+                interface_rules.len(),
+                rules.len()
+            )
+        );
+
         if interface_rules.is_empty() {
+            log_debug!(
+                logger,
+                Facility::Supervisor,
+                &format!(
+                    "sync_rules_to_workers: skipping worker {} - no matching rules (rule interfaces: {:?})",
+                    interface,
+                    rules.iter().map(|r| &r.input_interface).collect::<Vec<_>>()
+                )
+            );
             continue;
         }
 
@@ -4938,14 +4985,20 @@ async fn handle_client(
                 }
             }
 
-            // Now broadcast the command to all workers
+            // Send the command only to workers for the specified interface
+            // (not to all workers, to avoid race conditions with SyncRules)
             let cmd_bytes = serde_json::to_vec(&command)?;
-            let stream_pairs = {
+            let stream_pairs_with_iface = {
                 let manager = worker_manager.lock().unwrap();
-                manager.get_all_dp_cmd_streams()
+                manager.get_all_dp_cmd_streams_with_interface()
             };
 
-            for (ingress_stream, egress_stream) in stream_pairs {
+            for (worker_interface, ingress_stream, egress_stream) in stream_pairs_with_iface {
+                // Only send to workers matching the specified interface
+                if worker_interface != interface {
+                    continue;
+                }
+
                 // Send to ingress
                 let cmd_bytes_clone = cmd_bytes.clone();
                 tokio::spawn(async move {
