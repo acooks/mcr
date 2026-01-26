@@ -333,9 +333,22 @@ RECEIVER_PID=$!
 
 log_info "Receiver started (PID: $RECEIVER_PID)"
 
-# Wait for IGMP report to be processed
-log_info 'Waiting for IGMP group detection...'
-sleep 3
+# Wait for IGMP report to be processed and (*,G) route to be created on RP2
+# This ensures the full PIM path is established before traffic is sent
+log_info "Waiting for (*,G) route on RP2 (receiver downstream)..."
+ROUTE_TIMEOUT=15
+for i in $(seq 1 $ROUTE_TIMEOUT); do
+    RP2_ROUTES=$("$CONTROL_CLIENT_BINARY" --socket-path "$SOCK_RP2" mroute 2>/dev/null || echo "")
+    # Check for (*,G) route with veth_r as output (receiver interface)
+    if echo "$RP2_ROUTES" | grep -q "\"veth_r\""; then
+        log_info "✓ RP2 (*,G) route with receiver interface after ${i}s"
+        break
+    fi
+    if [ "$i" -eq "$ROUTE_TIMEOUT" ]; then
+        log_info "Warning: RP2 (*,G) route not detected after ${ROUTE_TIMEOUT}s"
+    fi
+    sleep 1
+done
 
 # Check if IGMP group was detected
 log_info 'IGMP groups after join (RP2):'
@@ -343,9 +356,35 @@ log_info 'IGMP groups after join (RP2):'
 
 log_section 'Sending Source Traffic (Trigger SA)'
 
-# Send traffic from source side in RP1 namespace
-# This should trigger RP1 to originate an SA message to RP2
-log_info "Sending multicast traffic to $MCAST_GROUP:$MCAST_PORT to trigger SA..."
+# Send a few priming packets to trigger direct source detection and (S,G) route creation
+log_info "Sending priming packets to trigger route creation..."
+sudo ip netns exec "$NS_RP1" "$TRAFFIC_GENERATOR_BINARY" \
+    --interface "$IP_SRC" \
+    --group "$MCAST_GROUP" \
+    --port "$MCAST_PORT" \
+    --count 10 \
+    --size "$PACKET_SIZE" \
+    --rate 10 2>/dev/null || true
+
+# Wait for (S,G) route to be created on RP1 (needed for correct forwarding)
+log_info "Waiting for (S,G) route creation on RP1..."
+ROUTE_TIMEOUT=15
+for i in $(seq 1 $ROUTE_TIMEOUT); do
+    ROUTES=$("$CONTROL_CLIENT_BINARY" --socket-path "$SOCK_RP1" mroute 2>/dev/null || echo "")
+    # Check for (S,G) route - JSON format has "source": "10.0.0.1"
+    if echo "$ROUTES" | grep -q "\"source\": \"$IP_SRC\""; then
+        log_info "✓ (S,G) route created after ${i}s"
+        break
+    fi
+    if [ "$i" -eq "$ROUTE_TIMEOUT" ]; then
+        log_info "Warning: (S,G) route not detected, continuing anyway"
+        log_info "RP1 routes: $ROUTES"
+    fi
+    sleep 1
+done
+
+# Send bulk traffic from source side in RP1 namespace
+log_info "Sending bulk multicast traffic to $MCAST_GROUP:$MCAST_PORT..."
 
 sudo ip netns exec "$NS_RP1" "$TRAFFIC_GENERATOR_BINARY" \
     --interface "$IP_SRC" \
