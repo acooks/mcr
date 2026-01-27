@@ -7,10 +7,10 @@
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::os::fd::OwnedFd;
-use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+use std::os::unix::io::{AsRawFd, RawFd};
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 
 use crate::config::Config;
@@ -2367,42 +2367,16 @@ impl ProtocolState {
         // === Create raw IP socket for SENDING IGMP ===
         const IPPROTO_IGMP: i32 = 2;
 
-        let send_fd = unsafe {
-            libc::socket(
-                libc::AF_INET,
-                libc::SOCK_RAW | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
-                IPPROTO_IGMP,
-            )
-        };
-
-        if send_fd < 0 {
-            return Err(anyhow::anyhow!(
-                "Failed to create IGMP send socket: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
+        let send_sock = socket_helpers::create_raw_ip_socket(
+            IPPROTO_IGMP,
+            socket_helpers::SocketFlags::cloexec_nonblock(),
+        )
+        .context("Failed to create IGMP send socket")?;
 
         // Set IP_HDRINCL so we can craft our own IP headers for IGMP messages
-        let hdrincl: libc::c_int = 1;
-        let result = unsafe {
-            libc::setsockopt(
-                send_fd,
-                libc::IPPROTO_IP,
-                libc::IP_HDRINCL,
-                &hdrincl as *const _ as *const libc::c_void,
-                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-            )
-        };
+        socket_helpers::set_ip_hdrincl(send_sock.as_raw_fd())
+            .context("Failed to set IP_HDRINCL on IGMP send socket")?;
 
-        if result < 0 {
-            unsafe { libc::close(send_fd) };
-            return Err(anyhow::anyhow!(
-                "Failed to set IP_HDRINCL on IGMP send socket: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
-
-        let send_sock = unsafe { OwnedFd::from_raw_fd(send_fd) };
         log_info!(
             self.logger,
             Facility::Supervisor,
@@ -2410,50 +2384,29 @@ impl ProtocolState {
         );
 
         // === Create AF_PACKET socket for RECEIVING IGMP ===
-        // ETH_P_IP = 0x0800, but we need to filter for IGMP at IP layer
-        // Use ETH_P_ALL to receive all packets, then filter for IGMP in userspace
-        let recv_fd = unsafe {
-            libc::socket(
-                libc::AF_PACKET,
-                libc::SOCK_DGRAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
-                (libc::ETH_P_IP as u16).to_be() as i32,
-            )
-        };
-
-        if recv_fd < 0 {
-            return Err(anyhow::anyhow!(
-                "Failed to create IGMP AF_PACKET recv socket: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
+        // ETH_P_IP = 0x0800, filters for IP packets at L2
+        let recv_sock = socket_helpers::create_packet_socket(
+            libc::SOCK_DGRAM,
+            libc::ETH_P_IP as u16,
+            socket_helpers::SocketFlags::cloexec_nonblock(),
+        )
+        .context("Failed to create IGMP AF_PACKET recv socket")?;
 
         // Don't bind to a specific interface - receive from all interfaces
         // The sockaddr_ll in recvfrom will tell us which interface the packet came from
 
         // Set PACKET_AUXDATA to get packet metadata including interface index
-        let auxdata: libc::c_int = 1;
-        let result = unsafe {
-            libc::setsockopt(
-                recv_fd,
-                libc::SOL_PACKET,
-                libc::PACKET_AUXDATA,
-                &auxdata as *const _ as *const libc::c_void,
-                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-            )
-        };
-
-        if result < 0 {
+        if let Err(e) = socket_helpers::set_packet_auxdata(recv_sock.as_raw_fd()) {
             log_warning!(
                 self.logger,
                 Facility::Supervisor,
                 &format!(
                     "Failed to set PACKET_AUXDATA on IGMP recv socket (non-fatal): {}",
-                    std::io::Error::last_os_error()
+                    e
                 )
             );
         }
 
-        let recv_sock = unsafe { OwnedFd::from_raw_fd(recv_fd) };
         log_info!(
             self.logger,
             Facility::Supervisor,
@@ -2482,62 +2435,19 @@ impl ProtocolState {
         const IPPROTO_PIM: i32 = 103;
 
         // Create raw socket for PIM
-        let fd = unsafe {
-            libc::socket(
-                libc::AF_INET,
-                libc::SOCK_RAW | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
-                IPPROTO_PIM,
-            )
-        };
-
-        if fd < 0 {
-            return Err(anyhow::anyhow!(
-                "Failed to create PIM raw socket: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
+        let sock = socket_helpers::create_raw_ip_socket(
+            IPPROTO_PIM,
+            socket_helpers::SocketFlags::cloexec_nonblock(),
+        )
+        .context("Failed to create PIM raw socket")?;
 
         // Set IP_HDRINCL so we can craft our own IP headers for PIM messages
-        let hdrincl: libc::c_int = 1;
-        let result = unsafe {
-            libc::setsockopt(
-                fd,
-                libc::IPPROTO_IP,
-                libc::IP_HDRINCL,
-                &hdrincl as *const _ as *const libc::c_void,
-                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-            )
-        };
-
-        if result < 0 {
-            unsafe { libc::close(fd) };
-            return Err(anyhow::anyhow!(
-                "Failed to set IP_HDRINCL on PIM socket: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
+        socket_helpers::set_ip_hdrincl(sock.as_raw_fd())
+            .context("Failed to set IP_HDRINCL on PIM socket")?;
 
         // Set IP_PKTINFO to receive the interface index on incoming packets
-        let pktinfo: libc::c_int = 1;
-        let result = unsafe {
-            libc::setsockopt(
-                fd,
-                libc::IPPROTO_IP,
-                libc::IP_PKTINFO,
-                &pktinfo as *const _ as *const libc::c_void,
-                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-            )
-        };
-
-        if result < 0 {
-            unsafe { libc::close(fd) };
-            return Err(anyhow::anyhow!(
-                "Failed to set IP_PKTINFO on PIM socket: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
-
-        let sock = unsafe { OwnedFd::from_raw_fd(fd) };
+        socket_helpers::set_ip_pktinfo(sock.as_raw_fd())
+            .context("Failed to set IP_PKTINFO on PIM socket")?;
 
         log_info!(
             self.logger,
@@ -2567,32 +2477,8 @@ impl ProtocolState {
         // ALL-PIM-ROUTERS multicast group (224.0.0.13)
         let all_pim_routers = Ipv4Addr::new(224, 0, 0, 13);
 
-        // Use ip_mreqn to specify the interface by index
-        let mreqn = libc::ip_mreqn {
-            imr_multiaddr: libc::in_addr {
-                s_addr: u32::from(all_pim_routers).to_be(),
-            },
-            imr_address: libc::in_addr { s_addr: 0 },
-            imr_ifindex: iface_index,
-        };
-
-        let result = unsafe {
-            libc::setsockopt(
-                fd,
-                libc::IPPROTO_IP,
-                libc::IP_ADD_MEMBERSHIP,
-                &mreqn as *const _ as *const libc::c_void,
-                std::mem::size_of::<libc::ip_mreqn>() as libc::socklen_t,
-            )
-        };
-
-        if result < 0 {
-            return Err(anyhow::anyhow!(
-                "Failed to join ALL-PIM-ROUTERS on {}: {}",
-                interface,
-                std::io::Error::last_os_error()
-            ));
-        }
+        socket_helpers::join_multicast_group(fd, all_pim_routers, iface_index)
+            .with_context(|| format!("Failed to join ALL-PIM-ROUTERS on {}", interface))?;
 
         log_info!(
             self.logger,
@@ -2617,14 +2503,9 @@ impl ProtocolState {
         let iface_cstr = CString::new(interface)
             .map_err(|_| anyhow::anyhow!("Invalid interface name: {}", interface))?;
 
-        // Create a temporary socket for ioctl
-        let sock = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
-        if sock < 0 {
-            return Err(anyhow::anyhow!(
-                "Failed to create socket for ALLMULTI: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
+        // Create a temporary socket for ioctl (OwnedFd auto-closes on drop)
+        let sock = socket_helpers::create_ioctl_socket()
+            .context("Failed to create socket for ALLMULTI")?;
 
         // Get current flags
         let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
@@ -2634,9 +2515,8 @@ impl ProtocolState {
             ifr.ifr_name[i] = b as i8;
         }
 
-        let result = unsafe { libc::ioctl(sock, libc::SIOCGIFFLAGS as _, &mut ifr) };
+        let result = unsafe { libc::ioctl(sock.as_raw_fd(), libc::SIOCGIFFLAGS as _, &mut ifr) };
         if result < 0 {
-            unsafe { libc::close(sock) };
             return Err(anyhow::anyhow!(
                 "Failed to get interface flags for {}: {}",
                 interface,
@@ -2648,13 +2528,11 @@ impl ProtocolState {
         let flags = unsafe { ifr.ifr_ifru.ifru_flags };
         if flags & (libc::IFF_ALLMULTI as i16) != 0 {
             // Already set
-            unsafe { libc::close(sock) };
             return Ok(());
         }
 
         ifr.ifr_ifru.ifru_flags = flags | (libc::IFF_ALLMULTI as i16);
-        let result = unsafe { libc::ioctl(sock, libc::SIOCSIFFLAGS as _, &ifr) };
-        unsafe { libc::close(sock) };
+        let result = unsafe { libc::ioctl(sock.as_raw_fd(), libc::SIOCSIFFLAGS as _, &ifr) };
 
         if result < 0 {
             return Err(anyhow::anyhow!(
@@ -2692,32 +2570,8 @@ impl ProtocolState {
         // IGMPv3 all-routers multicast group (224.0.0.22)
         let igmp_v3_all_routers = Ipv4Addr::new(224, 0, 0, 22);
 
-        // Use ip_mreqn to specify the interface by index
-        let mreqn = libc::ip_mreqn {
-            imr_multiaddr: libc::in_addr {
-                s_addr: u32::from(igmp_v3_all_routers).to_be(),
-            },
-            imr_address: libc::in_addr { s_addr: 0 },
-            imr_ifindex: iface_index,
-        };
-
-        let result = unsafe {
-            libc::setsockopt(
-                fd,
-                libc::IPPROTO_IP,
-                libc::IP_ADD_MEMBERSHIP,
-                &mreqn as *const _ as *const libc::c_void,
-                std::mem::size_of::<libc::ip_mreqn>() as libc::socklen_t,
-            )
-        };
-
-        if result < 0 {
-            return Err(anyhow::anyhow!(
-                "Failed to join IGMPv3 all-routers on {}: {}",
-                interface,
-                std::io::Error::last_os_error()
-            ));
-        }
+        socket_helpers::join_multicast_group(fd, igmp_v3_all_routers, iface_index)
+            .with_context(|| format!("Failed to join IGMPv3 all-routers on {}", interface))?;
 
         log_info!(
             self.logger,

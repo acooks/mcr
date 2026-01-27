@@ -51,44 +51,7 @@ pub(crate) fn create_af_packet_socket(
     // We request 16MB which gives ~11k packets / ~110ms of burst tolerance.
     // Note: Actual size may be limited by net.core.rmem_max sysctl.
     const RECV_BUFFER_SIZE: i32 = 16 * 1024 * 1024; // 16MB
-    unsafe {
-        let ret = libc::setsockopt(
-            recv_socket.as_raw_fd(),
-            libc::SOL_SOCKET,
-            libc::SO_RCVBUF,
-            &RECV_BUFFER_SIZE as *const _ as *const _,
-            std::mem::size_of::<i32>() as libc::socklen_t,
-        );
-        if ret < 0 {
-            // Log warning but don't fail - system may have lower limits
-            logger.warning(
-                Facility::Supervisor,
-                &format!(
-                    "Failed to set SO_RCVBUF to {}MB, using system default",
-                    RECV_BUFFER_SIZE / 1024 / 1024
-                ),
-            );
-        } else {
-            // Read back actual size (kernel may have adjusted it)
-            let mut actual_size: i32 = 0;
-            let mut len: libc::socklen_t = std::mem::size_of::<i32>() as libc::socklen_t;
-            libc::getsockopt(
-                recv_socket.as_raw_fd(),
-                libc::SOL_SOCKET,
-                libc::SO_RCVBUF,
-                &mut actual_size as *mut _ as *mut _,
-                &mut len,
-            );
-            logger.debug(
-                Facility::Supervisor,
-                &format!(
-                    "AF_PACKET SO_RCVBUF set to {}KB (requested {}MB)",
-                    actual_size / 1024,
-                    RECV_BUFFER_SIZE / 1024 / 1024
-                ),
-            );
-        }
-    }
+    set_recv_buffer_size(recv_socket.as_raw_fd(), RECV_BUFFER_SIZE, Some(logger));
 
     // Get interface index
     let iface_index = get_interface_index(interface_name)?;
@@ -335,6 +298,328 @@ pub(crate) async fn create_and_send_socketpair(supervisor_sock: &UnixStream) -> 
     Ok(UnixStream::from_std(unsafe {
         std::os::unix::net::UnixStream::from_raw_fd(supervisor_fd.into_raw_fd())
     })?)
+}
+
+// ============================================================================
+// Safe socket creation and configuration wrappers
+// ============================================================================
+//
+// These wrappers encapsulate unsafe libc socket operations to:
+// - Centralize error handling with consistent messages
+// - Eliminate repetitive unsafe blocks throughout the codebase
+// - Provide type-safe interfaces for socket configuration
+// ============================================================================
+
+/// Socket flags for creation
+#[derive(Clone, Copy, Default)]
+pub struct SocketFlags {
+    pub cloexec: bool,
+    pub nonblock: bool,
+}
+
+impl SocketFlags {
+    pub fn cloexec_nonblock() -> Self {
+        Self {
+            cloexec: true,
+            nonblock: true,
+        }
+    }
+
+    fn to_libc_flags(self) -> i32 {
+        let mut flags = 0;
+        if self.cloexec {
+            flags |= libc::SOCK_CLOEXEC;
+        }
+        if self.nonblock {
+            flags |= libc::SOCK_NONBLOCK;
+        }
+        flags
+    }
+}
+
+/// Create a raw IP socket for a specific protocol (e.g., IGMP=2, PIM=103)
+///
+/// Returns an OwnedFd that automatically closes on drop.
+pub fn create_raw_ip_socket(protocol: i32, flags: SocketFlags) -> Result<std::os::fd::OwnedFd> {
+    let fd = unsafe {
+        libc::socket(
+            libc::AF_INET,
+            libc::SOCK_RAW | flags.to_libc_flags(),
+            protocol,
+        )
+    };
+
+    if fd < 0 {
+        return Err(anyhow::anyhow!(
+            "Failed to create raw IP socket (protocol {}): {}",
+            protocol,
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) })
+}
+
+/// Create an AF_PACKET socket for L2 packet capture
+///
+/// - `sock_type`: Use SOCK_DGRAM to skip ethernet header, SOCK_RAW for full frame
+/// - `protocol`: Ethernet protocol (e.g., ETH_P_IP=0x0800, ETH_P_ALL=0x0003)
+pub fn create_packet_socket(
+    sock_type: i32,
+    protocol: u16,
+    flags: SocketFlags,
+) -> Result<std::os::fd::OwnedFd> {
+    let fd = unsafe {
+        libc::socket(
+            libc::AF_PACKET,
+            sock_type | flags.to_libc_flags(),
+            protocol.to_be() as i32,
+        )
+    };
+
+    if fd < 0 {
+        return Err(anyhow::anyhow!(
+            "Failed to create AF_PACKET socket: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) })
+}
+
+/// Create a temporary DGRAM socket for ioctl operations
+///
+/// This socket is typically used for interface configuration (SIOCGIFFLAGS, etc.)
+/// and should be closed after the ioctl completes.
+pub fn create_ioctl_socket() -> Result<std::os::fd::OwnedFd> {
+    let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
+
+    if fd < 0 {
+        return Err(anyhow::anyhow!(
+            "Failed to create DGRAM socket for ioctl: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) })
+}
+
+/// Set IP_HDRINCL on a raw socket to craft our own IP headers
+pub fn set_ip_hdrincl(fd: RawFd) -> Result<()> {
+    let enabled: libc::c_int = 1;
+    let result = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::IPPROTO_IP,
+            libc::IP_HDRINCL,
+            &enabled as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+
+    if result < 0 {
+        return Err(anyhow::anyhow!(
+            "Failed to set IP_HDRINCL: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    Ok(())
+}
+
+/// Set IP_PKTINFO to receive interface information on incoming packets
+pub fn set_ip_pktinfo(fd: RawFd) -> Result<()> {
+    let enabled: libc::c_int = 1;
+    let result = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::IPPROTO_IP,
+            libc::IP_PKTINFO,
+            &enabled as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+
+    if result < 0 {
+        return Err(anyhow::anyhow!(
+            "Failed to set IP_PKTINFO: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    Ok(())
+}
+
+/// Set PACKET_AUXDATA on an AF_PACKET socket to receive metadata
+pub fn set_packet_auxdata(fd: RawFd) -> Result<()> {
+    let enabled: libc::c_int = 1;
+    let result = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_PACKET,
+            libc::PACKET_AUXDATA,
+            &enabled as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+
+    if result < 0 {
+        return Err(anyhow::anyhow!(
+            "Failed to set PACKET_AUXDATA: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    Ok(())
+}
+
+/// Join a multicast group on a specific interface
+///
+/// Uses ip_mreqn to specify the interface by index.
+pub fn join_multicast_group(
+    fd: RawFd,
+    group: std::net::Ipv4Addr,
+    interface_index: i32,
+) -> Result<()> {
+    let mreqn = libc::ip_mreqn {
+        imr_multiaddr: libc::in_addr {
+            s_addr: u32::from(group).to_be(),
+        },
+        imr_address: libc::in_addr { s_addr: 0 },
+        imr_ifindex: interface_index,
+    };
+
+    let result = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::IPPROTO_IP,
+            libc::IP_ADD_MEMBERSHIP,
+            &mreqn as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::ip_mreqn>() as libc::socklen_t,
+        )
+    };
+
+    if result < 0 {
+        return Err(anyhow::anyhow!(
+            "Failed to join multicast group {}: {}",
+            group,
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    Ok(())
+}
+
+/// Bind socket to a specific network device
+#[allow(dead_code)]
+pub fn set_bind_to_device(fd: RawFd, interface: &str) -> Result<()> {
+    use std::ffi::CString;
+
+    let iface_cstr = CString::new(interface)
+        .map_err(|_| anyhow::anyhow!("Invalid interface name: {}", interface))?;
+
+    let result = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_BINDTODEVICE,
+            iface_cstr.as_ptr() as *const libc::c_void,
+            iface_cstr.as_bytes_with_nul().len() as libc::socklen_t,
+        )
+    };
+
+    if result < 0 {
+        return Err(anyhow::anyhow!(
+            "Failed to bind to device {}: {}",
+            interface,
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    Ok(())
+}
+
+/// Set TCP_NODELAY on a TCP socket
+#[allow(dead_code)]
+pub fn set_tcp_nodelay(fd: RawFd) -> Result<()> {
+    let enabled: libc::c_int = 1;
+    let result = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::IPPROTO_TCP,
+            libc::TCP_NODELAY,
+            &enabled as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+
+    if result < 0 {
+        return Err(anyhow::anyhow!(
+            "Failed to set TCP_NODELAY: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    Ok(())
+}
+
+/// Set receive buffer size on a socket
+///
+/// Returns the actual buffer size set by the kernel (may be different from requested).
+/// Logs a warning if the requested size couldn't be set.
+pub fn set_recv_buffer_size(
+    fd: RawFd,
+    requested_size: i32,
+    logger: Option<&crate::logging::Logger>,
+) -> i32 {
+    let result = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_RCVBUF,
+            &requested_size as *const _ as *const libc::c_void,
+            std::mem::size_of::<i32>() as libc::socklen_t,
+        )
+    };
+
+    if result < 0 {
+        if let Some(log) = logger {
+            log.warning(
+                crate::logging::Facility::Supervisor,
+                &format!(
+                    "Failed to set SO_RCVBUF to {}MB, using system default",
+                    requested_size / 1024 / 1024
+                ),
+            );
+        }
+        return 0;
+    }
+
+    // Read back actual size (kernel may have adjusted it)
+    let mut actual_size: i32 = 0;
+    let mut len: libc::socklen_t = std::mem::size_of::<i32>() as libc::socklen_t;
+    unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_RCVBUF,
+            &mut actual_size as *mut _ as *mut libc::c_void,
+            &mut len,
+        );
+    }
+
+    if let Some(log) = logger {
+        log.debug(
+            crate::logging::Facility::Supervisor,
+            &format!(
+                "SO_RCVBUF set to {}KB (requested {}MB)",
+                actual_size / 1024,
+                requested_size / 1024 / 1024
+            ),
+        );
+    }
+
+    actual_size
 }
 
 #[cfg(test)]
