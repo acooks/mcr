@@ -7,7 +7,6 @@ use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
 
-pub mod adaptive_wakeup;
 pub mod buffer_pool;
 pub mod command_reader;
 pub mod data_plane_integrated;
