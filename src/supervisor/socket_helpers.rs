@@ -197,6 +197,212 @@ impl std::fmt::Display for InterfaceCapability {
     }
 }
 
+// ============================================================================
+// Interface Cache for O(1) lookups
+// ============================================================================
+
+use std::collections::HashMap;
+use std::sync::RwLock;
+use std::time::{Duration, Instant};
+
+/// Default TTL for interface cache (30 seconds)
+pub const DEFAULT_INTERFACE_CACHE_TTL: Duration = Duration::from_secs(30);
+
+/// Cached interface information for O(1) lookups
+///
+/// This cache stores interface information from `pnet::datalink::interfaces()`
+/// and provides fast lookups by name or index. The cache automatically refreshes
+/// when the TTL expires.
+///
+/// # Thread Safety
+/// The cache uses interior mutability with `RwLock` for thread-safe access.
+/// Multiple readers can access the cache concurrently, and writes (refresh)
+/// are exclusive.
+///
+/// # Example
+/// ```ignore
+/// let cache = InterfaceCache::new();
+/// let index = cache.get_index("eth0")?;
+/// let cap = cache.get_capability("eth0");
+/// ```
+pub struct InterfaceCache {
+    /// Map from interface name to capability info
+    by_name: RwLock<HashMap<String, InterfaceCapability>>,
+    /// Map from interface index to interface name
+    index_to_name: RwLock<HashMap<u32, String>>,
+    /// When the cache was last refreshed
+    last_refresh: RwLock<Instant>,
+    /// Time-to-live for cached data
+    ttl: Duration,
+}
+
+impl InterfaceCache {
+    /// Create a new interface cache with default TTL (30 seconds)
+    pub fn new() -> Self {
+        let cache = Self {
+            by_name: RwLock::new(HashMap::new()),
+            index_to_name: RwLock::new(HashMap::new()),
+            last_refresh: RwLock::new(Instant::now() - DEFAULT_INTERFACE_CACHE_TTL * 2), // Force initial refresh
+            ttl: DEFAULT_INTERFACE_CACHE_TTL,
+        };
+        cache.refresh_if_stale();
+        cache
+    }
+
+    /// Create a new interface cache with custom TTL
+    pub fn with_ttl(ttl: Duration) -> Self {
+        let cache = Self {
+            by_name: RwLock::new(HashMap::new()),
+            index_to_name: RwLock::new(HashMap::new()),
+            last_refresh: RwLock::new(Instant::now() - ttl * 2), // Force initial refresh
+            ttl,
+        };
+        cache.refresh_if_stale();
+        cache
+    }
+
+    /// Check if the cache is stale and needs refresh
+    fn is_stale(&self) -> bool {
+        let last = self.last_refresh.read().unwrap();
+        last.elapsed() >= self.ttl
+    }
+
+    /// Refresh the cache if it's stale
+    fn refresh_if_stale(&self) {
+        if !self.is_stale() {
+            return;
+        }
+        self.refresh();
+    }
+
+    /// Force refresh the cache from system interfaces
+    pub fn refresh(&self) {
+        use interface_flags::*;
+
+        let interfaces = pnet::datalink::interfaces();
+
+        let mut by_name = self.by_name.write().unwrap();
+        let mut index_to_name = self.index_to_name.write().unwrap();
+        let mut last_refresh = self.last_refresh.write().unwrap();
+
+        by_name.clear();
+        index_to_name.clear();
+
+        for iface in interfaces {
+            let cap = InterfaceCapability {
+                name: iface.name.clone(),
+                index: iface.index,
+                flags: iface.flags,
+                is_up: iface.flags & IFF_UP != 0,
+                is_running: iface.flags & IFF_RUNNING != 0,
+                is_multicast: iface.flags & IFF_MULTICAST != 0,
+                is_loopback: iface.flags & IFF_LOOPBACK != 0,
+                is_point_to_point: iface.flags & IFF_POINTOPOINT != 0,
+            };
+
+            index_to_name.insert(iface.index, iface.name.clone());
+            by_name.insert(iface.name, cap);
+        }
+
+        *last_refresh = Instant::now();
+    }
+
+    /// Get interface index by name (O(1) lookup)
+    ///
+    /// Automatically refreshes the cache if stale.
+    pub fn get_index(&self, interface_name: &str) -> Result<i32> {
+        self.refresh_if_stale();
+        let by_name = self.by_name.read().unwrap();
+        by_name
+            .get(interface_name)
+            .map(|cap| cap.index as i32)
+            .ok_or_else(|| anyhow::anyhow!("Interface not found: {}", interface_name))
+    }
+
+    /// Get interface capability by name (O(1) lookup)
+    ///
+    /// Automatically refreshes the cache if stale.
+    pub fn get_capability(&self, interface_name: &str) -> Option<InterfaceCapability> {
+        self.refresh_if_stale();
+        let by_name = self.by_name.read().unwrap();
+        by_name.get(interface_name).cloned()
+    }
+
+    /// Get interface name by index (O(1) lookup)
+    ///
+    /// Automatically refreshes the cache if stale.
+    pub fn get_name_by_index(&self, index: u32) -> Option<String> {
+        self.refresh_if_stale();
+        let index_to_name = self.index_to_name.read().unwrap();
+        index_to_name.get(&index).cloned()
+    }
+
+    /// Get all multicast-capable interfaces
+    ///
+    /// Automatically refreshes the cache if stale.
+    pub fn get_multicast_capable(&self) -> Vec<InterfaceCapability> {
+        self.refresh_if_stale();
+        let by_name = self.by_name.read().unwrap();
+        by_name
+            .values()
+            .filter(|cap| cap.is_multicast_capable())
+            .cloned()
+            .collect()
+    }
+
+    /// Get all cached interfaces
+    pub fn get_all(&self) -> Vec<InterfaceCapability> {
+        self.refresh_if_stale();
+        let by_name = self.by_name.read().unwrap();
+        by_name.values().cloned().collect()
+    }
+
+    /// Get the number of cached interfaces
+    pub fn len(&self) -> usize {
+        let by_name = self.by_name.read().unwrap();
+        by_name.len()
+    }
+
+    /// Check if the cache is empty
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Get the configured TTL
+    pub fn ttl(&self) -> Duration {
+        self.ttl
+    }
+
+    /// Get time since last refresh
+    pub fn age(&self) -> Duration {
+        let last = self.last_refresh.read().unwrap();
+        last.elapsed()
+    }
+}
+
+impl Default for InterfaceCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// Global interface cache singleton
+use std::sync::OnceLock;
+
+static INTERFACE_CACHE: OnceLock<InterfaceCache> = OnceLock::new();
+
+/// Get the global interface cache
+///
+/// This provides a singleton interface cache that can be used throughout the application.
+/// The cache is initialized lazily on first access with the default TTL.
+pub fn global_interface_cache() -> &'static InterfaceCache {
+    INTERFACE_CACHE.get_or_init(InterfaceCache::new)
+}
+
+// ============================================================================
+// Interface lookup functions (now with optional caching)
+// ============================================================================
+
 /// Get capability information for a specific interface
 pub fn get_interface_capability(interface_name: &str) -> Option<InterfaceCapability> {
     use interface_flags::*;
@@ -1214,5 +1420,148 @@ mod tests {
         for iface in &interfaces {
             assert!(iface.is_multicast_capable());
         }
+    }
+
+    // ========================================================================
+    // InterfaceCache tests
+    // ========================================================================
+
+    #[test]
+    fn test_interface_cache_new() {
+        let cache = InterfaceCache::new();
+        // Should have at least loopback
+        assert!(!cache.is_empty(), "Cache should not be empty");
+    }
+
+    #[test]
+    fn test_interface_cache_default_ttl() {
+        let cache = InterfaceCache::new();
+        assert_eq!(cache.ttl(), DEFAULT_INTERFACE_CACHE_TTL);
+    }
+
+    #[test]
+    fn test_interface_cache_custom_ttl() {
+        let custom_ttl = Duration::from_secs(60);
+        let cache = InterfaceCache::with_ttl(custom_ttl);
+        assert_eq!(cache.ttl(), custom_ttl);
+    }
+
+    #[test]
+    fn test_interface_cache_get_index_loopback() {
+        let cache = InterfaceCache::new();
+        let result = cache.get_index("lo");
+        assert!(result.is_ok(), "get_index(lo) failed: {:?}", result.err());
+        let index = result.unwrap();
+        assert!(index > 0, "Loopback index should be positive");
+    }
+
+    #[test]
+    fn test_interface_cache_get_index_nonexistent() {
+        let cache = InterfaceCache::new();
+        let result = cache.get_index("nonexistent_xyz123");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[test]
+    fn test_interface_cache_get_capability_loopback() {
+        let cache = InterfaceCache::new();
+        let cap = cache.get_capability("lo");
+        assert!(cap.is_some(), "Loopback should exist");
+        let cap = cap.unwrap();
+        assert!(cap.is_loopback);
+        assert!(cap.is_up);
+    }
+
+    #[test]
+    fn test_interface_cache_get_capability_nonexistent() {
+        let cache = InterfaceCache::new();
+        let cap = cache.get_capability("nonexistent_xyz123");
+        assert!(cap.is_none());
+    }
+
+    #[test]
+    fn test_interface_cache_get_name_by_index() {
+        let cache = InterfaceCache::new();
+        // Get loopback index first
+        let lo_index = cache.get_index("lo").unwrap() as u32;
+        // Then look up by index
+        let name = cache.get_name_by_index(lo_index);
+        assert!(name.is_some(), "Should find loopback by index");
+        assert_eq!(name.unwrap(), "lo");
+    }
+
+    #[test]
+    fn test_interface_cache_get_name_by_index_nonexistent() {
+        let cache = InterfaceCache::new();
+        let name = cache.get_name_by_index(99999);
+        assert!(name.is_none());
+    }
+
+    #[test]
+    fn test_interface_cache_get_all() {
+        let cache = InterfaceCache::new();
+        let all = cache.get_all();
+        assert!(!all.is_empty(), "Should have at least loopback");
+        // Verify loopback is in the list
+        assert!(all.iter().any(|cap| cap.name == "lo"));
+    }
+
+    #[test]
+    fn test_interface_cache_get_multicast_capable() {
+        let cache = InterfaceCache::new();
+        let mc_capable = cache.get_multicast_capable();
+        // All returned should be multicast capable
+        for cap in &mc_capable {
+            assert!(cap.is_multicast_capable());
+        }
+    }
+
+    #[test]
+    fn test_interface_cache_refresh() {
+        let cache = InterfaceCache::new();
+        let initial_age = cache.age();
+        // Force refresh
+        cache.refresh();
+        // Age should be reset (less than initial)
+        assert!(
+            cache.age() < initial_age || cache.age() < Duration::from_millis(100),
+            "Age should be reset after refresh"
+        );
+    }
+
+    #[test]
+    fn test_interface_cache_consistency() {
+        let cache = InterfaceCache::new();
+        // Multiple calls should return consistent results
+        let index1 = cache.get_index("lo").unwrap();
+        let index2 = cache.get_index("lo").unwrap();
+        assert_eq!(index1, index2, "Index should be consistent");
+
+        let cap1 = cache.get_capability("lo").unwrap();
+        let cap2 = cache.get_capability("lo").unwrap();
+        assert_eq!(cap1.index, cap2.index);
+        assert_eq!(cap1.name, cap2.name);
+    }
+
+    #[test]
+    fn test_global_interface_cache() {
+        // Test the global singleton
+        let cache = global_interface_cache();
+        assert!(!cache.is_empty());
+
+        // Multiple calls should return the same instance
+        let cache2 = global_interface_cache();
+        // Can't directly compare addresses, but we can verify behavior is consistent
+        let index1 = cache.get_index("lo").unwrap();
+        let index2 = cache2.get_index("lo").unwrap();
+        assert_eq!(index1, index2);
+    }
+
+    #[test]
+    fn test_interface_cache_default_impl() {
+        let cache = InterfaceCache::default();
+        assert!(!cache.is_empty());
+        assert_eq!(cache.ttl(), DEFAULT_INTERFACE_CACHE_TTL);
     }
 }
