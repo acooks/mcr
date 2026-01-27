@@ -88,7 +88,7 @@ pub struct UnifiedConfig {
     pub send_batch_size: usize,
     /// Track statistics
     pub track_stats: bool,
-    /// Stats reporting interval in milliseconds (0 = disabled, uses packet-count instead)
+    /// Stats reporting interval in milliseconds (default: 10000ms = 10 seconds)
     pub stats_interval_ms: u64,
 }
 
@@ -101,19 +101,20 @@ impl Default for UnifiedConfig {
             .and_then(|v| v.parse().ok())
             .unwrap_or(32);
 
-        // Get stats interval from environment, default to 0 (packet-count based)
-        // Set MCR_STATS_INTERVAL_MS=10 for 10ms time-based reporting
+        // Get stats interval from environment, default to 10000ms (10 seconds)
+        // This matches the ARCHITECTURE.md specification for periodic stats reporting.
+        // Set MCR_STATS_INTERVAL_MS=100 for faster reporting in tests.
         let stats_interval_ms = std::env::var("MCR_STATS_INTERVAL_MS")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(0);
+            .unwrap_or(10000);
 
         Self {
             queue_depth: 1024,   // Increased from 128 for high throughput (300k+ pps)
             num_recv_buffers,    // Configurable via MCR_NUM_RECV_BUFFERS (default: 32)
             send_batch_size: 64, // Increased from 32 to reduce syscall overhead
             track_stats: true,
-            stats_interval_ms, // Configurable via MCR_STATS_INTERVAL_MS (default: 0 = packet-count)
+            stats_interval_ms, // Configurable via MCR_STATS_INTERVAL_MS (default: 10000ms)
         }
     }
 }
@@ -451,6 +452,8 @@ impl UnifiedDataPlane {
             }
         }
 
+        // Flush final stats to supervisor before exiting
+        self.flush_stats_to_pipe();
         self.print_final_stats();
         Ok(())
     }
@@ -744,9 +747,9 @@ impl UnifiedDataPlane {
                 self.stats.bytes_sent += result as u64;
             }
 
-            // Periodic stats - check if we should log
+            // Periodic stats - check if we should log and push to supervisor
             let should_log_stats = if self.config.stats_interval_ms > 0 {
-                // Time-based reporting
+                // Time-based reporting (default: every 10 seconds)
                 let now = Instant::now();
                 let elapsed_ms = now.duration_since(self.last_stats_time).as_millis() as u64;
                 if elapsed_ms >= self.config.stats_interval_ms {
@@ -756,7 +759,8 @@ impl UnifiedDataPlane {
                     false
                 }
             } else {
-                // Packet-count based reporting (legacy behavior)
+                // Packet-count based reporting (legacy fallback if MCR_STATS_INTERVAL_MS=0)
+                // Not recommended: stats may never be reported for low-traffic flows
                 self.stats.packets_sent.is_multiple_of(10000)
             };
 
@@ -1097,6 +1101,22 @@ impl UnifiedDataPlane {
         );
 
         Ok(())
+    }
+
+    /// Flush final stats to supervisor via pipe before shutdown.
+    /// This ensures the supervisor has up-to-date stats even if the periodic
+    /// reporting interval hasn't elapsed yet.
+    fn flush_stats_to_pipe(&mut self) {
+        // Get flow stats first to avoid borrow conflict with stats_pipe
+        let flow_stats = self.get_flow_stats();
+        if let Some(ref mut pipe) = self.stats_pipe {
+            if let Ok(json) = serde_json::to_vec(&flow_stats) {
+                use std::io::Write;
+                // Best-effort write - don't block shutdown on pipe errors
+                let _ = writeln!(pipe, "{}", String::from_utf8_lossy(&json));
+                let _ = pipe.flush();
+            }
+        }
     }
 
     fn print_final_stats(&self) {
