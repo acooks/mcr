@@ -150,7 +150,7 @@ impl WakeupStrategy for EventfdWakeup {
     }
 
     fn uses_io_uring_blocking(&self) -> bool {
-        false // No longer using io_uring blocking
+        false // Uses eventfd wait instead
     }
 
     fn eventfd_raw_fd(&self) -> Option<std::os::fd::RawFd> {
