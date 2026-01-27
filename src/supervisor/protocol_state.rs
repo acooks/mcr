@@ -2821,42 +2821,13 @@ impl ProtocolState {
         if packet.destination.is_multicast() {
             let iface_index = socket_helpers::get_interface_index(&packet.interface)?;
 
-            // Use ip_mreqn to specify outgoing interface by index
-            let mreqn = libc::ip_mreqn {
-                imr_multiaddr: libc::in_addr { s_addr: 0 },
-                imr_address: libc::in_addr { s_addr: 0 },
-                imr_ifindex: iface_index,
-            };
-
-            let result = unsafe {
-                libc::setsockopt(
-                    fd,
-                    libc::IPPROTO_IP,
-                    libc::IP_MULTICAST_IF,
-                    &mreqn as *const _ as *const libc::c_void,
-                    std::mem::size_of::<libc::ip_mreqn>() as libc::socklen_t,
-                )
-            };
-
-            if result < 0 {
-                return Err(anyhow::anyhow!(
-                    "Failed to set multicast interface: {}",
-                    std::io::Error::last_os_error()
-                ));
-            }
+            socket_helpers::set_multicast_if_by_index(fd, iface_index)
+                .context("Failed to set multicast interface")?;
 
             // Set TTL to 1 for link-local multicast (224.0.0.x)
             if packet.destination.octets()[0..2] == [224, 0] {
-                let ttl: libc::c_int = 1;
-                unsafe {
-                    libc::setsockopt(
-                        fd,
-                        libc::IPPROTO_IP,
-                        libc::IP_MULTICAST_TTL,
-                        &ttl as *const _ as *const libc::c_void,
-                        std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-                    );
-                }
+                // Ignore errors on TTL - it's not critical
+                let _ = socket_helpers::set_multicast_ttl(fd, 1);
             }
         }
 

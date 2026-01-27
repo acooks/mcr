@@ -49,6 +49,7 @@ use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::sync::Arc;
 
 use crate::logging::{Facility, Logger};
+use crate::supervisor::socket_helpers;
 use crate::worker::buffer_pool::{BufferPool, BufferSize, ManagedBuffer};
 use crate::worker::packet_parser::parse_packet;
 use crate::ForwardingRule;
@@ -1189,25 +1190,7 @@ fn create_connected_udp_socket(source_ip: Ipv4Addr, dest_addr: SocketAddr) -> Re
     // wrong interface or be dropped in multi-interface/multi-namespace topologies.
     if let std::net::IpAddr::V4(dest_ipv4) = dest_addr.ip() {
         if dest_ipv4.is_multicast() {
-            let mcast_if = libc::in_addr {
-                s_addr: u32::from_ne_bytes(source_ip.octets()),
-            };
-            unsafe {
-                if libc::setsockopt(
-                    socket.as_raw_fd(),
-                    libc::IPPROTO_IP,
-                    libc::IP_MULTICAST_IF,
-                    &mcast_if as *const _ as *const libc::c_void,
-                    std::mem::size_of::<libc::in_addr>() as libc::socklen_t,
-                ) < 0
-                {
-                    return Err(anyhow::anyhow!(
-                        "Failed to set IP_MULTICAST_IF to {}: {}",
-                        source_ip,
-                        std::io::Error::last_os_error()
-                    ));
-                }
-            }
+            socket_helpers::set_multicast_if_by_addr(socket.as_raw_fd(), source_ip)?;
         }
     }
 

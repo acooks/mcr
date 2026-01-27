@@ -302,7 +302,14 @@ impl WakeupStrategy for HybridWakeup {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::fd::FromRawFd;
+    use crate::supervisor::socket_helpers;
+
+    /// Helper to create an eventfd for tests
+    fn create_test_eventfd() -> Arc<OwnedFd> {
+        Arc::new(
+            socket_helpers::create_eventfd(true, true).expect("Failed to create eventfd for test"),
+        )
+    }
 
     #[test]
     fn test_spin_is_noop_signal() {
@@ -326,12 +333,7 @@ mod tests {
 
     #[test]
     fn test_eventfd_creation() {
-        // Create an eventfd for testing
-        let fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
-        assert!(fd >= 0, "Failed to create eventfd");
-
-        let owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };
-        let eventfd = EventfdWakeup::new(Arc::new(owned_fd));
+        let eventfd = EventfdWakeup::new(create_test_eventfd());
 
         assert!(!eventfd.uses_io_uring_blocking());
         assert!(eventfd.eventfd_raw_fd().is_some());
@@ -339,17 +341,12 @@ mod tests {
 
     #[test]
     fn test_eventfd_signal_and_read() {
-        // Create an eventfd (non-blocking for testing)
-        let fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
-        assert!(fd >= 0, "Failed to create eventfd");
-
-        let owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };
-        let eventfd = EventfdWakeup::new(Arc::new(owned_fd));
+        let eventfd = EventfdWakeup::new(create_test_eventfd());
 
         // Signal
         eventfd.signal();
 
-        // Read back (non-blocking)
+        // Read back (non-blocking) - still needs unsafe for raw read
         let mut buf = [0u8; 8];
         let result = unsafe {
             libc::read(
@@ -366,11 +363,7 @@ mod tests {
 
     #[test]
     fn test_hybrid_starts_with_eventfd() {
-        let fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
-        assert!(fd >= 0);
-
-        let owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };
-        let hybrid = HybridWakeup::new(Arc::new(owned_fd));
+        let hybrid = HybridWakeup::new(create_test_eventfd());
 
         // Should start in EVENTFD mode
         assert_eq!(
@@ -381,22 +374,14 @@ mod tests {
 
     #[test]
     fn test_hybrid_has_eventfd() {
-        let fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
-        assert!(fd >= 0);
-
-        let owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };
-        let hybrid = HybridWakeup::new(Arc::new(owned_fd));
+        let hybrid = HybridWakeup::new(create_test_eventfd());
 
         assert!(hybrid.eventfd_raw_fd().is_some());
     }
 
     #[test]
     fn test_hybrid_signal_tracks_packets() {
-        let fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
-        assert!(fd >= 0);
-
-        let owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };
-        let hybrid = HybridWakeup::new(Arc::new(owned_fd));
+        let hybrid = HybridWakeup::new(create_test_eventfd());
 
         // Signal a few packets
         for _ in 0..10 {
@@ -409,11 +394,7 @@ mod tests {
 
     #[test]
     fn test_hybrid_uses_io_uring_blocking_in_eventfd_mode() {
-        let fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
-        assert!(fd >= 0);
-
-        let owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };
-        let hybrid = HybridWakeup::new(Arc::new(owned_fd));
+        let hybrid = HybridWakeup::new(create_test_eventfd());
 
         // Starts in EVENTFD mode
         assert_eq!(
@@ -426,11 +407,7 @@ mod tests {
 
     #[test]
     fn test_hybrid_strategy_switch() {
-        let fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
-        assert!(fd >= 0);
-
-        let owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };
-        let hybrid = HybridWakeup::new(Arc::new(owned_fd));
+        let hybrid = HybridWakeup::new(create_test_eventfd());
 
         // Manually switch to SPIN mode
         hybrid

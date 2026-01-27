@@ -622,6 +622,123 @@ pub fn set_recv_buffer_size(
     actual_size
 }
 
+// ============================================================================
+// Eventfd creation
+// ============================================================================
+
+/// Create an eventfd for signaling between threads/processes
+///
+/// Flags:
+/// - `nonblock`: Set EFD_NONBLOCK for non-blocking reads
+/// - `cloexec`: Set EFD_CLOEXEC to close on exec (recommended)
+pub fn create_eventfd(nonblock: bool, cloexec: bool) -> Result<std::os::fd::OwnedFd> {
+    let mut flags = 0;
+    if nonblock {
+        flags |= libc::EFD_NONBLOCK;
+    }
+    if cloexec {
+        flags |= libc::EFD_CLOEXEC;
+    }
+
+    let fd = unsafe { libc::eventfd(0, flags) };
+
+    if fd < 0 {
+        return Err(anyhow::anyhow!(
+            "Failed to create eventfd: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) })
+}
+
+// ============================================================================
+// Multicast socket options
+// ============================================================================
+
+/// Set the outgoing interface for multicast packets by interface index
+///
+/// Uses ip_mreqn which allows specifying the interface by index rather than address.
+pub fn set_multicast_if_by_index(fd: RawFd, interface_index: i32) -> Result<()> {
+    let mreqn = libc::ip_mreqn {
+        imr_multiaddr: libc::in_addr { s_addr: 0 },
+        imr_address: libc::in_addr { s_addr: 0 },
+        imr_ifindex: interface_index,
+    };
+
+    let result = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::IPPROTO_IP,
+            libc::IP_MULTICAST_IF,
+            &mreqn as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::ip_mreqn>() as libc::socklen_t,
+        )
+    };
+
+    if result < 0 {
+        return Err(anyhow::anyhow!(
+            "Failed to set IP_MULTICAST_IF: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    Ok(())
+}
+
+/// Set the outgoing interface for multicast packets by source IP address
+///
+/// Uses in_addr which specifies the interface by its IP address.
+pub fn set_multicast_if_by_addr(fd: RawFd, source_ip: std::net::Ipv4Addr) -> Result<()> {
+    let mcast_if = libc::in_addr {
+        s_addr: u32::from_ne_bytes(source_ip.octets()),
+    };
+
+    let result = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::IPPROTO_IP,
+            libc::IP_MULTICAST_IF,
+            &mcast_if as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::in_addr>() as libc::socklen_t,
+        )
+    };
+
+    if result < 0 {
+        return Err(anyhow::anyhow!(
+            "Failed to set IP_MULTICAST_IF to {}: {}",
+            source_ip,
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    Ok(())
+}
+
+/// Set the TTL for outgoing multicast packets
+pub fn set_multicast_ttl(fd: RawFd, ttl: u8) -> Result<()> {
+    let ttl_val: libc::c_int = ttl as libc::c_int;
+    let result = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::IPPROTO_IP,
+            libc::IP_MULTICAST_TTL,
+            &ttl_val as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+
+    if result < 0 {
+        return Err(anyhow::anyhow!(
+            "Failed to set IP_MULTICAST_TTL to {}: {}",
+            ttl,
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

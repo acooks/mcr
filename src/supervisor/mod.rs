@@ -7,7 +7,7 @@ mod actions;
 mod command_handler;
 mod event_subscription;
 mod protocol_state;
-mod socket_helpers;
+pub mod socket_helpers;
 mod timer_manager;
 mod worker_manager;
 
