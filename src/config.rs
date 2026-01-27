@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::path::Path;
 
+use crate::validation;
 use crate::{ForwardingRule, OutputDestination, RuleSource};
 
 /// Startup/running configuration (JSON5 file format)
@@ -460,65 +461,26 @@ impl ConfigRule {
     }
 }
 
-/// Validate an interface name
+/// Validate an interface name using shared validation logic
 fn validate_interface_name(name: &str) -> Result<(), ConfigError> {
-    if name.is_empty() {
-        return Err(ConfigError::InvalidInterfaceName {
-            name: name.to_string(),
-            reason: "interface name cannot be empty".to_string(),
-        });
-    }
-    if name.len() > 15 {
-        // Linux IFNAMSIZ limit
-        return Err(ConfigError::InvalidInterfaceName {
-            name: name.to_string(),
-            reason: "interface name too long (max 15 chars)".to_string(),
-        });
-    }
-    // Check for invalid characters
-    if !name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
-    {
-        return Err(ConfigError::InvalidInterfaceName {
-            name: name.to_string(),
-            reason: "interface name contains invalid characters".to_string(),
-        });
-    }
-    // Interface names shouldn't start with a number
-    if name.chars().next().map(|c| c.is_ascii_digit()) == Some(true) {
-        return Err(ConfigError::InvalidInterfaceName {
-            name: name.to_string(),
-            reason: "interface name cannot start with a digit".to_string(),
-        });
-    }
-    Ok(())
+    validation::validate_interface_name(name).map_err(|reason| ConfigError::InvalidInterfaceName {
+        name: name.to_string(),
+        reason,
+    })
 }
 
 /// Validate PIM configuration
 fn validate_pim_config(pim: &PimConfig) -> Result<(), ConfigError> {
     // Validate router_id if provided (must be unicast)
     if let Some(router_id) = pim.router_id {
-        if router_id.is_multicast() || router_id.is_broadcast() || router_id.is_unspecified() {
-            return Err(ConfigError::InvalidPimConfig {
-                reason: format!(
-                    "router_id must be a valid unicast address, got {}",
-                    router_id
-                ),
-            });
-        }
+        validation::validate_unicast_address(router_id, "router_id")
+            .map_err(|reason| ConfigError::InvalidPimConfig { reason })?;
     }
 
     // Validate rp_address if provided (must be unicast)
     if let Some(rp_address) = pim.rp_address {
-        if rp_address.is_multicast() || rp_address.is_broadcast() || rp_address.is_unspecified() {
-            return Err(ConfigError::InvalidPimConfig {
-                reason: format!(
-                    "rp_address must be a valid unicast address, got {}",
-                    rp_address
-                ),
-            });
-        }
+        validation::validate_unicast_address(rp_address, "rp_address")
+            .map_err(|reason| ConfigError::InvalidPimConfig { reason })?;
     }
 
     // Validate interface configurations
@@ -542,17 +504,11 @@ fn validate_pim_config(pim: &PimConfig) -> Result<(), ConfigError> {
         validate_group_prefix(&rp_config.group)?;
 
         // RP address must be unicast
-        if rp_config.rp.is_multicast()
-            || rp_config.rp.is_broadcast()
-            || rp_config.rp.is_unspecified()
-        {
-            return Err(ConfigError::InvalidPimConfig {
-                reason: format!(
-                    "static RP address must be unicast, got {} for group {}",
-                    rp_config.rp, rp_config.group
-                ),
-            });
-        }
+        validation::validate_unicast_address(
+            rp_config.rp,
+            &format!("static RP address for group {}", rp_config.group),
+        )
+        .map_err(|reason| ConfigError::InvalidPimConfig { reason })?;
     }
 
     Ok(())
@@ -604,14 +560,8 @@ fn validate_igmp_config(igmp: &IgmpConfig) -> Result<(), ConfigError> {
 fn validate_msdp_config(msdp: &MsdpConfig) -> Result<(), ConfigError> {
     // Validate local_address if provided (must be unicast)
     if let Some(local_addr) = msdp.local_address {
-        if local_addr.is_multicast() || local_addr.is_broadcast() || local_addr.is_unspecified() {
-            return Err(ConfigError::InvalidMsdpConfig {
-                reason: format!(
-                    "local_address must be a valid unicast address, got {}",
-                    local_addr
-                ),
-            });
-        }
+        validation::validate_unicast_address(local_addr, "local_address")
+            .map_err(|reason| ConfigError::InvalidMsdpConfig { reason })?;
     }
 
     // Validate keepalive_interval (must be > 0)
@@ -635,14 +585,8 @@ fn validate_msdp_config(msdp: &MsdpConfig) -> Result<(), ConfigError> {
     let mut seen_peers = std::collections::HashSet::new();
     for peer_config in &msdp.peers {
         // Peer address must be unicast
-        if peer_config.address.is_multicast()
-            || peer_config.address.is_broadcast()
-            || peer_config.address.is_unspecified()
-        {
-            return Err(ConfigError::InvalidMsdpConfig {
-                reason: format!("peer address must be unicast, got {}", peer_config.address),
-            });
-        }
+        validation::validate_unicast_address(peer_config.address, "peer address")
+            .map_err(|reason| ConfigError::InvalidMsdpConfig { reason })?;
 
         // Check for duplicate peers
         if !seen_peers.insert(peer_config.address) {
@@ -996,7 +940,7 @@ mod tests {
         let result = config.validate();
         match result {
             Err(ConfigError::InvalidInterfaceName { reason, .. }) => {
-                assert!(reason.contains("too long"));
+                assert!(reason.contains("exceeds maximum length"));
             }
             _ => panic!("Expected InvalidInterfaceName error for too long name"),
         }
@@ -1024,7 +968,7 @@ mod tests {
         let result = config.validate();
         match result {
             Err(ConfigError::InvalidInterfaceName { reason, .. }) => {
-                assert!(reason.contains("invalid characters"));
+                assert!(reason.contains("invalid character"));
             }
             _ => panic!("Expected InvalidInterfaceName error for invalid chars"),
         }

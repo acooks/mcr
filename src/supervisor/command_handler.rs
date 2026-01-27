@@ -12,9 +12,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use super::{ForwardingRule, RelayCommand};
-
-/// Maximum interface name length (IFNAMSIZ - 1 on Linux)
-const MAX_INTERFACE_NAME_LEN: usize = 15;
+use crate::validation;
 
 /// Action that may need to be taken after handling a supervisor command
 #[derive(Debug, Clone, PartialEq)]
@@ -63,56 +61,14 @@ pub enum CommandAction {
     ClearRpfRoutes,
 }
 
-/// Validate an interface name according to Linux kernel rules.
-/// Returns Ok(()) if valid, Err(reason) if invalid.
+/// Validate an interface name using shared validation logic.
 fn validate_interface_name(name: &str) -> Result<(), String> {
-    // Must not be empty
-    if name.is_empty() {
-        return Err("interface name cannot be empty".to_string());
-    }
-
-    // Must not exceed IFNAMSIZ - 1 (15 chars)
-    if name.len() > MAX_INTERFACE_NAME_LEN {
-        return Err(format!(
-            "interface name '{}' exceeds maximum length of {} characters",
-            name, MAX_INTERFACE_NAME_LEN
-        ));
-    }
-
-    // Must contain only valid characters: alphanumeric, dash, underscore
-    // (Linux allows most characters but these are the safe/common ones)
-    for (i, c) in name.chars().enumerate() {
-        if !c.is_ascii_alphanumeric() && c != '-' && c != '_' && c != '.' {
-            return Err(format!(
-                "interface name '{}' contains invalid character '{}' at position {}; \
-                only alphanumeric, dash, underscore, and dot are allowed",
-                name, c, i
-            ));
-        }
-    }
-
-    // Must not start with a dash or dot (kernel restriction)
-    if name.starts_with('-') || name.starts_with('.') {
-        return Err(format!(
-            "interface name '{}' cannot start with '{}'; must start with alphanumeric or underscore",
-            name,
-            name.chars().next().unwrap()
-        ));
-    }
-
-    Ok(())
+    validation::validate_interface_name(name)
 }
 
-/// Validate a port number.
-/// Port 0 is rejected as it's typically reserved and indicates a configuration error.
+/// Validate a port number using shared validation logic.
 fn validate_port(port: u16, context: &str) -> Result<(), String> {
-    if port == 0 {
-        return Err(format!(
-            "{} cannot be 0; valid port range is 1-65535",
-            context
-        ));
-    }
-    Ok(())
+    validation::validate_port(port, context)
 }
 
 /// Handle a supervisor command by updating state and returning a response + action.
@@ -1318,7 +1274,7 @@ mod tests {
         assert!(validate_interface_name("eth0.100").is_ok()); // VLAN interface
 
         // Maximum length (15 chars)
-        assert!(validate_interface_name("123456789012345").is_ok());
+        assert!(validate_interface_name("abcdefghij12345").is_ok());
     }
 
     #[test]
