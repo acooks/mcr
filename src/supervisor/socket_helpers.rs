@@ -405,23 +405,10 @@ pub fn global_interface_cache() -> &'static InterfaceCache {
 
 /// Get capability information for a specific interface
 pub fn get_interface_capability(interface_name: &str) -> Option<InterfaceCapability> {
-    use interface_flags::*;
-
-    for iface in pnet::datalink::interfaces() {
-        if iface.name == interface_name {
-            return Some(InterfaceCapability {
-                name: iface.name,
-                index: iface.index,
-                flags: iface.flags,
-                is_up: iface.flags & IFF_UP != 0,
-                is_running: iface.flags & IFF_RUNNING != 0,
-                is_multicast: iface.flags & IFF_MULTICAST != 0,
-                is_loopback: iface.flags & IFF_LOOPBACK != 0,
-                is_point_to_point: iface.flags & IFF_POINTOPOINT != 0,
-            });
-        }
-    }
-    None
+    pnet::datalink::interfaces()
+        .iter()
+        .find(|iface| iface.name == interface_name)
+        .map(extract_interface_capability)
 }
 
 /// Check if an interface supports multicast
@@ -447,20 +434,9 @@ pub fn check_multicast_capability(interface_name: &str) -> Result<()> {
 /// Get all multicast-capable interfaces
 #[allow(dead_code)]
 pub fn get_multicast_capable_interfaces() -> Vec<InterfaceCapability> {
-    use interface_flags::*;
-
     pnet::datalink::interfaces()
-        .into_iter()
-        .map(|iface| InterfaceCapability {
-            name: iface.name,
-            index: iface.index,
-            flags: iface.flags,
-            is_up: iface.flags & IFF_UP != 0,
-            is_running: iface.flags & IFF_RUNNING != 0,
-            is_multicast: iface.flags & IFF_MULTICAST != 0,
-            is_loopback: iface.flags & IFF_LOOPBACK != 0,
-            is_point_to_point: iface.flags & IFF_POINTOPOINT != 0,
-        })
+        .iter()
+        .map(extract_interface_capability)
         .filter(|cap| cap.is_multicast_capable())
         .collect()
 }
@@ -543,6 +519,60 @@ impl SocketFlags {
     }
 }
 
+// ============================================================================
+// Error handling helpers (M1 from refactoring roadmap)
+// ============================================================================
+
+/// Check a libc function result and convert to anyhow::Result
+///
+/// This helper reduces repetitive error handling boilerplate across socket
+/// option functions. It checks if the result is negative (indicating error)
+/// and returns an appropriate error with the OS error message.
+///
+/// # Arguments
+/// * `result` - The return value from a libc function
+/// * `context` - Description of the operation for the error message
+///
+/// # Example
+/// ```ignore
+/// let result = unsafe { libc::setsockopt(...) };
+/// check_libc_result(result, "set IP_HDRINCL")?;
+/// ```
+fn check_libc_result(result: i32, context: &str) -> Result<()> {
+    if result < 0 {
+        Err(anyhow::anyhow!(
+            "Failed to {}: {}",
+            context,
+            std::io::Error::last_os_error()
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+// ============================================================================
+// Interface capability helper (M2 from refactoring roadmap)
+// ============================================================================
+
+/// Extract InterfaceCapability from a pnet NetworkInterface
+///
+/// This helper centralizes the flag extraction logic that was duplicated
+/// in `get_interface_capability()` and `get_multicast_capable_interfaces()`.
+fn extract_interface_capability(iface: &pnet::datalink::NetworkInterface) -> InterfaceCapability {
+    use interface_flags::*;
+
+    InterfaceCapability {
+        name: iface.name.clone(),
+        index: iface.index,
+        flags: iface.flags,
+        is_up: iface.flags & IFF_UP != 0,
+        is_running: iface.flags & IFF_RUNNING != 0,
+        is_multicast: iface.flags & IFF_MULTICAST != 0,
+        is_loopback: iface.flags & IFF_LOOPBACK != 0,
+        is_point_to_point: iface.flags & IFF_POINTOPOINT != 0,
+    }
+}
+
 /// Create a raw IP socket for a specific protocol (e.g., IGMP=2, PIM=103)
 ///
 /// Returns an OwnedFd that automatically closes on drop.
@@ -622,15 +652,7 @@ pub fn set_ip_hdrincl(fd: RawFd) -> Result<()> {
             std::mem::size_of::<libc::c_int>() as libc::socklen_t,
         )
     };
-
-    if result < 0 {
-        return Err(anyhow::anyhow!(
-            "Failed to set IP_HDRINCL: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-
-    Ok(())
+    check_libc_result(result, "set IP_HDRINCL")
 }
 
 /// Set IP_PKTINFO to receive interface information on incoming packets
@@ -645,15 +667,7 @@ pub fn set_ip_pktinfo(fd: RawFd) -> Result<()> {
             std::mem::size_of::<libc::c_int>() as libc::socklen_t,
         )
     };
-
-    if result < 0 {
-        return Err(anyhow::anyhow!(
-            "Failed to set IP_PKTINFO: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-
-    Ok(())
+    check_libc_result(result, "set IP_PKTINFO")
 }
 
 /// Set PACKET_AUXDATA on an AF_PACKET socket to receive metadata
@@ -668,15 +682,7 @@ pub fn set_packet_auxdata(fd: RawFd) -> Result<()> {
             std::mem::size_of::<libc::c_int>() as libc::socklen_t,
         )
     };
-
-    if result < 0 {
-        return Err(anyhow::anyhow!(
-            "Failed to set PACKET_AUXDATA: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-
-    Ok(())
+    check_libc_result(result, "set PACKET_AUXDATA")
 }
 
 /// Join a multicast group on a specific interface
@@ -704,16 +710,7 @@ pub fn join_multicast_group(
             std::mem::size_of::<libc::ip_mreqn>() as libc::socklen_t,
         )
     };
-
-    if result < 0 {
-        return Err(anyhow::anyhow!(
-            "Failed to join multicast group {}: {}",
-            group,
-            std::io::Error::last_os_error()
-        ));
-    }
-
-    Ok(())
+    check_libc_result(result, &format!("join multicast group {}", group))
 }
 
 /// Bind socket to a specific network device
@@ -733,16 +730,7 @@ pub fn set_bind_to_device(fd: RawFd, interface: &str) -> Result<()> {
             iface_cstr.as_bytes_with_nul().len() as libc::socklen_t,
         )
     };
-
-    if result < 0 {
-        return Err(anyhow::anyhow!(
-            "Failed to bind to device {}: {}",
-            interface,
-            std::io::Error::last_os_error()
-        ));
-    }
-
-    Ok(())
+    check_libc_result(result, &format!("bind to device {}", interface))
 }
 
 /// Set TCP_NODELAY on a TCP socket
@@ -758,15 +746,7 @@ pub fn set_tcp_nodelay(fd: RawFd) -> Result<()> {
             std::mem::size_of::<libc::c_int>() as libc::socklen_t,
         )
     };
-
-    if result < 0 {
-        return Err(anyhow::anyhow!(
-            "Failed to set TCP_NODELAY: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-
-    Ok(())
+    check_libc_result(result, "set TCP_NODELAY")
 }
 
 /// Set receive buffer size on a socket
@@ -881,15 +861,7 @@ pub fn set_multicast_if_by_index(fd: RawFd, interface_index: i32) -> Result<()> 
             std::mem::size_of::<libc::ip_mreqn>() as libc::socklen_t,
         )
     };
-
-    if result < 0 {
-        return Err(anyhow::anyhow!(
-            "Failed to set IP_MULTICAST_IF: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-
-    Ok(())
+    check_libc_result(result, "set IP_MULTICAST_IF")
 }
 
 /// Set the outgoing interface for multicast packets by source IP address
@@ -909,16 +881,7 @@ pub fn set_multicast_if_by_addr(fd: RawFd, source_ip: std::net::Ipv4Addr) -> Res
             std::mem::size_of::<libc::in_addr>() as libc::socklen_t,
         )
     };
-
-    if result < 0 {
-        return Err(anyhow::anyhow!(
-            "Failed to set IP_MULTICAST_IF to {}: {}",
-            source_ip,
-            std::io::Error::last_os_error()
-        ));
-    }
-
-    Ok(())
+    check_libc_result(result, &format!("set IP_MULTICAST_IF to {}", source_ip))
 }
 
 /// Set the TTL for outgoing multicast packets
@@ -933,16 +896,7 @@ pub fn set_multicast_ttl(fd: RawFd, ttl: u8) -> Result<()> {
             std::mem::size_of::<libc::c_int>() as libc::socklen_t,
         )
     };
-
-    if result < 0 {
-        return Err(anyhow::anyhow!(
-            "Failed to set IP_MULTICAST_TTL to {}: {}",
-            ttl,
-            std::io::Error::last_os_error()
-        ));
-    }
-
-    Ok(())
+    check_libc_result(result, &format!("set IP_MULTICAST_TTL to {}", ttl))
 }
 
 #[cfg(test)]
