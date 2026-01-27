@@ -742,6 +742,363 @@ pub fn set_multicast_ttl(fd: RawFd, ttl: u8) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::fd::AsRawFd;
+
+    // ========================================================================
+    // SocketFlags tests
+    // ========================================================================
+
+    #[test]
+    fn test_socket_flags_default() {
+        let flags = SocketFlags::default();
+        assert!(!flags.cloexec);
+        assert!(!flags.nonblock);
+        assert_eq!(flags.to_libc_flags(), 0);
+    }
+
+    #[test]
+    fn test_socket_flags_cloexec_nonblock() {
+        let flags = SocketFlags::cloexec_nonblock();
+        assert!(flags.cloexec);
+        assert!(flags.nonblock);
+        let libc_flags = flags.to_libc_flags();
+        assert_ne!(libc_flags & libc::SOCK_CLOEXEC, 0);
+        assert_ne!(libc_flags & libc::SOCK_NONBLOCK, 0);
+    }
+
+    #[test]
+    fn test_socket_flags_individual() {
+        let cloexec_only = SocketFlags {
+            cloexec: true,
+            nonblock: false,
+        };
+        assert_ne!(cloexec_only.to_libc_flags() & libc::SOCK_CLOEXEC, 0);
+        assert_eq!(cloexec_only.to_libc_flags() & libc::SOCK_NONBLOCK, 0);
+
+        let nonblock_only = SocketFlags {
+            cloexec: false,
+            nonblock: true,
+        };
+        assert_eq!(nonblock_only.to_libc_flags() & libc::SOCK_CLOEXEC, 0);
+        assert_ne!(nonblock_only.to_libc_flags() & libc::SOCK_NONBLOCK, 0);
+    }
+
+    // ========================================================================
+    // Socket creation tests (non-privileged where possible)
+    // ========================================================================
+
+    #[test]
+    fn test_create_ioctl_socket_success() {
+        // create_ioctl_socket doesn't require special privileges
+        let result = create_ioctl_socket();
+        assert!(
+            result.is_ok(),
+            "create_ioctl_socket should succeed: {:?}",
+            result.err()
+        );
+        let fd = result.unwrap();
+        // Verify it's a valid file descriptor
+        assert!(fd.as_raw_fd() >= 0);
+    }
+
+    #[test]
+    fn test_create_ioctl_socket_returns_owned_fd() {
+        // Verify the OwnedFd is properly closed on drop
+        let fd_raw;
+        {
+            let fd = create_ioctl_socket().unwrap();
+            fd_raw = fd.as_raw_fd();
+            // fd is valid here
+            assert!(fd_raw >= 0);
+        }
+        // After drop, trying to use fd_raw would be invalid
+        // We can't easily test this without undefined behavior, but the OwnedFd
+        // should have closed it automatically
+    }
+
+    // Note: create_raw_ip_socket and create_packet_socket require CAP_NET_RAW
+    // These tests are skipped unless running as root
+    #[test]
+    #[ignore = "requires CAP_NET_RAW (run with: cargo test -- --ignored)"]
+    fn test_create_raw_ip_socket_igmp() {
+        let result = create_raw_ip_socket(libc::IPPROTO_IGMP, SocketFlags::cloexec_nonblock());
+        assert!(
+            result.is_ok(),
+            "create_raw_ip_socket(IGMP) failed: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    #[ignore = "requires CAP_NET_RAW (run with: cargo test -- --ignored)"]
+    fn test_create_raw_ip_socket_pim() {
+        let result = create_raw_ip_socket(103, SocketFlags::cloexec_nonblock()); // PIM = 103
+        assert!(
+            result.is_ok(),
+            "create_raw_ip_socket(PIM) failed: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    #[ignore = "requires CAP_NET_RAW (run with: cargo test -- --ignored)"]
+    fn test_create_packet_socket_dgram() {
+        let result = create_packet_socket(
+            libc::SOCK_DGRAM,
+            libc::ETH_P_IP as u16,
+            SocketFlags::cloexec_nonblock(),
+        );
+        assert!(
+            result.is_ok(),
+            "create_packet_socket(DGRAM) failed: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    #[ignore = "requires CAP_NET_RAW (run with: cargo test -- --ignored)"]
+    fn test_create_packet_socket_raw() {
+        let result = create_packet_socket(
+            libc::SOCK_RAW,
+            libc::ETH_P_ALL as u16,
+            SocketFlags::cloexec_nonblock(),
+        );
+        assert!(
+            result.is_ok(),
+            "create_packet_socket(RAW) failed: {:?}",
+            result.err()
+        );
+    }
+
+    // ========================================================================
+    // Eventfd tests
+    // ========================================================================
+
+    #[test]
+    fn test_create_eventfd_default() {
+        let result = create_eventfd(false, false);
+        assert!(result.is_ok(), "create_eventfd failed: {:?}", result.err());
+        let fd = result.unwrap();
+        assert!(fd.as_raw_fd() >= 0);
+    }
+
+    #[test]
+    fn test_create_eventfd_nonblock() {
+        let result = create_eventfd(true, false);
+        assert!(result.is_ok());
+        let fd = result.unwrap();
+
+        // Verify nonblock by trying to read - should return EAGAIN
+        let mut buf = [0u8; 8];
+        let read_result =
+            unsafe { libc::read(fd.as_raw_fd(), buf.as_mut_ptr() as *mut libc::c_void, 8) };
+        assert_eq!(read_result, -1);
+        let err = std::io::Error::last_os_error();
+        assert!(
+            err.kind() == std::io::ErrorKind::WouldBlock,
+            "Expected WouldBlock, got: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_create_eventfd_cloexec() {
+        let result = create_eventfd(false, true);
+        assert!(result.is_ok());
+        // Can't easily verify CLOEXEC without fork/exec, but at least verify success
+    }
+
+    #[test]
+    fn test_create_eventfd_both_flags() {
+        let result = create_eventfd(true, true);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_eventfd_signal_and_read() {
+        let fd = create_eventfd(true, true).expect("create_eventfd failed");
+
+        // Write a value
+        let value: u64 = 42;
+        let write_result =
+            unsafe { libc::write(fd.as_raw_fd(), &value as *const _ as *const libc::c_void, 8) };
+        assert_eq!(write_result, 8);
+
+        // Read the value back
+        let mut read_value: u64 = 0;
+        let read_result = unsafe {
+            libc::read(
+                fd.as_raw_fd(),
+                &mut read_value as *mut _ as *mut libc::c_void,
+                8,
+            )
+        };
+        assert_eq!(read_result, 8);
+        assert_eq!(read_value, 42);
+    }
+
+    #[test]
+    fn test_eventfd_semaphore_behavior() {
+        // Eventfd without EFD_SEMAPHORE adds values
+        let fd = create_eventfd(true, true).expect("create_eventfd failed");
+
+        // Write twice
+        let value: u64 = 1;
+        unsafe {
+            libc::write(fd.as_raw_fd(), &value as *const _ as *const libc::c_void, 8);
+            libc::write(fd.as_raw_fd(), &value as *const _ as *const libc::c_void, 8);
+        }
+
+        // Read should give sum
+        let mut read_value: u64 = 0;
+        unsafe {
+            libc::read(
+                fd.as_raw_fd(),
+                &mut read_value as *mut _ as *mut libc::c_void,
+                8,
+            );
+        }
+        assert_eq!(read_value, 2); // 1 + 1 = 2
+    }
+
+    // ========================================================================
+    // Socket option tests (using ioctl socket which doesn't need privileges)
+    // ========================================================================
+
+    #[test]
+    fn test_set_recv_buffer_size() {
+        let fd = create_ioctl_socket().unwrap();
+        let actual = set_recv_buffer_size(fd.as_raw_fd(), 1024 * 1024, None);
+        // Should return a non-zero value (kernel may adjust the size)
+        assert!(actual > 0, "Expected positive buffer size, got {}", actual);
+    }
+
+    #[test]
+    fn test_set_recv_buffer_size_invalid_fd() {
+        // Using invalid fd should return 0 (failure)
+        let actual = set_recv_buffer_size(-1, 1024 * 1024, None);
+        assert_eq!(actual, 0);
+    }
+
+    // Note: Most socket option tests require specific socket types
+    // These are skipped unless running with privileges
+
+    #[test]
+    #[ignore = "requires CAP_NET_RAW (run with: cargo test -- --ignored)"]
+    fn test_set_ip_hdrincl() {
+        let fd = create_raw_ip_socket(libc::IPPROTO_IGMP, SocketFlags::default()).unwrap();
+        let result = set_ip_hdrincl(fd.as_raw_fd());
+        assert!(result.is_ok(), "set_ip_hdrincl failed: {:?}", result.err());
+    }
+
+    #[test]
+    #[ignore = "requires CAP_NET_RAW (run with: cargo test -- --ignored)"]
+    fn test_set_ip_pktinfo() {
+        let fd = create_raw_ip_socket(libc::IPPROTO_IGMP, SocketFlags::default()).unwrap();
+        let result = set_ip_pktinfo(fd.as_raw_fd());
+        assert!(result.is_ok(), "set_ip_pktinfo failed: {:?}", result.err());
+    }
+
+    #[test]
+    #[ignore = "requires CAP_NET_RAW (run with: cargo test -- --ignored)"]
+    fn test_set_packet_auxdata() {
+        let fd = create_packet_socket(
+            libc::SOCK_DGRAM,
+            libc::ETH_P_IP as u16,
+            SocketFlags::default(),
+        )
+        .unwrap();
+        let result = set_packet_auxdata(fd.as_raw_fd());
+        assert!(
+            result.is_ok(),
+            "set_packet_auxdata failed: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    #[ignore = "requires CAP_NET_RAW (run with: cargo test -- --ignored)"]
+    fn test_set_multicast_ttl() {
+        let fd = create_raw_ip_socket(libc::IPPROTO_IGMP, SocketFlags::default()).unwrap();
+        let result = set_multicast_ttl(fd.as_raw_fd(), 1);
+        assert!(
+            result.is_ok(),
+            "set_multicast_ttl failed: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    #[ignore = "requires CAP_NET_RAW (run with: cargo test -- --ignored)"]
+    fn test_set_multicast_if_by_index() {
+        let fd = create_raw_ip_socket(libc::IPPROTO_IGMP, SocketFlags::default()).unwrap();
+        // Use loopback index (usually 1)
+        let lo_index = get_interface_index("lo").unwrap_or(1);
+        let result = set_multicast_if_by_index(fd.as_raw_fd(), lo_index);
+        assert!(
+            result.is_ok(),
+            "set_multicast_if_by_index failed: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    #[ignore = "requires CAP_NET_RAW (run with: cargo test -- --ignored)"]
+    fn test_set_multicast_if_by_addr() {
+        let fd = create_raw_ip_socket(libc::IPPROTO_IGMP, SocketFlags::default()).unwrap();
+        let result = set_multicast_if_by_addr(fd.as_raw_fd(), std::net::Ipv4Addr::LOCALHOST);
+        assert!(
+            result.is_ok(),
+            "set_multicast_if_by_addr failed: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    #[ignore = "requires CAP_NET_RAW (run with: cargo test -- --ignored)"]
+    fn test_join_multicast_group() {
+        let fd = create_raw_ip_socket(libc::IPPROTO_IGMP, SocketFlags::default()).unwrap();
+        let lo_index = get_interface_index("lo").unwrap_or(1);
+        // Join 224.0.0.1 (all hosts)
+        let result = join_multicast_group(
+            fd.as_raw_fd(),
+            std::net::Ipv4Addr::new(224, 0, 0, 1),
+            lo_index,
+        );
+        assert!(
+            result.is_ok(),
+            "join_multicast_group failed: {:?}",
+            result.err()
+        );
+    }
+
+    // ========================================================================
+    // Interface lookup tests
+    // ========================================================================
+
+    #[test]
+    fn test_get_interface_index_loopback() {
+        // Loopback should always exist
+        let result = get_interface_index("lo");
+        assert!(
+            result.is_ok(),
+            "get_interface_index(lo) failed: {:?}",
+            result.err()
+        );
+        let index = result.unwrap();
+        assert!(
+            index > 0,
+            "Loopback index should be positive, got {}",
+            index
+        );
+    }
+
+    #[test]
+    fn test_get_interface_index_nonexistent() {
+        let result = get_interface_index("nonexistent_iface_xyz123");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
 
     #[test]
     fn test_interface_flags_constants() {
