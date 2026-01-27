@@ -267,6 +267,15 @@ mcrctl add \
     --outputs <group>:<port>:<interface>[,...]
 ```
 
+**Architecture Note (Republishing vs. Forwarding):**
+Technically, MCR does not "forward" packets in the sense of a router or bridge. Instead, it **republishes** them.
+
+1. **Ingress:** It captures the raw packet from the wire using `AF_PACKET`.
+2. **Process:** It extracts the UDP payload.
+3. **Egress:** It sends a *new* UDP datagram using a standard `AF_INET` socket.
+
+This means the **Linux Kernel handles all routing and encapsulation** for the egress packet. Consequently, MCR supports any output interface the kernel supports, including **VPN tunnels (WireGuard, OpenVPN)**, **VLANs**, and **Unicast destinations**.
+
 **Arguments:**
 
 | Argument | Description |
@@ -298,7 +307,7 @@ mcrctl add --rule-id my-stream --input-interface eth0 \
     --input-group 239.1.1.1 --input-port 5000 --outputs 239.2.2.2:6000:eth1
 ```
 
-#### Flexible Address Support
+#### Flexible Address Support (Unicast & VPNs)
 
 MCR supports any combination of unicast and multicast addresses for both input and output:
 
@@ -307,17 +316,18 @@ MCR supports any combination of unicast and multicast addresses for both input a
 | Standard relay | Multicast | Multicast | Bridge multicast across network segments |
 | Multicast-to-unicast | Multicast | Unicast | Deliver to legacy systems or cloud VPCs |
 | Unicast-to-multicast | Unicast | Multicast | Inject from unicast tunnel into multicast |
-| Unicast-to-unicast | Unicast | Unicast | General packet forwarding |
+| Unicast-to-unicast | Unicast | Unicast | General packet forwarding / UDP Tunnel |
 
-**Multicast-to-Unicast Example:**
+**Multicast-to-Unicast (VPN Injection) Example:**
 
 ```bash
-# Forward multicast 239.1.1.1:5000 to unicast host 10.0.0.100:6000
+# Relay multicast stream into a WireGuard tunnel (wg0)
+# The kernel handles the encryption and routing to the peer (10.100.0.2).
 mcrctl add --input-interface eth0 --input-group 239.1.1.1 \
-    --input-port 5000 --outputs 10.0.0.100:6000:eth1
+    --input-port 5000 --outputs 10.100.0.2:6000:wg0
 ```
 
-**Unicast-to-Multicast Example (tunnel endpoint):**
+**Unicast-to-Multicast (VPN Exit) Example:**
 
 ```bash
 # Receive unicast from tunnel and re-inject to multicast
@@ -385,7 +395,27 @@ mcrctl log-level set --global info                # Set global level
 mcrctl log-level set --facility DataPlane --level debug  # Per-facility
 ```
 
-Levels: `emergency`, `alert`, `critical`, `error`, `warning`, `notice`, `info`, `debug`
+**Severity Levels** (from most to least severe):
+`emergency`, `alert`, `critical`, `error`, `warning`, `notice`, `info`, `debug`, `trace`
+
+**Log Level Propagation**: When you change log levels via `mcrctl`, the changes are automatically propagated to all data plane workers. This allows runtime debugging without restarting the service.
+
+**Logging Facilities**:
+
+| Facility | Description |
+|----------|-------------|
+| `Supervisor` | Supervisor core logic, worker lifecycle management |
+| `RuleDispatch` | Rule distribution to workers |
+| `ControlSocket` | Unix domain socket control interface |
+| `DataPlane` | Data plane coordinator/integration |
+| `Ingress` | AF_PACKET receive, packet parsing |
+| `Egress` | UDP transmit via io_uring |
+| `BufferPool` | Buffer allocation/deallocation |
+| `PacketParser` | Packet header parsing |
+| `Stats` | Metrics and monitoring |
+| `Security` | Capabilities, privilege drop, FD passing |
+| `Network` | Socket operations, interface queries |
+| `Test` | Test harness and fixtures |
 
 ### 5.6. Configuration Management
 
@@ -454,6 +484,108 @@ mcrctl config check <file>      # Validate file without loading
 | `pinning` | No | Map of interface name to CPU core list |
 
 **Note:** The `pinning` configuration controls how many workers spawn per interface and which CPU cores they use. If not specified, workers use the `--num-workers` default.
+
+### 5.7. Protocol Commands (PIM/IGMP)
+
+When PIM or IGMP protocols are enabled in the configuration, additional commands are available for viewing protocol state.
+
+#### View PIM Neighbors
+
+```bash
+mcrctl pim neighbors
+```
+
+Returns the PIM neighbor table with:
+
+- Interface where neighbor was discovered
+- Neighbor's IP address
+- DR priority and whether the neighbor is the DR
+- Time until neighbor expires
+- Generation ID
+
+#### View IGMP Group Membership
+
+```bash
+mcrctl igmp groups
+```
+
+Returns IGMP group membership information:
+
+- Interface where membership was learned
+- Multicast group address
+- Time until membership expires
+- Last reporter's IP address
+- Whether we are the querier on this interface
+
+#### View Multicast Routing Table
+
+```bash
+mcrctl mroute
+```
+
+Returns the complete multicast routing table, including:
+
+- Static rules (from config/CLI)
+- PIM (*,G) shared tree entries
+- PIM (S,G) shortest-path tree entries
+
+Each entry shows:
+
+- Source IP (or `*` for (*,G) entries)
+- Multicast group
+- Input interface
+- Output interfaces
+- Entry type (static, *G, SG)
+- Age in seconds
+
+### 5.8. Protocol Configuration
+
+MCR supports optional PIM-SM and IGMP protocols. Add these sections to your JSON5 configuration:
+
+```json5
+{
+  rules: [...],  // Static forwarding rules
+
+  // PIM-SM configuration (optional)
+  pim: {
+    enabled: true,
+    router_id: "10.0.0.1",              // Our router ID
+    interfaces: [
+      { name: "eth0", dr_priority: 100 },
+      { name: "eth1", dr_priority: 50 }
+    ],
+    static_rp: [
+      { group: "239.0.0.0/8", rp: "10.0.0.1" }
+    ],
+    rp_address: "10.0.0.1"              // We are the RP (optional)
+  },
+
+  // IGMP querier configuration (optional)
+  igmp: {
+    querier_interfaces: ["eth0", "eth1"],
+    query_interval: 125,                 // Seconds between queries
+    robustness: 2                        // Robustness variable
+  }
+}
+```
+
+**PIM Configuration Fields:**
+
+| Field | Required | Description |
+| :---- | :------- | :---------- |
+| `enabled` | Yes | Enable/disable PIM-SM |
+| `router_id` | Yes | IPv4 address used as router identifier |
+| `interfaces` | Yes | List of PIM-enabled interfaces with DR priority |
+| `static_rp` | No | Static RP mappings (group prefix → RP address) |
+| `rp_address` | No | Our RP address (if this router is an RP) |
+
+**IGMP Configuration Fields:**
+
+| Field | Required | Description |
+| :---- | :------- | :---------- |
+| `querier_interfaces` | Yes | Interfaces where we act as IGMP querier |
+| `query_interval` | No | Seconds between General Queries (default: 125) |
+| `robustness` | No | Robustness variable for timer calculations (default: 2) |
 
 ---
 

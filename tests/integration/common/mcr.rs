@@ -46,6 +46,7 @@ pub struct McrInstanceBuilder {
     config_content: Option<String>,
     num_workers: Option<u32>,
     core: Option<u32>,
+    envs: Vec<(String, String)>,
 }
 
 impl McrInstanceBuilder {
@@ -77,6 +78,15 @@ impl McrInstanceBuilder {
     /// Pin the supervisor to a specific CPU core using taskset
     pub fn core(mut self, core_id: u32) -> Self {
         self.core = Some(core_id);
+        self
+    }
+
+    /// Set an environment variable for the MCR process
+    ///
+    /// Useful for configuring worker behavior, e.g.:
+    /// - `MCR_STATS_INTERVAL_MS=100` for faster stats reporting in tests
+    pub fn env(mut self, key: &str, value: &str) -> Self {
+        self.envs.push((key.to_string(), value.to_string()));
         self
     }
 
@@ -163,6 +173,11 @@ impl McrInstance {
         // Add num_workers (default to 1)
         let num_workers = builder.num_workers.unwrap_or(1);
         cmd.arg("--num-workers").arg(num_workers.to_string());
+
+        // Set environment variables
+        for (key, value) in &builder.envs {
+            cmd.env(key, value);
+        }
 
         // Always capture output to avoid noisy test output
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -289,6 +304,11 @@ impl McrInstance {
         // Add num_workers (default to 1)
         let num_workers = builder.num_workers.unwrap_or(1);
         cmd.arg("--num-workers").arg(num_workers.to_string());
+
+        // Set environment variables
+        for (key, value) in &builder.envs {
+            cmd.env(key, value);
+        }
 
         // Always capture output to avoid noisy test output
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());

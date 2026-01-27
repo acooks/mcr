@@ -10,6 +10,17 @@ It is built for engineers who face challenges with kernel-level multicast forwar
 
 ---
 
+## Key Features
+
+- **High Performance:** Built on `io_uring` for asynchronous I/O and zero-copy forwarding, achieving near line-rate speeds.
+- **Bypass RPF Checks:** Captures raw Ethernet frames (`AF_PACKET`) to sidestep kernel routing restrictions.
+- **Flexible Forwarding:** Supports 1-to-1, 1-to-many (fan-out), and multicast-to-unicast (tunneling) scenarios.
+- **Dynamic Control:** Add or remove forwarding rules at runtime via a CLI or JSON5 API without restarting the daemon.
+- **Protocol Support:** IGMPv2 querier for group membership tracking and PIM-SM for dynamic multicast routing.
+- **Observability:** Specialized "at-a-glance" statistics for monitoring high-throughput flows.
+
+---
+
 ## The Problem MCR Solves
 
 In many modern network environments—such as broadcast media facilities, financial data centers, or complex cloud VPCs—multicast traffic needs to traverse network boundaries that are not cleanly routable. Attempting to forward this traffic with standard routers often fails due to the kernel's strict RPF check, which drops packets that arrive on an interface other than the one the kernel would use to route back to the source.
@@ -67,6 +78,11 @@ sudo ./target/release/mcrd supervisor
 # Check status
 ./target/release/mcrctl list
 ./target/release/mcrctl stats
+
+# View protocol state (when PIM/IGMP enabled)
+./target/release/mcrctl pim neighbors
+./target/release/mcrctl igmp groups
+./target/release/mcrctl mroute
 ```
 
 For detailed usage, see the [User Guide](./user_docs/GUIDE.md).
@@ -81,6 +97,7 @@ This project provides separate documentation for users and developers.
 
 - **[User Guide](./user_docs/GUIDE.md):** A quick-start guide to get MCR up and running.
 - **[Reference Manual](./user_docs/REFERENCE.md):** The complete reference for configuring MCR, including kernel tuning, environment variables, and control plane commands.
+- **[Protocol Capabilities](./user_docs/PROTOCOL_CAPABILITIES.md):** IGMP, PIM-SM, and MSDP protocol support, including hybrid static + dynamic deployments.
 - **[WHY_USE_MCR.md](./user_docs/WHY_USE_MCR.md):** Explains the core problem MCR solves and compares it to other tools like `socat`.
 
 ### For Developers

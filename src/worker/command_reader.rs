@@ -165,11 +165,13 @@ mod tests {
             input_interface: "eth0".to_string(),
             input_group: Ipv4Addr::new(239, 1, 1, 1),
             input_port: 5000,
+            input_source: None,
             outputs: vec![OutputDestination {
                 group: Ipv4Addr::new(239, 2, 2, 2),
                 port: 6000,
                 interface: "eth1".to_string(),
             }],
+            source: crate::RuleSource::Static,
         });
 
         let mut data = create_frame(&cmd1);

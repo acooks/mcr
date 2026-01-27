@@ -39,6 +39,23 @@ mod cli_functional; // CLI functional tests: mcrctl commands against running sup
 #[path = "integration/supervisor_resilience.rs"]
 mod supervisor_resilience; // 3 tests: Worker restart, rule persistence, multi-failure handling
 
+// Protocol integration tests
+#[path = "integration/protocol_igmp.rs"]
+mod protocol_igmp; // IGMP querier control and configuration tests (requires root)
+
+#[path = "integration/protocol_pim.rs"]
+mod protocol_pim; // PIM neighbor management and configuration tests (requires root)
+
+#[path = "integration/protocol_msdp.rs"]
+mod protocol_msdp; // MSDP peer management and SA cache tests (requires root)
+
+#[path = "integration/protocol_cli.rs"]
+mod protocol_cli; // Protocol enable via CLI without config file (requires root)
+
+// Topology tests - multi-node protocol validation
+#[path = "integration/topology.rs"]
+mod topology; // PIM Hello exchange, IGMP querier election, MSDP TCP session (requires root)
+
 // REMOVED: supervisor.rs - redundant with unit tests in src/supervisor.rs
 // REMOVED: ipc.rs - broken code, redundant with rule_management.rs
 // REMOVED: 4 tests from log_level_control.rs - redundant with supervisor unit tests (kept 2 IPC tests)

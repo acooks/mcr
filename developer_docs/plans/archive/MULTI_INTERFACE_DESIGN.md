@@ -1,7 +1,8 @@
 # Multi-Interface Architecture Design
 
-**Status:** DRAFT
+**Status:** IMPLEMENTED (97%)
 **Created:** 2025-12-04
+**Last Updated:** January 2026
 
 ## Overview
 
@@ -396,3 +397,45 @@ struct WorkerId {
 
 - [ARCHITECTURE.md](../ARCHITECTURE.md) - Overall system architecture (includes privilege separation details)
 - [IMPROVEMENT_PLAN.md](../IMPROVEMENT_PLAN.md) - Project roadmap and completed items
+
+---
+
+## Current Status
+
+### Completion: 97%
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| JSON5 configuration | Complete | `json5` crate integrated |
+| Config file parser | Complete | Full validation |
+| WorkerManager redesign | Complete | Tracks by (interface, core_id) |
+| Dynamic worker spawning | Complete | Workers spawn on rule addition |
+| Two-state config model | Complete | Running vs startup config |
+| CLI commands | Complete (25/25) | All commands wired |
+
+### CLI Command Status
+
+| Command | Status |
+|---------|--------|
+| `mcrctl add` | Complete |
+| `mcrctl add --name` | Complete |
+| `mcrctl remove --id` | Complete |
+| `mcrctl remove --name` | Complete |
+| `mcrctl show` | Complete |
+| `mcrctl check` | Complete |
+| `mcrctl load` | Complete |
+| `mcrctl load --replace` | Complete |
+| `mcrctl save` | Complete |
+| `mcrctl stats` | Complete |
+| `mcrctl workers` | Complete |
+| `mcrctl ping` | Complete |
+| `mcrctl version` | Complete |
+| `mcrctl log-level` | Complete |
+
+### Remaining Work
+
+1. **Dynamic worker cleanup:**
+   - Configurable grace period for idle dynamic workers
+   - Currently workers persist until daemon restart
+
+See [IMPROVEMENT_PLAN.md](../IMPROVEMENT_PLAN.md) for consolidated roadmap.

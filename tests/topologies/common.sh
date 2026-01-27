@@ -77,6 +77,55 @@ init_test() {
     sudo ip netns exec "$NETNS" ip link set lo up
 }
 
+# Initialize multi-namespace test environment
+# Creates multiple network namespaces with loopback enabled
+# Usage: init_multi_ns_test <test_title> <ns1> <ns2> ...
+# Example: init_multi_ns_test "PIM Neighbor Test" mcr_pim_1 mcr_pim_2
+init_multi_ns_test() {
+    local test_title="$1"
+    shift
+    local namespaces=("$@")
+
+    # Check for root privileges
+    if [ "$EUID" -ne 0 ]; then
+        echo "ERROR: This test requires root privileges for network namespace isolation"
+        echo "Please run with: sudo $0"
+        exit 1
+    fi
+
+    # Build binaries if needed
+    ensure_binaries_built
+
+    # Print test header
+    if [ -n "$test_title" ]; then
+        echo "=== $test_title ==="
+        echo ""
+    fi
+
+    log_section 'Creating Network Namespaces'
+
+    # Clean up and create namespaces
+    for ns in "${namespaces[@]}"; do
+        ip netns del "$ns" 2>/dev/null || true
+        ip netns add "$ns"
+        sudo ip netns exec "$ns" ip link set lo up
+        log_info "Created namespace: $ns"
+    done
+}
+
+# Cleanup multiple namespaces
+# Usage: cleanup_multi_ns <ns1> <ns2> ...
+cleanup_multi_ns() {
+    log_info "Cleaning up namespaces..."
+    for ns in "$@"; do
+        # Kill all processes in namespace
+        sudo ip netns pids "$ns" 2>/dev/null | xargs -r sudo kill -9 2>/dev/null || true
+        # Delete namespace
+        sudo ip netns del "$ns" 2>/dev/null || true
+    done
+    log_info "Cleanup complete"
+}
+
 # --- Build Utilities ---
 
 # Ensure required binaries are built
@@ -676,6 +725,317 @@ graceful_cleanup_namespace() {
     # Remove namespace
     sudo ip netns del "$netns" 2>/dev/null || true
     log_info "Cleanup complete"
+}
+
+# --- Protocol Test Helpers ---
+
+# Wait for PIM neighbor to appear
+# Usage: wait_for_pim_neighbor <socket> <neighbor_ip> [timeout]
+# Example: wait_for_pim_neighbor /tmp/mcr1.sock 10.1.0.2 20
+wait_for_pim_neighbor() {
+    local socket="$1"
+    local neighbor_ip="$2"
+    local timeout="${3:-20}"
+    local start=$(date +%s)
+
+    log_info "Waiting for PIM neighbor $neighbor_ip..."
+
+    while true; do
+        if "$CONTROL_CLIENT_BINARY" --socket-path "$socket" pim neighbors 2>/dev/null | grep -q "$neighbor_ip"; then
+            log_info "PIM neighbor $neighbor_ip discovered"
+            return 0
+        fi
+
+        if [ "$(($(date +%s) - start))" -gt "$timeout" ]; then
+            log_error "Timeout waiting for PIM neighbor $neighbor_ip"
+            "$CONTROL_CLIENT_BINARY" --socket-path "$socket" pim neighbors 2>/dev/null || true
+            return 1
+        fi
+
+        sleep 0.5
+    done
+}
+
+# Wait for PIM neighbor to expire/disappear
+# Usage: wait_for_pim_neighbor_expiry <socket> <neighbor_ip> [timeout]
+# Example: wait_for_pim_neighbor_expiry /tmp/mcr1.sock 10.1.0.2 120
+wait_for_pim_neighbor_expiry() {
+    local socket="$1"
+    local neighbor_ip="$2"
+    local timeout="${3:-120}"
+    local start=$(date +%s)
+
+    log_info "Waiting for PIM neighbor $neighbor_ip to expire..."
+
+    while true; do
+        if ! "$CONTROL_CLIENT_BINARY" --socket-path "$socket" pim neighbors 2>/dev/null | grep -q "$neighbor_ip"; then
+            log_info "PIM neighbor $neighbor_ip expired"
+            return 0
+        fi
+
+        if [ "$(($(date +%s) - start))" -gt "$timeout" ]; then
+            log_error "Timeout waiting for PIM neighbor $neighbor_ip to expire"
+            return 1
+        fi
+
+        sleep 1
+    done
+}
+
+# Wait for MSDP peer to reach Active or Established state
+# Usage: wait_for_msdp_peer_active <socket> <peer_ip> [timeout]
+# Example: wait_for_msdp_peer_active /tmp/mcr1.sock 10.3.0.2 30
+wait_for_msdp_peer_active() {
+    local socket="$1"
+    local peer_ip="$2"
+    local timeout="${3:-30}"
+    local start=$(date +%s)
+
+    log_info "Waiting for MSDP peer $peer_ip to become Active/Established..."
+
+    while true; do
+        local peer_output
+        peer_output=$("$CONTROL_CLIENT_BINARY" --socket-path "$socket" msdp peers 2>/dev/null || echo "")
+
+        # Check if peer is in Active, Established, or connected state (case-insensitive)
+        # MSDP states: disabled -> connecting -> established -> active
+        if echo "$peer_output" | grep -q "$peer_ip"; then
+            if echo "$peer_output" | grep -qiE "(active|established)"; then
+                log_info "MSDP peer $peer_ip is Active/Established"
+                return 0
+            fi
+        fi
+
+        if [ "$(($(date +%s) - start))" -gt "$timeout" ]; then
+            log_error "Timeout waiting for MSDP peer $peer_ip to become Active/Established"
+            echo "$peer_output" >&2
+            return 1
+        fi
+
+        sleep 0.5
+    done
+}
+
+# Verify MSDP SA cache contains an entry
+# Usage: verify_msdp_sa_entry <socket> <source> <group>
+# Example: verify_msdp_sa_entry /tmp/mcr1.sock 10.0.0.1 239.1.1.1
+verify_msdp_sa_entry() {
+    local socket="$1"
+    local source="$2"
+    local group="$3"
+
+    local sa_output
+    sa_output=$("$CONTROL_CLIENT_BINARY" --socket-path "$socket" msdp sa-cache 2>/dev/null || echo "")
+
+    if echo "$sa_output" | grep -q "$source" && echo "$sa_output" | grep -q "$group"; then
+        log_info "✅ MSDP SA entry found: ($source, $group)"
+        return 0
+    else
+        log_error "❌ MSDP SA entry not found: ($source, $group)"
+        log_info "Current SA cache:"
+        echo "$sa_output" >&2
+        return 1
+    fi
+}
+
+# Wait for MSDP SA cache entry to appear
+# Usage: wait_for_msdp_sa_entry <socket> <source> <group> [timeout]
+# Example: wait_for_msdp_sa_entry /tmp/mcr1.sock 10.0.0.1 239.1.1.1 20
+wait_for_msdp_sa_entry() {
+    local socket="$1"
+    local source="$2"
+    local group="$3"
+    local timeout="${4:-20}"
+    local start=$(date +%s)
+
+    log_info "Waiting for MSDP SA entry ($source, $group)..."
+
+    while true; do
+        local sa_output
+        sa_output=$("$CONTROL_CLIENT_BINARY" --socket-path "$socket" msdp sa-cache 2>/dev/null || echo "")
+
+        if echo "$sa_output" | grep -q "$source" && echo "$sa_output" | grep -q "$group"; then
+            log_info "MSDP SA entry ($source, $group) found"
+            return 0
+        fi
+
+        if [ "$(($(date +%s) - start))" -gt "$timeout" ]; then
+            log_error "Timeout waiting for MSDP SA entry ($source, $group)"
+            log_info "Current SA cache:"
+            echo "$sa_output" >&2
+            return 1
+        fi
+
+        sleep 0.5
+    done
+}
+
+# Wait for IGMP group to appear
+# Usage: wait_for_igmp_group <socket> <group> [timeout]
+# Example: wait_for_igmp_group /tmp/mcr1.sock 239.1.1.1 15
+wait_for_igmp_group() {
+    local socket="$1"
+    local group="$2"
+    local timeout="${3:-15}"
+    local start=$(date +%s)
+
+    log_info "Waiting for IGMP group $group..."
+
+    while true; do
+        if "$CONTROL_CLIENT_BINARY" --socket-path "$socket" igmp groups 2>/dev/null | grep -q "$group"; then
+            log_info "IGMP group $group detected"
+            return 0
+        fi
+
+        if [ "$(($(date +%s) - start))" -gt "$timeout" ]; then
+            log_error "Timeout waiting for IGMP group $group"
+            "$CONTROL_CLIENT_BINARY" --socket-path "$socket" igmp groups 2>/dev/null || true
+            return 1
+        fi
+
+        sleep 0.5
+    done
+}
+
+# Wait for multicast route to appear
+# Usage: wait_for_mroute <socket> <group> [timeout]
+# Example: wait_for_mroute /tmp/mcr1.sock 239.1.1.1 15
+wait_for_mroute() {
+    local socket="$1"
+    local group="$2"
+    local timeout="${3:-15}"
+    local start=$(date +%s)
+
+    log_info "Waiting for multicast route for $group..."
+
+    while true; do
+        if "$CONTROL_CLIENT_BINARY" --socket-path "$socket" mroute 2>/dev/null | grep -q "$group"; then
+            log_info "Multicast route for $group found"
+            return 0
+        fi
+
+        if [ "$(($(date +%s) - start))" -gt "$timeout" ]; then
+            log_error "Timeout waiting for multicast route for $group"
+            "$CONTROL_CLIENT_BINARY" --socket-path "$socket" mroute 2>/dev/null || true
+            return 1
+        fi
+
+        sleep 0.5
+    done
+}
+
+# Get PIM DR for an interface
+# Usage: get_pim_dr <socket> <interface>
+# Returns: The DR IP address, or empty string if not found
+get_pim_dr() {
+    local socket="$1"
+    local interface="$2"
+
+    # Parse pim neighbors output for DR information
+    "$CONTROL_CLIENT_BINARY" --socket-path "$socket" pim neighbors 2>/dev/null | \
+        grep -A5 "$interface" | grep -oP 'DR:\s*\K[0-9.]+' || echo ""
+}
+
+# Verify PIM DR election result
+# Usage: verify_pim_dr <socket> <interface> <expected_dr_ip>
+verify_pim_dr() {
+    local socket="$1"
+    local interface="$2"
+    local expected_dr="$3"
+
+    local neighbors_output
+    neighbors_output=$("$CONTROL_CLIENT_BINARY" --socket-path "$socket" pim neighbors 2>/dev/null || echo "")
+
+    # Check if the expected DR is marked as DR in the output
+    if echo "$neighbors_output" | grep -q "DR.*$expected_dr\|$expected_dr.*DR\|is_dr.*true"; then
+        log_info "✅ DR election correct: $expected_dr is DR"
+        return 0
+    else
+        log_error "❌ DR election mismatch: expected $expected_dr to be DR"
+        log_info "Neighbors output:"
+        echo "$neighbors_output" >&2
+        return 1
+    fi
+}
+
+# Start MCR with a config file (for protocol tests)
+# Usage: start_mcr_with_config <name> <config_file> <control_socket> [log_file] [core_id] [netns]
+start_mcr_with_config() {
+    local name="$1"
+    local config_file="$2"
+    local control_socket="$3"
+    local log_file="${4:-/tmp/${name}.log}"
+    local core_id="${5:-0}"
+    local netns="${6:-}"
+
+    log_info "Starting $name with config $config_file (socket: $control_socket, CPU core: $core_id)"
+
+    # Clean up any stale files
+    rm -f "$control_socket"
+    rm -f "$log_file"
+
+    if [ -n "$netns" ]; then
+        sudo -E ip netns exec "$netns" taskset -c "$core_id" "$RELAY_BINARY" supervisor \
+            --control-socket-path "$control_socket" \
+            --config "$config_file" \
+            --num-workers 1 \
+            > "$log_file" 2>&1 &
+    else
+        taskset -c "$core_id" "$RELAY_BINARY" supervisor \
+            --control-socket-path "$control_socket" \
+            --config "$config_file" \
+            --num-workers 1 \
+            > "$log_file" 2>&1 &
+    fi
+
+    local pid=$!
+    log_info "$name started with PID $pid"
+
+    export "${name}_PID=$pid"
+}
+
+# Create a veth pair in a specific namespace
+# Usage: create_veth_in_ns <netns> <name1> <name2> <ip1/prefix> <ip2/prefix>
+create_veth_in_ns() {
+    local netns="$1"
+    local name1="$2"
+    local name2="$3"
+    local ip1="$4"
+    local ip2="$5"
+
+    log_info "Creating veth pair in $netns: $name1 ↔ $name2"
+    sudo ip netns exec "$netns" ip link add "$name1" type veth peer name "$name2"
+    sudo ip netns exec "$netns" ip addr add "$ip1" dev "$name1"
+    sudo ip netns exec "$netns" ip addr add "$ip2" dev "$name2"
+    sudo ip netns exec "$netns" ip link set "$name1" up
+    sudo ip netns exec "$netns" ip link set "$name2" up
+}
+
+# Create linked network namespaces with veth connection
+# Usage: create_linked_namespaces <ns1> <ns2> <veth1> <veth2> <ip1/prefix> <ip2/prefix>
+create_linked_namespaces() {
+    local ns1="$1"
+    local ns2="$2"
+    local veth1="$3"
+    local veth2="$4"
+    local ip1="$5"
+    local ip2="$6"
+
+    log_info "Linking namespaces $ns1 ↔ $ns2 via $veth1 ↔ $veth2"
+
+    # Create veth pair in root namespace
+    sudo ip link add "$veth1" type veth peer name "$veth2"
+
+    # Move each end to respective namespace
+    sudo ip link set "$veth1" netns "$ns1"
+    sudo ip link set "$veth2" netns "$ns2"
+
+    # Configure IPs and bring up
+    sudo ip netns exec "$ns1" ip addr add "$ip1" dev "$veth1"
+    sudo ip netns exec "$ns1" ip link set "$veth1" up
+
+    sudo ip netns exec "$ns2" ip addr add "$ip2" dev "$veth2"
+    sudo ip netns exec "$ns2" ip link set "$veth2" up
 }
 
 # Graceful cleanup for unshare contexts (ephemeral namespaces)

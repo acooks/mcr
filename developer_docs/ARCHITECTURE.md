@@ -36,6 +36,11 @@ This document describes both **current implementation** and **target architectur
 - Periodic health checks (250ms with auto-restart + SyncRules)
 - Protocol versioning (PROTOCOL_VERSION, GetVersion command)
 - Data plane worker privilege dropping (AF_PACKET FD passing via SCM_RIGHTS)
+- IGMPv2 querier with group membership tracking (RFC 2236)
+- PIM-SM state machine with neighbor discovery and DR election (RFC 7761 subset)
+- MSDP for inter-domain multicast source discovery (RFC 3618)
+- Multicast RIB merging static rules with protocol-learned routes
+- Per-interface rule filtering for data plane workers
 
 **⚠️ Partially Implemented:**
 
@@ -132,11 +137,17 @@ graph TD
 - **Supervisor Process:** The main process that manages workers, handles configuration commands, and centralizes logging and statistics. It runs with privileges but does not handle high-speed packet forwarding.
 - **Worker Processes:** High-performance data plane processes, each pinned to a specific CPU core. They receive, process, and re-transmit all multicast traffic.
 
-## 4. The Data Plane: A Unified, Single-Threaded Architecture
+## 4. The Data Plane: A Unified, Hybrid Architecture
 
-The MCR data plane uses a **single-threaded, unified event loop model**. This eliminates the complexity and performance issues of inter-thread communication. All data plane logic for a given CPU core runs within a single OS thread.
+The MCR data plane uses a **single-threaded, unified event loop model** with a **hybrid networking architecture**. This hybrid approach combines the power of raw sockets for ingress with the flexibility of standard sockets for egress.
 
 **Implementation:** `run_unified_data_plane()` in `src/worker/data_plane_integrated.rs`
+
+- **Hybrid I/O Strategy (Asymmetrical Pipeline):**
+  - **Ingress (Layer 2 - `AF_PACKET`):** Workers indiscriminately capture multicast traffic using raw `AF_PACKET` sockets. This occurs at Layer 2, effectively "sniffing" the wire before the kernel's IP stack can process the packet. This allows MCR to bypass the kernel's Reverse Path Forwarding (RPF) checks, which would otherwise drop traffic from unroutable sources.
+  - **Egress (Layer 3/4 - `AF_INET`/UDP):** Workers transmit packets using standard `SOCK_DGRAM` (UDP) sockets. MCR "republishes" the payload as a new UDP datagram. This allows the application to rely entirely on the Linux kernel for Layer 3 routing, Layer 2 encapsulation (ARP/Neighbor Discovery), and IP fragmentation.
+
+  **Why this matters:** Because the egress path is standard UDP, MCR is fully compatible with any interface the Linux kernel supports, including **VPNs (WireGuard, OpenVPN)**, **Tun/Tap interfaces**, and **cellular/satellite links**, provided the routing table is configured correctly.
 
 - **Core Affinity:** The supervisor spawns one data plane worker process per designated CPU core, and this worker process is pinned to that core.
 
@@ -229,7 +240,196 @@ The control interface provides runtime configuration and monitoring. The supervi
   - **Rule Resynchronization:** When workers restart, the supervisor sends a `SyncRules` command with the complete ruleset. Periodic health checks (every 250ms) detect dead workers and trigger automatic restart with rule resync.
   - **Drift Detection:** Hash-based drift detection enables manual detection of workers with stale rulesets by comparing hash values in log output. Each component (supervisor, workers) logs a hash of its ruleset when rules change.
 
-## 6. Monitoring and Hotspot Strategy
+## 6. Protocol Subsystem (IGMP, PIM-SM, and MSDP)
+
+MCR includes optional support for multicast routing protocols, transforming it from a pure static relay into a multicast router capable of learning routes dynamically.
+
+### Design Principles
+
+- **State Machines in Supervisor:** IGMP and PIM state machines run in the supervisor process, not workers. This centralizes protocol state (neighbor tables, group membership, routing entries) while keeping workers as stateless relay engines.
+- **Raw Sockets for Protocol Packets:** The supervisor uses raw IP sockets (protocol 2 for IGMP, protocol 103 for PIM) to send and receive control plane packets.
+- **Unified Multicast RIB:** A `MulticastRib` abstraction merges static rules (from config/CLI) with protocol-learned routes (from IGMP/PIM). This ensures both coexist with union semantics.
+
+### Architecture
+
+```text
+┌─────────────────────────────────────────────────────────────┐
+│                      Supervisor                              │
+│  ┌─────────────┐  ┌─────────────┐  ┌──────────────────────┐ │
+│  │ IGMP FSM    │  │ PIM-SM FSM  │  │ Multicast RIB        │ │
+│  │ (per-iface) │  │ (global)    │  │ (*,G) and (S,G)      │ │
+│  └──────┬──────┘  └──────┬──────┘  └──────────┬───────────┘ │
+│         │                │                    │              │
+│         └────────────────┴────────────────────┘              │
+│                          │                                   │
+│              ┌───────────▼───────────┐                       │
+│              │  Forwarding Rules     │                       │
+│              │  (per-interface sync) │                       │
+│              └───────────────────────┘                       │
+└──────────────────────────┬──────────────────────────────────┘
+                           │ IPC (RelayCommand::SyncRules)
+         ┌─────────────────┼─────────────────┐
+         ▼                 ▼                 ▼
+    ┌─────────┐       ┌─────────┐       ┌─────────┐
+    │ Worker 0│       │ Worker 1│       │ Worker N│
+    │ (relay) │       │ (relay) │       │ (relay) │
+    └─────────┘       └─────────┘       └─────────┘
+```
+
+### IGMP Querier (RFC 2236)
+
+When configured, MCR acts as an IGMPv2 querier on specified interfaces:
+
+- **Querier Election:** Lower IP address wins. MCR tracks other queriers and yields if a lower-IP querier is detected.
+- **Group Membership Tracking:** Maintains per-interface group membership with RFC-compliant timers.
+- **Timer Defaults:** Query interval 125s, query response interval 10s, robustness 2.
+
+### PIM-SM (RFC 7761 Subset)
+
+MCR implements a subset of PIM Sparse Mode for dynamic multicast routing:
+
+- **Neighbor Discovery:** Sends periodic Hello messages (30s interval) and maintains neighbor table.
+- **DR Election:** Highest priority wins, then highest IP as tiebreaker.
+- **(*,G) Shared Trees:** Tracks shared tree state with upstream/downstream interfaces.
+- **(S,G) Shortest-Path Trees:** Tracks source-specific tree state for SPT switchover.
+- **Static RP Only:** RP address is statically configured; BSR/Auto-RP not implemented.
+
+### Rule Merging (Union Semantics)
+
+Static rules and protocol-learned routes are merged using union semantics:
+
+| Scenario | Resolution |
+|----------|------------|
+| Static rule + IGMP membership | Union: Static outputs + IGMP-joined interfaces |
+| Static rule + PIM (*,G) | Union: Static outputs + PIM downstream interfaces |
+| PIM (*,G) + (S,G) | (S,G) is more specific for that source |
+
+### Configuration
+
+Protocol support is configured in JSON5:
+
+```json5
+{
+  rules: [...],  // Static forwarding rules
+
+  pim: {
+    enabled: true,
+    router_id: "10.0.0.1",
+    interfaces: [
+      { name: "eth0", dr_priority: 100 }
+    ],
+    static_rp: [
+      { group: "239.0.0.0/8", rp: "10.0.0.1" }
+    ],
+    rp_address: "10.0.0.1"  // We are the RP
+  },
+
+  igmp: {
+    querier_interfaces: ["eth0", "eth1"],
+    query_interval: 125,
+    robustness: 2
+  }
+}
+```
+
+### CLI Commands
+
+```bash
+mcrctl pim neighbors           # Show PIM neighbor table
+mcrctl igmp groups             # Show IGMP group membership
+mcrctl mroute                  # Show multicast routing table
+```
+
+### MSDP (RFC 3618)
+
+MCR implements Multicast Source Discovery Protocol for inter-domain multicast source discovery between PIM-SM domains.
+
+#### Purpose
+
+MSDP enables receivers in one PIM domain to learn about active sources in other domains:
+
+- **Source-Active (SA) Messages:** Announce (source, group) pairs to MSDP peers
+- **Anycast-RP Support:** Multiple RPs sharing the same IP can synchronize via mesh groups
+- **Inter-domain Multicast:** Sources in one domain can reach receivers in another
+
+#### Architecture
+
+```text
+┌─────────────────────────────────────────────────────────────────┐
+│                         Supervisor                               │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐              │
+│  │ IGMP FSM    │  │ PIM-SM FSM  │  │ MSDP FSM    │              │
+│  │ (per-iface) │  │ (global)    │  │ (global)    │              │
+│  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘              │
+│         │                │                │                      │
+│         └────────────────┴────────────────┘                      │
+│                          │                                       │
+│  ┌───────────────────────┼───────────────────────┐              │
+│  │ Raw Sockets           │  TCP Connections      │              │
+│  │ (IGMP/PIM)            │  (MSDP port 639)      │              │
+│  └───────────────────────┴───────────────────────┘              │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### Key Features
+
+- **Peer Connections:** TCP connections on port 639 with keepalive/hold timers
+- **Collision Resolution:** Higher IP address initiates connection (RFC 3618)
+- **SA Cache:** Stores learned and local source-active entries with expiry
+- **Mesh Groups:** Peers in the same mesh group don't flood SAs to each other
+- **PIM Integration:** New sources trigger SA origination; learned SAs create (S,G) routes
+
+#### Integration Flow
+
+1. **PIM → MSDP:** When PIM receives a Register message for a new source, MSDP is notified
+2. **MSDP Flooding:** SA is flooded to all active peers (respecting mesh group rules)
+3. **MSDP → PIM:** When SA is learned for a group with IGMP receivers, an (S,G) route is created
+
+#### Configuration
+
+```json5
+{
+  msdp: {
+    enabled: true,
+    local_address: "10.0.0.1",
+    keepalive_interval: 60,
+    hold_time: 75,
+    peers: [
+      {
+        address: "10.0.0.2",
+        description: "Remote RP",
+        mesh_group: "anycast-rp"
+      },
+      {
+        address: "10.0.0.3",
+        description: "Backup RP",
+        mesh_group: "anycast-rp"
+      }
+    ]
+  }
+}
+```
+
+#### CLI Commands
+
+```bash
+mcrctl msdp peers              # Show MSDP peer table
+mcrctl msdp sa-cache           # Show SA cache entries
+mcrctl msdp add-peer           # Add a peer dynamically
+mcrctl msdp remove-peer        # Remove a peer
+mcrctl msdp clear-sa-cache     # Clear SA cache
+```
+
+#### Timer Reference (RFC 3618)
+
+| Timer | Default | Purpose |
+|-------|---------|---------|
+| ConnectRetry | 30s | Retry interval after connection failure |
+| Keepalive | 60s | Send keepalive if no other message sent |
+| Hold | 75s | Peer considered dead if no message received |
+| SA Cache | 60s | SA entry expiry (refreshed on receipt) |
+
+## 7. Monitoring and Hotspot Strategy
 
 - **Hotspot Management (Observe, Don't Act):** The initial design will not implement an automatic hotspot mitigation strategy. Instead, it will rely on a robust, **core-aware monitoring system** to make any potential single-core saturation observable to the operator.
 
@@ -248,13 +448,13 @@ The control interface provides runtime configuration and monitoring. The supervi
 
 - **On-Demand Packet Tracing (NOT IMPLEMENTED):** _Future work:_ The application will implement a low-impact, on-demand packet tracing capability. Tracing will be configurable on a per-rule basis via control interface commands (`EnableTrace`, `DisableTrace`, `GetTrace`) and disabled by default. Each data plane worker will maintain a pre-allocated, in-memory ring buffer to store key diagnostic events for packets matching an enabled rule. The `GetTrace` command will retrieve these events, providing a detailed, chronological log of a packet's lifecycle or the reason for its drop.
 
-## 7. Logging Architecture
+## 8. Logging Architecture
 
 Worker processes do not log directly to files. Instead, a simple and robust pipe-based mechanism decouples the high-performance workers from slower I/O by centralizing logging in the supervisor. Workers emit logs as a fast "fire-and-forget" operation into a pipe, and the supervisor asynchronously reads from these pipes, aggregates the messages, and prints them to its standard output.
 
 For a comprehensive guide to the logging system, including the high-performance cross-process design for the data plane, API usage, and monitoring techniques, see the detailed **[Logging Design Document](../design/LOGGING_DESIGN.md)**.
 
-## 8. Statistics Reporting Architecture
+## 9. Statistics Reporting Architecture
 
 ### Design Principles for Data Plane Stats
 

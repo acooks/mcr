@@ -118,7 +118,7 @@ jobs:
       run: cargo audit
 
     - name: Install cargo-outdated
-      run: command -v cargo-outdated >/dev/null || cargo install cargo-outdated
+      run: command -v cargo-outdated >/dev/null || cargo install cargo-outdated --locked
 
     - name: Check for outdated dependencies
-      run: cargo outdated
+      run: cargo outdated --root-deps-only --exit-code 0

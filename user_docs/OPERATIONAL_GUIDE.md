@@ -8,10 +8,6 @@ This guide explains how to monitor the Multicast Relay (MCR) application, unders
 - [Understanding the Statistics Output](#understanding-the-statistics-output)
   - [Ingress Statistics](#ingress-statistics)
   - [Egress Statistics](#egress-statistics)
-- [Deployment Options](#deployment-options)
-  - [Recommended: Capability-Based Deployment](#recommended-capability-based-deployment)
-  - [Systemd Service Deployment](#systemd-service-deployment)
-  - [Running as Root](#running-as-root)
 - [Troubleshooting & Common Scenarios](#troubleshooting--common-scenarios)
   - [Healthy Operation (At Capacity)](#healthy-operation-at-capacity)
   - [Egress Path Failure](#egress-path-failure)
@@ -56,81 +52,6 @@ The Egress stats line shows how many packets are being sent out.
 - **`errors`**: The number of packets that the kernel reported as failing to send. This counter **should always be 0** in a healthy system.
 - **`bytes`**: The total number of bytes sent.
 - **`pps` (Packets Per Second):** The current rate of _sent_ packets.
-
-## Deployment Options
-
-MCR can be deployed in several ways depending on your security requirements and operational preferences.
-
-### Recommended: Capability-Based Deployment
-
-The recommended approach is to run MCR as a non-root user with Linux capabilities. This provides strong security isolation while maintaining full functionality.
-
-**Required capabilities:**
-
-- `CAP_NET_RAW` - Create AF_PACKET sockets for packet capture
-- `CAP_SETUID` / `CAP_SETGID` - Drop worker privileges to nobody:nobody
-
-**One-time setup (requires root):**
-
-```bash
-# Using setcap directly
-sudo setcap 'cap_net_raw,cap_setuid,cap_setgid=eip' /usr/local/bin/mcrd
-
-# Or using the justfile helper
-just set-caps
-```
-
-**Running without root:**
-
-```bash
-# Start the supervisor (no sudo needed)
-mcrd supervisor --config /etc/mcr/rules.json5
-
-# Control commands (no sudo needed)
-mcrctl add --input-interface eth0 --input-group 239.1.1.1 --input-port 5001 \
-    --outputs '239.2.2.2:5002:eth1'
-mcrctl list
-```
-
-**Verify capabilities:**
-
-```bash
-# Check capabilities are set
-getcap /usr/local/bin/mcrd
-```
-
-### Systemd Service Deployment
-
-For production deployments, use the systemd service which handles capabilities automatically:
-
-```bash
-# Install the service (RPM or manual)
-sudo cp packaging/systemd/mcrd.service /etc/systemd/system/
-sudo cp packaging/systemd/mcrd.sysusers /usr/lib/sysusers.d/mcrd.conf
-sudo cp packaging/systemd/mcrd.tmpfiles /usr/lib/tmpfiles.d/mcrd.conf
-
-# Create the mcr user
-sudo systemd-sysusers
-
-# Create runtime directories
-sudo systemd-tmpfiles --create
-
-# Enable and start
-sudo systemctl enable mcrd
-sudo systemctl start mcrd
-```
-
-The systemd service runs as the `mcr` user with ambient capabilities, providing secure operation without file capabilities.
-
-### Running as Root
-
-For testing or in trusted environments, MCR can run directly as root:
-
-```bash
-sudo mcrd supervisor --config /etc/mcr/rules.json5
-```
-
-This is not recommended for production as it provides no privilege separation.
 
 ## Troubleshooting & Common Scenarios
 
@@ -178,3 +99,16 @@ By comparing the Ingress and Egress stats, you can quickly diagnose the health o
 
 - **`matched = 0` and `no_match > 0`**: This is a configuration issue. Packets are arriving at the MCR host, but their destination multicast group and/or port do not match any of the forwarding rules you have configured.
 - **Action:** Use the `mcrctl list` command to verify your rules and compare them against the source traffic.
+
+## Log Management
+
+MCR logs to `stdout` (standard output) by default. When running via systemd, these logs are captured by `journald`.
+
+**Viewing Logs:**
+
+```bash
+journalctl -u mcrd -f
+```
+
+**Log Rotation:**
+Since `journald` handles rotation automatically, no additional configuration is required. If you redirect output to a file manually, ensure you use a tool like `logrotate` to prevent disk exhaustion.

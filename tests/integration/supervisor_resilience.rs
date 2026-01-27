@@ -5,7 +5,7 @@
 //! and restarts them with proper state synchronization.
 
 use anyhow::{Context, Result};
-use multicast_relay::ForwardingRule;
+use multicast_relay::{ForwardingRule, RuleSource};
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 use std::time::Duration;
@@ -67,7 +67,9 @@ async fn test_supervisor_restarts_killed_worker() -> Result<()> {
         input_interface: "lo".to_string(),
         input_group: "239.0.0.1".parse()?,
         input_port: 5000,
+        input_source: None,
         outputs: vec![],
+        source: RuleSource::Static,
     };
     client.add_rule(rule).await?;
     println!("[TEST] Rule added to trigger worker spawning");
@@ -158,7 +160,9 @@ async fn test_rules_persist_after_worker_restart() -> Result<()> {
         input_interface: "lo".to_string(),
         input_group: "239.0.0.1".parse()?,
         input_port: 5001,
+        input_source: None,
         outputs: vec![],
+        source: RuleSource::Static,
     };
     client.add_rule(rule).await?;
 
@@ -194,7 +198,9 @@ async fn test_rules_persist_after_worker_restart() -> Result<()> {
         input_interface: "lo".to_string(),
         input_group: "239.0.0.2".parse()?,
         input_port: 5002,
+        input_source: None,
         outputs: vec![],
+        source: RuleSource::Static,
     };
     client.add_rule(new_rule).await?;
 
@@ -232,7 +238,9 @@ async fn test_supervisor_handles_multiple_worker_failures() -> Result<()> {
         input_interface: "lo".to_string(),
         input_group: "239.0.0.1".parse()?,
         input_port: 5000,
+        input_source: None,
         outputs: vec![],
+        source: RuleSource::Static,
     };
     client.add_rule(rule).await?;
     println!("[TEST] Rule added to trigger worker spawning");

@@ -88,7 +88,7 @@ pub struct UnifiedConfig {
     pub send_batch_size: usize,
     /// Track statistics
     pub track_stats: bool,
-    /// Stats reporting interval in milliseconds (0 = disabled, uses packet-count instead)
+    /// Stats reporting interval in milliseconds (default: 10000ms = 10 seconds)
     pub stats_interval_ms: u64,
 }
 
@@ -101,19 +101,20 @@ impl Default for UnifiedConfig {
             .and_then(|v| v.parse().ok())
             .unwrap_or(32);
 
-        // Get stats interval from environment, default to 0 (packet-count based)
-        // Set MCR_STATS_INTERVAL_MS=10 for 10ms time-based reporting
+        // Get stats interval from environment, default to 10000ms (10 seconds)
+        // This matches the ARCHITECTURE.md specification for periodic stats reporting.
+        // Set MCR_STATS_INTERVAL_MS=100 for faster reporting in tests.
         let stats_interval_ms = std::env::var("MCR_STATS_INTERVAL_MS")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(0);
+            .unwrap_or(10000);
 
         Self {
             queue_depth: 1024,   // Increased from 128 for high throughput (300k+ pps)
             num_recv_buffers,    // Configurable via MCR_NUM_RECV_BUFFERS (default: 32)
             send_batch_size: 64, // Increased from 32 to reduce syscall overhead
             track_stats: true,
-            stats_interval_ms, // Configurable via MCR_STATS_INTERVAL_MS (default: 0 = packet-count)
+            stats_interval_ms, // Configurable via MCR_STATS_INTERVAL_MS (default: 10000ms)
         }
     }
 }
@@ -147,6 +148,10 @@ struct FlowCounters {
 /// Unified single-threaded data plane loop
 pub struct UnifiedDataPlane {
     ring: IoUring,
+
+    // Interface this worker is bound to (for diagnostics and logging)
+    #[allow(dead_code)] // Reserved for future diagnostic/logging use
+    interface_name: String,
 
     // Ingress
     recv_socket: Socket,
@@ -202,7 +207,7 @@ impl UnifiedDataPlane {
     /// * `af_packet_fd` - Pre-configured AF_PACKET socket FD from supervisor
     /// * `logger` - Logger instance
     pub fn new_with_socket(
-        _interface_name: &str,
+        interface_name: &str,
         config: UnifiedConfig,
         buffer_pool: std::sync::Arc<BufferPool>,
         cmd_stream_fd: OwnedFd,
@@ -213,11 +218,19 @@ impl UnifiedDataPlane {
         // SAFETY: The supervisor created and configured this socket, we're taking ownership
         let recv_socket = unsafe { Socket::from_raw_fd(af_packet_fd.into_raw_fd()) };
 
-        Self::new_internal(config, buffer_pool, cmd_stream_fd, recv_socket, logger)
+        Self::new_internal(
+            interface_name,
+            config,
+            buffer_pool,
+            cmd_stream_fd,
+            recv_socket,
+            logger,
+        )
     }
 
     /// Internal constructor.
     fn new_internal(
+        interface_name: &str,
         config: UnifiedConfig,
         buffer_pool: std::sync::Arc<BufferPool>,
         cmd_stream_fd: OwnedFd,
@@ -259,6 +272,7 @@ impl UnifiedDataPlane {
 
         let mut unified = Self {
             ring: IoUring::new(config.queue_depth)?,
+            interface_name: interface_name.to_string(),
             recv_socket,
             recv_buffers: Vec::new(),
             in_flight_recvs: HashMap::new(),
@@ -438,6 +452,8 @@ impl UnifiedDataPlane {
             }
         }
 
+        // Flush final stats to supervisor before exiting
+        self.flush_stats_to_pipe();
         self.print_final_stats();
         Ok(())
     }
@@ -566,12 +582,35 @@ impl UnifiedDataPlane {
                                         self.rules.len()
                                     ),
                                 );
+
+                                // Send ACK back to supervisor
+                                let response = crate::WorkerResponse::SyncRulesAck {
+                                    rule_count: self.rules.len(),
+                                    ruleset_hash,
+                                };
+                                if let Err(e) = self.send_response(&response) {
+                                    self.logger.error(
+                                        Facility::DataPlane,
+                                        &format!("Failed to send SyncRulesAck: {}", e),
+                                    );
+                                }
                             }
                             Err(e) => {
                                 self.logger.error(
                                     Facility::DataPlane,
                                     &format!("Failed to sync rules: {}", e),
                                 );
+
+                                // Send error response
+                                let response = crate::WorkerResponse::Error {
+                                    message: format!("Failed to sync rules: {}", e),
+                                };
+                                if let Err(e) = self.send_response(&response) {
+                                    self.logger.error(
+                                        Facility::DataPlane,
+                                        &format!("Failed to send error response: {}", e),
+                                    );
+                                }
                             }
                         }
                     }
@@ -581,6 +620,22 @@ impl UnifiedDataPlane {
                         // No action needed - fire-and-forget health check
                         // Worker readiness is indicated by processing this command
                     }
+                    crate::RelayCommand::SetLogLevel { facility, level } => match facility {
+                        None => {
+                            self.logger.set_global_level(level);
+                            self.logger.info(
+                                Facility::DataPlane,
+                                &format!("Global log level set to {:?}", level),
+                            );
+                        }
+                        Some(f) => {
+                            self.logger.set_facility_level(f, level);
+                            self.logger.info(
+                                Facility::DataPlane,
+                                &format!("Log level for {:?} set to {:?}", f, level),
+                            );
+                        }
+                    },
                 }
             }
 
@@ -692,9 +747,9 @@ impl UnifiedDataPlane {
                 self.stats.bytes_sent += result as u64;
             }
 
-            // Periodic stats - check if we should log
+            // Periodic stats - check if we should log and push to supervisor
             let should_log_stats = if self.config.stats_interval_ms > 0 {
-                // Time-based reporting
+                // Time-based reporting (default: every 10 seconds)
                 let now = Instant::now();
                 let elapsed_ms = now.duration_since(self.last_stats_time).as_millis() as u64;
                 if elapsed_ms >= self.config.stats_interval_ms {
@@ -704,7 +759,8 @@ impl UnifiedDataPlane {
                     false
                 }
             } else {
-                // Packet-count based reporting (legacy behavior)
+                // Packet-count based reporting (legacy fallback if MCR_STATS_INTERVAL_MS=0)
+                // Not recommended: stats may never be reported for low-traffic flows
                 self.stats.packets_sent.is_multiple_of(10000)
             };
 
@@ -781,17 +837,34 @@ impl UnifiedDataPlane {
         };
 
         // Lookup forwarding rule based on (multicast_group, port)
-        let key = (headers.ipv4.dst_ip, headers.udp.dst_port);
-        let rule = match self.rules.get(&key) {
+        // First try exact match, then try wildcard port (0) for protocol-learned routes
+        let exact_key = (headers.ipv4.dst_ip, headers.udp.dst_port);
+        let wildcard_key = (headers.ipv4.dst_ip, 0u16);
+        let rule = match self.rules.get(&exact_key) {
             Some(r) => r,
-            None => {
-                // No matching rule
+            None => match self.rules.get(&wildcard_key) {
+                Some(r) => r, // Wildcard port match (protocol-learned route)
+                None => {
+                    // No matching rule
+                    if self.config.track_stats {
+                        self.stats.rules_not_matched += 1;
+                    }
+                    return Ok(Vec::new());
+                }
+            },
+        };
+
+        // Check source filter for PIM (S,G) matching
+        // If rule.input_source is Some, the packet's source must match
+        if let Some(required_source) = rule.input_source {
+            if headers.ipv4.src_ip != required_source {
+                // Source doesn't match (S,G) rule - packet is not forwarded
                 if self.config.track_stats {
                     self.stats.rules_not_matched += 1;
                 }
                 return Ok(Vec::new());
             }
-        };
+        }
 
         // Check if rule has any outputs
         if rule.outputs.is_empty() {
@@ -799,20 +872,29 @@ impl UnifiedDataPlane {
         }
 
         // Create forwarding targets for ALL outputs (fan-out support)
+        // For protocol-learned routes (port=0), preserve the original packet's port
+        let original_port = headers.udp.dst_port;
         let targets: Vec<ForwardingTarget> = rule
             .outputs
             .iter()
-            .map(|output| ForwardingTarget {
-                payload_offset: headers.payload_offset,
-                payload_len: headers.payload_len,
-                dest_addr: SocketAddr::new(output.group.into(), output.port),
-                interface_name: output.interface.clone(),
+            .map(|output| {
+                let dest_port = if output.port == 0 {
+                    original_port // Preserve original port for wildcard rules
+                } else {
+                    output.port
+                };
+                ForwardingTarget {
+                    payload_offset: headers.payload_offset,
+                    payload_len: headers.payload_len,
+                    dest_addr: SocketAddr::new(output.group.into(), dest_port),
+                    interface_name: output.interface.clone(),
+                }
             })
             .collect();
 
-        // Update per-flow counters
+        // Update per-flow counters (use exact packet key for granular stats)
         if self.config.track_stats && !targets.is_empty() {
-            let counter = self.flow_counters.entry(key).or_default();
+            let counter = self.flow_counters.entry(exact_key).or_default();
             counter.packets_relayed += 1;
             counter.bytes_relayed += headers.payload_len as u64;
         }
@@ -960,6 +1042,83 @@ impl UnifiedDataPlane {
         Ok(())
     }
 
+    /// Send a response back to the supervisor using length-delimited framing.
+    /// This is a synchronous write - used only for infrequent ACK responses.
+    fn send_response(&self, response: &crate::WorkerResponse) -> Result<()> {
+        // Serialize response to JSON
+        let payload =
+            serde_json::to_vec(response).context("Failed to serialize worker response")?;
+
+        // Length-delimited framing: 4-byte big-endian length prefix + payload
+        let len = payload.len() as u32;
+        let len_bytes = len.to_be_bytes();
+
+        // Write to the command socket (same socket used for receiving commands)
+        // This is safe because the socket is bidirectional (Unix stream socket)
+        let fd = self.cmd_stream_fd.as_raw_fd();
+        let mut written = 0;
+
+        // Write length prefix
+        while written < 4 {
+            let result = unsafe {
+                libc::write(
+                    fd,
+                    len_bytes[written..].as_ptr() as *const libc::c_void,
+                    4 - written,
+                )
+            };
+            if result < 0 {
+                return Err(anyhow::anyhow!(
+                    "Failed to write response length: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            written += result as usize;
+        }
+
+        // Write payload
+        written = 0;
+        while written < payload.len() {
+            let result = unsafe {
+                libc::write(
+                    fd,
+                    payload[written..].as_ptr() as *const libc::c_void,
+                    payload.len() - written,
+                )
+            };
+            if result < 0 {
+                return Err(anyhow::anyhow!(
+                    "Failed to write response payload: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            written += result as usize;
+        }
+
+        self.logger.debug(
+            Facility::DataPlane,
+            &format!("Sent response: {} bytes", payload.len()),
+        );
+
+        Ok(())
+    }
+
+    /// Flush final stats to supervisor via pipe before shutdown.
+    /// This ensures the supervisor has up-to-date stats even if the periodic
+    /// reporting interval hasn't elapsed yet.
+    fn flush_stats_to_pipe(&mut self) {
+        // Get flow stats first to avoid borrow conflict with stats_pipe
+        let flow_stats = self.get_flow_stats();
+        if let Some(ref mut pipe) = self.stats_pipe {
+            if let Ok(json) = serde_json::to_vec(&flow_stats) {
+                use std::io::Write;
+                // Best-effort write - don't block shutdown on pipe errors
+                let _ = writeln!(pipe, "{}", String::from_utf8_lossy(&json));
+                let _ = pipe.flush();
+            }
+        }
+    }
+
     fn print_final_stats(&self) {
         // Log in format expected by test framework:
         // [STATS:Ingress FINAL] total: recv=X matched=X egr_sent=X filtered=X no_match=X buf_exhaust=X
@@ -1025,6 +1184,33 @@ fn create_connected_udp_socket(source_ip: Ipv4Addr, dest_addr: SocketAddr) -> Re
         .set_send_buffer_size(send_buffer_size)
         .context("Failed to set SO_SNDBUF")?;
 
+    // For multicast destinations, set IP_MULTICAST_IF to ensure packets egress
+    // on the correct interface. Without this, multicast packets may go out the
+    // wrong interface or be dropped in multi-interface/multi-namespace topologies.
+    if let std::net::IpAddr::V4(dest_ipv4) = dest_addr.ip() {
+        if dest_ipv4.is_multicast() {
+            let mcast_if = libc::in_addr {
+                s_addr: u32::from_ne_bytes(source_ip.octets()),
+            };
+            unsafe {
+                if libc::setsockopt(
+                    socket.as_raw_fd(),
+                    libc::IPPROTO_IP,
+                    libc::IP_MULTICAST_IF,
+                    &mcast_if as *const _ as *const libc::c_void,
+                    std::mem::size_of::<libc::in_addr>() as libc::socklen_t,
+                ) < 0
+                {
+                    return Err(anyhow::anyhow!(
+                        "Failed to set IP_MULTICAST_IF to {}: {}",
+                        source_ip,
+                        std::io::Error::last_os_error()
+                    ));
+                }
+            }
+        }
+    }
+
     socket.bind(&SocketAddr::new(source_ip.into(), 0).into())?;
     socket.connect(&dest_addr.into())?;
     Ok(socket.into())
@@ -1042,11 +1228,13 @@ mod tests {
             input_interface: "lo".to_string(),
             input_group: input_group.parse().unwrap(),
             input_port,
+            input_source: None,
             outputs: vec![OutputDestination {
                 group: "224.0.0.2".parse().unwrap(),
                 port: 5001,
                 interface: "lo".to_string(),
             }],
+            source: crate::RuleSource::Static,
         }
     }
 

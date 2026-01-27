@@ -35,3 +35,9 @@ Deeper dives into specific topics, policies, and historical analysis.
 - **[comparisons/README.md](./comparisons/README.md):** Analysis and comparison of MCR with other networking tools.
 - **[reference_docs/](./reference_docs/):** Detailed investigation archives and completed implementation plans (see [completed/](./reference_docs/completed/))
 - **[plans/](./plans/):** Implementation plans for upcoming features and improvements.
+
+## 5. Future Work & Roadmaps
+
+Planned features and architectural directions.
+
+- **[future_work/HEAD_END_REPLICATION.md](./future_work/HEAD_END_REPLICATION.md):** Roadmap for multicast-to-unicast gateway capability (HER).

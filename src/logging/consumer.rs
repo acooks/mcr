@@ -2,7 +2,7 @@
 // Log consumer task - drains ring buffers and outputs log entries
 
 use super::entry::LogEntry;
-use super::ringbuffer::{MPSCRingBuffer, SPSCRingBuffer, SharedSPSCRingBuffer};
+use super::ringbuffer::MPSCRingBuffer;
 use super::Facility;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -186,103 +186,6 @@ impl AsyncConsumer {
     }
 }
 
-/// Consumer task for SPSC ring buffers (blocking/thread)
-pub struct BlockingConsumer {
-    ringbuffers: Vec<(Facility, Arc<SPSCRingBuffer>)>,
-    sink: Box<dyn LogSink>,
-    running: Arc<AtomicBool>,
-}
-
-impl BlockingConsumer {
-    /// Create a new blocking consumer with given ring buffers and sink
-    pub fn new(ringbuffers: Vec<(Facility, Arc<SPSCRingBuffer>)>, sink: Box<dyn LogSink>) -> Self {
-        Self {
-            ringbuffers,
-            sink,
-            running: Arc::new(AtomicBool::new(true)),
-        }
-    }
-
-    /// Create a consumer that writes to stdout
-    pub fn stdout(ringbuffers: Vec<(Facility, Arc<SPSCRingBuffer>)>) -> Self {
-        Self::new(ringbuffers, Box::new(StdoutSink::new()))
-    }
-
-    /// Create a consumer that writes to stderr
-    pub fn stderr(ringbuffers: Vec<(Facility, Arc<SPSCRingBuffer>)>) -> Self {
-        Self::new(ringbuffers, Box::new(StderrSink::new()))
-    }
-
-    /// Get a handle to stop the consumer
-    pub fn stop_handle(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.running)
-    }
-
-    /// Run the consumer task (blocks until stopped)
-    pub fn run(mut self) {
-        while self.running.load(Ordering::Relaxed) {
-            let mut any_read = false;
-
-            // Poll all ring buffers
-            for (_facility, ringbuffer) in &self.ringbuffers {
-                while let Some(entry) = ringbuffer.read() {
-                    self.sink.write_entry(&entry);
-                    any_read = true;
-                }
-            }
-
-            if any_read {
-                self.sink.flush();
-            } else {
-                // No data available, sleep briefly
-                std::thread::sleep(Duration::from_millis(1));
-            }
-        }
-
-        // Final drain: process any remaining entries after shutdown signal
-        for (_facility, ringbuffer) in &self.ringbuffers {
-            while let Some(entry) = ringbuffer.read() {
-                self.sink.write_entry(&entry);
-            }
-        }
-
-        // Final flush
-        self.sink.flush();
-    }
-}
-
-/// Consumer task for SharedSPSCRingBuffer (cross-process logging)
-pub struct SharedBlockingConsumer {
-    ringbuffers: Vec<Arc<SharedSPSCRingBuffer>>,
-    sink: Box<dyn LogSink>,
-}
-
-impl SharedBlockingConsumer {
-    /// Create a new shared blocking consumer
-    pub fn new(ringbuffers: Vec<Arc<SharedSPSCRingBuffer>>, sink: Box<dyn LogSink>) -> Self {
-        Self { ringbuffers, sink }
-    }
-
-    /// Process once (read all available entries from all buffers)
-    ///
-    /// This is called repeatedly by the consumer thread.
-    pub fn process_once(&mut self) {
-        let mut any_read = false;
-
-        // Poll all ring buffers
-        for ringbuffer in &self.ringbuffers {
-            while let Some(entry) = ringbuffer.read() {
-                self.sink.write_entry(&entry);
-                any_read = true;
-            }
-        }
-
-        if any_read {
-            self.sink.flush();
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,68 +255,6 @@ mod tests {
     }
 
     #[test]
-    fn test_blocking_consumer() {
-        let ringbuffer = Arc::new(SPSCRingBuffer::new(16, 0));
-        let (sink, entries) = TestSink::new();
-
-        // Write some entries
-        ringbuffer.write(LogEntry::new(Severity::Info, Facility::Test, "Message 1"));
-        ringbuffer.write(LogEntry::new(Severity::Error, Facility::Test, "Message 2"));
-
-        let consumer = BlockingConsumer::new(vec![(Facility::Test, ringbuffer)], Box::new(sink));
-        let stop = consumer.stop_handle();
-
-        // Run consumer in background thread
-        let handle = std::thread::spawn(move || {
-            consumer.run();
-        });
-
-        // Give it time to consume
-        std::thread::sleep(Duration::from_millis(10));
-
-        // Stop consumer
-        stop.store(false, Ordering::Relaxed);
-        handle.join().unwrap();
-
-        // Check entries were consumed
-        let entries = entries.lock().unwrap();
-        assert_eq!(entries.len(), 2);
-        assert!(entries[0].contains("Message 1"));
-        assert!(entries[1].contains("Message 2"));
-    }
-
-    #[test]
-    fn test_shared_blocking_consumer() {
-        // Create shared memory ring buffer
-        let buffer = SharedSPSCRingBuffer::create("/test_shared_consumer", 16, 0).unwrap();
-        let buffer = Arc::new(buffer);
-
-        // Write some entries
-        buffer.write(LogEntry::new(
-            Severity::Info,
-            Facility::Test,
-            "Shared message 1",
-        ));
-        buffer.write(LogEntry::new(
-            Severity::Error,
-            Facility::Test,
-            "Shared message 2",
-        ));
-
-        let (sink, entries) = TestSink::new();
-        let mut consumer = SharedBlockingConsumer::new(vec![Arc::clone(&buffer)], Box::new(sink));
-
-        // Process entries
-        consumer.process_once();
-
-        // Check entries were consumed
-        let entries = entries.lock().unwrap();
-        assert_eq!(entries.len(), 2);
-        assert!(entries[0].contains("Shared message 1"));
-        assert!(entries[1].contains("Shared message 2"));
-    }
-
-    #[test]
     fn test_stdout_sink() {
         let mut sink = StdoutSink::new();
         let entry = LogEntry::new(Severity::Info, Facility::Test, "Test stdout");
@@ -431,17 +272,6 @@ mod tests {
         // Just ensure it doesn't crash - we can't easily capture stderr in tests
         sink.write_entry(&entry);
         sink.flush();
-    }
-
-    #[test]
-    fn test_consumer_convenience_constructors() {
-        let ringbuffer = Arc::new(SPSCRingBuffer::new(16, 0));
-
-        // Test stdout constructor
-        let _consumer = BlockingConsumer::stdout(vec![(Facility::Test, Arc::clone(&ringbuffer))]);
-
-        // Test stderr constructor
-        let _consumer = BlockingConsumer::stderr(vec![(Facility::Test, ringbuffer)]);
     }
 
     #[tokio::test]

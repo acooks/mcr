@@ -1,121 +1,347 @@
 # Project Improvement Plan
 
-Last updated: December 2025
+Last updated: January 2026
+
+## Overview
+
+This is the master roadmap for MCR development. It consolidates all planned work from individual plan documents and tracks completion status.
 
 ## Priority Legend
 
-- **CRITICAL** - Security or correctness issues
-- **HIGH** - Significant impact on maintainability or performance
+- **CRITICAL** - Security, correctness, or blocking issues
+- **HIGH** - Significant impact on maintainability or user experience
 - **MEDIUM** - Quality improvements, technical debt
 - **LOW** - Nice-to-have, future enhancements
 
 ---
 
-## HIGH Priority
+## Recently Completed
 
-### Network State Reconciliation
+### Control Plane Integration (January 2026)
 
-Use `rtnetlink` crate to subscribe to RTNLGRP_LINK events. Detect interface up/down and address changes, trigger rule reconciliation.
+Implemented external control plane APIs for overlay/mesh network integration:
 
-### Automated Drift Recovery
+- **External Neighbor API:** Inject PIM neighbors from external routing daemons (Babel, OSPF)
+- **RPF Provider API:** Static RPF entries for overlay topologies
+- **Event Subscription API:** Push notifications for IGMP/PIM/MSDP state changes
+- **Namespace Documentation:** Deployment guide for network namespace environments
 
-Phase 1 (detection) complete. Phase 2 needs: workers report ruleset hash, supervisor compares and triggers sync/restart on mismatch.
+**Status:** Complete (93%) - External RPF socket protocol intentionally deferred
+**Plan:** [plans/archive/CONTROL_PLANE_INTEGRATION.md](plans/archive/CONTROL_PLANE_INTEGRATION.md)
+
+### MSDP Protocol Support (January 2026)
+
+Implemented Multicast Source Discovery Protocol (RFC 3618):
+
+- **State Machine:** Peer states, SA cache management, mesh group support
+- **TCP Layer:** Connection management with RFC 3618 collision resolution
+- **Protocol Integration:** PIM-to-MSDP and MSDP-to-PIM notifications, SA flooding
+- **CLI Commands:** `msdp peers`, `msdp sa-cache`, `msdp add-peer`, etc.
+
+**Status:** Complete (95%) - Integration tests deferred
+**Plan:** [plans/archive/MSDP_IMPLEMENTATION.md](plans/archive/MSDP_IMPLEMENTATION.md)
+
+### Multi-Interface Architecture (December 2025)
+
+Redesigned MCR for multiple input interfaces from a single daemon:
+
+- **Configuration:** JSON5 format with pinning and rules
+- **Worker Model:** Dynamic spawning, per-interface fanout groups
+- **Two-State Config:** Running config vs startup config model
+- **CLI:** Full mcrctl command set (23/25 commands)
+
+**Status:** Complete (94%) - Minor CLI polish remaining
+**Plan:** [plans/archive/MULTI_INTERFACE_DESIGN.md](plans/archive/MULTI_INTERFACE_DESIGN.md)
+
+### PIM-SM and IGMP Protocol Support (January 2026)
+
+- **IGMPv2 Querier:** Querier election, group membership tracking, RFC 2236 timers
+- **PIM-SM:** Neighbor discovery, DR election, (*,G) and (S,G) state machines
+- **Multicast RIB:** Unified abstraction merging static rules with protocol-learned routes
+- **IGMP-MRIB Integration:** Automatic fanout when hosts join multicast groups
+
+### Logging Subsystem Cleanup (January 2026)
+
+- Removed ~600 lines of dead code (unused ring buffers)
+- Fixed log level propagation to workers
+- Added per-facility log level control
+
+### CLI --name Options (January 2026)
+
+- `mcrctl add --name <NAME>` - Name rules for easier management
+- `mcrctl remove --name <NAME>` - Remove rules by name
+
+### Supervisor Module Refactoring (January 2026)
+
+Split the 6,050-line supervisor.rs into focused submodules:
+
+```text
+src/supervisor/
+├── mod.rs                  # Main orchestration, ProtocolState (3,196 lines)
+├── command_handler.rs      # Pure command parsing and validation (1,572 lines)
+├── worker_manager.rs       # Worker lifecycle, spawn, restart with backoff (745 lines)
+├── timer_manager.rs        # Protocol timer scheduling with priority queue (172 lines)
+├── socket_helpers.rs       # AF_PACKET socket creation and FD passing (206 lines)
+└── event_subscription.rs   # Event broadcast channel management (49 lines)
+```
+
+**Status:** Complete - All 309 unit tests, 61 integration tests, and topology tests pass.
+
+### Protocol Handler Decoupling (January 2026)
+
+Refactored protocol event handlers to return explicit actions instead of directly mutating MRIB:
+
+- **MribAction enum:** AddIgmpMembership, RemoveIgmpMembership, AddStarGRoute, RemoveStarGRoute, AddSgRoute, RemoveSgRoute
+- **ProtocolHandlerResult:** Unified result type with timers, mrib_actions, and notifications
+- **Handler migration:** IGMP, PIM, MSDP, and Timer handlers all return results
+- **Centralized application:** process_event() applies actions after handlers return
+
+```text
+src/supervisor/
+├── actions.rs              # MribAction enum and ProtocolHandlerResult (NEW)
+└── mod.rs                  # Updated handlers + apply_mrib_actions(), emit_notifications()
+```
+
+**Status:** Complete - All 313 unit tests pass. Handlers are now pure functions.
+**Plan:** [plans/archive/REFACTORING_PLAN.md](plans/archive/REFACTORING_PLAN.md) (Section 2)
 
 ---
 
-## MEDIUM Priority
+## Remaining Work
 
-### Dynamic Worker Idle Cleanup
+### CRITICAL Priority
 
-Design spec: dynamic workers should exit after grace period of inactivity.
+#### 1. Protocol Packet Transmission Infrastructure
 
-- Track last rule timestamp per dynamic interface
-- Check in periodic sync loop (300s interval)
-- Gracefully shut down workers with no rules after configurable timeout
-- **Test:** `test_dynamic_worker_cleanup_after_idle`
+**Source:** PROTOCOL_IMPLEMENTATION_GAP_ANALYSIS (January 2026)
+**Impact:** PIM and IGMP control plane completely non-functional
 
-### Buffer Size for Jumbo Frames
+The protocol architecture only supports receiving packets. There is no mechanism for handlers to request packet transmission.
 
-Current buffer pool is undersized for jumbo frames (9000+ bytes). Options: add jumbo buffer tier, make sizes configurable, or detect MTU at startup.
+Missing:
 
-**Related:** PACKET_MMAP proposal was **rejected** (see `developer_docs/decisions/001_buffer_management_strategy.md`).
+- `OutgoingPacket` type in `actions.rs`
+- `outgoing_packets` field in `ProtocolHandlerResult`
+- Packet send loop in supervisor
+- IP header construction for raw sockets
 
-### Multi-Interface Test Coverage
+**Report:** [reports/PROTOCOL_IMPLEMENTATION_GAP_ANALYSIS.md](reports/PROTOCOL_IMPLEMENTATION_GAP_ANALYSIS.md)
 
-Remaining tests needed:
+#### 2. PIM Hello Send/Receive
 
-- `test_config_load_merge_vs_replace` - Verify `--replace` flag behavior
+**Source:** PROTOCOL_IMPLEMENTATION_GAP_ANALYSIS
+**Impact:** No PIM neighbor discovery, DR election broken
 
-**Implemented** (in `tests/integration/multi_interface.rs`):
+- `hello_timer_expired()` schedules timers but doesn't build/send Hello packets
+- `PimHelloBuilder` exists but is only used in tests
+- Neighbor discovery completely non-functional
 
-- `test_config_startup_spawns_workers_for_interface`
-- `test_dynamic_worker_spawn_on_add_rule`
-- `test_multiple_rules_same_interface`
-- `test_remove_rule_by_name`
-- `test_remove_rule_by_name_not_found`
-- `test_config_preserves_rule_names`
-- `test_multiple_ingress_interfaces` - Tests config with rules for 2 different input interfaces (veth pairs)
-- `test_dynamic_spawn_for_new_interface` - Tests dynamic worker spawn when adding rule for new interface
+#### 3. PIM Route to MRIB Integration
 
-### CLI Missing Features
+**Source:** PROTOCOL_IMPLEMENTATION_GAP_ANALYSIS
+**Impact:** PIM routes never become forwarding rules
 
-The `--name` option for `mcrctl add` is not yet implemented (TODO in `src/control_client.rs:178`). Rules can have names via JSON5 config but not via CLI.
+- `process_join_prune()` results discarded (no MRIB actions generated)
+- (*,G) and (S,G) routes exist in PIM state but not in MRIB
+- `upstream_interface` never set in route state
+
+### HIGH Priority
+
+#### 4. Network State Reconciliation
+
+**Source:** Original IMPROVEMENT_PLAN
+**Impact:** Resilience to network changes
+
+- Detect when interfaces go down or change IP
+- Use `rtnetlink` crate in supervisor to monitor network events
+- Gracefully handle interface flaps
+
+### MEDIUM Priority
+
+#### 5. Audit unwrap()/expect() Usage
+
+**Source:** REFACTORING_PLAN
+**Impact:** Production stability
+
+| File | Count |
+|------|-------|
+| protocols/msdp.rs | 96 |
+| protocols/pim.rs | 80 |
+| control_client.rs | 80 |
+| supervisor/mod.rs | ~70 |
+| supervisor/command_handler.rs | ~16 |
+
+Focus on packet parsing paths where malformed data could cause panics.
+
+#### 6. Add Protocol Integration Tests
+
+**Source:** MSDP_IMPLEMENTATION Phase 5, PROTOCOL_IMPLEMENTATION_GAP_ANALYSIS
+**Impact:** Test coverage
+
+No integration tests exist for control plane protocols. Missing:
+
+**MSDP:**
+
+- Peer connection establishment (active/passive)
+- Keepalive exchange
+- SA message exchange
+- Mesh group flood suppression
+
+**PIM:**
+
+- Hello exchange between routers
+- Neighbor discovery and DR election
+- Join/Prune message processing
+
+**IGMP:**
+
+- Querier election
+- Membership report handling
+
+**End-to-End:**
+
+- IGMP join → PIM Join → RP → MSDP SA flow
+
+#### 7. Implement Lazy Socket Creation
+
+**Source:** REFACTORING_PLAN, supervisor.rs TODO
+**Impact:** Scalability on multi-interface systems
+
+Workers currently create all AF_PACKET sockets upfront. Implement lazy creation triggered by rule additions.
+
+#### 8. Consolidate Config Validation
+
+**Source:** REFACTORING_PLAN
+**Impact:** Code quality
+
+Create `src/validation.rs` with reusable validators instead of 7 separate validation functions.
+
+#### 9. Reorganize Worker Module
+
+**Source:** REFACTORING_PLAN
+**Impact:** Code organization
+
+Split `unified_loop.rs` (1,273 lines) and `packet_parser.rs` (1,404 lines) into focused submodules.
+
+### LOW Priority
+
+#### 10. Add require_mcrd_caps! Macro
+
+**Source:** CAPABILITIES_AND_PACKAGING Phase 4.2
+**Impact:** Test convenience
+
+Create test macro that checks for root OR required capabilities (not just root).
+
+#### 11. Add Capability Section to OPERATIONAL_GUIDE.md
+
+**Source:** CAPABILITIES_AND_PACKAGING Phase 1.2
+**Impact:** Documentation completeness
+
+Document capability-based deployment as recommended production approach.
+
+#### 11. Dynamic Worker Idle Cleanup
+
+**Source:** Original IMPROVEMENT_PLAN
+**Impact:** Resource efficiency
+
+Shut down workers with 0 rules after configurable idle timeout.
+
+#### 12. Jumbo Frame Support
+
+**Source:** Original IMPROVEMENT_PLAN
+**Impact:** Feature completeness
+
+Add 9KB buffer slab to BufferPool for jumbo frame support.
+
+#### 13. On-Demand Packet Tracing
+
+**Source:** Original IMPROVEMENT_PLAN
+**Impact:** Debugging capability
+
+Add `TraceRule` command to log sampled packets for debugging.
+
+#### 14. Consolidate Display Implementations
+
+**Source:** REFACTORING_PLAN
+**Impact:** Code quality
+
+10 repetitive Display implementations could use `strum` crate or string constants.
+
+#### 15. Create Shared Test Fixtures
+
+**Source:** REFACTORING_PLAN
+**Impact:** Test maintainability
+
+Extract common test helpers to `tests/common/` module.
+
+#### 16. Standardize API Naming
+
+**Source:** REFACTORING_PLAN
+**Impact:** Consistency
+
+Establish and enforce naming conventions (e.g., `group_address` vs `group` vs `group_addr`).
 
 ---
 
-## LOW Priority
+## Documentation Gaps
 
-### On-Demand Packet Tracing
+### Undocumented Features
 
-EnableTrace/DisableTrace/GetTrace commands for per-rule debugging.
+- `mcrctl config load <file> --replace` - Not in REFERENCE.md
+- `pinning` JSON object - No formal definition
 
-### Troubleshooting Guide
+### Missing Troubleshooting
 
-Create `user_docs/TROUBLESHOOTING.md` with common errors, permission issues, buffer exhaustion symptoms, performance tuning.
+- MSDP-specific troubleshooting guide
 
-### Benchmark Implementations
+---
 
-Location: `tests/benchmarks/forwarding_rate.rs` (skeleton with TODOs)
+## Plan Document Status
+
+All development plans have been consolidated into this document. Original plans are archived for reference.
+
+| Plan | Status | Location |
+|------|--------|----------|
+| CONTROL_PLANE_INTEGRATION | **Archived** (93%) | plans/archive/ |
+| MSDP_IMPLEMENTATION | **Archived** (95%) | plans/archive/ |
+| MULTI_INTERFACE_DESIGN | **Archived** (97%) | plans/archive/ |
+| CAPABILITIES_AND_PACKAGING | **Archived** (89%) | plans/archive/ |
+| REFACTORING_PLAN | **Archived** (100% HIGH) | plans/archive/ |
 
 ---
 
 ## Roadmap
 
-**Near-term:** Network reconciliation, Drift recovery
+### Phase 1: Infrastructure ✓ COMPLETE
 
-**Long-term:** Packet tracing, Benchmarks
+1. ✓ Add CLI --name options
+2. ✓ Split supervisor.rs into submodules
+3. ✓ Decouple protocols from MRIB
+4. ✓ Fix MSDP connection timer scheduling
 
----
+### Phase 2: Protocol I/O (CRITICAL)
 
-## Completed (December 2025)
+1. Add outgoing packet infrastructure to supervisor
+2. Wire up PIM Hello packet transmission
+3. Wire up IGMP Query packet transmission
+4. Fix PIM route → MRIB integration
+5. Add protocol integration tests
 
-- **Multi-Interface Architecture (Complete)**:
-  - JSON5 config file support (`--config`)
-  - Interfaces derived from rules in config
-  - Workers spawned per interface at startup
-  - Per-interface fanout_group_id assignment
-  - Dynamic worker spawning for runtime AddRule
-  - `mcrctl config show/load/check/save` commands
-  - Startup config path tracking for `mcrctl save` without args
-  - Pinning configuration applied from config (workers spawn on specified cores)
-  - Rule naming: `name` field in ForwardingRule, `RemoveRuleByName` implemented
-- **Binary renaming**: `multicast_relay` → `mcrd`, `control_client` → `mcrctl`, `traffic_generator` → `mcrgen`
-- **Hash-based rule IDs**: Computed from input tuple (interface, group, port) for stability across reloads
-- **AF_PACKET FD Passing & Privilege Separation**: Workers drop to nobody:nobody (uid=65534)
-- Test cleanup: Removed 26 redundant/broken test files
-- Documentation consolidation
-- Control plane worker removal
-- Dead code cleanup (`ipc.rs`, `data_plane.rs`, `stats.rs`)
-- Flaky `log_level_control` test fix
-- **REJECTED:** PACKET_MMAP / Zero-Copy Ingress (ADR 001)
-- Data Plane Fan-Out (`Arc<[u8]>` zero-copy)
-- Protocol versioning (`GetVersion` command)
+### Phase 3: Code Quality
 
-## Completed (November 2025)
+1. Audit critical unwrap() calls
+2. Network state reconciliation
+3. Reorganize worker module
 
-- Legacy two-thread data plane removal (1,814 lines deleted)
-- Real-time statistics collection (pipe-based IPC)
-- Hash-based drift detection (Phase 1)
-- RemoveRule implementation
-- SyncRules on worker startup
-- Periodic health checks (250ms with auto-restart)
+### Phase 4: Features & Polish
+
+1. Lazy socket creation
+2. Consolidate config validation
+3. Documentation updates
+
+### Phase 5: Nice-to-Have (ongoing)
+
+1. Jumbo frame support
+2. Packet tracing
+3. Test infrastructure improvements
+4. API naming standardization

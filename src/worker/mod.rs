@@ -313,7 +313,9 @@ mod tests {
             input_interface: "eth0".to_string(),
             input_group: "224.0.0.1".parse().unwrap(),
             input_port: 5000,
+            input_source: None,
             outputs: vec![],
+            source: crate::RuleSource::Static,
         });
 
         sender.send(command.clone()).await.unwrap();

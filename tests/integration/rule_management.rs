@@ -5,7 +5,7 @@
 //! from the control client to the data plane workers.
 
 use anyhow::{Context, Result};
-use multicast_relay::ForwardingRule;
+use multicast_relay::{ForwardingRule, RuleSource};
 use std::env;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -44,7 +44,9 @@ async fn test_add_and_remove_rule_e2e() -> Result<()> {
         input_interface: "lo".to_string(),
         input_group: "239.1.1.1".parse()?,
         input_port: 5001,
+        input_source: None,
         outputs: vec![],
+        source: RuleSource::Static,
     };
     client.add_rule(rule.clone()).await?;
 
@@ -103,8 +105,10 @@ async fn test_get_stats_e2e() -> Result<()> {
         .await?;
 
     // 3. Start the supervisor using unified McrInstance
+    // Use short stats interval (100ms) so stats are reported quickly after traffic
     let mcr = McrInstance::builder()
         .num_workers(2)
+        .env("MCR_STATS_INTERVAL_MS", "100")
         .start_async()
         .await
         .context("Failed to start supervisor")?;
@@ -130,18 +134,20 @@ async fn test_get_stats_e2e() -> Result<()> {
         input_interface: "lo".to_string(),
         input_group: "239.1.1.1".parse()?,
         input_port: 5002,
+        input_source: None,
         outputs: vec![multicast_relay::OutputDestination {
             group: "239.2.2.2".parse()?,
             port: 6002,
             interface: veth_a.clone(), // Different from input interface to pass validation
         }],
+        source: RuleSource::Static,
     };
     client.add_rule(rule.clone()).await?;
 
     // Give a moment for the command to propagate
     sleep(Duration::from_millis(300)).await;
 
-    // 6. SEND TRAFFIC: Send 15,000 packets to trigger stats reporting (threshold is 10,000)
+    // 6. SEND TRAFFIC: Send 15,000 packets (stats reported every 100ms via MCR_STATS_INTERVAL_MS)
     // Build path to mcrgen binary
     let mut traffic_gen_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     traffic_gen_path.push("target");
@@ -259,7 +265,9 @@ async fn test_max_workers_spawning() -> Result<()> {
         input_interface: "lo".to_string(),
         input_group: "239.1.1.1".parse()?,
         input_port: 5555,
+        input_source: None,
         outputs: vec![],
+        source: RuleSource::Static,
     };
 
     client.add_rule(rule.clone()).await?;
@@ -335,7 +343,9 @@ async fn test_rule_removal_during_traffic() -> Result<()> {
         input_interface: "lo".to_string(),
         input_group: "239.1.1.1".parse()?,
         input_port: 5001,
+        input_source: None,
         outputs: vec![],
+        source: RuleSource::Static,
     };
     client.add_rule(rule).await?;
 
@@ -397,7 +407,9 @@ async fn test_rule_removal_during_traffic() -> Result<()> {
         input_interface: "lo".to_string(),
         input_group: "239.2.2.2".parse()?,
         input_port: 5002,
+        input_source: None,
         outputs: vec![],
+        source: RuleSource::Static,
     };
     client.add_rule(new_rule).await?;
 
@@ -440,7 +452,9 @@ async fn test_concurrent_rule_modifications() -> Result<()> {
                 input_interface: "lo".to_string(),
                 input_group: format!("239.1.1.{}", i + 1).parse().unwrap(),
                 input_port: 5000 + i as u16,
+                input_source: None,
                 outputs: vec![],
+                source: RuleSource::Static,
             };
             client.add_rule(rule).await
         });
