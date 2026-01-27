@@ -143,6 +143,11 @@ This document tracks technical debt, refactoring opportunities, and optimization
 
 **Impact:** Maintenance burden
 
+- [x] **L1.0** Remove dead adaptive_wakeup module ✓ COMPLETED (Jan 2025)
+  - Deleted `src/worker/adaptive_wakeup.rs` (435 lines)
+  - Orphaned code from legacy two-thread data plane (ingress.rs/egress.rs removed Nov 2025)
+  - Current unified_loop.rs uses io_uring submit_and_wait() directly
+
 - [ ] **L1.1** Evaluate unused socket helper functions
   - File: `src/supervisor/socket_helpers.rs`
   - `set_bind_to_device()` - line 514-539
@@ -230,13 +235,14 @@ This document tracks technical debt, refactoring opportunities, and optimization
 1. **Validation module** - Centralized address/interface/port validation
 2. **ProtocolState extraction** - Reduced supervisor/mod.rs from 6,798 to 3,037 lines
 3. **Socket wrappers** - Eliminated ~210 lines of unsafe code duplication
-4. **Eventfd wrapper** - Simplified test code in adaptive_wakeup.rs
+4. **Eventfd wrapper** - Simplified eventfd creation in socket_helpers.rs
 5. **Multicast wrappers** - Consolidated IP_MULTICAST_IF/TTL handling
 6. **Bounded collections (H1)** - Memory-safe limits with eviction for rules, flows, sockets
 7. **Socket_helpers tests (H2)** - 37 new tests (22 passing, 11 ignored requiring CAP_NET_RAW)
 8. **Interface cache (H3)** - O(1) lookups via InterfaceCache with 30s TTL
 9. **Error handling helpers (M1)** - `check_libc_result()` eliminated ~50 lines duplication
 10. **Interface capability helper (M2)** - `extract_interface_capability()` reduced ~20 lines
+11. **Dead code removal (L1.0)** - Deleted adaptive_wakeup.rs (435 lines of orphaned code)
 
 ### Guidelines for Future Work
 
