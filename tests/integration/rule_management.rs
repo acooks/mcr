@@ -105,8 +105,10 @@ async fn test_get_stats_e2e() -> Result<()> {
         .await?;
 
     // 3. Start the supervisor using unified McrInstance
+    // Use short stats interval (100ms) so stats are reported quickly after traffic
     let mcr = McrInstance::builder()
         .num_workers(2)
+        .env("MCR_STATS_INTERVAL_MS", "100")
         .start_async()
         .await
         .context("Failed to start supervisor")?;
@@ -145,7 +147,7 @@ async fn test_get_stats_e2e() -> Result<()> {
     // Give a moment for the command to propagate
     sleep(Duration::from_millis(300)).await;
 
-    // 6. SEND TRAFFIC: Send 15,000 packets to trigger stats reporting (threshold is 10,000)
+    // 6. SEND TRAFFIC: Send 15,000 packets (stats reported every 100ms via MCR_STATS_INTERVAL_MS)
     // Build path to mcrgen binary
     let mut traffic_gen_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     traffic_gen_path.push("target");

@@ -100,6 +100,10 @@ test-integration: build-release
     #!/usr/bin/env bash
     set -euo pipefail
     echo "--- Running integration tests ---"
+
+    # Use short stats interval for faster test execution
+    export MCR_STATS_INTERVAL_MS=100
+
     cargo test --test integration --no-run --release 2>/dev/null
 
     TEST_BINARY=$(find target/release/deps -name 'integration-*' -type f -executable ! -name '*.d' | head -1)
@@ -115,6 +119,10 @@ test-topologies: build-release
     #!/usr/bin/env bash
     set -euo pipefail
     echo "--- Running topology tests ---"
+
+    # Use short stats interval for faster test execution
+    export MCR_STATS_INTERVAL_MS=100
+
     for test in tests/topologies/*.sh; do
         [ "$(basename "$test")" = "common.sh" ] && continue
         echo ""
@@ -127,13 +135,14 @@ test-topologies: build-release
 # Run a specific topology test
 test-topology NAME: build-release
     @echo "--- Running {{NAME}} topology test ---"
-    @sudo -E tests/topologies/{{NAME}}.sh
+    @MCR_STATS_INTERVAL_MS=100 sudo -E tests/topologies/{{NAME}}.sh
 
 # Run PIM protocol tests
 test-topology-pim: build-release
     #!/usr/bin/env bash
     set -euo pipefail
     echo "--- Running PIM protocol tests ---"
+    export MCR_STATS_INTERVAL_MS=100
     for test in pim_neighbor pim_join; do
         echo ""
         echo "=== Running $test.sh ==="
@@ -147,6 +156,7 @@ test-topology-msdp: build-release
     #!/usr/bin/env bash
     set -euo pipefail
     echo "--- Running MSDP protocol tests ---"
+    export MCR_STATS_INTERVAL_MS=100
     for test in msdp_peer msdp_sa; do
         echo ""
         echo "=== Running $test.sh ==="
@@ -160,6 +170,7 @@ test-topology-protocol: build-release
     #!/usr/bin/env bash
     set -euo pipefail
     echo "--- Running protocol integration tests ---"
+    export MCR_STATS_INTERVAL_MS=100
     for test in pim_neighbor msdp_peer pim_join msdp_sa protocol_e2e; do
         echo ""
         echo "=== Running $test.sh ==="
@@ -184,6 +195,10 @@ coverage:
     set -euo pipefail
     echo "=== Generating Coverage Report ==="
     echo ""
+
+    # Use short stats interval for faster test execution
+    # (default 10s is too slow for tests that validate stats reporting)
+    export MCR_STATS_INTERVAL_MS=100
 
     # Fix permission issues from previous runs
     sudo chown -R "$(whoami):$(whoami)" target/ 2>/dev/null || true
