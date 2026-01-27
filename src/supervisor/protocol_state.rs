@@ -29,9 +29,6 @@ use super::{
     EventSubscriptionManager,
 };
 
-#[allow(dead_code)]
-const ALL_PIM_ROUTERS: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 13);
-
 /// Get current Unix timestamp in seconds
 pub(super) fn unix_timestamp() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};

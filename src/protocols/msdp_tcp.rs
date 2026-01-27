@@ -568,48 +568,6 @@ pub async fn process_reader_messages(
     }
 }
 
-/// Process messages from an MSDP connection (legacy, uses Arc<Mutex>)
-///
-/// This function reads messages from a connection and sends events to the state machine.
-#[allow(dead_code)]
-pub async fn process_connection_messages(
-    conn: Arc<Mutex<MsdpConnection>>,
-    event_tx: mpsc::Sender<ProtocolEvent>,
-) -> io::Result<()> {
-    let peer_addr = {
-        let conn = conn.lock().await;
-        conn.peer_addr
-    };
-
-    loop {
-        let messages = {
-            let mut conn = conn.lock().await;
-            match conn.read_messages().await {
-                Ok(msgs) => msgs,
-                Err(e) => {
-                    return Err(e);
-                }
-            }
-        };
-
-        for (msg_type, payload) in messages {
-            let event = ProtocolEvent::Msdp(super::msdp::MsdpEvent::MessageReceived {
-                peer: peer_addr,
-                msg_type,
-                payload,
-            });
-
-            if event_tx.send(event).await.is_err() {
-                // Event channel closed
-                return Err(io::Error::new(
-                    io::ErrorKind::BrokenPipe,
-                    "event channel closed",
-                ));
-            }
-        }
-    }
-}
-
 /// Commands that can be sent to the MSDP TCP runner
 #[derive(Debug)]
 pub enum MsdpTcpCommand {

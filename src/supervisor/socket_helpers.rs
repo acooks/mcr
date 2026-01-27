@@ -713,42 +713,6 @@ pub fn join_multicast_group(
     check_libc_result(result, &format!("join multicast group {}", group))
 }
 
-/// Bind socket to a specific network device
-#[allow(dead_code)]
-pub fn set_bind_to_device(fd: RawFd, interface: &str) -> Result<()> {
-    use std::ffi::CString;
-
-    let iface_cstr = CString::new(interface)
-        .map_err(|_| anyhow::anyhow!("Invalid interface name: {}", interface))?;
-
-    let result = unsafe {
-        libc::setsockopt(
-            fd,
-            libc::SOL_SOCKET,
-            libc::SO_BINDTODEVICE,
-            iface_cstr.as_ptr() as *const libc::c_void,
-            iface_cstr.as_bytes_with_nul().len() as libc::socklen_t,
-        )
-    };
-    check_libc_result(result, &format!("bind to device {}", interface))
-}
-
-/// Set TCP_NODELAY on a TCP socket
-#[allow(dead_code)]
-pub fn set_tcp_nodelay(fd: RawFd) -> Result<()> {
-    let enabled: libc::c_int = 1;
-    let result = unsafe {
-        libc::setsockopt(
-            fd,
-            libc::IPPROTO_TCP,
-            libc::TCP_NODELAY,
-            &enabled as *const _ as *const libc::c_void,
-            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-        )
-    };
-    check_libc_result(result, "set TCP_NODELAY")
-}
-
 /// Set receive buffer size on a socket
 ///
 /// Returns the actual buffer size set by the kernel (may be different from requested).

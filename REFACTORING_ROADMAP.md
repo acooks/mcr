@@ -148,26 +148,21 @@ This document tracks technical debt, refactoring opportunities, and optimization
   - Orphaned code from legacy two-thread data plane (ingress.rs/egress.rs removed Nov 2025)
   - Current unified_loop.rs uses io_uring submit_and_wait() directly
 
-- [ ] **L1.1** Evaluate unused socket helper functions
-  - File: `src/supervisor/socket_helpers.rs`
-  - `set_bind_to_device()` - line 514-539
-  - `set_tcp_nodelay()` - line 543-562
-  - `get_multicast_capable_interfaces()` - line 242
-  - Decision: Remove or document intended use
+- [x] **L1.1** Remove unused socket helper functions ✓ COMPLETED (Jan 2025)
+  - Removed `set_bind_to_device()` and `set_tcp_nodelay()` (~35 lines)
+  - Kept `get_multicast_capable_interfaces()` - used in tests, useful public API
 
-- [ ] **L1.2** Evaluate unused constants
-  - File: `src/supervisor/protocol_state.rs`
-  - `ALL_PIM_ROUTERS` constant - line 32
-  - Decision: Use in multicast joins or remove
+- [x] **L1.2** Remove duplicate constant ✓ COMPLETED (Jan 2025)
+  - Removed duplicate `ALL_PIM_ROUTERS` from protocol_state.rs
+  - All usages already import from `crate::protocols::pim`
 
-- [ ] **L1.3** Evaluate unused diagnostic field
-  - File: `src/worker/unified_loop.rs:154-155`
-  - `interface_name` field marked dead
-  - Decision: Implement diagnostics or remove
+- [x] **L1.3** Evaluate unused diagnostic field ✓ REVIEWED (Jan 2025)
+  - `interface_name` field in unified_loop.rs - KEPT
+  - Intentionally reserved for future diagnostic/logging use (documented)
 
-- [ ] **L1.4** Evaluate unused msdp_tcp function
-  - File: `src/protocols/msdp_tcp.rs:574`
-  - Decision: Remove or document intended use
+- [x] **L1.4** Remove legacy msdp_tcp function ✓ COMPLETED (Jan 2025)
+  - Removed `process_connection_messages()` (~40 lines)
+  - Replaced by `process_reader_messages()` which is actively used
 
 ### L2: String Allocation Optimization
 
@@ -215,7 +210,7 @@ This document tracks technical debt, refactoring opportunities, and optimization
 | Unsafe blocks | ~75 | <50 | Pending |
 | Test coverage (socket_helpers) | 37 tests | >80% | ✓ Done |
 | Duplicate error patterns | 5 | 0 | ✓ Reduced (was 14) |
-| Dead code functions | 4 | 0 | Pending |
+| Dead code functions | 0 | 0 | ✓ Done |
 
 ### Performance Targets
 
@@ -243,6 +238,7 @@ This document tracks technical debt, refactoring opportunities, and optimization
 9. **Error handling helpers (M1)** - `check_libc_result()` eliminated ~50 lines duplication
 10. **Interface capability helper (M2)** - `extract_interface_capability()` reduced ~20 lines
 11. **Dead code removal (L1.0)** - Deleted adaptive_wakeup.rs (435 lines of orphaned code)
+12. **Dead code removal (L1.1-L1.4)** - Removed unused socket helpers, duplicate constant, legacy function (~80 lines)
 
 ### Guidelines for Future Work
 
