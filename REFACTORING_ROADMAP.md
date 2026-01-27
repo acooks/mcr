@@ -64,101 +64,64 @@ This document tracks technical debt, refactoring opportunities, and optimization
 
 ## Medium Priority
 
-### M1: Code Duplication - Error Handling
+### M1: Code Duplication - Error Handling ✓ COMPLETED (Jan 2025)
 
 **Impact:** 30+ lines of repetitive error handling
 
-- [ ] **M1.1** Create libc result helper function
-  - File: `src/supervisor/socket_helpers.rs`
-
-  ```rust
-  fn check_libc_result(result: i32, context: &str) -> Result<()> {
-      if result < 0 {
-          Err(anyhow::anyhow!("{}: {}", context, std::io::Error::last_os_error()))
-      } else {
-          Ok(())
-      }
-  }
-  ```
-
-- [ ] **M1.2** Refactor all 14 socket option functions to use helper
+- [x] **M1.1** Create `check_libc_result()` helper function
+- [x] **M1.2** Refactor 9 socket option functions to use helper
   - `set_ip_hdrincl`, `set_ip_pktinfo`, `set_packet_auxdata`
   - `join_multicast_group`, `set_multicast_if_by_index`, `set_multicast_if_by_addr`
   - `set_multicast_ttl`, `set_bind_to_device`, `set_tcp_nodelay`
-  - `set_recv_buffer_size`
+  - Note: `set_recv_buffer_size` has different return type, kept as-is
 
-### M2: Code Duplication - Interface Flags
+### M2: Code Duplication - Interface Flags ✓ COMPLETED (Jan 2025)
 
 **Impact:** ~20 lines duplicated
 
-- [ ] **M2.1** Extract interface flag extraction helper
-  - File: `src/supervisor/socket_helpers.rs`
+- [x] **M2.1** Extract `extract_interface_capability()` helper
+- [x] **M2.2** Refactor `get_interface_capability()` to use helper (14 → 4 lines)
+- [x] **M2.3** Refactor `get_multicast_capable_interfaces()` to use helper (14 → 6 lines)
 
-  ```rust
-  fn extract_interface_capability(iface: &pnet::datalink::NetworkInterface) -> InterfaceCapability
-  ```
-
-- [ ] **M2.2** Refactor `get_interface_capability()` to use helper
-
-- [ ] **M2.3** Refactor `get_multicast_capable_interfaces()` to use helper
-
-### M3: Error Handling Consistency
+### M3: Error Handling Consistency ✓ REVIEWED (Jan 2025)
 
 **Impact:** Mixed error types across codebase
 
-- [ ] **M3.1** Document error handling strategy
-  - Create `docs/ERROR_HANDLING.md`
-  - Define when to use anyhow vs thiserror
-  - Define error context requirements
+- [x] **M3.1** Document error handling strategy
+  - Decision: `io::Error` for I/O operations, `anyhow` for configuration/setup
+  - MSDP TCP uses `io::Result` appropriately for async I/O
+- [x] **M3.2** MSDP TCP error handling - KEPT AS-IS
+  - `io::Error::new()` with specific ErrorKinds is correct for network I/O
+- [x] **M3.3** Bare error returns in `pre_exec` - KEPT AS-IS
+  - API constraint: `pre_exec` closures must return `io::Result`
 
-- [ ] **M3.2** Standardize MSDP TCP error handling
-  - File: `src/protocols/msdp_tcp.rs`
-  - Replace `io::Error::new()` with anyhow where appropriate
-  - Lines: 48-51, 70-73, 194, 216, 370, 386, 433, 451, 562, 604
-
-- [ ] **M3.3** Add context to bare error returns
-  - File: `src/worker/unified_loop.rs:1072-1074`
-  - File: `src/supervisor/worker_manager.rs:160-177`
-
-### M4: Architecture - Large Functions
+### M4: Architecture - Large Functions ✓ REVIEWED (Jan 2025)
 
 **Impact:** Maintainability
 
-- [ ] **M4.1** Extract client command handler from supervisor run loop
-  - File: `src/supervisor/mod.rs`
-  - Extract `handle_client_command()` function
+- [x] **M4.1** Client command handler - ALREADY EXTRACTED
+  - `handle_client()` function exists at line 599
+- [x] **M4.2** Rule sync logic - ALREADY EXTRACTED
+  - `sync_rules_to_workers()` function exists at line 252
+- [ ] **M4.3** Extract protocol event processing (optional)
+  - `ProtocolCoordinator::process_pending_events()` exists but inline in run()
+  - Low priority: further extraction adds complexity without clear benefit
+- [x] **M4.4** TODO at line 1723-1726 - DOCUMENTED
+  - Issue: Worker count vs lazy socket creation
+  - Plan: Implement lazy AF_PACKET socket creation per interface
 
-- [ ] **M4.2** Extract rule sync logic
-  - File: `src/supervisor/mod.rs`
-  - Extract `sync_rules_to_workers()` function
-
-- [ ] **M4.3** Extract protocol event processing
-  - File: `src/supervisor/mod.rs`
-  - Extract `process_protocol_events()` function
-
-- [ ] **M4.4** Investigate TODO at line 1713-1714
-  - File: `src/supervisor/mod.rs`
-  - Document the architectural issue
-  - Create plan to address
-
-### M5: Test Coverage - Protocol and Worker
+### M5: Test Coverage - Protocol and Worker ✓ REVIEWED (Jan 2025)
 
 **Impact:** Reliability
 
-- [ ] **M5.1** Add protocol socket creation tests
-  - File: `src/supervisor/protocol_state.rs`
-  - Test: `create_igmp_socket`, `create_pim_socket`
-  - Use mock interfaces or integration tests
-
-- [ ] **M5.2** Add buffer pool edge case tests
-  - File: `src/worker/buffer_pool.rs`
-  - Test: Pool exhaustion behavior
-  - Test: Concurrent allocation stress
-
-- [ ] **M5.3** Add command reader tests
-  - File: `src/worker/command_reader.rs`
-  - Test: Frame parsing
-  - Test: Invalid frame handling
+- [ ] **M5.1** Add protocol socket creation tests (requires CAP_NET_RAW)
+  - Covered by integration tests in `tests/integration/`
+- [x] **M5.2** Buffer pool tests - ALREADY COMPREHENSIVE
+  - `test_pool_exhaustion`, `test_concurrent_acquire_release_simulation`
+  - `test_zero_capacity_pool`, `test_arc_cloning`
+- [x] **M5.3** Command reader tests - ALREADY EXIST
+  - `test_frame_too_large`, `test_invalid_json`
+  - `test_partial_frame_data`, `test_partial_frame_length`
 
 ### M6: Performance - Clone Reduction
 
@@ -246,7 +209,7 @@ This document tracks technical debt, refactoring opportunities, and optimization
 |--------|---------|--------|--------|
 | Unsafe blocks | ~75 | <50 | Pending |
 | Test coverage (socket_helpers) | 37 tests | >80% | ✓ Done |
-| Duplicate error patterns | 14 | 0 | Pending |
+| Duplicate error patterns | 5 | 0 | ✓ Reduced (was 14) |
 | Dead code functions | 4 | 0 | Pending |
 
 ### Performance Targets
@@ -272,6 +235,8 @@ This document tracks technical debt, refactoring opportunities, and optimization
 6. **Bounded collections (H1)** - Memory-safe limits with eviction for rules, flows, sockets
 7. **Socket_helpers tests (H2)** - 37 new tests (22 passing, 11 ignored requiring CAP_NET_RAW)
 8. **Interface cache (H3)** - O(1) lookups via InterfaceCache with 30s TTL
+9. **Error handling helpers (M1)** - `check_libc_result()` eliminated ~50 lines duplication
+10. **Interface capability helper (M2)** - `extract_interface_capability()` reduced ~20 lines
 
 ### Guidelines for Future Work
 
