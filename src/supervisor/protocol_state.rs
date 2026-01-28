@@ -3690,3 +3690,207 @@ fn find_interface_by_ip(ip: Ipv4Addr) -> Option<String> {
 
     subnet_match
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::logging::{MPSCRingBuffer, Severity};
+    use crate::protocols::igmp::IgmpConfig;
+    use crate::protocols::pim::{PimInterfaceConfig, StarGState};
+    use std::sync::atomic::AtomicU8;
+    use std::sync::{Arc, RwLock};
+
+    fn create_test_logger() -> Logger {
+        let ringbuffer = Arc::new(MPSCRingBuffer::new(16));
+        let global_min_level = Arc::new(AtomicU8::new(Severity::Info as u8));
+        let facility_min_levels = Arc::new(RwLock::new(std::collections::HashMap::new()));
+        Logger::from_mpsc(ringbuffer, global_min_level, facility_min_levels)
+    }
+
+    fn create_test_state() -> ProtocolState {
+        let logger = create_test_logger();
+        ProtocolState::new(logger)
+    }
+
+    #[test]
+    fn test_handle_igmp_general_query_timer_no_interface() {
+        let mut state = create_test_state();
+        let now = Instant::now();
+        let mut result = ProtocolHandlerResult::new();
+
+        // No IGMP interface configured - should do nothing
+        state.handle_igmp_general_query_timer("eth0", now, &mut result);
+
+        assert!(result.mrib_actions.is_empty());
+        assert!(result.packets.is_empty());
+        assert!(result.timers.is_empty());
+    }
+
+    #[test]
+    fn test_handle_igmp_general_query_timer_not_querier() {
+        let mut state = create_test_state();
+        let now = Instant::now();
+        let mut result = ProtocolHandlerResult::new();
+
+        // Add IGMP interface but as non-querier
+        let config = IgmpConfig::default();
+        let mut igmp_state =
+            InterfaceIgmpState::new("eth0".to_string(), Ipv4Addr::new(10, 0, 0, 1), config);
+        igmp_state.is_querier = false;
+        state.igmp_state.insert("eth0".to_string(), igmp_state);
+
+        state.handle_igmp_general_query_timer("eth0", now, &mut result);
+
+        // Non-querier: should not send packet AND should not reschedule timer
+        // (no point scheduling queries if we're not the querier)
+        assert!(result.packets.is_empty());
+        assert!(result.timers.is_empty());
+    }
+
+    #[test]
+    fn test_handle_igmp_general_query_timer_as_querier() {
+        let mut state = create_test_state();
+        let now = Instant::now();
+        let mut result = ProtocolHandlerResult::new();
+
+        // Add IGMP interface as querier
+        let config = IgmpConfig::default();
+        let mut igmp_state =
+            InterfaceIgmpState::new("eth0".to_string(), Ipv4Addr::new(10, 0, 0, 1), config);
+        igmp_state.is_querier = true;
+        state.igmp_state.insert("eth0".to_string(), igmp_state);
+
+        state.handle_igmp_general_query_timer("eth0", now, &mut result);
+
+        // Should schedule next timer AND send query packet
+        assert_eq!(result.packets.len(), 1);
+        assert_eq!(result.packets[0].protocol, ProtocolType::Igmp);
+        assert_eq!(result.packets[0].destination, Ipv4Addr::new(224, 0, 0, 1)); // ALL_HOSTS
+        assert!(!result.timers.is_empty()); // Timer rescheduled
+    }
+
+    #[test]
+    fn test_handle_pim_hello_timer_no_interface() {
+        let mut state = create_test_state();
+        let now = Instant::now();
+        let mut result = ProtocolHandlerResult::new();
+
+        // No PIM interface configured - should do nothing
+        state.handle_pim_hello_timer("eth0", now, &mut result);
+
+        assert!(result.mrib_actions.is_empty());
+        assert!(result.packets.is_empty());
+        assert!(result.timers.is_empty());
+    }
+
+    #[test]
+    fn test_handle_pim_hello_timer_with_interface() {
+        let mut state = create_test_state();
+        let now = Instant::now();
+        let mut result = ProtocolHandlerResult::new();
+
+        // Enable PIM on interface
+        let config = PimInterfaceConfig::default();
+        let _timers = state
+            .pim_state
+            .enable_interface("eth0", Ipv4Addr::new(10, 0, 0, 1), config);
+
+        state.handle_pim_hello_timer("eth0", now, &mut result);
+
+        // Should schedule next timer AND send Hello packet
+        assert_eq!(result.packets.len(), 1);
+        assert_eq!(result.packets[0].protocol, ProtocolType::Pim);
+        assert_eq!(result.packets[0].destination, Ipv4Addr::new(224, 0, 0, 13)); // ALL_PIM_ROUTERS
+        assert!(!result.timers.is_empty()); // Timer rescheduled
+    }
+
+    #[test]
+    fn test_handle_pim_join_prune_timer_no_route() {
+        let mut state = create_test_state();
+        let now = Instant::now();
+        let mut result = ProtocolHandlerResult::new();
+
+        // No (*,G) route - should do nothing
+        let group = Ipv4Addr::new(239, 1, 1, 1);
+        state.handle_pim_join_prune_timer("eth0", group, now, &mut result);
+
+        assert!(result.mrib_actions.is_empty());
+        assert!(result.packets.is_empty());
+        assert!(result.timers.is_empty());
+    }
+
+    #[test]
+    fn test_handle_pim_join_prune_timer_no_downstream() {
+        let mut state = create_test_state();
+        let now = Instant::now();
+        let mut result = ProtocolHandlerResult::new();
+
+        // Add (*,G) route without downstream - should not send refresh
+        let group = Ipv4Addr::new(239, 1, 1, 1);
+        let rp = Ipv4Addr::new(10, 0, 0, 1);
+        state.pim_state.star_g.insert(
+            group,
+            StarGState {
+                group,
+                rp,
+                upstream_interface: Some("eth0".to_string()),
+                downstream_interfaces: std::collections::HashSet::new(), // Empty downstream
+                created_at: Instant::now(),
+                expires_at: Some(Instant::now() + Duration::from_secs(180)),
+            },
+        );
+
+        state.handle_pim_join_prune_timer("eth0", group, now, &mut result);
+
+        // No downstream interest - should not send packet
+        assert!(result.packets.is_empty());
+        assert!(result.timers.is_empty());
+    }
+
+    #[test]
+    fn test_handle_msdp_connect_retry_timer_no_peer() {
+        let mut state = create_test_state();
+        let now = Instant::now();
+        let mut result = ProtocolHandlerResult::new();
+
+        // No peer configured - should still reschedule timer
+        let peer = Ipv4Addr::new(10, 0, 0, 2);
+        state.handle_msdp_connect_retry_timer(peer, now, &mut result);
+
+        // Should reschedule connect retry timer
+        assert_eq!(result.timers.len(), 1);
+        match &result.timers[0].timer_type {
+            TimerType::MsdpConnectRetry { peer: p } => assert_eq!(*p, peer),
+            _ => panic!("Wrong timer type"),
+        }
+    }
+
+    #[test]
+    fn test_handle_msdp_keepalive_timer_no_peer() {
+        let mut state = create_test_state();
+        let now = Instant::now();
+        let mut result = ProtocolHandlerResult::new();
+
+        // No peer configured - should do nothing
+        let peer = Ipv4Addr::new(10, 0, 0, 2);
+        state.handle_msdp_keepalive_timer(peer, now, &mut result);
+
+        // No peer - no timers scheduled
+        assert!(result.timers.is_empty());
+    }
+
+    #[test]
+    fn test_handle_msdp_hold_timer_no_peer() {
+        let mut state = create_test_state();
+        let now = Instant::now();
+        let mut result = ProtocolHandlerResult::new();
+
+        // No peer configured - should do nothing
+        let peer = Ipv4Addr::new(10, 0, 0, 2);
+        state.handle_msdp_hold_timer(peer, now, &mut result);
+
+        // No peer - no action
+        assert!(result.mrib_actions.is_empty());
+        assert!(result.timers.is_empty());
+    }
+}
