@@ -438,18 +438,8 @@ impl ProtocolState {
                                                 Some(now + Duration::from_secs(210)); // Default PIM holdtime
 
                                             // Add route to MRIB
-                                            let route = crate::mroute::StarGRoute {
-                                                group,
-                                                rp,
-                                                upstream_interface: star_g_state
-                                                    .upstream_interface
-                                                    .clone(),
-                                                downstream_interfaces: star_g_state
-                                                    .downstream_interfaces
-                                                    .clone(),
-                                                created_at: star_g_state.created_at,
-                                                expires_at: star_g_state.expires_at,
-                                            };
+                                            let route =
+                                                crate::mroute::StarGRoute::from(&star_g_state);
                                             result.add_action(MribAction::AddStarGRoute(route));
 
                                             // Store in PIM state
@@ -546,19 +536,26 @@ impl ProtocolState {
                                                     .downstream_interfaces
                                                     .insert(interface.clone());
                                                 // Update MRIB with new downstream
-                                                let route = crate::mroute::StarGRoute {
-                                                    group,
-                                                    rp: star_g_state.rp,
-                                                    upstream_interface: star_g_state
-                                                        .upstream_interface
-                                                        .clone(),
-                                                    downstream_interfaces: star_g_state
-                                                        .downstream_interfaces
-                                                        .clone(),
-                                                    created_at: star_g_state.created_at,
-                                                    expires_at: star_g_state.expires_at,
-                                                };
+                                                let route = crate::mroute::StarGRoute::from(
+                                                    star_g_state as &_,
+                                                );
                                                 result.add_action(MribAction::AddStarGRoute(route));
+
+                                                // H4.1 fix: Ensure Join/Prune refresh timer is active
+                                                // when adding downstream to existing route
+                                                if let Some(ref upstream_iface) =
+                                                    star_g_state.upstream_interface
+                                                {
+                                                    result.add_timers(vec![TimerRequest {
+                                                        timer_type: TimerType::PimJoinPrune {
+                                                            interface: upstream_iface.clone(),
+                                                            group,
+                                                        },
+                                                        fire_at: now
+                                                            + crate::protocols::pim::DEFAULT_JOIN_PRUNE_PERIOD,
+                                                        replace_existing: true,
+                                                    }]);
+                                                }
                                             }
                                         }
                                     }
@@ -643,16 +640,7 @@ impl ProtocolState {
                                     star_g_state.expires_at = Some(now + Duration::from_secs(210));
 
                                     // Add route to MRIB
-                                    let route = crate::mroute::StarGRoute {
-                                        group,
-                                        rp,
-                                        upstream_interface: star_g_state.upstream_interface.clone(),
-                                        downstream_interfaces: star_g_state
-                                            .downstream_interfaces
-                                            .clone(),
-                                        created_at: star_g_state.created_at,
-                                        expires_at: star_g_state.expires_at,
-                                    };
+                                    let route = crate::mroute::StarGRoute::from(&star_g_state);
                                     result.add_action(MribAction::AddStarGRoute(route));
 
                                     // Store in PIM state
@@ -730,6 +718,36 @@ impl ProtocolState {
                                                         + crate::protocols::pim::DEFAULT_JOIN_PRUNE_PERIOD,
                                                     replace_existing: true,
                                                 }]);
+                                        }
+                                    }
+                                }
+                            } else if self.pim_enabled {
+                                // H4.2 fix: Route exists - add this interface as downstream
+                                // (mirrors active IGMP path at lines 536-577)
+                                if let Some(star_g_state) = self.pim_state.star_g.get_mut(&group) {
+                                    if !star_g_state.downstream_interfaces.contains(&interface) {
+                                        star_g_state
+                                            .downstream_interfaces
+                                            .insert(interface.clone());
+
+                                        // Update MRIB with new downstream
+                                        let route =
+                                            crate::mroute::StarGRoute::from(star_g_state as &_);
+                                        result.add_action(MribAction::AddStarGRoute(route));
+
+                                        // Ensure Join/Prune refresh timer is active
+                                        if let Some(ref upstream_iface) =
+                                            star_g_state.upstream_interface
+                                        {
+                                            result.add_timers(vec![TimerRequest {
+                                                timer_type: TimerType::PimJoinPrune {
+                                                    interface: upstream_iface.clone(),
+                                                    group,
+                                                },
+                                                fire_at: now
+                                                    + crate::protocols::pim::DEFAULT_JOIN_PRUNE_PERIOD,
+                                                replace_existing: true,
+                                            }]);
                                         }
                                     }
                                 }
@@ -1146,18 +1164,8 @@ impl ProtocolState {
                                             if let Some(star_g_state) =
                                                 self.pim_state.star_g.get(group)
                                             {
-                                                let route = crate::mroute::StarGRoute {
-                                                    group: *group,
-                                                    rp: star_g_state.rp,
-                                                    upstream_interface: star_g_state
-                                                        .upstream_interface
-                                                        .clone(),
-                                                    downstream_interfaces: star_g_state
-                                                        .downstream_interfaces
-                                                        .clone(),
-                                                    created_at: star_g_state.created_at,
-                                                    expires_at: star_g_state.expires_at,
-                                                };
+                                                let route =
+                                                    crate::mroute::StarGRoute::from(star_g_state);
                                                 result.add_action(MribAction::AddStarGRoute(route));
                                                 result.notify(
                                                 crate::ProtocolEventNotification::PimRouteChange {
@@ -1175,19 +1183,7 @@ impl ProtocolState {
                                             if let Some(sg_state) =
                                                 self.pim_state.sg.get(&(*src, *group))
                                             {
-                                                let route = crate::mroute::SGRoute {
-                                                    source: *src,
-                                                    group: *group,
-                                                    upstream_interface: sg_state
-                                                        .upstream_interface
-                                                        .clone(),
-                                                    downstream_interfaces: sg_state
-                                                        .downstream_interfaces
-                                                        .clone(),
-                                                    spt_bit: sg_state.spt_bit,
-                                                    created_at: sg_state.created_at,
-                                                    expires_at: sg_state.expires_at,
-                                                };
+                                                let route = crate::mroute::SGRoute::from(sg_state);
                                                 result.add_action(MribAction::AddSgRoute(route));
                                                 result.notify(
                                                 crate::ProtocolEventNotification::PimRouteChange {
@@ -1989,7 +1985,13 @@ impl ProtocolState {
 
                 // Send connect command to TCP runner
                 if let Some(ref tcp_tx) = self.msdp_tcp_tx {
-                    let _ = tcp_tx.try_send(MsdpTcpCommand::Connect { peer });
+                    if let Err(e) = tcp_tx.try_send(MsdpTcpCommand::Connect { peer }) {
+                        log_warning!(
+                            self.logger,
+                            Facility::Supervisor,
+                            &format!("MSDP: failed to send connect command for {}: {}", peer, e)
+                        );
+                    }
                 } else {
                     // TCP runner not available - log this only once at debug level
                     log_debug!(
@@ -2027,7 +2029,14 @@ impl ProtocolState {
 
                         // Send keepalive command to TCP runner
                         if let Some(ref tcp_tx) = self.msdp_tcp_tx {
-                            let _ = tcp_tx.try_send(MsdpTcpCommand::SendKeepalive { peer });
+                            if let Err(e) = tcp_tx.try_send(MsdpTcpCommand::SendKeepalive { peer })
+                            {
+                                log_warning!(
+                                    self.logger,
+                                    Facility::Supervisor,
+                                    &format!("MSDP: failed to send keepalive for {}: {}", peer, e)
+                                );
+                            }
                         }
 
                         // Update last_sent time
@@ -2062,7 +2071,13 @@ impl ProtocolState {
 
                     // Send disconnect command to TCP runner
                     if let Some(ref tcp_tx) = self.msdp_tcp_tx {
-                        let _ = tcp_tx.try_send(MsdpTcpCommand::Disconnect { peer });
+                        if let Err(e) = tcp_tx.try_send(MsdpTcpCommand::Disconnect { peer }) {
+                            log_warning!(
+                                self.logger,
+                                Facility::Supervisor,
+                                &format!("MSDP: failed to send disconnect for {}: {}", peer, e)
+                            );
+                        }
                     }
 
                     result.add_timers(self.msdp_state.connection_closed(peer, now));
@@ -3580,7 +3595,7 @@ fn parse_pim_packet(
 fn find_interface_by_ip(ip: Ipv4Addr) -> Option<String> {
     let mut subnet_match = None;
 
-    for iface in pnet::datalink::interfaces() {
+    for iface in socket_helpers::get_interfaces() {
         for ip_net in &iface.ips {
             if let std::net::IpAddr::V4(v4) = ip_net.ip() {
                 // If source IP matches interface IP exactly, this is our own

@@ -405,7 +405,7 @@ async fn sync_rules_to_workers(
 
 /// Get IPv4 address for an interface
 pub(super) fn get_interface_ipv4(interface: &str) -> Option<Ipv4Addr> {
-    for iface in pnet::datalink::interfaces() {
+    for iface in socket_helpers::get_interfaces() {
         if iface.name == interface {
             for ip_net in iface.ips {
                 if let std::net::IpAddr::V4(ip) = ip_net.ip() {
@@ -445,7 +445,7 @@ fn get_source_addr_for_dest(dest: Ipv4Addr) -> Option<Ipv4Addr> {
 ///
 /// Iterates through all interfaces to find one with the given IP address.
 fn get_interface_for_ip(ip: Ipv4Addr) -> Option<String> {
-    for iface in pnet::datalink::interfaces() {
+    for iface in socket_helpers::get_interfaces() {
         for ip_net in &iface.ips {
             if let std::net::IpAddr::V4(iface_ip) = ip_net.ip() {
                 if iface_ip == ip {

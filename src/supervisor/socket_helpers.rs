@@ -14,6 +14,148 @@ use tokio::net::UnixStream;
 
 use crate::logging::{Facility, Logger};
 
+// ============================================================================
+// Interface enumeration using nix::ifaddrs (replaces pnet::datalink)
+// ============================================================================
+
+/// An IP network (address + prefix length), similar to ipnetwork::IpNetwork
+#[derive(Debug, Clone)]
+pub struct IpNetwork {
+    addr: std::net::IpAddr,
+    prefix: u8,
+}
+
+impl IpNetwork {
+    /// Get the IP address
+    pub fn ip(&self) -> std::net::IpAddr {
+        self.addr
+    }
+
+    /// Get the prefix length
+    #[allow(dead_code)]
+    pub fn prefix(&self) -> u8 {
+        self.prefix
+    }
+
+    /// Check if the given IP address is in this network
+    pub fn contains(&self, ip: std::net::IpAddr) -> bool {
+        match (self.addr, ip) {
+            (std::net::IpAddr::V4(net), std::net::IpAddr::V4(addr)) => {
+                if self.prefix == 0 {
+                    return true;
+                }
+                if self.prefix >= 32 {
+                    return net == addr;
+                }
+                let mask = !0u32 << (32 - self.prefix);
+                let net_bits = u32::from_be_bytes(net.octets()) & mask;
+                let addr_bits = u32::from_be_bytes(addr.octets()) & mask;
+                net_bits == addr_bits
+            }
+            (std::net::IpAddr::V6(net), std::net::IpAddr::V6(addr)) => {
+                if self.prefix == 0 {
+                    return true;
+                }
+                if self.prefix >= 128 {
+                    return net == addr;
+                }
+                let net_bits = u128::from_be_bytes(net.octets());
+                let addr_bits = u128::from_be_bytes(addr.octets());
+                let mask = !0u128 << (128 - self.prefix);
+                (net_bits & mask) == (addr_bits & mask)
+            }
+            _ => false, // IPv4/IPv6 mismatch
+        }
+    }
+}
+
+/// A network interface with its addresses, similar to pnet::datalink::NetworkInterface
+#[derive(Debug, Clone)]
+pub struct NetworkInterface {
+    /// Interface name (e.g., "eth0")
+    pub name: String,
+    /// Interface index
+    pub index: u32,
+    /// Interface flags (IFF_UP, IFF_MULTICAST, etc.)
+    pub flags: u32,
+    /// IP addresses assigned to this interface
+    pub ips: Vec<IpNetwork>,
+}
+
+/// Get all network interfaces with their addresses using nix::ifaddrs
+///
+/// This is a drop-in replacement for pnet::datalink::interfaces()
+pub fn get_interfaces() -> Vec<NetworkInterface> {
+    use nix::ifaddrs::getifaddrs;
+    use nix::net::if_::if_nametoindex;
+    use std::collections::HashMap;
+
+    let mut interfaces: HashMap<String, NetworkInterface> = HashMap::new();
+
+    // Get interface addresses from getifaddrs
+    if let Ok(addrs) = getifaddrs() {
+        for addr in addrs {
+            let name = addr.interface_name.clone();
+
+            // Get or create interface entry
+            let iface = interfaces.entry(name.clone()).or_insert_with(|| {
+                // Get interface index
+                let index = if_nametoindex(addr.interface_name.as_str()).unwrap_or(0);
+
+                NetworkInterface {
+                    name,
+                    index,
+                    flags: addr.flags.bits() as u32,
+                    ips: Vec::new(),
+                }
+            });
+
+            // Update flags (they should be the same for all entries of same interface)
+            iface.flags = addr.flags.bits() as u32;
+
+            // Extract IP address if present
+            if let Some(storage) = addr.address {
+                if let Some(sockaddr) = storage.as_sockaddr_in() {
+                    // IPv4 address
+                    let ip = std::net::IpAddr::V4(sockaddr.ip());
+                    let prefix = if let Some(ref netmask) = addr.netmask {
+                        if let Some(m) = netmask.as_sockaddr_in() {
+                            let mask = u32::from(m.ip());
+                            mask.count_ones() as u8
+                        } else {
+                            32
+                        }
+                    } else {
+                        32
+                    };
+                    iface.ips.push(IpNetwork { addr: ip, prefix });
+                } else if let Some(sockaddr) = storage.as_sockaddr_in6() {
+                    // IPv6 address
+                    let ip = std::net::IpAddr::V6(sockaddr.ip());
+                    let prefix = if let Some(ref netmask) = addr.netmask {
+                        if let Some(m) = netmask.as_sockaddr_in6() {
+                            let octets = m.ip().octets();
+                            let mask = u128::from_be_bytes(octets);
+                            mask.count_ones() as u8
+                        } else {
+                            128
+                        }
+                    } else {
+                        128
+                    };
+                    iface.ips.push(IpNetwork { addr: ip, prefix });
+                }
+            }
+        }
+    }
+
+    interfaces.into_values().collect()
+}
+
+// ============================================================================
+// Socket creation helpers
+// ============================================================================
+
 /// Create and configure an AF_PACKET socket bound to a specific interface.
 ///
 /// This function creates the socket with CAP_NET_RAW privileges in the supervisor,
@@ -126,7 +268,7 @@ pub(crate) fn create_af_packet_socket(
 
 /// Get network interface index by name
 pub(crate) fn get_interface_index(interface_name: &str) -> Result<i32> {
-    for iface in pnet::datalink::interfaces() {
+    for iface in get_interfaces() {
         if iface.name == interface_name {
             return Ok(iface.index as i32);
         }
@@ -286,7 +428,7 @@ impl InterfaceCache {
     pub fn refresh(&self) {
         use interface_flags::*;
 
-        let interfaces = pnet::datalink::interfaces();
+        let interfaces = get_interfaces();
 
         let mut by_name = self.by_name.write().unwrap();
         let mut index_to_name = self.index_to_name.write().unwrap();
@@ -412,10 +554,10 @@ pub fn global_interface_cache() -> &'static InterfaceCache {
 
 /// Get capability information for a specific interface
 pub fn get_interface_capability(interface_name: &str) -> Option<InterfaceCapability> {
-    pnet::datalink::interfaces()
-        .iter()
+    get_interfaces()
+        .into_iter()
         .find(|iface| iface.name == interface_name)
-        .map(extract_interface_capability)
+        .map(|iface| extract_interface_capability(&iface))
 }
 
 /// Check if an interface supports multicast
@@ -441,7 +583,7 @@ pub fn check_multicast_capability(interface_name: &str) -> Result<()> {
 /// Get all multicast-capable interfaces
 #[allow(dead_code)]
 pub fn get_multicast_capable_interfaces() -> Vec<InterfaceCapability> {
-    pnet::datalink::interfaces()
+    get_interfaces()
         .iter()
         .map(extract_interface_capability)
         .filter(|cap| cap.is_multicast_capable())
@@ -561,11 +703,11 @@ fn check_libc_result(result: i32, context: &str) -> Result<()> {
 // Interface capability helper (M2 from refactoring roadmap)
 // ============================================================================
 
-/// Extract InterfaceCapability from a pnet NetworkInterface
+/// Extract InterfaceCapability from a NetworkInterface
 ///
 /// This helper centralizes the flag extraction logic that was duplicated
 /// in `get_interface_capability()` and `get_multicast_capable_interfaces()`.
-fn extract_interface_capability(iface: &pnet::datalink::NetworkInterface) -> InterfaceCapability {
+fn extract_interface_capability(iface: &NetworkInterface) -> InterfaceCapability {
     use interface_flags::*;
 
     InterfaceCapability {

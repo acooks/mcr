@@ -1219,7 +1219,7 @@ impl UnifiedDataPlane {
 // Helper functions
 
 fn get_interface_ip(interface_name: &str) -> Result<Ipv4Addr> {
-    for iface in pnet::datalink::interfaces() {
+    for iface in crate::supervisor::socket_helpers::get_interfaces() {
         if iface.name == interface_name {
             for ip_net in iface.ips {
                 if let std::net::IpAddr::V4(ip) = ip_net.ip() {

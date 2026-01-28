@@ -28,6 +28,31 @@ This document tracks technical debt, refactoring opportunities, and optimization
 
 ## High Priority
 
+### H4: Protocol State Bugs ✓ COMPLETED (Jan 2025)
+
+**Risk:** Protocol failures, route timeouts, silent failures
+
+- [x] **H4.1** Missing timer when adding downstream to existing (*,G) route - **BUG**
+  - File: `src/supervisor/protocol_state.rs` lines 561-576
+  - Issue: New route creation scheduled PimJoinPrune timer, but adding downstream
+    to EXISTING route did NOT schedule timer
+  - Fix: Added timer scheduling to existing route update path (mirrors new route path)
+
+- [x] **H4.2** Incomplete passive IGMP route handling - **BUG**
+  - File: `src/supervisor/protocol_state.rs` lines 752-791
+  - Issue: Passive IGMP path lacked downstream update logic for existing routes
+  - Fix: Added else branch mirroring active IGMP path
+
+- [x] **H4.3** Critical error handling - silent failures on critical paths
+  - File: `src/supervisor/protocol_state.rs`
+  - Issues fixed:
+    - Line 2046: MSDP Connect command - added warning log on failure
+    - Line 2094: MSDP Keepalive command - added warning log on failure
+    - Line 2129: MSDP Disconnect command - added warning log on failure
+  - Notes:
+    - Lines 295-302: PIM Hello timer already logs warning (acceptable)
+    - Line 2628: Already uses `?` for proper error propagation (not a bug)
+
 ### H1: Memory Safety - Bounded Collections ✓ COMPLETED (Jan 2025)
 
 **Risk:** Memory exhaustion under attack or misconfiguration
@@ -139,6 +164,52 @@ This document tracks technical debt, refactoring opportunities, and optimization
 - [ ] **M6.2** Refactor hot-path clones to use Arc
   - Focus on event channels and logger clones
 
+### M7: Code Duplication - Route Creation ✓ COMPLETED (Jan 2025)
+
+**Impact:** ~160 lines of duplicated code reduced
+
+- [x] **M7.1** Add `impl From<&StarGState> for StarGRoute`
+  - File: `src/mroute.rs`
+  - Eliminated 5 duplicate StarGRoute creation sites
+
+- [x] **M7.2** Add `impl From<&SGState> for SGRoute`
+  - File: `src/mroute.rs`
+  - Eliminated 1 duplicate SGRoute creation site
+
+### M8: Deep Nesting - IGMP Route Creation (Jan 2025)
+
+**Impact:** 7 levels of nesting, hard to read/maintain, 95% code duplication
+
+- [ ] **M8.1** Extract helper: `create_star_g_route_state()`
+  - Creates StarGState with group, rp, upstream, downstream
+
+- [ ] **M8.2** Extract helper: `send_pim_star_g_join()`
+  - Determines upstream neighbor, builds Join packet, schedules timer
+
+- [ ] **M8.3** Extract helper: `determine_pim_upstream_neighbor()`
+  - RP direct neighbor check with fallback logic (lines 483-495, 686-697)
+
+- [ ] **M8.4** Refactor IGMP handler to use early returns
+  - Reduce nesting from 7 levels to 2-3 levels
+  - Consolidate active (407-565) and passive (623-735) paths
+
+### M9: Oversized Function - handle_timer_expired() (Jan 2025)
+
+**Impact:** 308-line function with 13 timer types, hard to test
+
+- [ ] **M9.1** Extract IGMP timer handlers
+  - `handle_igmp_general_query_timer()` (33 lines)
+  - `handle_igmp_group_query_timer()` (35 lines)
+  - Consolidate shared query logic (~35 lines saved)
+
+- [ ] **M9.2** Extract PIM timer handlers
+  - `handle_pim_join_prune_timer()` (56 lines) - highest priority
+  - `handle_pim_hello_timer()` (34 lines)
+
+- [ ] **M9.3** Extract MSDP timer handlers
+  - `handle_msdp_connect_retry_timer()` (36 lines)
+  - `handle_msdp_keepalive_timer()` (39 lines)
+
 ---
 
 ## Low Priority
@@ -188,6 +259,21 @@ This document tracks technical debt, refactoring opportunities, and optimization
   - Worker async code uses standard tokio features (UnixStream)
   - Data plane uses `io_uring` crate directly for performance
   - Eliminated duplicate io-uring versions (v0.6.4 via tokio-uring, v0.7.11 direct)
+
+- [x] **L3.3** Remove unused/replaceable dependencies ✓ COMPLETED (Jan 2025)
+  - Removed `sysinfo` (completely unused)
+  - Removed `log` crate (replaced 4 `error!()` calls with custom `log_error!` macro)
+  - Removed `num_cpus` (replaced with `std::thread::available_parallelism()`)
+  - Reduced direct dependencies from 21 to 18
+  - Reduced dependency tree from 109 to 103 crates
+
+- [x] **L3.4** Replace pnet with nix::ifaddrs ✓ COMPLETED (Jan 2025)
+  - pnet contributed 28 unique crates to dependency tree (including regex, proc-macros)
+  - Only used for `pnet::datalink::interfaces()` to enumerate network interfaces
+  - Created `get_interfaces()` using `nix::ifaddrs::getifaddrs()` (nix already a dependency)
+  - Added `NetworkInterface` and `IpNetwork` types as pnet replacements
+  - Reduced direct dependencies from 18 to 17
+  - Reduced dependency tree from 239 to 211 crates
 
 - [ ] **L3.2** Document error crate usage
   - Clarify when to use anyhow vs thiserror
@@ -250,6 +336,8 @@ This document tracks technical debt, refactoring opportunities, and optimization
 12. **Dead code removal (L1.1-L1.4)** - Removed unused socket helpers, duplicate constant, legacy function (~80 lines)
 13. **Unsafe code audit (L4.1)** - Reduced unsafe blocks 72→63, added SAFETY comments, replaced libc calls with nix wrappers
 14. **Netlink monitor (H3.4)** - Real-time interface change detection via RTMGRP_LINK multicast group
+15. **Dependency reduction (L3.3)** - Removed sysinfo, log, num_cpus; reduced deps 21→18, tree 109→103
+16. **pnet removal (L3.4)** - Replaced pnet with nix::ifaddrs for interface enumeration; reduced tree by 28 crates (239→211)
 
 ### Guidelines for Future Work
 
