@@ -822,7 +822,7 @@ async fn test_cli_config_check_invalid_interface() -> Result<()> {
         output
     );
     assert!(
-        output.contains("interface") && output.contains("too long"),
+        output.contains("interface") && output.contains("exceeds maximum length"),
         "Expected interface name error, got: {}",
         output
     );

@@ -91,6 +91,9 @@ impl MPSCRingBuffer {
         }
 
         // 3. Mark entry as WRITING
+        // SAFETY: We have exclusive access to this slot because:
+        // - We won the CAS for this sequence number (no other writer has this slot)
+        // - The state machine ensures the reader won't access WRITING entries
         unsafe {
             (*self.entries[pos].get())
                 .state
@@ -100,7 +103,10 @@ impl MPSCRingBuffer {
         // 4. Fill entry fields
         entry.sequence = seq;
 
-        // Copy data field-by-field (safe: we own this slot via state machine)
+        // SAFETY: We have exclusive access to this slot because:
+        // - We reserved this slot via CAS on write_seq
+        // - State is WRITING, so the reader will skip this entry
+        // - Other writers have different sequence numbers (different slots)
         unsafe {
             let slot = &mut *self.entries[pos].get();
             slot.timestamp_ns = entry.timestamp_ns;
@@ -118,6 +124,7 @@ impl MPSCRingBuffer {
         }
 
         // 5. Mark entry as READY
+        // SAFETY: Same as above - we still own this slot exclusively
         unsafe {
             (*self.entries[pos].get())
                 .state
@@ -138,6 +145,8 @@ impl MPSCRingBuffer {
 
         let mut spins = 0;
         loop {
+            // SAFETY: Reading the atomic state field is always safe. The state machine
+            // ensures we only proceed when state == READY, meaning the writer is done.
             let state = unsafe { (*self.entries[pos].get()).state.load(Ordering::Acquire) };
             if state == READY {
                 break;
@@ -149,8 +158,12 @@ impl MPSCRingBuffer {
             std::hint::spin_loop();
         }
 
+        // SAFETY: We are the single consumer (guaranteed by caller contract).
+        // The entry is READY, so the writer has finished writing.
+        // No other thread will modify this entry until we mark it EMPTY.
         let entry = unsafe { (*self.entries[pos].get()).clone() };
 
+        // SAFETY: Same as above - we have exclusive consumer access to this slot.
         unsafe {
             (*self.entries[pos].get())
                 .state

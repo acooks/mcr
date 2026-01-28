@@ -2,6 +2,7 @@
 use clap::Parser;
 pub mod config;
 pub mod logging;
+pub mod validation;
 
 use serde::{Deserialize, Serialize};
 use std::hash::{Hash, Hasher};

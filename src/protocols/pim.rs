@@ -582,10 +582,10 @@ impl PimState {
     /// This is used to handle cases where IP_PKTINFO reports the wrong interface,
     /// such as in shared namespace test setups.
     pub fn find_interface_for_neighbor(&self, neighbor_ip: Ipv4Addr) -> Option<String> {
-        use pnet::datalink::interfaces;
+        use crate::supervisor::socket_helpers::get_interfaces;
 
         // Get all system interfaces and their IP configurations
-        let system_ifaces = interfaces();
+        let system_ifaces = get_interfaces();
 
         for iface_name in self.interfaces.keys() {
             // Find the system interface with this name

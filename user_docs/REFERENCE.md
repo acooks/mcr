@@ -166,6 +166,8 @@ These environment variables can be used to fine-tune the data plane's performanc
 | `MCR_BUFFER_POOL_SMALL`    | `1000`           | Number of small buffers (up to 2KB) to pre-allocate.                     |
 | `MCR_BUFFER_POOL_STANDARD` | `500`            | Number of standard buffers (up to 4KB) to pre-allocate.                  |
 | `MCR_BUFFER_POOL_JUMBO`    | `200`            | Number of jumbo buffers (9KB each) to pre-allocate.                      |
+| `MCR_NUM_RECV_BUFFERS`     | `32`             | Number of receive buffers to pre-post in the io_uring submission queue.  |
+| `MCR_STATS_INTERVAL_MS`    | `10000` (10s)    | Stats reporting interval in milliseconds. Workers push stats to the supervisor at this interval. Set to a lower value (e.g., `100`) for more responsive stats during debugging. |
 
 **Note:** The number of data plane workers is configured via the `--num-workers` flag on the supervisor command, not via an environment variable.
 

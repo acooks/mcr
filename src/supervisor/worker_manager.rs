@@ -8,9 +8,11 @@
 use anyhow::Result;
 use futures::SinkExt;
 use std::collections::HashMap;
+#[cfg(not(feature = "testing"))]
+use std::os::unix::io::FromRawFd;
 #[cfg(feature = "testing")]
 use std::os::unix::io::RawFd;
-use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd};
+use std::os::unix::io::{AsRawFd, IntoRawFd};
 use std::sync::{Arc, Mutex};
 use tokio::net::UnixStream;
 use tokio::process::{Child, Command};

@@ -22,6 +22,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
 use std::time::Instant;
 
+use crate::protocols::pim::{SGState, StarGState};
 use crate::{ForwardingRule, OutputDestination, PimTreeType, RuleSource};
 
 /// PIM (*,G) shared tree state
@@ -106,6 +107,19 @@ impl StarGRoute {
                 ),
             },
         }]
+    }
+}
+
+impl From<&StarGState> for StarGRoute {
+    fn from(state: &StarGState) -> Self {
+        Self {
+            group: state.group,
+            rp: state.rp,
+            upstream_interface: state.upstream_interface.clone(),
+            downstream_interfaces: state.downstream_interfaces.clone(),
+            created_at: state.created_at,
+            expires_at: state.expires_at,
+        }
     }
 }
 
@@ -197,6 +211,20 @@ impl SGRoute {
                 ),
             },
         }]
+    }
+}
+
+impl From<&SGState> for SGRoute {
+    fn from(state: &SGState) -> Self {
+        Self {
+            source: state.source,
+            group: state.group,
+            upstream_interface: state.upstream_interface.clone(),
+            downstream_interfaces: state.downstream_interfaces.clone(),
+            spt_bit: state.spt_bit,
+            created_at: state.created_at,
+            expires_at: state.expires_at,
+        }
     }
 }
 

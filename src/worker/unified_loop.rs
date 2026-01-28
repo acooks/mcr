@@ -49,6 +49,7 @@ use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::sync::Arc;
 
 use crate::logging::{Facility, Logger};
+use crate::supervisor::socket_helpers;
 use crate::worker::buffer_pool::{BufferPool, BufferSize, ManagedBuffer};
 use crate::worker::packet_parser::parse_packet;
 use crate::ForwardingRule;
@@ -90,6 +91,12 @@ pub struct UnifiedConfig {
     pub track_stats: bool,
     /// Stats reporting interval in milliseconds (default: 10000ms = 10 seconds)
     pub stats_interval_ms: u64,
+    /// Maximum number of forwarding rules (0 = unlimited, default: 10000)
+    pub max_rules: usize,
+    /// Maximum number of flow counters to track (0 = unlimited, default: 100000)
+    pub max_flow_counters: usize,
+    /// Maximum number of cached egress sockets (0 = unlimited, default: 10000)
+    pub max_egress_sockets: usize,
 }
 
 impl Default for UnifiedConfig {
@@ -115,6 +122,9 @@ impl Default for UnifiedConfig {
             send_batch_size: 64, // Increased from 32 to reduce syscall overhead
             track_stats: true,
             stats_interval_ms, // Configurable via MCR_STATS_INTERVAL_MS (default: 10000ms)
+            max_rules: 10_000, // Reasonable limit for forwarding rules
+            max_flow_counters: 100_000, // Track up to 100k unique flows
+            max_egress_sockets: 10_000, // Cache up to 10k egress sockets
         }
     }
 }
@@ -132,6 +142,10 @@ pub struct UnifiedStats {
     pub packets_filtered: u64, // Non-UDP packets (ARP, IPv6, TCP, etc.)
     pub buffer_pool_exhaustion: u64, // Buffer pool exhaustion events
     pub stats_pipe_errors: u64, // Errors writing to supervisor stats pipe
+    // Capacity metrics
+    pub rules_rejected: u64,         // Rules rejected due to max_rules limit
+    pub flow_counters_evicted: u64,  // Flow counters evicted due to max_flow_counters limit
+    pub egress_sockets_evicted: u64, // Egress sockets evicted due to max_egress_sockets limit
 }
 
 /// Per-flow counters for stats reporting
@@ -306,6 +320,19 @@ impl UnifiedDataPlane {
     /// Add a forwarding rule
     pub fn add_rule(&mut self, rule: ForwardingRule) -> Result<()> {
         let key = (rule.input_group, rule.input_port);
+
+        // Check capacity (if limit is set and key doesn't already exist)
+        if self.config.max_rules > 0
+            && !self.rules.contains_key(&key)
+            && self.rules.len() >= self.config.max_rules
+        {
+            self.stats.rules_rejected += 1;
+            return Err(anyhow::anyhow!(
+                "Cannot add rule: max_rules limit ({}) reached",
+                self.config.max_rules
+            ));
+        }
+
         self.rules.insert(key, rule);
         Ok(())
     }
@@ -328,6 +355,16 @@ impl UnifiedDataPlane {
     }
 
     pub fn sync_rules(&mut self, rules: Vec<ForwardingRule>) -> Result<()> {
+        // Check if new ruleset exceeds capacity
+        if self.config.max_rules > 0 && rules.len() > self.config.max_rules {
+            self.stats.rules_rejected += (rules.len() - self.config.max_rules) as u64;
+            return Err(anyhow::anyhow!(
+                "Cannot sync rules: {} rules exceeds max_rules limit ({})",
+                rules.len(),
+                self.config.max_rules
+            ));
+        }
+
         // Atomically replace entire ruleset
         self.rules.clear();
         for rule in rules {
@@ -894,6 +931,23 @@ impl UnifiedDataPlane {
 
         // Update per-flow counters (use exact packet key for granular stats)
         if self.config.track_stats && !targets.is_empty() {
+            // Check if we need to evict old flow counters
+            if self.config.max_flow_counters > 0
+                && !self.flow_counters.contains_key(&exact_key)
+                && self.flow_counters.len() >= self.config.max_flow_counters
+            {
+                // Evict the flow with the lowest packet count (least active)
+                if let Some(key_to_evict) = self
+                    .flow_counters
+                    .iter()
+                    .min_by_key(|(_, c)| c.packets_relayed)
+                    .map(|(k, _)| *k)
+                {
+                    self.flow_counters.remove(&key_to_evict);
+                    self.stats.flow_counters_evicted += 1;
+                }
+            }
+
             let counter = self.flow_counters.entry(exact_key).or_default();
             counter.packets_relayed += 1;
             counter.bytes_relayed += headers.payload_len as u64;
@@ -993,6 +1047,18 @@ impl UnifiedDataPlane {
             // Get or create egress socket
             let key = (item.interface_name.clone(), item.dest_addr);
             if !self.egress_sockets.contains_key(&key) {
+                // Check if we need to evict old sockets
+                if self.config.max_egress_sockets > 0
+                    && self.egress_sockets.len() >= self.config.max_egress_sockets
+                {
+                    // Evict an arbitrary socket (first one found)
+                    // Note: A more sophisticated approach would track last-use time
+                    if let Some(key_to_evict) = self.egress_sockets.keys().next().cloned() {
+                        self.egress_sockets.remove(&key_to_evict);
+                        self.stats.egress_sockets_evicted += 1;
+                    }
+                }
+
                 let source_ip = get_interface_ip(&item.interface_name)?;
                 let socket = create_connected_udp_socket(source_ip, item.dest_addr)?;
                 self.egress_sockets.insert(key.clone(), (socket, source_ip));
@@ -1153,7 +1219,7 @@ impl UnifiedDataPlane {
 // Helper functions
 
 fn get_interface_ip(interface_name: &str) -> Result<Ipv4Addr> {
-    for iface in pnet::datalink::interfaces() {
+    for iface in crate::supervisor::socket_helpers::get_interfaces() {
         if iface.name == interface_name {
             for ip_net in iface.ips {
                 if let std::net::IpAddr::V4(ip) = ip_net.ip() {
@@ -1189,25 +1255,7 @@ fn create_connected_udp_socket(source_ip: Ipv4Addr, dest_addr: SocketAddr) -> Re
     // wrong interface or be dropped in multi-interface/multi-namespace topologies.
     if let std::net::IpAddr::V4(dest_ipv4) = dest_addr.ip() {
         if dest_ipv4.is_multicast() {
-            let mcast_if = libc::in_addr {
-                s_addr: u32::from_ne_bytes(source_ip.octets()),
-            };
-            unsafe {
-                if libc::setsockopt(
-                    socket.as_raw_fd(),
-                    libc::IPPROTO_IP,
-                    libc::IP_MULTICAST_IF,
-                    &mcast_if as *const _ as *const libc::c_void,
-                    std::mem::size_of::<libc::in_addr>() as libc::socklen_t,
-                ) < 0
-                {
-                    return Err(anyhow::anyhow!(
-                        "Failed to set IP_MULTICAST_IF to {}: {}",
-                        source_ip,
-                        std::io::Error::last_os_error()
-                    ));
-                }
-            }
+            socket_helpers::set_multicast_if_by_addr(socket.as_raw_fd(), source_ip)?;
         }
     }
 
@@ -1414,5 +1462,39 @@ mod tests {
         rules.clear();
 
         assert_eq!(rules.len(), 0);
+    }
+
+    #[test]
+    fn test_config_capacity_defaults() {
+        let config = UnifiedConfig::default();
+
+        // Verify default capacity limits are set
+        assert_eq!(config.max_rules, 10_000);
+        assert_eq!(config.max_flow_counters, 100_000);
+        assert_eq!(config.max_egress_sockets, 10_000);
+    }
+
+    #[test]
+    fn test_config_capacity_custom() {
+        let config = UnifiedConfig {
+            max_rules: 100,
+            max_flow_counters: 500,
+            max_egress_sockets: 50,
+            ..Default::default()
+        };
+
+        assert_eq!(config.max_rules, 100);
+        assert_eq!(config.max_flow_counters, 500);
+        assert_eq!(config.max_egress_sockets, 50);
+    }
+
+    #[test]
+    fn test_stats_capacity_metrics_default() {
+        let stats = UnifiedStats::default();
+
+        // Verify capacity metrics start at zero
+        assert_eq!(stats.rules_rejected, 0);
+        assert_eq!(stats.flow_counters_evicted, 0);
+        assert_eq!(stats.egress_sockets_evicted, 0);
     }
 }

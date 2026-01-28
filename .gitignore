@@ -8,6 +8,8 @@ experiments/**/Cargo.lock
 # Coverage reports
 tarpaulin-report.html
 target/tarpaulin/
+coverage/
+coverage.lcov
 .gemini
 
 # Unsafe code tracking baseline (local development file)
