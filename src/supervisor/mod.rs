@@ -25,7 +25,6 @@ use worker_manager::WorkerManager;
 
 use anyhow::Result;
 use futures::SinkExt;
-use log::error;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -1236,9 +1235,13 @@ async fn handle_client(
                     let cmd_bytes = match serde_json::to_vec(&interface_cmd) {
                         Ok(bytes) => bytes,
                         Err(e) => {
-                            error!(
-                                "Failed to serialize SyncRules for interface {}: {}",
-                                interface, e
+                            log_error!(
+                                logger,
+                                Facility::Supervisor,
+                                &format!(
+                                    "Failed to serialize SyncRules for interface {}: {}",
+                                    interface, e
+                                )
                             );
                             continue;
                         }
@@ -1362,9 +1365,13 @@ async fn handle_client(
                         .ensure_workers_for_interface(&interface, is_pinned)
                         .await
                     {
-                        error!(
-                            "Failed to spawn workers for interface '{}': {}",
-                            interface, e
+                        log_error!(
+                            logger,
+                            Facility::Supervisor,
+                            &format!(
+                                "Failed to spawn workers for interface '{}': {}",
+                                interface, e
+                            )
                         );
                     }
                 }
@@ -1725,7 +1732,9 @@ pub async fn run(
     // Per architecture (D21, D23): One worker per CPU core, rules hashed to cores.
     // The --num-workers override exists to avoid resource exhaustion on single-interface tests
     // until lazy socket creation is implemented.
-    let detected_cores = num_cpus::get();
+    let detected_cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
     let num_cores = num_workers.unwrap_or(detected_cores);
 
     // Initialize logging early (before spawning workers)
@@ -2097,7 +2106,11 @@ pub async fn run(
                 )
                 .await
                 {
-                    error!("Error handling client: {}", e);
+                    log_error!(
+                        supervisor_logger,
+                        Facility::Supervisor,
+                        &format!("Error handling client: {}", e)
+                    );
                 }
             }
 
@@ -2154,7 +2167,11 @@ pub async fn run(
                         }
                     }
                     Err(e) => {
-                        error!("Error checking/restarting worker: {}", e);
+                        log_error!(
+                            supervisor_logger,
+                            Facility::Supervisor,
+                            &format!("Error checking/restarting worker: {}", e)
+                        );
                     }
                     _ => {
                         // No worker restarted or control plane worker restarted (no action needed)

@@ -227,7 +227,9 @@ async fn test_max_workers_spawning() -> Result<()> {
     require_root!();
 
     // Determine the number of CPU cores (maximum workers)
-    let num_cpus = num_cpus::get() as u32;
+    let num_cpus = std::thread::available_parallelism()
+        .map(|n| n.get() as u32)
+        .unwrap_or(1);
     println!(
         "[TEST] System has {} CPU cores, testing max worker creation",
         num_cpus
