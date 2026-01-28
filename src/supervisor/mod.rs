@@ -24,6 +24,7 @@ use protocol_state::unix_timestamp;
 use worker_manager::WorkerManager;
 
 use anyhow::Result;
+use bytes::Bytes;
 use futures::SinkExt;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -307,7 +308,7 @@ async fn sync_rules_to_workers(
             continue;
         }
 
-        let sync_cmd = RelayCommand::SyncRules(interface_rules.clone());
+        let sync_cmd = RelayCommand::SyncRules(interface_rules);
         if let Ok(cmd_bytes) = serde_json::to_vec(&sync_cmd) {
             // Send to worker via ingress stream and wait for ACK
             // Note: In unified mode, the worker only monitors the ingress command stream,
@@ -1210,8 +1211,9 @@ async fn handle_client(
             if is_sync_rules {
                 // For SyncRules, filter rules by interface before sending to each worker
                 // This implements per-interface rule distribution (Phase 1 of the roadmap)
-                let all_rules = if let RelayCommand::SyncRules(rules) = &relay_cmd {
-                    rules.clone()
+                // Move rules out of relay_cmd to avoid clone (relay_cmd not used after this)
+                let all_rules = if let RelayCommand::SyncRules(rules) = relay_cmd {
+                    rules
                 } else {
                     vec![]
                 };
@@ -1232,8 +1234,8 @@ async fn handle_client(
 
                     // Create interface-specific SyncRules command
                     let interface_cmd = RelayCommand::SyncRules(interface_rules);
-                    let cmd_bytes = match serde_json::to_vec(&interface_cmd) {
-                        Ok(bytes) => bytes,
+                    let cmd_bytes: Bytes = match serde_json::to_vec(&interface_cmd) {
+                        Ok(bytes) => bytes.into(),
                         Err(e) => {
                             log_error!(
                                 logger,
@@ -1247,24 +1249,25 @@ async fn handle_client(
                         }
                     };
 
-                    // Send to ingress worker
+                    // Send to ingress worker (Bytes::clone is cheap - Arc-based)
                     let cmd_bytes_clone = cmd_bytes.clone();
                     tokio::spawn(async move {
                         let mut stream = ingress_stream.lock().await;
                         let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
-                        let _ = framed.send(cmd_bytes_clone.into()).await;
+                        let _ = framed.send(cmd_bytes_clone).await;
                     });
 
                     // Send to egress worker
                     tokio::spawn(async move {
                         let mut stream = egress_stream.lock().await;
                         let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
-                        let _ = framed.send(cmd_bytes.into()).await;
+                        let _ = framed.send(cmd_bytes).await;
                     });
                 }
             } else {
                 // For non-SyncRules commands, broadcast same command to all workers
-                let cmd_bytes = serde_json::to_vec(&relay_cmd)?;
+                // Convert to Bytes upfront for cheap Arc-based cloning
+                let cmd_bytes: Bytes = serde_json::to_vec(&relay_cmd)?.into();
 
                 // Get cmd stream pairs from WorkerManager
                 let stream_pairs = {
@@ -1277,12 +1280,12 @@ async fn handle_client(
                     let mut send_tasks = Vec::new();
 
                     for (ingress_stream, egress_stream) in stream_pairs {
-                        // Send to ingress
+                        // Send to ingress (Bytes::clone is cheap - Arc-based)
                         let cmd_bytes_clone = cmd_bytes.clone();
                         let task = tokio::spawn(async move {
                             let mut stream = ingress_stream.lock().await;
                             let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
-                            framed.send(cmd_bytes_clone.into()).await
+                            framed.send(cmd_bytes_clone).await
                         });
                         send_tasks.push(task);
 
@@ -1291,7 +1294,7 @@ async fn handle_client(
                         let task = tokio::spawn(async move {
                             let mut stream = egress_stream.lock().await;
                             let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
-                            framed.send(cmd_bytes_clone.into()).await
+                            framed.send(cmd_bytes_clone).await
                         });
                         send_tasks.push(task);
                     }
@@ -1328,12 +1331,12 @@ async fn handle_client(
                 } else {
                     // For non-ping, non-SyncRules commands, fire and forget
                     for (ingress_stream, egress_stream) in stream_pairs {
-                        // Send to ingress
+                        // Send to ingress (Bytes::clone is cheap - Arc-based)
                         let cmd_bytes_clone = cmd_bytes.clone();
                         tokio::spawn(async move {
                             let mut stream = ingress_stream.lock().await;
                             let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
-                            let _ = framed.send(cmd_bytes_clone.into()).await;
+                            let _ = framed.send(cmd_bytes_clone).await;
                         });
 
                         // Send to egress
@@ -1341,7 +1344,7 @@ async fn handle_client(
                         tokio::spawn(async move {
                             let mut stream = egress_stream.lock().await;
                             let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
-                            let _ = framed.send(cmd_bytes_clone.into()).await;
+                            let _ = framed.send(cmd_bytes_clone).await;
                         });
                     }
                 }
@@ -1379,7 +1382,8 @@ async fn handle_client(
 
             // Send the command only to workers for the specified interface
             // (not to all workers, to avoid race conditions with SyncRules)
-            let cmd_bytes = serde_json::to_vec(&command)?;
+            // Convert to Bytes upfront for cheap Arc-based cloning
+            let cmd_bytes: Bytes = serde_json::to_vec(&command)?.into();
             let stream_pairs_with_iface = {
                 let manager = worker_manager.lock().unwrap();
                 manager.get_all_dp_cmd_streams_with_interface()
@@ -1391,12 +1395,12 @@ async fn handle_client(
                     continue;
                 }
 
-                // Send to ingress
+                // Send to ingress (Bytes::clone is cheap - Arc-based)
                 let cmd_bytes_clone = cmd_bytes.clone();
                 tokio::spawn(async move {
                     let mut stream = ingress_stream.lock().await;
                     let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
-                    let _ = framed.send(cmd_bytes_clone.into()).await;
+                    let _ = framed.send(cmd_bytes_clone).await;
                 });
 
                 // Send to egress
@@ -1404,7 +1408,7 @@ async fn handle_client(
                 tokio::spawn(async move {
                     let mut stream = egress_stream.lock().await;
                     let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
-                    let _ = framed.send(cmd_bytes_clone.into()).await;
+                    let _ = framed.send(cmd_bytes_clone).await;
                 });
             }
         }
@@ -1887,17 +1891,18 @@ pub async fn run(
 
                 let sync_cmd = RelayCommand::SyncRules(interface_rules);
                 if let Ok(cmd_bytes) = serde_json::to_vec(&sync_cmd) {
+                    let cmd_bytes: Bytes = cmd_bytes.into();
                     // Send to ingress worker using length-delimited framing
                     {
                         let mut stream = ingress_stream.lock().await;
                         let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
-                        let _ = framed.send(cmd_bytes.clone().into()).await;
+                        let _ = framed.send(cmd_bytes.clone()).await;
                     }
                     // Send to egress worker using length-delimited framing
                     {
                         let mut stream = egress_stream.lock().await;
                         let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
-                        let _ = framed.send(cmd_bytes.into()).await;
+                        let _ = framed.send(cmd_bytes).await;
                     }
                 }
             }
@@ -2148,19 +2153,20 @@ pub async fn run(
 
                                 let sync_cmd = RelayCommand::SyncRules(interface_rules);
                                 if let Ok(cmd_bytes) = serde_json::to_vec(&sync_cmd) {
+                                    let cmd_bytes: Bytes = cmd_bytes.into();
                                     // Send to ingress worker using length-delimited framing
                                     {
                                         let mut stream = ingress_stream.lock().await;
                                         let mut framed =
                                             Framed::new(&mut *stream, LengthDelimitedCodec::new());
-                                        let _ = framed.send(cmd_bytes.clone().into()).await;
+                                        let _ = framed.send(cmd_bytes.clone()).await;
                                     }
                                     // Send to egress worker using length-delimited framing
                                     {
                                         let mut stream = egress_stream.lock().await;
                                         let mut framed =
                                             Framed::new(&mut *stream, LengthDelimitedCodec::new());
-                                        let _ = framed.send(cmd_bytes.into()).await;
+                                        let _ = framed.send(cmd_bytes).await;
                                     }
                                 }
                             }
@@ -2215,19 +2221,20 @@ pub async fn run(
 
                         let sync_cmd = RelayCommand::SyncRules(interface_rules);
                         if let Ok(cmd_bytes) = serde_json::to_vec(&sync_cmd) {
+                            let cmd_bytes: Bytes = cmd_bytes.into();
                             // Send to ingress worker using length-delimited framing
                             {
                                 let mut stream = ingress_stream.lock().await;
                                 let mut framed =
                                     Framed::new(&mut *stream, LengthDelimitedCodec::new());
-                                let _ = framed.send(cmd_bytes.clone().into()).await;
+                                let _ = framed.send(cmd_bytes.clone()).await;
                             }
                             // Send to egress worker using length-delimited framing
                             {
                                 let mut stream = egress_stream.lock().await;
                                 let mut framed =
                                     Framed::new(&mut *stream, LengthDelimitedCodec::new());
-                                let _ = framed.send(cmd_bytes.into()).await;
+                                let _ = framed.send(cmd_bytes).await;
                             }
                         }
                     }

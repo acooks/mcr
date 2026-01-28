@@ -152,17 +152,24 @@ This document tracks technical debt, refactoring opportunities, and optimization
   - `test_frame_too_large`, `test_invalid_json`
   - `test_partial_frame_data`, `test_partial_frame_length`
 
-### M6: Performance - Clone Reduction
+### M6: Performance - Clone Reduction ✓ COMPLETED (Jan 2025)
 
-**Impact:** Unnecessary allocations
+**Impact:** Unnecessary allocations eliminated in command broadcast paths
 
-- [ ] **M6.1** Audit clone operations in supervisor/mod.rs
-  - File: `src/supervisor/mod.rs`
-  - Identify clones that could use Arc references
-  - Lines: 211, 220-221, 236, 723, 1247, 1277, 1286, 1328, 1336, 1387, 1395, 1944
+- [x] **M6.1** Audit clone operations in supervisor/mod.rs
+  - Identified hot-path clones: cmd_bytes.clone() in broadcast loops
+  - Identified unnecessary clone: interface_rules.clone() when ownership could be moved
 
-- [ ] **M6.2** Refactor hot-path clones to use Arc
-  - Focus on event channels and logger clones
+- [x] **M6.2** Refactor hot-path clones to use Bytes (Arc-based)
+  - Added `bytes` crate dependency
+  - Converted `Vec<u8>` to `Bytes` upfront in 4 broadcast paths
+  - `Bytes::clone()` is O(1) - just increments Arc refcount
+  - Removed unnecessary `interface_rules.clone()` (moved ownership instead)
+  - Removed unnecessary `all_rules.clone()` (moved out of RelayCommand)
+
+- [x] **M6.3** Files modified:
+  - `Cargo.toml`: Added `bytes = "1"` dependency
+  - `src/supervisor/mod.rs`: 10 clone sites optimized
 
 ### M7: Code Duplication - Route Creation ✓ COMPLETED (Jan 2025)
 
