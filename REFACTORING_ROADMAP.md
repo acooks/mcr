@@ -200,22 +200,25 @@ This document tracks technical debt, refactoring opportunities, and optimization
   - Reduce nesting from 7 levels to 2-3 levels
   - Consolidate active (407-565) and passive (623-735) paths
 
-### M9: Oversized Function - handle_timer_expired() (Jan 2025)
+### M9: Oversized Function - handle_timer_expired() ✓ COMPLETED (Jan 2025)
 
-**Impact:** 308-line function with 13 timer types, hard to test
+**Impact:** Reduced 326-line function with 13 timer types to ~80 lines + 7 helper methods
 
-- [ ] **M9.1** Extract IGMP timer handlers
-  - `handle_igmp_general_query_timer()` (33 lines)
-  - `handle_igmp_group_query_timer()` (35 lines)
-  - Consolidate shared query logic (~35 lines saved)
+- [x] **M9.1** Extract IGMP timer handlers
+  - `handle_igmp_general_query_timer()` - ~40 lines
+  - `handle_igmp_group_query_timer()` - ~40 lines
 
-- [ ] **M9.2** Extract PIM timer handlers
-  - `handle_pim_join_prune_timer()` (56 lines) - highest priority
-  - `handle_pim_hello_timer()` (34 lines)
+- [x] **M9.2** Extract PIM timer handlers
+  - `handle_pim_join_prune_timer()` - ~55 lines (highest priority)
+  - `handle_pim_hello_timer()` - ~35 lines
 
-- [ ] **M9.3** Extract MSDP timer handlers
-  - `handle_msdp_connect_retry_timer()` (36 lines)
-  - `handle_msdp_keepalive_timer()` (39 lines)
+- [x] **M9.3** Extract MSDP timer handlers
+  - `handle_msdp_connect_retry_timer()` - ~40 lines
+  - `handle_msdp_keepalive_timer()` - ~45 lines
+  - `handle_msdp_hold_timer()` - ~30 lines
+
+- [x] **Result:** `handle_timer_expired()` now delegates to focused helper methods,
+  improving readability and testability. Each timer type has clear separation of concerns.
 
 ---
 

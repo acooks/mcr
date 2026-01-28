@@ -1766,78 +1766,343 @@ impl ProtocolState {
         result
     }
 
+    // ===== Timer Handler Helper Methods =====
+    // These methods handle specific timer types to reduce complexity in handle_timer_expired()
+
+    /// Handle IGMP General Query timer expiration
+    fn handle_igmp_general_query_timer(
+        &mut self,
+        interface: &str,
+        now: Instant,
+        result: &mut ProtocolHandlerResult,
+    ) {
+        if let Some(igmp_state) = self.igmp_state.get_mut(interface) {
+            // Schedule next query timer
+            result.add_timers(igmp_state.query_timer_expired(now));
+
+            // Only send query if we're the elected querier
+            if igmp_state.is_querier {
+                use crate::protocols::igmp::IgmpQueryBuilder;
+                use crate::protocols::PacketBuilder;
+                const IGMP_ALL_HOSTS: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 1);
+
+                // Max response time in tenths of seconds (default 10 seconds = 100)
+                let max_resp_time =
+                    (igmp_state.config.query_response_interval.as_millis() / 100) as u8;
+                let builder = IgmpQueryBuilder::general_query(max_resp_time);
+                let packet_data = builder.build();
+
+                result.send_packet(OutgoingPacket {
+                    protocol: ProtocolType::Igmp,
+                    interface: interface.to_string(),
+                    destination: IGMP_ALL_HOSTS,
+                    source: Some(igmp_state.interface_ip),
+                    data: packet_data,
+                });
+
+                log_debug!(
+                    self.logger,
+                    Facility::Supervisor,
+                    &format!("IGMP: Sending General Query on {}", interface)
+                );
+            }
+        }
+    }
+
+    /// Handle IGMP Group-Specific Query timer expiration
+    fn handle_igmp_group_query_timer(
+        &mut self,
+        interface: &str,
+        group: Ipv4Addr,
+        now: Instant,
+        result: &mut ProtocolHandlerResult,
+    ) {
+        if let Some(igmp_state) = self.igmp_state.get_mut(interface) {
+            let (timers, _expired) = igmp_state.group_query_expired(group, now);
+            result.add_timers(timers);
+
+            // Only send query if we're the elected querier
+            if igmp_state.is_querier {
+                use crate::protocols::igmp::IgmpQueryBuilder;
+                use crate::protocols::PacketBuilder;
+
+                // Group-specific query uses last member query interval
+                let max_resp_time =
+                    (igmp_state.config.last_member_query_interval.as_millis() / 100) as u8;
+                let builder = IgmpQueryBuilder::group_specific_query(group, max_resp_time);
+                let packet_data = builder.build();
+
+                result.send_packet(OutgoingPacket {
+                    protocol: ProtocolType::Igmp,
+                    interface: interface.to_string(),
+                    destination: group, // Group-specific query goes to the group address
+                    source: Some(igmp_state.interface_ip),
+                    data: packet_data,
+                });
+
+                log_debug!(
+                    self.logger,
+                    Facility::Supervisor,
+                    &format!(
+                        "IGMP: Sending Group-Specific Query for {} on {}",
+                        group, interface
+                    )
+                );
+            }
+        }
+    }
+
+    /// Handle PIM Hello timer expiration
+    fn handle_pim_hello_timer(
+        &mut self,
+        interface: &str,
+        now: Instant,
+        result: &mut ProtocolHandlerResult,
+    ) {
+        if let Some(iface_state) = self.pim_state.get_interface_mut(interface) {
+            // Schedule next Hello timer
+            result.add_timers(iface_state.hello_timer_expired(now));
+
+            // Build and queue PIM Hello packet
+            use crate::protocols::pim::PimHelloBuilder;
+            use crate::protocols::PacketBuilder;
+            const PIM_ALL_ROUTERS: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 13);
+
+            // Holdtime is typically 3.5x the hello period
+            let holdtime = (iface_state.config.hello_period.as_secs() as f64 * 3.5) as u16;
+            let builder = PimHelloBuilder::new(
+                holdtime,
+                iface_state.config.dr_priority,
+                iface_state.generation_id,
+            );
+            let packet_data = builder.build();
+
+            result.send_packet(OutgoingPacket {
+                protocol: ProtocolType::Pim,
+                interface: interface.to_string(),
+                destination: PIM_ALL_ROUTERS,
+                source: Some(iface_state.address),
+                data: packet_data,
+            });
+
+            log_info!(
+                self.logger,
+                Facility::Supervisor,
+                &format!("PIM: Sending Hello on {}", interface)
+            );
+        }
+    }
+
+    /// Handle PIM Join/Prune timer expiration - refresh (*,G) joins
+    fn handle_pim_join_prune_timer(
+        &mut self,
+        interface: &str,
+        group: Ipv4Addr,
+        now: Instant,
+        result: &mut ProtocolHandlerResult,
+    ) {
+        // Send periodic Join/Prune refresh for (*,G) routes
+        if let Some(star_g_state) = self.pim_state.star_g.get(&group) {
+            // Only refresh if the route is still valid and has downstream interest
+            if star_g_state.has_downstream() {
+                if let Some(upstream_state) = self.pim_state.get_interface(interface) {
+                    use crate::protocols::pim::{PimJoinPruneBuilder, ALL_PIM_ROUTERS};
+                    use crate::protocols::PacketBuilder;
+
+                    let rp = star_g_state.rp;
+                    // Use RPF neighbor, not DR (DR could be ourselves)
+                    let upstream_neighbor = if upstream_state.neighbors.contains_key(&rp) {
+                        rp // RP is directly connected
+                    } else {
+                        upstream_state
+                            .neighbors
+                            .keys()
+                            .next()
+                            .copied()
+                            .unwrap_or(rp)
+                    };
+
+                    let builder = PimJoinPruneBuilder::star_g_join(upstream_neighbor, group, rp);
+                    let packet_data = builder.build();
+
+                    result.send_packet(OutgoingPacket {
+                        protocol: ProtocolType::Pim,
+                        interface: interface.to_string(),
+                        destination: ALL_PIM_ROUTERS,
+                        source: Some(upstream_state.address),
+                        data: packet_data,
+                    });
+
+                    log_debug!(
+                        self.logger,
+                        Facility::Supervisor,
+                        &format!(
+                            "PIM: Refreshing (*,{}) Join to {} on {}",
+                            group, upstream_neighbor, interface
+                        )
+                    );
+
+                    // Reschedule the refresh timer
+                    result.add_timers(vec![TimerRequest {
+                        timer_type: TimerType::PimJoinPrune {
+                            interface: interface.to_string(),
+                            group,
+                        },
+                        fire_at: now + crate::protocols::pim::DEFAULT_JOIN_PRUNE_PERIOD,
+                        replace_existing: true,
+                    }]);
+                }
+            }
+        }
+    }
+
+    /// Handle MSDP Connect Retry timer expiration
+    fn handle_msdp_connect_retry_timer(
+        &mut self,
+        peer: Ipv4Addr,
+        now: Instant,
+        result: &mut ProtocolHandlerResult,
+    ) {
+        use crate::protocols::msdp_tcp::MsdpTcpCommand;
+
+        log_debug!(
+            self.logger,
+            Facility::Supervisor,
+            &format!("MSDP: connect retry timer expired for {}", peer)
+        );
+
+        // Update peer state to Connecting
+        if let Some(msdp_peer) = self.msdp_state.get_peer_mut(peer) {
+            // Only transition to Connecting if currently Disabled
+            if msdp_peer.state == crate::protocols::msdp::MsdpPeerState::Disabled {
+                msdp_peer.state = crate::protocols::msdp::MsdpPeerState::Connecting;
+            }
+        }
+
+        // Send connect command to TCP runner
+        if let Some(ref tcp_tx) = self.msdp_tcp_tx {
+            if let Err(e) = tcp_tx.try_send(MsdpTcpCommand::Connect { peer }) {
+                log_warning!(
+                    self.logger,
+                    Facility::Supervisor,
+                    &format!("MSDP: failed to send connect command for {}: {}", peer, e)
+                );
+            }
+        } else {
+            // TCP runner not available - log this only once at debug level
+            log_debug!(
+                self.logger,
+                Facility::Supervisor,
+                &format!("MSDP: TCP runner not available for peer {}", peer)
+            );
+        }
+
+        // Reschedule connect retry timer
+        result.add_timer(TimerRequest {
+            timer_type: TimerType::MsdpConnectRetry { peer },
+            fire_at: now + self.msdp_state.config.connect_retry_period,
+            replace_existing: true,
+        });
+    }
+
+    /// Handle MSDP Keepalive timer expiration
+    fn handle_msdp_keepalive_timer(
+        &mut self,
+        peer: Ipv4Addr,
+        now: Instant,
+        result: &mut ProtocolHandlerResult,
+    ) {
+        use crate::protocols::msdp_tcp::MsdpTcpCommand;
+
+        // Check if keepalive is needed and get the interval
+        let keepalive_info = self.msdp_state.get_peer(peer).map(|msdp_peer| {
+            (
+                msdp_peer.needs_keepalive(now),
+                msdp_peer.config.keepalive_interval,
+            )
+        });
+
+        if let Some((needs_keepalive, keepalive_interval)) = keepalive_info {
+            if needs_keepalive {
+                log_debug!(
+                    self.logger,
+                    Facility::Supervisor,
+                    &format!("MSDP: sending keepalive to {}", peer)
+                );
+
+                // Send keepalive command to TCP runner
+                if let Some(ref tcp_tx) = self.msdp_tcp_tx {
+                    if let Err(e) = tcp_tx.try_send(MsdpTcpCommand::SendKeepalive { peer }) {
+                        log_warning!(
+                            self.logger,
+                            Facility::Supervisor,
+                            &format!("MSDP: failed to send keepalive for {}: {}", peer, e)
+                        );
+                    }
+                }
+
+                // Update last_sent time
+                if let Some(msdp_peer) = self.msdp_state.get_peer_mut(peer) {
+                    msdp_peer.record_sent(now);
+                    msdp_peer.keepalives_sent += 1;
+                }
+
+                // Reschedule keepalive timer
+                result.add_timer(TimerRequest {
+                    timer_type: TimerType::MsdpKeepalive { peer },
+                    fire_at: now + keepalive_interval,
+                    replace_existing: true,
+                });
+            }
+        }
+    }
+
+    /// Handle MSDP Hold timer expiration - disconnect timed out peer
+    fn handle_msdp_hold_timer(
+        &mut self,
+        peer: Ipv4Addr,
+        now: Instant,
+        result: &mut ProtocolHandlerResult,
+    ) {
+        use crate::protocols::msdp_tcp::MsdpTcpCommand;
+
+        let is_timed_out = self
+            .msdp_state
+            .get_peer(peer)
+            .is_some_and(|p| p.is_timed_out(now));
+
+        if is_timed_out {
+            log_warning!(
+                self.logger,
+                Facility::Supervisor,
+                &format!("MSDP: peer {} hold timer expired - disconnecting", peer)
+            );
+
+            // Send disconnect command to TCP runner
+            if let Some(ref tcp_tx) = self.msdp_tcp_tx {
+                if let Err(e) = tcp_tx.try_send(MsdpTcpCommand::Disconnect { peer }) {
+                    log_warning!(
+                        self.logger,
+                        Facility::Supervisor,
+                        &format!("MSDP: failed to send disconnect for {}: {}", peer, e)
+                    );
+                }
+            }
+
+            result.add_timers(self.msdp_state.connection_closed(peer, now));
+        }
+    }
+
     fn handle_timer_expired(&mut self, timer_type: TimerType) -> ProtocolHandlerResult {
         let now = Instant::now();
         let mut result = ProtocolHandlerResult::new();
 
         match timer_type {
             TimerType::IgmpGeneralQuery { interface } => {
-                if let Some(igmp_state) = self.igmp_state.get_mut(&interface) {
-                    // Schedule next query timer
-                    result.add_timers(igmp_state.query_timer_expired(now));
-
-                    // Only send query if we're the elected querier
-                    if igmp_state.is_querier {
-                        use crate::protocols::igmp::IgmpQueryBuilder;
-                        use crate::protocols::PacketBuilder;
-                        const IGMP_ALL_HOSTS: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 1);
-
-                        // Max response time in tenths of seconds (default 10 seconds = 100)
-                        let max_resp_time =
-                            (igmp_state.config.query_response_interval.as_millis() / 100) as u8;
-                        let builder = IgmpQueryBuilder::general_query(max_resp_time);
-                        let packet_data = builder.build();
-
-                        result.send_packet(OutgoingPacket {
-                            protocol: ProtocolType::Igmp,
-                            interface: interface.clone(),
-                            destination: IGMP_ALL_HOSTS,
-                            source: Some(igmp_state.interface_ip),
-                            data: packet_data,
-                        });
-
-                        log_debug!(
-                            self.logger,
-                            Facility::Supervisor,
-                            &format!("IGMP: Sending General Query on {}", interface)
-                        );
-                    }
-                }
+                self.handle_igmp_general_query_timer(&interface, now, &mut result);
             }
             TimerType::IgmpGroupQuery { interface, group } => {
-                if let Some(igmp_state) = self.igmp_state.get_mut(&interface) {
-                    let (timers, _expired) = igmp_state.group_query_expired(group, now);
-                    result.add_timers(timers);
-
-                    // Only send query if we're the elected querier
-                    if igmp_state.is_querier {
-                        use crate::protocols::igmp::IgmpQueryBuilder;
-                        use crate::protocols::PacketBuilder;
-
-                        // Group-specific query uses last member query interval
-                        let max_resp_time =
-                            (igmp_state.config.last_member_query_interval.as_millis() / 100) as u8;
-                        let builder = IgmpQueryBuilder::group_specific_query(group, max_resp_time);
-                        let packet_data = builder.build();
-
-                        result.send_packet(OutgoingPacket {
-                            protocol: ProtocolType::Igmp,
-                            interface: interface.clone(),
-                            destination: group, // Group-specific query goes to the group address
-                            source: Some(igmp_state.interface_ip),
-                            data: packet_data,
-                        });
-
-                        log_debug!(
-                            self.logger,
-                            Facility::Supervisor,
-                            &format!(
-                                "IGMP: Sending Group-Specific Query for {} on {}",
-                                group, interface
-                            )
-                        );
-                    }
-                }
+                self.handle_igmp_group_query_timer(&interface, group, now, &mut result);
             }
             TimerType::IgmpGroupExpiry { interface, group } => {
                 if let Some(igmp_state) = self.igmp_state.get_mut(&interface) {
@@ -1855,38 +2120,7 @@ impl ProtocolState {
                 }
             }
             TimerType::PimHello { interface } => {
-                if let Some(iface_state) = self.pim_state.get_interface_mut(&interface) {
-                    // Schedule next Hello timer
-                    result.add_timers(iface_state.hello_timer_expired(now));
-
-                    // Build and queue PIM Hello packet
-                    use crate::protocols::pim::PimHelloBuilder;
-                    use crate::protocols::PacketBuilder;
-                    const PIM_ALL_ROUTERS: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 13);
-
-                    // Holdtime is typically 3.5x the hello period
-                    let holdtime = (iface_state.config.hello_period.as_secs() as f64 * 3.5) as u16;
-                    let builder = PimHelloBuilder::new(
-                        holdtime,
-                        iface_state.config.dr_priority,
-                        iface_state.generation_id,
-                    );
-                    let packet_data = builder.build();
-
-                    result.send_packet(OutgoingPacket {
-                        protocol: ProtocolType::Pim,
-                        interface: interface.clone(),
-                        destination: PIM_ALL_ROUTERS,
-                        source: Some(iface_state.address),
-                        data: packet_data,
-                    });
-
-                    log_info!(
-                        self.logger,
-                        Facility::Supervisor,
-                        &format!("PIM: Sending Hello on {}", interface)
-                    );
-                }
+                self.handle_pim_hello_timer(&interface, now, &mut result);
             }
             TimerType::PimNeighborExpiry {
                 interface,
@@ -1904,60 +2138,7 @@ impl ProtocolState {
                 }
             }
             TimerType::PimJoinPrune { interface, group } => {
-                // Send periodic Join/Prune refresh for (*,G) routes
-                if let Some(star_g_state) = self.pim_state.star_g.get(&group) {
-                    // Only refresh if the route is still valid and has downstream interest
-                    if star_g_state.has_downstream() {
-                        if let Some(upstream_state) = self.pim_state.get_interface(&interface) {
-                            use crate::protocols::pim::{PimJoinPruneBuilder, ALL_PIM_ROUTERS};
-                            use crate::protocols::PacketBuilder;
-
-                            let rp = star_g_state.rp;
-                            // Use RPF neighbor, not DR (DR could be ourselves)
-                            let upstream_neighbor = if upstream_state.neighbors.contains_key(&rp) {
-                                rp // RP is directly connected
-                            } else {
-                                upstream_state
-                                    .neighbors
-                                    .keys()
-                                    .next()
-                                    .copied()
-                                    .unwrap_or(rp)
-                            };
-
-                            let builder =
-                                PimJoinPruneBuilder::star_g_join(upstream_neighbor, group, rp);
-                            let packet_data = builder.build();
-
-                            result.send_packet(OutgoingPacket {
-                                protocol: ProtocolType::Pim,
-                                interface: interface.clone(),
-                                destination: ALL_PIM_ROUTERS,
-                                source: Some(upstream_state.address),
-                                data: packet_data,
-                            });
-
-                            log_debug!(
-                                self.logger,
-                                Facility::Supervisor,
-                                &format!(
-                                    "PIM: Refreshing (*,{}) Join to {} on {}",
-                                    group, upstream_neighbor, interface
-                                )
-                            );
-
-                            // Reschedule the refresh timer
-                            result.add_timers(vec![TimerRequest {
-                                timer_type: TimerType::PimJoinPrune {
-                                    interface: interface.clone(),
-                                    group,
-                                },
-                                fire_at: now + crate::protocols::pim::DEFAULT_JOIN_PRUNE_PERIOD,
-                                replace_existing: true,
-                            }]);
-                        }
-                    }
-                }
+                self.handle_pim_join_prune_timer(&interface, group, now, &mut result);
             }
             TimerType::PimStarGExpiry { group } => {
                 result.add_action(MribAction::RemoveStarGRoute { group });
@@ -1967,121 +2148,13 @@ impl ProtocolState {
             }
             // MSDP timer handling
             TimerType::MsdpConnectRetry { peer } => {
-                use crate::protocols::msdp_tcp::MsdpTcpCommand;
-
-                log_debug!(
-                    self.logger,
-                    Facility::Supervisor,
-                    &format!("MSDP: connect retry timer expired for {}", peer)
-                );
-
-                // Update peer state to Connecting
-                if let Some(msdp_peer) = self.msdp_state.get_peer_mut(peer) {
-                    // Only transition to Connecting if currently Disabled
-                    if msdp_peer.state == crate::protocols::msdp::MsdpPeerState::Disabled {
-                        msdp_peer.state = crate::protocols::msdp::MsdpPeerState::Connecting;
-                    }
-                }
-
-                // Send connect command to TCP runner
-                if let Some(ref tcp_tx) = self.msdp_tcp_tx {
-                    if let Err(e) = tcp_tx.try_send(MsdpTcpCommand::Connect { peer }) {
-                        log_warning!(
-                            self.logger,
-                            Facility::Supervisor,
-                            &format!("MSDP: failed to send connect command for {}: {}", peer, e)
-                        );
-                    }
-                } else {
-                    // TCP runner not available - log this only once at debug level
-                    log_debug!(
-                        self.logger,
-                        Facility::Supervisor,
-                        &format!("MSDP: TCP runner not available for peer {}", peer)
-                    );
-                }
-
-                // Reschedule connect retry timer
-                result.add_timer(TimerRequest {
-                    timer_type: TimerType::MsdpConnectRetry { peer },
-                    fire_at: now + self.msdp_state.config.connect_retry_period,
-                    replace_existing: true,
-                });
+                self.handle_msdp_connect_retry_timer(peer, now, &mut result);
             }
             TimerType::MsdpKeepalive { peer } => {
-                use crate::protocols::msdp_tcp::MsdpTcpCommand;
-
-                // Check if keepalive is needed and get the interval
-                let keepalive_info = self.msdp_state.get_peer(peer).map(|msdp_peer| {
-                    (
-                        msdp_peer.needs_keepalive(now),
-                        msdp_peer.config.keepalive_interval,
-                    )
-                });
-
-                if let Some((needs_keepalive, keepalive_interval)) = keepalive_info {
-                    if needs_keepalive {
-                        log_debug!(
-                            self.logger,
-                            Facility::Supervisor,
-                            &format!("MSDP: sending keepalive to {}", peer)
-                        );
-
-                        // Send keepalive command to TCP runner
-                        if let Some(ref tcp_tx) = self.msdp_tcp_tx {
-                            if let Err(e) = tcp_tx.try_send(MsdpTcpCommand::SendKeepalive { peer })
-                            {
-                                log_warning!(
-                                    self.logger,
-                                    Facility::Supervisor,
-                                    &format!("MSDP: failed to send keepalive for {}: {}", peer, e)
-                                );
-                            }
-                        }
-
-                        // Update last_sent time
-                        if let Some(msdp_peer) = self.msdp_state.get_peer_mut(peer) {
-                            msdp_peer.record_sent(now);
-                            msdp_peer.keepalives_sent += 1;
-                        }
-
-                        // Reschedule keepalive timer
-                        result.add_timer(TimerRequest {
-                            timer_type: TimerType::MsdpKeepalive { peer },
-                            fire_at: now + keepalive_interval,
-                            replace_existing: true,
-                        });
-                    }
-                }
+                self.handle_msdp_keepalive_timer(peer, now, &mut result);
             }
             TimerType::MsdpHold { peer } => {
-                use crate::protocols::msdp_tcp::MsdpTcpCommand;
-
-                let is_timed_out = self
-                    .msdp_state
-                    .get_peer(peer)
-                    .is_some_and(|p| p.is_timed_out(now));
-
-                if is_timed_out {
-                    log_warning!(
-                        self.logger,
-                        Facility::Supervisor,
-                        &format!("MSDP: peer {} hold timer expired - disconnecting", peer)
-                    );
-
-                    // Send disconnect command to TCP runner
-                    if let Some(ref tcp_tx) = self.msdp_tcp_tx {
-                        if let Err(e) = tcp_tx.try_send(MsdpTcpCommand::Disconnect { peer }) {
-                            log_warning!(
-                                self.logger,
-                                Facility::Supervisor,
-                                &format!("MSDP: failed to send disconnect for {}: {}", peer, e)
-                            );
-                        }
-                    }
-
-                    result.add_timers(self.msdp_state.connection_closed(peer, now));
-                }
+                self.handle_msdp_hold_timer(peer, now, &mut result);
             }
             TimerType::MsdpSaCacheExpiry {
                 source,
