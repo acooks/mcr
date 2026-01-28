@@ -6,6 +6,7 @@
 mod actions;
 mod command_handler;
 mod event_subscription;
+mod netlink_monitor;
 mod protocol_state;
 pub mod socket_helpers;
 mod timer_manager;
@@ -1745,6 +1746,11 @@ pub async fn run(
     let _log_consumer_handle = tokio::spawn(async move {
         AsyncConsumer::stderr(ringbuffers_for_consumer).run().await;
     });
+
+    // Start netlink monitor for real-time interface change detection (H3.4)
+    // This refreshes the interface cache immediately when interfaces change,
+    // rather than waiting for the TTL to expire.
+    let _netlink_monitor_handle = netlink_monitor::spawn_netlink_monitor(supervisor_logger.clone());
 
     log_debug!(
         supervisor_logger,

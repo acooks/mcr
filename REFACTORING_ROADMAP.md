@@ -58,7 +58,11 @@ This document tracks technical debt, refactoring opportunities, and optimization
 - [x] **H3.1** Create InterfaceCache struct with TTL-based refresh (30s default)
 - [x] **H3.2** Provide O(1) lookup methods: `get_index`, `get_capability`, `get_name_by_index`
 - [x] **H3.3** Add global singleton via `global_interface_cache()`
-- [ ] **H3.4** (Future) Add netlink-based cache invalidation on interface changes
+- [x] **H3.4** Add netlink-based cache invalidation on interface changes ✓ COMPLETED (Jan 2025)
+  - Added `netlink_monitor` module using rtnetlink crate
+  - Monitors RTM_NEWLINK and RTM_DELLINK events via RTMGRP_LINK multicast group
+  - Automatically refreshes interface cache when interfaces are added/removed/changed
+  - TTL-based refresh remains as fallback
 
 ---
 
@@ -245,6 +249,7 @@ This document tracks technical debt, refactoring opportunities, and optimization
 11. **Dead code removal (L1.0)** - Deleted adaptive_wakeup.rs (435 lines of orphaned code)
 12. **Dead code removal (L1.1-L1.4)** - Removed unused socket helpers, duplicate constant, legacy function (~80 lines)
 13. **Unsafe code audit (L4.1)** - Reduced unsafe blocks 72→63, added SAFETY comments, replaced libc calls with nix wrappers
+14. **Netlink monitor (H3.4)** - Real-time interface change detection via RTMGRP_LINK multicast group
 
 ### Guidelines for Future Work
 
