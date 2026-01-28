@@ -136,9 +136,13 @@ fn main() -> Result<()> {
                 reporting_interval: reporting_interval.unwrap_or(1),
                 fanout_group_id,
             };
-            // D1, D7: The worker process uses a `tokio-uring` runtime
-            // to drive the high-performance data plane.
-            tokio_uring::start(async {
+            // Worker uses single-threaded tokio runtime for FD receiving,
+            // then runs synchronous io_uring-based data plane loop.
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("Failed to create tokio runtime");
+            runtime.block_on(async {
                 if let Err(e) = worker::run_data_plane(config, worker::DefaultWorkerLifecycle).await
                 {
                     eprintln!("Data Plane worker process failed: {}", e);

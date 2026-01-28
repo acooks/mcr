@@ -179,9 +179,11 @@ This document tracks technical debt, refactoring opportunities, and optimization
 
 **Impact:** Build size and complexity
 
-- [ ] **L3.1** Audit io-uring vs tokio-uring usage
-  - Check if both crates are necessary
-  - Consider consolidating to tokio-uring only
+- [x] **L3.1** Remove tokio-uring dependency ✓ COMPLETED (Jan 2025)
+  - Removed `tokio-uring` - worker only used it as runtime wrapper
+  - Worker async code uses standard tokio features (UnixStream)
+  - Data plane uses `io_uring` crate directly for performance
+  - Eliminated duplicate io-uring versions (v0.6.4 via tokio-uring, v0.7.11 direct)
 
 - [ ] **L3.2** Document error crate usage
   - Clarify when to use anyhow vs thiserror
