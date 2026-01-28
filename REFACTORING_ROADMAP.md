@@ -193,9 +193,12 @@ This document tracks technical debt, refactoring opportunities, and optimization
 
 **Impact:** Onboarding and maintenance
 
-- [ ] **L4.1** Document unsafe code rationale
-  - Add safety comments to remaining unsafe blocks
-  - Especially in `src/logging/ringbuffer.rs`
+- [x] **L4.1** Document unsafe code rationale ✓ COMPLETED (Jan 2025)
+  - Reduced unsafe blocks from 72 to 63 (9 removed)
+  - Removed unused `create_eventfd()` wrapper (production uses `nix::sys::eventfd::EventFd`)
+  - Replaced `libc::if_indextoname` with `nix::net::if_::if_indextoname` in protocol_state.rs
+  - Added SAFETY comments to ringbuffer.rs lock-free operations
+  - Added SAFETY comments to socket_helpers.rs socket creation and bind operations
 
 - [ ] **L4.2** Document socket_helpers API
   - Add module-level documentation
@@ -209,8 +212,8 @@ This document tracks technical debt, refactoring opportunities, and optimization
 
 | Metric | Current | Target | Status |
 |--------|---------|--------|--------|
-| Unsafe blocks | ~75 | <50 | Pending |
-| Test coverage (socket_helpers) | 37 tests | >80% | ✓ Done |
+| Unsafe blocks | 63 | <50 | In progress (was 72) |
+| Test coverage (socket_helpers) | 31 tests | >80% | ✓ Done |
 | Duplicate error patterns | 5 | 0 | ✓ Reduced (was 14) |
 | Dead code functions | 0 | 0 | ✓ Done |
 
@@ -241,6 +244,7 @@ This document tracks technical debt, refactoring opportunities, and optimization
 10. **Interface capability helper (M2)** - `extract_interface_capability()` reduced ~20 lines
 11. **Dead code removal (L1.0)** - Deleted adaptive_wakeup.rs (435 lines of orphaned code)
 12. **Dead code removal (L1.1-L1.4)** - Removed unused socket helpers, duplicate constant, legacy function (~80 lines)
+13. **Unsafe code audit (L4.1)** - Reduced unsafe blocks 72→63, added SAFETY comments, replaced libc calls with nix wrappers
 
 ### Guidelines for Future Work
 

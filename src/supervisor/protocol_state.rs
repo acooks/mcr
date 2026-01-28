@@ -2931,14 +2931,10 @@ fn interface_name_from_index(index: i32) -> Option<String> {
     if index <= 0 {
         return None;
     }
-    let mut buf = [0u8; libc::IF_NAMESIZE];
-    let result = unsafe { libc::if_indextoname(index as u32, buf.as_mut_ptr() as *mut i8) };
-    if result.is_null() {
-        None
-    } else {
-        let name = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr() as *const i8) };
-        name.to_str().ok().map(|s| s.to_string())
-    }
+    // Use nix's safe wrapper instead of raw libc
+    nix::net::if_::if_indextoname(index as libc::c_uint)
+        .ok()
+        .and_then(|cstr| cstr.to_str().ok().map(|s| s.to_string()))
 }
 
 impl AsyncRawSocket {

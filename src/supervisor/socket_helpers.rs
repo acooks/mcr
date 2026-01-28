@@ -57,6 +57,10 @@ pub(crate) fn create_af_packet_socket(
     let iface_index = get_interface_index(interface_name)?;
 
     // Bind to interface using raw libc bind
+    // SAFETY: libc::bind is safe when:
+    // - recv_socket is a valid socket fd (guaranteed by socket2::Socket::new)
+    // - sockaddr_ll is correctly initialized for AF_PACKET
+    // - The size matches sockaddr_ll structure
     unsafe {
         let sockaddr_ll = libc::sockaddr_ll {
             sll_family: libc::AF_PACKET as u16,
@@ -85,6 +89,9 @@ pub(crate) fn create_af_packet_socket(
     if fanout_group_id > 0 {
         let fanout_arg: u32 = (fanout_group_id as u32) | (libc::PACKET_FANOUT_CPU << 16);
 
+        // SAFETY: libc::setsockopt is safe when:
+        // - The socket fd is valid (guaranteed by socket2::Socket)
+        // - The option value pointer and size are correct for PACKET_FANOUT (u32)
         unsafe {
             if libc::setsockopt(
                 recv_socket.as_raw_fd(),
@@ -577,6 +584,8 @@ fn extract_interface_capability(iface: &pnet::datalink::NetworkInterface) -> Int
 ///
 /// Returns an OwnedFd that automatically closes on drop.
 pub fn create_raw_ip_socket(protocol: i32, flags: SocketFlags) -> Result<std::os::fd::OwnedFd> {
+    // SAFETY: libc::socket is safe to call with valid domain/type/protocol values.
+    // We check the return value for errors before using the fd.
     let fd = unsafe {
         libc::socket(
             libc::AF_INET,
@@ -593,6 +602,8 @@ pub fn create_raw_ip_socket(protocol: i32, flags: SocketFlags) -> Result<std::os
         ));
     }
 
+    // SAFETY: We just created this fd and verified it's non-negative.
+    // OwnedFd takes ownership and will close it on drop.
     Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) })
 }
 
@@ -605,6 +616,8 @@ pub fn create_packet_socket(
     protocol: u16,
     flags: SocketFlags,
 ) -> Result<std::os::fd::OwnedFd> {
+    // SAFETY: libc::socket is safe to call with valid domain/type/protocol values.
+    // We check the return value for errors before using the fd.
     let fd = unsafe {
         libc::socket(
             libc::AF_PACKET,
@@ -620,6 +633,8 @@ pub fn create_packet_socket(
         ));
     }
 
+    // SAFETY: We just created this fd and verified it's non-negative.
+    // OwnedFd takes ownership and will close it on drop.
     Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) })
 }
 
@@ -628,6 +643,7 @@ pub fn create_packet_socket(
 /// This socket is typically used for interface configuration (SIOCGIFFLAGS, etc.)
 /// and should be closed after the ioctl completes.
 pub fn create_ioctl_socket() -> Result<std::os::fd::OwnedFd> {
+    // SAFETY: libc::socket is safe to call with valid domain/type/protocol values.
     let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
 
     if fd < 0 {
@@ -637,10 +653,15 @@ pub fn create_ioctl_socket() -> Result<std::os::fd::OwnedFd> {
         ));
     }
 
+    // SAFETY: We just created this fd and verified it's non-negative.
     Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) })
 }
 
 /// Set IP_HDRINCL on a raw socket to craft our own IP headers
+///
+/// # Safety note
+/// The unsafe block calls libc::setsockopt with a valid fd (caller's responsibility)
+/// and correctly-sized option value. The enabled flag is a c_int as required by IP_HDRINCL.
 pub fn set_ip_hdrincl(fd: RawFd) -> Result<()> {
     let enabled: libc::c_int = 1;
     let result = unsafe {
@@ -770,36 +791,6 @@ pub fn set_recv_buffer_size(
     }
 
     actual_size
-}
-
-// ============================================================================
-// Eventfd creation
-// ============================================================================
-
-/// Create an eventfd for signaling between threads/processes
-///
-/// Flags:
-/// - `nonblock`: Set EFD_NONBLOCK for non-blocking reads
-/// - `cloexec`: Set EFD_CLOEXEC to close on exec (recommended)
-pub fn create_eventfd(nonblock: bool, cloexec: bool) -> Result<std::os::fd::OwnedFd> {
-    let mut flags = 0;
-    if nonblock {
-        flags |= libc::EFD_NONBLOCK;
-    }
-    if cloexec {
-        flags |= libc::EFD_CLOEXEC;
-    }
-
-    let fd = unsafe { libc::eventfd(0, flags) };
-
-    if fd < 0 {
-        return Err(anyhow::anyhow!(
-            "Failed to create eventfd: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-
-    Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) })
 }
 
 // ============================================================================
@@ -992,97 +983,6 @@ mod tests {
             "create_packet_socket(RAW) failed: {:?}",
             result.err()
         );
-    }
-
-    // ========================================================================
-    // Eventfd tests
-    // ========================================================================
-
-    #[test]
-    fn test_create_eventfd_default() {
-        let result = create_eventfd(false, false);
-        assert!(result.is_ok(), "create_eventfd failed: {:?}", result.err());
-        let fd = result.unwrap();
-        assert!(fd.as_raw_fd() >= 0);
-    }
-
-    #[test]
-    fn test_create_eventfd_nonblock() {
-        let result = create_eventfd(true, false);
-        assert!(result.is_ok());
-        let fd = result.unwrap();
-
-        // Verify nonblock by trying to read - should return EAGAIN
-        let mut buf = [0u8; 8];
-        let read_result =
-            unsafe { libc::read(fd.as_raw_fd(), buf.as_mut_ptr() as *mut libc::c_void, 8) };
-        assert_eq!(read_result, -1);
-        let err = std::io::Error::last_os_error();
-        assert!(
-            err.kind() == std::io::ErrorKind::WouldBlock,
-            "Expected WouldBlock, got: {:?}",
-            err
-        );
-    }
-
-    #[test]
-    fn test_create_eventfd_cloexec() {
-        let result = create_eventfd(false, true);
-        assert!(result.is_ok());
-        // Can't easily verify CLOEXEC without fork/exec, but at least verify success
-    }
-
-    #[test]
-    fn test_create_eventfd_both_flags() {
-        let result = create_eventfd(true, true);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_eventfd_signal_and_read() {
-        let fd = create_eventfd(true, true).expect("create_eventfd failed");
-
-        // Write a value
-        let value: u64 = 42;
-        let write_result =
-            unsafe { libc::write(fd.as_raw_fd(), &value as *const _ as *const libc::c_void, 8) };
-        assert_eq!(write_result, 8);
-
-        // Read the value back
-        let mut read_value: u64 = 0;
-        let read_result = unsafe {
-            libc::read(
-                fd.as_raw_fd(),
-                &mut read_value as *mut _ as *mut libc::c_void,
-                8,
-            )
-        };
-        assert_eq!(read_result, 8);
-        assert_eq!(read_value, 42);
-    }
-
-    #[test]
-    fn test_eventfd_semaphore_behavior() {
-        // Eventfd without EFD_SEMAPHORE adds values
-        let fd = create_eventfd(true, true).expect("create_eventfd failed");
-
-        // Write twice
-        let value: u64 = 1;
-        unsafe {
-            libc::write(fd.as_raw_fd(), &value as *const _ as *const libc::c_void, 8);
-            libc::write(fd.as_raw_fd(), &value as *const _ as *const libc::c_void, 8);
-        }
-
-        // Read should give sum
-        let mut read_value: u64 = 0;
-        unsafe {
-            libc::read(
-                fd.as_raw_fd(),
-                &mut read_value as *mut _ as *mut libc::c_void,
-                8,
-            );
-        }
-        assert_eq!(read_value, 2); // 1 + 1 = 2
     }
 
     // ========================================================================
