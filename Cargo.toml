@@ -62,3 +62,9 @@ path = "src/control_client.rs"
 [[test]]
 name = "proptests"
 path = "tests/proptests/packet_parser.rs"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
