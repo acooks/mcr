@@ -420,17 +420,11 @@ impl TrafficGenerator {
             .collect();
 
         let mut msghdrs: Vec<libc::mmsghdr> = (0..batch_size)
-            .map(|i| libc::mmsghdr {
-                msg_hdr: libc::msghdr {
-                    msg_name: std::ptr::null_mut(),
-                    msg_namelen: 0,
-                    msg_iov: &mut iovecs[i] as *mut libc::iovec,
-                    msg_iovlen: 1,
-                    msg_control: std::ptr::null_mut(),
-                    msg_controllen: 0,
-                    msg_flags: 0,
-                },
-                msg_len: 0,
+            .map(|i| {
+                let mut hdr: libc::mmsghdr = unsafe { std::mem::zeroed() };
+                hdr.msg_hdr.msg_iov = &mut iovecs[i] as *mut libc::iovec;
+                hdr.msg_hdr.msg_iovlen = 1 as _;
+                hdr
             })
             .collect();
 
@@ -854,17 +848,13 @@ fn send_batch_sendmmsg(
         .collect();
 
     let mut msghdrs: Vec<libc::mmsghdr> = (0..count)
-        .map(|i| libc::mmsghdr {
-            msg_hdr: libc::msghdr {
-                msg_name: &sockaddr as *const _ as *mut libc::c_void,
-                msg_namelen: sockaddr_len as libc::socklen_t,
-                msg_iov: &mut iovecs[i] as *mut libc::iovec,
-                msg_iovlen: 1,
-                msg_control: std::ptr::null_mut(),
-                msg_controllen: 0,
-                msg_flags: 0,
-            },
-            msg_len: 0,
+        .map(|i| {
+            let mut hdr: libc::mmsghdr = unsafe { std::mem::zeroed() };
+            hdr.msg_hdr.msg_name = &sockaddr as *const _ as *mut libc::c_void;
+            hdr.msg_hdr.msg_namelen = sockaddr_len as libc::socklen_t;
+            hdr.msg_hdr.msg_iov = &mut iovecs[i] as *mut libc::iovec;
+            hdr.msg_hdr.msg_iovlen = 1 as _;
+            hdr
         })
         .collect();
 
