@@ -3,5 +3,5 @@
 # See https://rust-lang.github.io/rustup/overrides.html for more details.
 
 [toolchain]
-channel = "1.90.0"
+channel = "1.93.0"
 components = ["rustfmt", "clippy"]

@@ -2597,7 +2597,7 @@ impl ProtocolState {
         let name_bytes = iface_cstr.as_bytes_with_nul();
         let copy_len = std::cmp::min(name_bytes.len(), ifr.ifr_name.len());
         for (i, &b) in name_bytes[..copy_len].iter().enumerate() {
-            ifr.ifr_name[i] = b as i8;
+            ifr.ifr_name[i] = b as libc::c_char;
         }
 
         let result = unsafe { libc::ioctl(sock.as_raw_fd(), libc::SIOCGIFFLAGS as _, &mut ifr) };
@@ -3043,9 +3043,9 @@ impl AsyncRawSocket {
 
         let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
         msg.msg_iov = &mut iov;
-        msg.msg_iovlen = 1;
+        msg.msg_iovlen = 1 as _;
         msg.msg_control = cmsg_buf.as_mut_ptr() as *mut libc::c_void;
-        msg.msg_controllen = cmsg_buf.len();
+        msg.msg_controllen = cmsg_buf.len() as _;
 
         let n = unsafe { libc::recvmsg(self.fd, &mut msg, 0) };
         if n < 0 {
