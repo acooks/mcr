@@ -10,8 +10,6 @@ use futures::SinkExt;
 use std::collections::HashMap;
 #[cfg(not(feature = "testing"))]
 use std::os::unix::io::FromRawFd;
-#[cfg(feature = "testing")]
-use std::os::unix::io::RawFd;
 use std::os::unix::io::{AsRawFd, IntoRawFd};
 use std::sync::{Arc, Mutex};
 use tokio::net::UnixStream;
@@ -156,25 +154,43 @@ pub async fn spawn_data_plane_worker(
         )
     );
 
-    // Create pipe for worker stderr (for JSON logging)
+    // Create pipe for worker stderr (for JSON logging).
+    // Keep as OwnedFd to ensure cleanup on error paths.
     #[cfg(not(feature = "testing"))]
     let (log_read_fd, log_write_fd) = {
         use nix::unistd::pipe;
         let (read_fd, write_fd) = pipe()?;
-        (Some(read_fd.into_raw_fd()), Some(write_fd.into_raw_fd()))
+        (Some(read_fd), Some(write_fd))
     };
     #[cfg(feature = "testing")]
-    let (_log_read_fd, _log_write_fd): (Option<RawFd>, Option<RawFd>) = (None, None);
+    let (log_read_fd, log_write_fd): (
+        Option<std::os::unix::io::OwnedFd>,
+        Option<std::os::unix::io::OwnedFd>,
+    ) = (None, None);
 
-    // Create pipe for worker stats (JSON stats reporting)
+    // Create pipe for worker stats (JSON stats reporting).
+    // Keep as OwnedFd to ensure cleanup on error paths.
     #[cfg(not(feature = "testing"))]
     let (stats_read_fd, stats_write_fd) = {
         use nix::unistd::pipe;
         let (read_fd, write_fd) = pipe()?;
-        (Some(read_fd.into_raw_fd()), Some(write_fd.into_raw_fd()))
+        (Some(read_fd), Some(write_fd))
     };
     #[cfg(feature = "testing")]
-    let (_stats_read_fd, _stats_write_fd): (Option<RawFd>, Option<RawFd>) = (None, None);
+    let (stats_read_fd, stats_write_fd): (
+        Option<std::os::unix::io::OwnedFd>,
+        Option<std::os::unix::io::OwnedFd>,
+    ) = (None, None);
+
+    // Extract raw FD values for the pre_exec closure (raw FDs are Copy).
+    // The OwnedFds above ensure cleanup if spawn fails.
+    #[cfg(not(feature = "testing"))]
+    let (log_read_raw, log_write_raw) = (
+        log_read_fd.as_ref().map(|fd| fd.as_raw_fd()),
+        log_write_fd.as_ref().map(|fd| fd.as_raw_fd()),
+    );
+    #[cfg(not(feature = "testing"))]
+    let stats_read_raw = stats_read_fd.as_ref().map(|fd| fd.as_raw_fd());
 
     // Create the supervisor-worker communication socket pair
     let (supervisor_sock, worker_sock) = UnixStream::pair()?;
@@ -197,18 +213,18 @@ pub async fn spawn_data_plane_worker(
 
     // Pass stats pipe FD via environment variable
     #[cfg(not(feature = "testing"))]
-    if let Some(write_fd) = stats_write_fd {
-        command.env("MCR_STATS_PIPE_FD", write_fd.to_string());
+    if let Some(ref write_fd) = stats_write_fd {
         use nix::fcntl::{fcntl, FcntlArg, FdFlag};
-        use std::os::fd::BorrowedFd;
-        let borrowed_fd = unsafe { BorrowedFd::borrow_raw(write_fd) };
-        let flags = fcntl(borrowed_fd, FcntlArg::F_GETFD)?;
+        use std::os::fd::AsFd;
+        command.env("MCR_STATS_PIPE_FD", write_fd.as_raw_fd().to_string());
+        let flags = fcntl(write_fd.as_fd(), FcntlArg::F_GETFD)?;
         let mut fd_flags = FdFlag::from_bits_truncate(flags);
         fd_flags.remove(FdFlag::FD_CLOEXEC);
-        fcntl(borrowed_fd, FcntlArg::F_SETFD(fd_flags))?;
+        fcntl(write_fd.as_fd(), FcntlArg::F_SETFD(fd_flags))?;
     }
 
-    // Ensure worker_sock becomes FD 3 in the child, and redirect stderr to pipe
+    // Ensure worker_sock becomes FD 3 in the child, and redirect stderr to pipe.
+    // The closure captures raw FD values (Copy) so OwnedFds remain in parent for cleanup.
     unsafe {
         command.pre_exec(move || {
             if worker_fd != 3 {
@@ -221,14 +237,14 @@ pub async fn spawn_data_plane_worker(
             }
 
             #[cfg(not(feature = "testing"))]
-            if let Some(write_fd) = log_write_fd {
+            if let Some(write_fd) = log_write_raw {
                 if libc::dup2(write_fd, 2) == -1 {
                     return Err(std::io::Error::last_os_error());
                 }
                 if libc::close(write_fd) == -1 {
                     return Err(std::io::Error::last_os_error());
                 }
-                if let Some(read_fd) = log_read_fd {
+                if let Some(read_fd) = log_read_raw {
                     if libc::close(read_fd) == -1 {
                         return Err(std::io::Error::last_os_error());
                     }
@@ -236,7 +252,7 @@ pub async fn spawn_data_plane_worker(
             }
 
             #[cfg(not(feature = "testing"))]
-            if let Some(read_fd) = stats_read_fd {
+            if let Some(read_fd) = stats_read_raw {
                 if libc::close(read_fd) == -1 {
                     return Err(std::io::Error::last_os_error());
                 }
@@ -248,26 +264,14 @@ pub async fn spawn_data_plane_worker(
 
     let child = command.spawn()?;
 
-    // Close write end in parent
-    #[cfg(not(feature = "testing"))]
-    if let Some(write_fd) = log_write_fd {
-        nix::unistd::close(write_fd).ok();
-    }
+    // Close write ends in parent by dropping the OwnedFds.
+    // Read ends are kept for log/stats consumption.
+    drop(log_write_fd);
+    drop(stats_write_fd);
 
-    #[cfg(not(feature = "testing"))]
-    let log_pipe = log_read_fd.map(|fd| unsafe { std::os::unix::io::OwnedFd::from_raw_fd(fd) });
-    #[cfg(feature = "testing")]
-    let log_pipe = None;
-
-    #[cfg(not(feature = "testing"))]
-    if let Some(write_fd) = stats_write_fd {
-        nix::unistd::close(write_fd).ok();
-    }
-
-    #[cfg(not(feature = "testing"))]
-    let stats_pipe = stats_read_fd.map(|fd| unsafe { std::os::unix::io::OwnedFd::from_raw_fd(fd) });
-    #[cfg(feature = "testing")]
-    let stats_pipe = None;
+    // log_read_fd and stats_read_fd are already OwnedFd
+    let log_pipe = log_read_fd;
+    let stats_pipe = stats_read_fd;
 
     // Send TWO command sockets to the child process
     let ingress_cmd_supervisor_stream =
