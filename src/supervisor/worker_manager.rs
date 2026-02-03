@@ -29,6 +29,31 @@ pub(super) const INITIAL_BACKOFF_MS: u64 = 250;
 /// Maximum backoff delay for restarting failed workers (16 seconds)
 pub(super) const MAX_BACKOFF_MS: u64 = 16000;
 
+/// Type alias for a pair of async command streams (ingress, egress)
+pub(super) type CmdStreamPair = (
+    Arc<tokio::sync::Mutex<UnixStream>>,
+    Arc<tokio::sync::Mutex<UnixStream>>,
+);
+
+/// Type alias for command streams with associated interface name
+pub(super) type CmdStreamWithInterface = (
+    String,
+    Arc<tokio::sync::Mutex<UnixStream>>,
+    Arc<tokio::sync::Mutex<UnixStream>>,
+);
+
+/// Result of spawning a data plane worker process.
+///
+/// Bundles the child process handle, command streams, and optional pipes
+/// returned by `spawn_data_plane_worker()`.
+pub(super) struct SpawnedWorker {
+    pub child: tokio::process::Child,
+    pub ingress_cmd_stream: UnixStream,
+    pub egress_cmd_stream: UnixStream,
+    pub log_pipe: Option<std::os::unix::io::OwnedFd>,
+    pub stats_pipe: Option<std::os::unix::io::OwnedFd>,
+}
+
 /// Differentiates worker types for unified handling
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum WorkerType {
@@ -107,13 +132,7 @@ pub async fn spawn_data_plane_worker(
     interface: String,
     fanout_group_id: u16,
     logger: &Logger,
-) -> Result<(
-    Child,
-    UnixStream,
-    UnixStream,
-    Option<std::os::unix::io::OwnedFd>,
-    Option<std::os::unix::io::OwnedFd>,
-)> {
+) -> Result<SpawnedWorker> {
     logger.debug(
         Facility::Supervisor,
         &format!(
@@ -260,13 +279,13 @@ pub async fn spawn_data_plane_worker(
     socket_helpers::send_fd(&supervisor_sock, af_packet_socket.as_raw_fd()).await?;
     drop(af_packet_socket);
 
-    Ok((
+    Ok(SpawnedWorker {
         child,
-        ingress_cmd_supervisor_stream,
-        egress_cmd_supervisor_stream,
+        ingress_cmd_stream: ingress_cmd_supervisor_stream,
+        egress_cmd_stream: egress_cmd_supervisor_stream,
         log_pipe,
         stats_pipe,
-    ))
+    })
 }
 
 impl WorkerManager {
@@ -356,20 +375,20 @@ impl WorkerManager {
         core_id: u32,
         fanout_group_id: u16,
     ) -> Result<()> {
-        let (child, ingress_cmd_stream, egress_cmd_stream, log_pipe, stats_pipe) =
-            spawn_data_plane_worker(
-                core_id,
-                interface.to_string(),
-                fanout_group_id,
-                &self.logger,
-            )
-            .await?;
+        let spawned = spawn_data_plane_worker(
+            core_id,
+            interface.to_string(),
+            fanout_group_id,
+            &self.logger,
+        )
+        .await?;
 
-        let pid = child
+        let pid = spawned
+            .child
             .id()
             .ok_or_else(|| anyhow::anyhow!("Worker process exited immediately after spawn"))?;
-        let ingress_cmd_stream_arc = Arc::new(tokio::sync::Mutex::new(ingress_cmd_stream));
-        let egress_cmd_stream_arc = Arc::new(tokio::sync::Mutex::new(egress_cmd_stream));
+        let ingress_cmd_stream_arc = Arc::new(tokio::sync::Mutex::new(spawned.ingress_cmd_stream));
+        let egress_cmd_stream_arc = Arc::new(tokio::sync::Mutex::new(spawned.egress_cmd_stream));
 
         self.workers.insert(
             pid,
@@ -379,11 +398,11 @@ impl WorkerManager {
                     interface: interface.to_string(),
                     core_id,
                 },
-                child,
+                child: spawned.child,
                 ingress_cmd_stream: Some(ingress_cmd_stream_arc),
                 egress_cmd_stream: Some(egress_cmd_stream_arc),
-                log_pipe,
-                stats_pipe,
+                log_pipe: spawned.log_pipe,
+                stats_pipe: spawned.stats_pipe,
             },
         );
 
@@ -648,23 +667,19 @@ impl WorkerManager {
     ///
     /// Inserts the worker, clears the restarting entry, resets backoff,
     /// and spawns log/stats consumers.
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn register_spawned_worker(
         &mut self,
-        child: Child,
-        ingress_cmd_stream: tokio::net::UnixStream,
-        egress_cmd_stream: tokio::net::UnixStream,
-        log_pipe: Option<std::os::unix::io::OwnedFd>,
-        stats_pipe: Option<std::os::unix::io::OwnedFd>,
+        spawned: SpawnedWorker,
         interface: &str,
         core_id: u32,
     ) -> Result<u32> {
-        let pid = child
+        let pid = spawned
+            .child
             .id()
             .ok_or_else(|| anyhow::anyhow!("Worker process exited immediately after spawn"))?;
 
-        let ingress_cmd_stream_arc = Arc::new(tokio::sync::Mutex::new(ingress_cmd_stream));
-        let egress_cmd_stream_arc = Arc::new(tokio::sync::Mutex::new(egress_cmd_stream));
+        let ingress_cmd_stream_arc = Arc::new(tokio::sync::Mutex::new(spawned.ingress_cmd_stream));
+        let egress_cmd_stream_arc = Arc::new(tokio::sync::Mutex::new(spawned.egress_cmd_stream));
 
         self.workers.insert(
             pid,
@@ -674,11 +689,11 @@ impl WorkerManager {
                     interface: interface.to_string(),
                     core_id,
                 },
-                child,
+                child: spawned.child,
                 ingress_cmd_stream: Some(ingress_cmd_stream_arc),
                 egress_cmd_stream: Some(egress_cmd_stream_arc),
-                log_pipe,
-                stats_pipe,
+                log_pipe: spawned.log_pipe,
+                stats_pipe: spawned.stats_pipe,
             },
         );
 
@@ -860,13 +875,7 @@ impl WorkerManager {
     }
 
     /// Get all data plane command streams for broadcasting
-    #[allow(clippy::type_complexity)]
-    pub(super) fn get_all_dp_cmd_streams(
-        &self,
-    ) -> Vec<(
-        Arc<tokio::sync::Mutex<UnixStream>>,
-        Arc<tokio::sync::Mutex<UnixStream>>,
-    )> {
+    pub(super) fn get_all_dp_cmd_streams(&self) -> Vec<CmdStreamPair> {
         self.workers
             .values()
             .filter(|w| matches!(w.worker_type, WorkerType::DataPlane { .. }))
@@ -878,14 +887,7 @@ impl WorkerManager {
     }
 
     /// Get all data plane command streams with interface name
-    #[allow(clippy::type_complexity)]
-    pub(super) fn get_all_dp_cmd_streams_with_interface(
-        &self,
-    ) -> Vec<(
-        String,
-        Arc<tokio::sync::Mutex<UnixStream>>,
-        Arc<tokio::sync::Mutex<UnixStream>>,
-    )> {
+    pub(super) fn get_all_dp_cmd_streams_with_interface(&self) -> Vec<CmdStreamWithInterface> {
         self.workers
             .values()
             .filter_map(|w| {

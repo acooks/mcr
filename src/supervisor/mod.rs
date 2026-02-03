@@ -485,19 +485,20 @@ pub(super) fn parse_group_prefix(prefix: &str) -> Result<Ipv4Addr> {
     }
 }
 
+/// Parsed PIM Join/Prune message
+pub(super) struct PimJoinPrune {
+    /// Upstream neighbor address
+    pub upstream: Ipv4Addr,
+    /// Join entries: (source, group) where None source means (*,G)
+    pub joins: Vec<(Option<Ipv4Addr>, Ipv4Addr)>,
+    /// Prune entries: (source, group) where None source means (*,G)
+    pub prunes: Vec<(Option<Ipv4Addr>, Ipv4Addr)>,
+    /// Hold time in seconds
+    pub holdtime_secs: u16,
+}
+
 /// Parse a PIM Join/Prune message payload
-///
-/// Returns: (upstream_neighbor, joins, prunes, holdtime_secs)
-/// Where joins/prunes are Vec<(Option<source>, group)> - None source means (*,G)
-#[allow(clippy::type_complexity)]
-pub(super) fn parse_pim_join_prune(
-    payload: &[u8],
-) -> Option<(
-    Ipv4Addr,
-    Vec<(Option<Ipv4Addr>, Ipv4Addr)>,
-    Vec<(Option<Ipv4Addr>, Ipv4Addr)>,
-    u16,
-)> {
+pub(super) fn parse_pim_join_prune(payload: &[u8]) -> Option<PimJoinPrune> {
     // Minimum length: 8 bytes for header (upstream neighbor encoded + reserved + num_groups + holdtime)
     if payload.len() < 8 {
         return None;
@@ -588,7 +589,12 @@ pub(super) fn parse_pim_join_prune(
         }
     }
 
-    Some((upstream, joins, prunes, holdtime))
+    Some(PimJoinPrune {
+        upstream,
+        joins,
+        prunes,
+        holdtime_secs: holdtime,
+    })
 }
 
 // --- Client Handling ---
@@ -1371,11 +1377,11 @@ async fn handle_client(
                     )
                     .await
                     {
-                        Ok((child, ingress, egress, log_pipe, stats_pipe)) => {
+                        Ok(spawned) => {
                             let mut mgr = worker_manager.lock().unwrap();
-                            if let Err(e) = mgr.register_spawned_worker(
-                                child, ingress, egress, log_pipe, stats_pipe, &interface, core_id,
-                            ) {
+                            if let Err(e) =
+                                mgr.register_spawned_worker(spawned, &interface, core_id)
+                            {
                                 log_error!(
                                     logger,
                                     Facility::Supervisor,
@@ -2168,12 +2174,11 @@ pub async fn run(
                             info.fanout_group_id,
                             &logger,
                         ).await {
-                            Ok((child, ingress, egress, log_pipe, stats_pipe)) => {
+                            Ok(spawned) => {
                                 let new_pid = {
                                     let mut mgr = wm.lock().unwrap();
                                     mgr.register_spawned_worker(
-                                        child, ingress, egress, log_pipe, stats_pipe,
-                                        &info.interface, info.core_id,
+                                        spawned, &info.interface, info.core_id,
                                     )
                                 };
 
@@ -2242,11 +2247,12 @@ pub async fn run(
                 }
             }
 
-            // Interface up event from netlink - immediate spawn retry
+            // Interface up/down event from netlink
             // When an interface appears, immediately retry any pending spawns for it
             // instead of waiting for the next health check tick + backoff delay.
             Some(event) = netlink_rx.recv() => {
-                if let netlink_monitor::InterfaceEvent::Up(interface) = event {
+                match event {
+                netlink_monitor::InterfaceEvent::Up(interface) => {
                     // Check if we have pending spawns for this interface
                     let pending_for_interface: Vec<worker_manager::ExitedWorkerInfo> = {
                         let mut mgr = worker_manager.lock().unwrap();
@@ -2279,17 +2285,11 @@ pub async fn run(
                                 )
                                 .await
                                 {
-                                    Ok((child, ingress, egress, log_pipe, stats_pipe)) => {
+                                    Ok(spawned) => {
                                         let new_pid = {
                                             let mut mgr = wm.lock().unwrap();
                                             mgr.register_spawned_worker(
-                                                child,
-                                                ingress,
-                                                egress,
-                                                log_pipe,
-                                                stats_pipe,
-                                                &info.interface,
-                                                info.core_id,
+                                                spawned, &info.interface, info.core_id,
                                             )
                                         };
 
@@ -2377,7 +2377,15 @@ pub async fn run(
                         }
                     }
                 }
-                // InterfaceEvent::Down is ignored - workers will handle interface removal
+                netlink_monitor::InterfaceEvent::Down(interface) => {
+                    // Log interface removal; workers will detect socket errors on their own
+                    log_debug!(
+                        supervisor_logger,
+                        Facility::Supervisor,
+                        &format!("Interface '{}' removed via netlink", interface)
+                    );
+                }
+                }
             }
 
             // Periodic ruleset sync (every 5 minutes)
@@ -2550,10 +2558,10 @@ pub async fn run(
                                         match worker_manager::spawn_data_plane_worker(
                                             core_id, iface.clone(), fanout_group_id, &logger_clone,
                                         ).await {
-                                            Ok((child, ingress, egress, log_pipe, stats_pipe)) => {
+                                            Ok(spawned) => {
                                                 let mut mgr = wm.lock().unwrap();
                                                 if let Err(e) = mgr.register_spawned_worker(
-                                                    child, ingress, egress, log_pipe, stats_pipe, &iface, core_id,
+                                                    spawned, &iface, core_id,
                                                 ) {
                                                     log_warning!(
                                                         logger_clone, Facility::Supervisor,
