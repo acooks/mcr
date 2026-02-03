@@ -1191,6 +1191,7 @@ mod tests {
                     group: "224.0.0.2".parse().unwrap(),
                     port: 5001,
                     interface: "eth0".to_string(), // Same as input!
+                    ttl: None,
                 }],
             },
             &master_rules,
@@ -1235,6 +1236,7 @@ mod tests {
                     group: "224.0.0.2".parse().unwrap(),
                     port: 5001,
                     interface: "eth0".to_string(), // Different from input - OK
+                    ttl: None,
                 }],
             },
             &master_rules,
@@ -1355,6 +1357,7 @@ mod tests {
                     group: "224.0.0.2".parse().unwrap(),
                     port: 5001,
                     interface: "eth1".to_string(),
+                    ttl: None,
                 }],
             },
             &master_rules,
@@ -1395,6 +1398,7 @@ mod tests {
                     group: "224.0.0.2".parse().unwrap(),
                     port: 5001,
                     interface: "invalid/name".to_string(),
+                    ttl: None,
                 }],
             },
             &master_rules,
@@ -1455,6 +1459,7 @@ mod tests {
                     group: "224.0.0.2".parse().unwrap(),
                     port: 5001,
                     interface: "eth1".to_string(),
+                    ttl: None,
                 }],
             },
             &master_rules,
@@ -1495,6 +1500,7 @@ mod tests {
                     group: "224.0.0.2".parse().unwrap(),
                     port: 0, // Invalid
                     interface: "eth1".to_string(),
+                    ttl: None,
                 }],
             },
             &master_rules,

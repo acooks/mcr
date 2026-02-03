@@ -170,6 +170,7 @@ mod tests {
                 group: Ipv4Addr::new(239, 2, 2, 2),
                 port: 6000,
                 interface: "eth1".to_string(),
+                ttl: None,
             }],
             source: crate::RuleSource::Static,
         });

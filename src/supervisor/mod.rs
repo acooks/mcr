@@ -2054,6 +2054,7 @@ pub async fn run(
             igmp: None,
             msdp: None,
             control_plane: None,
+            multicast_ttl: None,
         };
 
         match initialize_protocol_subsystem(&empty_config, supervisor_logger.clone()) {

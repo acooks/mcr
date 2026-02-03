@@ -68,6 +68,7 @@ struct SendWorkItem {
     payload: Arc<[u8]>, // Shared payload for zero-copy fan-out
     dest_addr: SocketAddr,
     interface_name: String,
+    multicast_ttl: u8,
 }
 
 /// Metadata about where to forward a packet
@@ -76,6 +77,7 @@ struct ForwardingTarget {
     payload_len: usize,
     dest_addr: SocketAddr,
     interface_name: String,
+    multicast_ttl: u8,
 }
 
 /// Configuration for the unified data plane
@@ -97,6 +99,8 @@ pub struct UnifiedConfig {
     pub max_flow_counters: usize,
     /// Maximum number of cached egress sockets (0 = unlimited, default: 10000)
     pub max_egress_sockets: usize,
+    /// TTL for outgoing multicast packets (default: 1)
+    pub multicast_ttl: u8,
 }
 
 impl Default for UnifiedConfig {
@@ -125,6 +129,10 @@ impl Default for UnifiedConfig {
             max_rules: 10_000, // Reasonable limit for forwarding rules
             max_flow_counters: 100_000, // Track up to 100k unique flows
             max_egress_sockets: 10_000, // Cache up to 10k egress sockets
+            multicast_ttl: std::env::var("MCR_MULTICAST_TTL")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1),
         }
     }
 }
@@ -180,7 +188,7 @@ pub struct UnifiedDataPlane {
     flow_counters: HashMap<(Ipv4Addr, u16), FlowCounters>,
 
     // Egress
-    egress_sockets: HashMap<(String, SocketAddr), (OwnedFd, Ipv4Addr)>,
+    egress_sockets: HashMap<(String, SocketAddr, u8), (OwnedFd, Ipv4Addr)>,
     send_queue: VecDeque<SendWorkItem>,
     in_flight_sends: HashMap<u64, Arc<[u8]>>,
     next_send_user_data: u64,
@@ -748,6 +756,7 @@ impl UnifiedDataPlane {
                     payload: Arc::clone(&payload),
                     dest_addr: target.dest_addr,
                     interface_name: target.interface_name,
+                    multicast_ttl: target.multicast_ttl,
                 });
             }
         }
@@ -925,6 +934,7 @@ impl UnifiedDataPlane {
                     payload_len: headers.payload_len,
                     dest_addr: SocketAddr::new(output.group.into(), dest_port),
                     interface_name: output.interface.clone(),
+                    multicast_ttl: output.ttl.unwrap_or(self.config.multicast_ttl),
                 }
             })
             .collect();
@@ -1044,8 +1054,12 @@ impl UnifiedDataPlane {
         for _ in 0..batch_size {
             let item = self.send_queue.pop_front().unwrap();
 
-            // Get or create egress socket
-            let key = (item.interface_name.clone(), item.dest_addr);
+            // Get or create egress socket (keyed by interface, dest, and TTL)
+            let key = (
+                item.interface_name.clone(),
+                item.dest_addr,
+                item.multicast_ttl,
+            );
             if !self.egress_sockets.contains_key(&key) {
                 // Check if we need to evict old sockets
                 if self.config.max_egress_sockets > 0
@@ -1060,7 +1074,8 @@ impl UnifiedDataPlane {
                 }
 
                 let source_ip = get_interface_ip(&item.interface_name)?;
-                let socket = create_connected_udp_socket(source_ip, item.dest_addr)?;
+                let socket =
+                    create_connected_udp_socket(source_ip, item.dest_addr, item.multicast_ttl)?;
                 self.egress_sockets.insert(key.clone(), (socket, source_ip));
             }
 
@@ -1234,7 +1249,11 @@ fn get_interface_ip(interface_name: &str) -> Result<Ipv4Addr> {
     ))
 }
 
-fn create_connected_udp_socket(source_ip: Ipv4Addr, dest_addr: SocketAddr) -> Result<OwnedFd> {
+fn create_connected_udp_socket(
+    source_ip: Ipv4Addr,
+    dest_addr: SocketAddr,
+    multicast_ttl: u8,
+) -> Result<OwnedFd> {
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
     socket.set_reuse_address(true)?;
 
@@ -1256,6 +1275,7 @@ fn create_connected_udp_socket(source_ip: Ipv4Addr, dest_addr: SocketAddr) -> Re
     if let std::net::IpAddr::V4(dest_ipv4) = dest_addr.ip() {
         if dest_ipv4.is_multicast() {
             socket_helpers::set_multicast_if_by_addr(socket.as_raw_fd(), source_ip)?;
+            socket_helpers::set_multicast_ttl(socket.as_raw_fd(), multicast_ttl)?;
         }
     }
 
@@ -1281,6 +1301,7 @@ mod tests {
                 group: "224.0.0.2".parse().unwrap(),
                 port: 5001,
                 interface: "lo".to_string(),
+                ttl: None,
             }],
             source: crate::RuleSource::Static,
         }

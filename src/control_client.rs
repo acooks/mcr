@@ -317,6 +317,7 @@ fn parse_output_destination(s: &str) -> Result<OutputDestination, String> {
         group,
         port,
         interface,
+        ttl: None,
     })
 }
 
@@ -814,6 +815,7 @@ mod tests {
                 group: "239.2.2.2".parse().unwrap(),
                 port: 6000,
                 interface: "eth1".to_string(),
+                ttl: None,
             }],
         };
         let supervisor_cmd = build_command(cmd).unwrap();

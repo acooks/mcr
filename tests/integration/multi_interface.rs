@@ -429,6 +429,7 @@ async fn test_dynamic_spawn_for_new_interface() -> Result<()> {
                 group: "239.2.2.3".parse()?,
                 port: 6001,
                 interface: "veth1b".to_string(),
+                ttl: None,
             }],
         )
         .await?;

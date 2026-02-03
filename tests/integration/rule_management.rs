@@ -139,6 +139,7 @@ async fn test_get_stats_e2e() -> Result<()> {
             group: "239.2.2.2".parse()?,
             port: 6002,
             interface: veth_a.clone(), // Different from input interface to pass validation
+            ttl: None,
         }],
         source: RuleSource::Static,
     };

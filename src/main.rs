@@ -22,6 +22,10 @@ fn main() -> Result<()> {
                 config
                     .validate()
                     .with_context(|| format!("Invalid config in {:?}", path))?;
+                // Propagate multicast TTL to worker processes via environment variable
+                if let Some(ttl) = config.multicast_ttl {
+                    std::env::set_var("MCR_MULTICAST_TTL", ttl.to_string());
+                }
                 eprintln!(
                     "[Supervisor] Loaded config from {:?} ({} rules)",
                     path,
