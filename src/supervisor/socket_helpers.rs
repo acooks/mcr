@@ -31,12 +31,6 @@ impl IpNetwork {
         self.addr
     }
 
-    /// Get the prefix length
-    #[allow(dead_code)]
-    pub fn prefix(&self) -> u8 {
-        self.prefix
-    }
-
     /// Check if the given IP address is in this network
     pub fn contains(&self, ip: std::net::IpAddr) -> bool {
         match (self.addr, ip) {
@@ -385,7 +379,6 @@ pub(crate) fn get_interface_index(interface_name: &str) -> Result<i32> {
 }
 
 /// Linux interface flags (from if.h)
-#[allow(dead_code)]
 pub mod interface_flags {
     pub const IFF_UP: u32 = 0x1;
     pub const IFF_BROADCAST: u32 = 0x2;
@@ -397,7 +390,6 @@ pub mod interface_flags {
 
 /// Information about an interface's multicast capability
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct InterfaceCapability {
     pub name: String,
     pub index: u32,
@@ -411,7 +403,6 @@ pub struct InterfaceCapability {
 
 impl InterfaceCapability {
     /// Check if interface is suitable for multicast forwarding
-    #[allow(dead_code)]
     pub fn is_multicast_capable(&self) -> bool {
         self.is_up && self.is_multicast
     }
@@ -689,7 +680,6 @@ pub fn check_multicast_capability(interface_name: &str) -> Result<()> {
 }
 
 /// Get all multicast-capable interfaces
-#[allow(dead_code)]
 pub fn get_multicast_capable_interfaces() -> Vec<InterfaceCapability> {
     get_interfaces()
         .iter()
