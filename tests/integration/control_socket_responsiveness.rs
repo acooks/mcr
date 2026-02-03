@@ -11,7 +11,7 @@
 //! block the loop and prevent new client connections from being accepted.
 
 use anyhow::{Context, Result};
-use multicast_relay::{ForwardingRule, RuleSource};
+use multicast_relay::{ForwardingRule, RuleSource, WorkerStatus};
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 use std::time::{Duration, Instant};
@@ -124,6 +124,27 @@ async fn test_control_socket_responsive_during_worker_restart() -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("No data plane worker found"))?;
     println!("[TEST] Killing worker PID {}", dp_worker.pid);
     kill_worker(dp_worker.pid).await?;
+
+    // Poll ListWorkers until we see a worker with Restarting status.
+    // The health check interval is 250ms, so it should be detected quickly.
+    let mut saw_restarting = false;
+    for _ in 0..20 {
+        if let Ok(workers) = client.list_workers().await {
+            if workers
+                .iter()
+                .any(|w| matches!(w.status, WorkerStatus::Restarting { .. }))
+            {
+                saw_restarting = true;
+                println!("[TEST] Saw worker with Restarting status in ListWorkers");
+                break;
+            }
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        saw_restarting,
+        "Expected to see a worker with Restarting status in ListWorkers after kill"
+    );
 
     // Immediately start sending queries for 2 seconds to overlap with
     // the health check tick (250ms interval) and its backoff sleep (250ms).
