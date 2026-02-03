@@ -79,6 +79,9 @@ pub(super) struct WorkerManager {
 
     /// Tracks workers currently being restarted (interface, core_id) -> backoff_ms
     pub(super) restarting: HashMap<(String, u32), u64>,
+
+    /// Tracks failed initial spawns pending retry (interface, core_id) -> (backoff_ms, fanout_group_id)
+    pub(super) pending_spawns: HashMap<(String, u32), (u64, u16)>,
 }
 
 /// Information about a worker that has exited, for async restart handling
@@ -284,6 +287,7 @@ impl WorkerManager {
             backoff_counters: HashMap::new(),
             worker_stats: Arc::new(Mutex::new(HashMap::new())),
             restarting: HashMap::new(),
+            pending_spawns: HashMap::new(),
         }
     }
 
@@ -564,6 +568,80 @@ impl WorkerManager {
         }
 
         result
+    }
+
+    /// Track a failed initial spawn attempt for retry with exponential backoff.
+    /// Returns the backoff duration in milliseconds.
+    pub(super) fn track_failed_spawn(
+        &mut self,
+        interface: &str,
+        core_id: u32,
+        fanout_group_id: u16,
+    ) -> u64 {
+        let key = (interface.to_string(), core_id);
+
+        // Calculate backoff using existing exponential pattern
+        let backoff = self
+            .backoff_counters
+            .entry(key.clone())
+            .or_insert(INITIAL_BACKOFF_MS);
+        let current_backoff = *backoff;
+        *backoff = (*backoff * 2).min(MAX_BACKOFF_MS);
+
+        // Track as pending spawn and in restarting (for ListWorkers visibility)
+        self.pending_spawns
+            .insert(key.clone(), (current_backoff, fanout_group_id));
+        self.restarting.insert(key, current_backoff);
+
+        current_backoff
+    }
+
+    /// Drain pending spawn retries, returning them as ExitedWorkerInfo for unified handling.
+    pub(super) fn drain_pending_spawns(&mut self) -> Vec<ExitedWorkerInfo> {
+        self.pending_spawns
+            .drain()
+            .map(
+                |((interface, core_id), (backoff_ms, fanout_group_id))| ExitedWorkerInfo {
+                    interface,
+                    core_id,
+                    graceful: false, // always apply backoff
+                    backoff_ms,
+                    fanout_group_id,
+                },
+            )
+            .collect()
+    }
+
+    /// Drain pending spawns for a specific interface (called on netlink interface-up event).
+    ///
+    /// This enables immediate retry when an interface appears, rather than waiting
+    /// for the next health check tick.
+    pub(super) fn drain_pending_spawns_for_interface(
+        &mut self,
+        interface: &str,
+    ) -> Vec<ExitedWorkerInfo> {
+        let keys_to_remove: Vec<_> = self
+            .pending_spawns
+            .keys()
+            .filter(|(iface, _)| iface == interface)
+            .cloned()
+            .collect();
+
+        keys_to_remove
+            .into_iter()
+            .filter_map(|key| {
+                let (backoff_ms, fanout_group_id) = self.pending_spawns.remove(&key)?;
+                // Also remove from restarting since we're handling it now
+                self.restarting.remove(&key);
+                Some(ExitedWorkerInfo {
+                    interface: key.0,
+                    core_id: key.1,
+                    graceful: true, // Skip backoff - interface just came up
+                    backoff_ms,
+                    fanout_group_id,
+                })
+            })
+            .collect()
     }
 
     /// Register a newly spawned worker after async restart completes.
@@ -922,5 +1000,188 @@ impl WorkerManager {
         });
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::logging::{MPSCRingBuffer, Severity};
+    use std::sync::atomic::AtomicU8;
+    use std::sync::{Arc, RwLock};
+
+    fn create_test_logger() -> Logger {
+        let ringbuffer = Arc::new(MPSCRingBuffer::new(16));
+        let global_min_level = Arc::new(AtomicU8::new(Severity::Debug as u8));
+        let facility_min_levels = Arc::new(RwLock::new(std::collections::HashMap::new()));
+        Logger::from_mpsc(ringbuffer, global_min_level, facility_min_levels)
+    }
+
+    fn create_test_manager() -> WorkerManager {
+        WorkerManager::new(1, create_test_logger(), 1, HashMap::new())
+    }
+
+    #[test]
+    fn test_track_failed_spawn_initial_backoff() {
+        let mut mgr = create_test_manager();
+
+        let backoff = mgr.track_failed_spawn("eth0", 0, 1);
+
+        assert_eq!(backoff, INITIAL_BACKOFF_MS);
+        assert!(mgr.pending_spawns.contains_key(&("eth0".to_string(), 0)));
+        assert!(mgr.restarting.contains_key(&("eth0".to_string(), 0)));
+    }
+
+    #[test]
+    fn test_track_failed_spawn_exponential_backoff() {
+        let mut mgr = create_test_manager();
+
+        // First failure: 250ms
+        let backoff1 = mgr.track_failed_spawn("eth0", 0, 1);
+        assert_eq!(backoff1, 250);
+
+        // Drain to simulate retry
+        mgr.drain_pending_spawns();
+
+        // Second failure: 500ms
+        let backoff2 = mgr.track_failed_spawn("eth0", 0, 1);
+        assert_eq!(backoff2, 500);
+
+        mgr.drain_pending_spawns();
+
+        // Third failure: 1000ms
+        let backoff3 = mgr.track_failed_spawn("eth0", 0, 1);
+        assert_eq!(backoff3, 1000);
+    }
+
+    #[test]
+    fn test_track_failed_spawn_max_backoff() {
+        let mut mgr = create_test_manager();
+
+        // Simulate many failures to reach max backoff
+        for _ in 0..10 {
+            mgr.track_failed_spawn("eth0", 0, 1);
+            mgr.drain_pending_spawns();
+        }
+
+        let backoff = mgr.track_failed_spawn("eth0", 0, 1);
+        assert_eq!(backoff, MAX_BACKOFF_MS);
+    }
+
+    #[test]
+    fn test_drain_pending_spawns_empties_map() {
+        let mut mgr = create_test_manager();
+
+        mgr.track_failed_spawn("eth0", 0, 1);
+        mgr.track_failed_spawn("eth1", 0, 2);
+
+        assert_eq!(mgr.pending_spawns.len(), 2);
+
+        let drained = mgr.drain_pending_spawns();
+
+        assert_eq!(drained.len(), 2);
+        assert!(mgr.pending_spawns.is_empty());
+    }
+
+    #[test]
+    fn test_drain_pending_spawns_returns_correct_info() {
+        let mut mgr = create_test_manager();
+
+        mgr.track_failed_spawn("eth0", 0, 1);
+
+        let drained = mgr.drain_pending_spawns();
+
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].interface, "eth0");
+        assert_eq!(drained[0].core_id, 0);
+        assert_eq!(drained[0].fanout_group_id, 1);
+        assert_eq!(drained[0].backoff_ms, INITIAL_BACKOFF_MS);
+        assert!(!drained[0].graceful); // Should apply backoff
+    }
+
+    #[test]
+    fn test_drain_pending_spawns_for_interface_filters_correctly() {
+        let mut mgr = create_test_manager();
+
+        mgr.track_failed_spawn("eth0", 0, 1);
+        mgr.track_failed_spawn("eth0", 1, 1);
+        mgr.track_failed_spawn("eth1", 0, 2);
+
+        let drained = mgr.drain_pending_spawns_for_interface("eth0");
+
+        assert_eq!(drained.len(), 2);
+        assert!(drained.iter().all(|info| info.interface == "eth0"));
+
+        // eth1 should still be pending
+        assert_eq!(mgr.pending_spawns.len(), 1);
+        assert!(mgr.pending_spawns.contains_key(&("eth1".to_string(), 0)));
+    }
+
+    #[test]
+    fn test_drain_pending_spawns_for_interface_removes_from_restarting() {
+        let mut mgr = create_test_manager();
+
+        mgr.track_failed_spawn("eth0", 0, 1);
+
+        assert!(mgr.restarting.contains_key(&("eth0".to_string(), 0)));
+
+        mgr.drain_pending_spawns_for_interface("eth0");
+
+        assert!(!mgr.restarting.contains_key(&("eth0".to_string(), 0)));
+    }
+
+    #[test]
+    fn test_drain_pending_spawns_for_interface_sets_graceful_true() {
+        let mut mgr = create_test_manager();
+
+        mgr.track_failed_spawn("eth0", 0, 1);
+
+        let drained = mgr.drain_pending_spawns_for_interface("eth0");
+
+        assert_eq!(drained.len(), 1);
+        assert!(drained[0].graceful); // Should skip backoff since interface just came up
+    }
+
+    #[test]
+    fn test_drain_pending_spawns_for_interface_nonexistent() {
+        let mut mgr = create_test_manager();
+
+        mgr.track_failed_spawn("eth0", 0, 1);
+
+        let drained = mgr.drain_pending_spawns_for_interface("eth1");
+
+        assert!(drained.is_empty());
+        // eth0 should still be pending
+        assert_eq!(mgr.pending_spawns.len(), 1);
+    }
+
+    #[test]
+    fn test_pending_spawns_visible_in_restarting() {
+        let mut mgr = create_test_manager();
+
+        mgr.track_failed_spawn("eth0", 0, 1);
+
+        // is_restarting_for_interface should return true
+        assert!(mgr.is_restarting_for_interface("eth0"));
+        assert!(!mgr.is_restarting_for_interface("eth1"));
+    }
+
+    #[test]
+    fn test_multiple_cores_same_interface() {
+        let mut mgr = create_test_manager();
+
+        mgr.track_failed_spawn("eth0", 0, 1);
+        mgr.track_failed_spawn("eth0", 1, 1);
+        mgr.track_failed_spawn("eth0", 2, 1);
+
+        assert_eq!(mgr.pending_spawns.len(), 3);
+
+        let drained = mgr.drain_pending_spawns_for_interface("eth0");
+
+        assert_eq!(drained.len(), 3);
+        let core_ids: Vec<u32> = drained.iter().map(|info| info.core_id).collect();
+        assert!(core_ids.contains(&0));
+        assert!(core_ids.contains(&1));
+        assert!(core_ids.contains(&2));
     }
 }
