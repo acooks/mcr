@@ -1,6 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-// Allow await_holding_lock for std::sync::Mutex - these are intentional short-lived locks
-#![allow(clippy::await_holding_lock)]
 
 // Submodules
 mod actions;
@@ -1355,34 +1353,54 @@ async fn handle_client(
             is_pinned,
             command,
         } => {
-            // First, ensure workers exist for the interface
-            {
-                let manager = worker_manager.lock().unwrap();
-                if !manager.has_workers_for_interface(&interface) {
-                    // Drop lock before async operation
-                    drop(manager);
+            // Check if workers need spawning (brief lock to plan, then spawn without lock)
+            let plan = {
+                let mut mgr = worker_manager.lock().unwrap();
+                mgr.plan_workers_for_interface(&interface, is_pinned)
+            };
 
-                    // Re-acquire lock and spawn workers
-                    let mut manager = worker_manager.lock().unwrap();
-                    if let Err(e) = manager
-                        .ensure_workers_for_interface(&interface, is_pinned)
-                        .await
+            if let Some((core_ids, fanout_group_id)) = plan {
+                // Spawn workers synchronously — this is a one-time operation per interface
+                // (no backoff sleep) so brief blocking is acceptable for correctness.
+                for core_id in core_ids {
+                    match worker_manager::spawn_data_plane_worker(
+                        core_id,
+                        interface.clone(),
+                        fanout_group_id,
+                        &logger,
+                    )
+                    .await
                     {
-                        log_error!(
-                            logger,
-                            Facility::Supervisor,
-                            &format!(
-                                "Failed to spawn workers for interface '{}': {}",
-                                interface, e
-                            )
-                        );
+                        Ok((child, ingress, egress, log_pipe, stats_pipe)) => {
+                            let mut mgr = worker_manager.lock().unwrap();
+                            if let Err(e) = mgr.register_spawned_worker(
+                                child, ingress, egress, log_pipe, stats_pipe, &interface, core_id,
+                            ) {
+                                log_error!(
+                                    logger,
+                                    Facility::Supervisor,
+                                    &format!(
+                                        "Failed to register worker for '{}' core {}: {}",
+                                        interface, core_id, e
+                                    )
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            log_error!(
+                                logger,
+                                Facility::Supervisor,
+                                &format!(
+                                    "Failed to spawn worker for '{}' core {}: {}",
+                                    interface, core_id, e
+                                )
+                            );
+                        }
                     }
                 }
             }
 
-            // Send the command only to workers for the specified interface
-            // (not to all workers, to avoid race conditions with SyncRules)
-            // Convert to Bytes upfront for cheap Arc-based cloning
+            // Send the command to workers for the specified interface
             let cmd_bytes: Bytes = serde_json::to_vec(&command)?.into();
             let stream_pairs_with_iface = {
                 let manager = worker_manager.lock().unwrap();
@@ -1390,12 +1408,10 @@ async fn handle_client(
             };
 
             for (worker_interface, ingress_stream, egress_stream) in stream_pairs_with_iface {
-                // Only send to workers matching the specified interface
                 if worker_interface != interface {
                     continue;
                 }
 
-                // Send to ingress (Bytes::clone is cheap - Arc-based)
                 let cmd_bytes_clone = cmd_bytes.clone();
                 tokio::spawn(async move {
                     let mut stream = ingress_stream.lock().await;
@@ -1403,7 +1419,6 @@ async fn handle_client(
                     let _ = framed.send(cmd_bytes_clone).await;
                 });
 
-                // Send to egress
                 let cmd_bytes_clone = cmd_bytes.clone();
                 tokio::spawn(async move {
                     let mut stream = egress_stream.lock().await;
@@ -1722,6 +1737,7 @@ async fn handle_client(
 // --- Supervisor Core Logic ---
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::await_holding_lock)] // Remaining cases: shutdown (runs once) and protocol coordinator (requires lock for correctness)
 pub async fn run(
     _interface: &str, // Unused: workers spawn lazily when rules are added
     control_socket_path: PathBuf,
@@ -2120,68 +2136,95 @@ pub async fn run(
             }
 
             // Periodic worker health check (every 250ms)
+            // Fast: detect exited workers (non-blocking try_wait), then spawn
+            // async restart tasks so backoff sleep doesn't block the select loop.
             _ = health_check_interval.tick() => {
-                // Check for crashed workers and restart them
-                let restart_result = {
+                let exited = {
                     let mut manager = worker_manager.lock().unwrap();
-                    manager.check_and_restart_worker().await
+                    manager.detect_exited_workers()
                 };
 
-                match restart_result {
-                    Ok(Some((_pid, was_dataplane))) if was_dataplane => {
-                        // A data plane worker was restarted - send SyncRules to ensure it has current ruleset
-                        // Rules are filtered per-interface so each worker only receives rules for its interface
-                        let rules_snapshot: Vec<ForwardingRule> = {
-                            let rules = master_rules.lock().unwrap();
-                            rules.values().cloned().collect()
-                        };
+                for info in exited {
+                    let wm = Arc::clone(&worker_manager);
+                    let logger = supervisor_logger.clone();
+                    let rules = Arc::clone(&master_rules);
+                    tokio::spawn(async move {
+                        // Slow phase: backoff sleep + subprocess spawn
+                        if !info.graceful {
+                            tokio::time::sleep(Duration::from_millis(info.backoff_ms)).await;
+                        }
 
-                        if !rules_snapshot.is_empty() {
-                            // Send per-interface filtered rules to all data plane workers
-                            let stream_pairs_with_iface = {
-                                let manager = worker_manager.lock().unwrap();
-                                manager.get_all_dp_cmd_streams_with_interface()
-                            };
+                        match worker_manager::spawn_data_plane_worker(
+                            info.core_id,
+                            info.interface.clone(),
+                            info.fanout_group_id,
+                            &logger,
+                        ).await {
+                            Ok((child, ingress, egress, log_pipe, stats_pipe)) => {
+                                let new_pid = {
+                                    let mut mgr = wm.lock().unwrap();
+                                    mgr.register_spawned_worker(
+                                        child, ingress, egress, log_pipe, stats_pipe,
+                                        &info.interface, info.core_id,
+                                    )
+                                };
 
-                            for (interface, ingress_stream, egress_stream) in stream_pairs_with_iface {
-                                // Filter rules to only include those matching this worker's input interface
-                                let interface_rules: Vec<ForwardingRule> = rules_snapshot
-                                    .iter()
-                                    .filter(|r| r.input_interface == interface)
-                                    .cloned()
-                                    .collect();
-
-                                let sync_cmd = RelayCommand::SyncRules(interface_rules);
-                                if let Ok(cmd_bytes) = serde_json::to_vec(&sync_cmd) {
-                                    let cmd_bytes: Bytes = cmd_bytes.into();
-                                    // Send to ingress worker using length-delimited framing
-                                    {
-                                        let mut stream = ingress_stream.lock().await;
-                                        let mut framed =
-                                            Framed::new(&mut *stream, LengthDelimitedCodec::new());
-                                        let _ = framed.send(cmd_bytes.clone()).await;
+                                // Sync rules to the restarted worker
+                                if let Ok(pid) = new_pid {
+                                    let rules_snapshot: Vec<ForwardingRule> = {
+                                        let r = rules.lock().unwrap();
+                                        r.values().cloned().collect()
+                                    };
+                                    if !rules_snapshot.is_empty() {
+                                        let streams = {
+                                            let mgr = wm.lock().unwrap();
+                                            mgr.get_all_dp_cmd_streams_with_interface()
+                                        };
+                                        for (iface, ingress_stream, egress_stream) in streams {
+                                            if iface != info.interface {
+                                                continue;
+                                            }
+                                            let iface_rules: Vec<ForwardingRule> = rules_snapshot
+                                                .iter()
+                                                .filter(|r| r.input_interface == iface)
+                                                .cloned()
+                                                .collect();
+                                            let sync_cmd = RelayCommand::SyncRules(iface_rules);
+                                            if let Ok(cmd_bytes) = serde_json::to_vec(&sync_cmd) {
+                                                let cmd_bytes: Bytes = cmd_bytes.into();
+                                                {
+                                                    let mut stream = ingress_stream.lock().await;
+                                                    let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
+                                                    let _ = framed.send(cmd_bytes.clone()).await;
+                                                }
+                                                {
+                                                    let mut stream = egress_stream.lock().await;
+                                                    let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
+                                                    let _ = framed.send(cmd_bytes).await;
+                                                }
+                                            }
+                                        }
                                     }
-                                    // Send to egress worker using length-delimited framing
-                                    {
-                                        let mut stream = egress_stream.lock().await;
-                                        let mut framed =
-                                            Framed::new(&mut *stream, LengthDelimitedCodec::new());
-                                        let _ = framed.send(cmd_bytes).await;
-                                    }
+                                    log_info!(
+                                        logger,
+                                        Facility::Supervisor,
+                                        &format!("Worker PID {} restarted for interface '{}' core {}",
+                                            pid, info.interface, info.core_id)
+                                    );
                                 }
                             }
+                            Err(e) => {
+                                let mut mgr = wm.lock().unwrap();
+                                mgr.restarting.remove(&(info.interface.clone(), info.core_id));
+                                log_error!(
+                                    logger,
+                                    Facility::Supervisor,
+                                    &format!("Failed to restart worker for interface '{}' core {}: {}",
+                                        info.interface, info.core_id, e)
+                                );
+                            }
                         }
-                    }
-                    Err(e) => {
-                        log_error!(
-                            supervisor_logger,
-                            Facility::Supervisor,
-                            &format!("Error checking/restarting worker: {}", e)
-                        );
-                    }
-                    _ => {
-                        // No worker restarted or control plane worker restarted (no action needed)
-                    }
+                    });
                 }
             }
 
@@ -2326,29 +2369,55 @@ pub async fn run(
                                 .collect()
                         };
 
-                        // Spawn workers without holding the lock
-                        log_info!(
-                            supervisor_logger,
-                            Facility::Supervisor,
-                            &format!(
-                                "Spawning workers for {} interfaces: {:?}",
-                                interfaces_to_spawn.len(),
-                                interfaces_to_spawn
-                            )
-                        );
-                        for interface in interfaces_to_spawn {
-                            let mut manager = worker_manager.lock().unwrap();
-                            if let Err(e) =
-                                manager.ensure_workers_for_interface(&interface, false).await
-                            {
-                                log_warning!(
-                                    supervisor_logger,
-                                    Facility::Supervisor,
-                                    &format!(
-                                        "Failed to spawn workers for interface '{}': {}",
-                                        interface, e
-                                    )
-                                );
+                        // Spawn workers in background tasks to avoid blocking the select loop.
+                        // The dirty flag will remain set, so rules will be synced on the next
+                        // tick once workers are ready.
+                        if !interfaces_to_spawn.is_empty() {
+                            log_info!(
+                                supervisor_logger,
+                                Facility::Supervisor,
+                                &format!(
+                                    "Spawning workers for {} interfaces in background: {:?}",
+                                    interfaces_to_spawn.len(),
+                                    interfaces_to_spawn
+                                )
+                            );
+                            // Plan spawns under lock, then execute async spawn outside lock
+                            let spawn_plans: Vec<(String, Vec<u32>, u16)> = {
+                                let mut mgr = worker_manager.lock().unwrap();
+                                interfaces_to_spawn.into_iter().filter_map(|iface| {
+                                    mgr.plan_workers_for_interface(&iface, false)
+                                        .map(|(cores, fgid)| (iface, cores, fgid))
+                                }).collect()
+                            };
+                            for (iface, core_ids, fanout_group_id) in spawn_plans {
+                                let wm = Arc::clone(&worker_manager);
+                                let logger_clone = supervisor_logger.clone();
+                                tokio::spawn(async move {
+                                    for core_id in core_ids {
+                                        match worker_manager::spawn_data_plane_worker(
+                                            core_id, iface.clone(), fanout_group_id, &logger_clone,
+                                        ).await {
+                                            Ok((child, ingress, egress, log_pipe, stats_pipe)) => {
+                                                let mut mgr = wm.lock().unwrap();
+                                                if let Err(e) = mgr.register_spawned_worker(
+                                                    child, ingress, egress, log_pipe, stats_pipe, &iface, core_id,
+                                                ) {
+                                                    log_warning!(
+                                                        logger_clone, Facility::Supervisor,
+                                                        &format!("Failed to register worker for '{}' core {}: {}", iface, core_id, e)
+                                                    );
+                                                }
+                                            }
+                                            Err(e) => {
+                                                log_warning!(
+                                                    logger_clone, Facility::Supervisor,
+                                                    &format!("Failed to spawn worker for '{}' core {}: {}", iface, core_id, e)
+                                                );
+                                            }
+                                        }
+                                    }
+                                });
                             }
                         }
 

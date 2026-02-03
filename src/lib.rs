@@ -73,10 +73,18 @@ impl std::fmt::Display for RuleSource {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub enum WorkerStatus {
+    Running,
+    Restarting { backoff_ms: u64 },
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct WorkerInfo {
     pub pid: u32,
     pub worker_type: String,
     pub core_id: Option<u32>,
+    pub interface: Option<String>,
+    pub status: WorkerStatus,
 }
 
 pub mod supervisor;

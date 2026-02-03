@@ -708,6 +708,8 @@ mod tests {
                 pid: 1234,
                 worker_type: "DataPlane".to_string(),
                 core_id: None,
+                interface: Some("lo".to_string()),
+                status: crate::WorkerStatus::Running,
             },
         );
         let global_min_level =

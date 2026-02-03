@@ -16,7 +16,7 @@ use std::os::unix::io::{AsRawFd, IntoRawFd};
 use std::sync::{Arc, Mutex};
 use tokio::net::UnixStream;
 use tokio::process::{Child, Command};
-use tokio::time::{sleep, Duration};
+use tokio::time::Duration;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 use crate::logging::{Facility, Logger};
@@ -76,6 +76,18 @@ pub(super) struct WorkerManager {
     pub(super) workers: HashMap<u32, Worker>,
     pub(super) backoff_counters: HashMap<(String, u32), u64>,
     pub(super) worker_stats: Arc<Mutex<HashMap<u32, Vec<crate::FlowStats>>>>,
+
+    /// Tracks workers currently being restarted (interface, core_id) -> backoff_ms
+    pub(super) restarting: HashMap<(String, u32), u64>,
+}
+
+/// Information about a worker that has exited, for async restart handling
+pub(super) struct ExitedWorkerInfo {
+    pub(super) interface: String,
+    pub(super) core_id: u32,
+    pub(super) graceful: bool,
+    pub(super) backoff_ms: u64,
+    pub(super) fanout_group_id: u16,
 }
 
 /// Spawn a data plane worker process for the given interface and core.
@@ -251,6 +263,7 @@ impl WorkerManager {
             workers: HashMap::new(),
             backoff_counters: HashMap::new(),
             worker_stats: Arc::new(Mutex::new(HashMap::new())),
+            restarting: HashMap::new(),
         }
     }
 
@@ -305,11 +318,11 @@ impl WorkerManager {
         fanout_group_id
     }
 
-    /// Check if workers exist for a given interface
+    /// Check if workers exist (or are being restarted) for a given interface
     pub(super) fn has_workers_for_interface(&self, interface: &str) -> bool {
         self.workers.values().any(|w| {
             matches!(&w.worker_type, WorkerType::DataPlane { interface: iface, .. } if iface == interface)
-        })
+        }) || self.is_restarting_for_interface(interface)
     }
 
     /// Spawn a data plane worker for the given interface and core
@@ -375,14 +388,19 @@ impl WorkerManager {
         Ok(())
     }
 
-    /// Spawn workers for an interface (if not already spawned)
-    pub(super) async fn ensure_workers_for_interface(
+    /// Plan which workers need spawning for an interface (non-async).
+    ///
+    /// Returns None if workers already exist, or Some((core_ids, fanout_group_id))
+    /// with the list of core IDs to spawn. The caller should drop the lock,
+    /// spawn workers using `spawn_data_plane_worker()`, then call
+    /// `register_spawned_worker()` to register them.
+    pub(super) fn plan_workers_for_interface(
         &mut self,
         interface: &str,
         is_pinned: bool,
-    ) -> Result<bool> {
+    ) -> Option<(Vec<u32>, u16)> {
         if self.has_workers_for_interface(interface) {
-            return Ok(false);
+            return None;
         }
 
         let fanout_group_id = self.get_or_create_interface(interface, is_pinned);
@@ -397,7 +415,7 @@ impl WorkerManager {
             self.logger,
             Facility::Supervisor,
             &format!(
-                "Spawning {} worker(s) for interface '{}' (fanout_group_id={}{})",
+                "Planning {} worker(s) for interface '{}' (fanout_group_id={}{})",
                 num_workers,
                 interface,
                 fanout_group_id,
@@ -409,85 +427,195 @@ impl WorkerManager {
             )
         );
 
-        if let Some(ref cores) = pinned_cores {
-            for &core_id in cores {
-                self.spawn_data_plane_for_interface(interface, core_id, fanout_group_id)
-                    .await?;
-            }
+        let core_ids = if let Some(cores) = pinned_cores {
+            cores
         } else {
-            for core_id in 0..num_workers as u32 {
-                self.spawn_data_plane_for_interface(interface, core_id, fanout_group_id)
-                    .await?;
-            }
+            (0..num_workers as u32).collect()
+        };
+
+        Some((core_ids, fanout_group_id))
+    }
+
+    /// Spawn workers for an interface (if not already spawned).
+    ///
+    /// Note: This method holds &mut self across .await points. It is safe to call
+    /// from contexts that don't need to remain responsive (e.g. startup), but
+    /// should NOT be called from inside the main select! loop. Use
+    /// plan_workers_for_interface() + tokio::spawn for non-blocking spawning.
+    pub(super) async fn ensure_workers_for_interface(
+        &mut self,
+        interface: &str,
+        is_pinned: bool,
+    ) -> Result<bool> {
+        let plan = self.plan_workers_for_interface(interface, is_pinned);
+        let (core_ids, fanout_group_id) = match plan {
+            Some(p) => p,
+            None => return Ok(false),
+        };
+
+        for core_id in core_ids {
+            self.spawn_data_plane_for_interface(interface, core_id, fanout_group_id)
+                .await?;
         }
 
         Ok(true)
     }
 
-    /// Check for exited workers and restart them with exponential backoff
-    pub(super) async fn check_and_restart_worker(&mut self) -> Result<Option<(u32, bool)>> {
+    /// Detect exited workers (non-blocking) and return info needed for async restart.
+    ///
+    /// This is the fast detection phase: calls try_wait() on all workers,
+    /// removes dead workers, updates backoff counters, and marks entries in
+    /// `self.restarting`. The caller handles the slow work (sleep + spawn)
+    /// outside the select! loop via tokio::spawn.
+    pub(super) fn detect_exited_workers(&mut self) -> Vec<ExitedWorkerInfo> {
         let mut exited_workers = Vec::new();
         for (pid, worker) in &mut self.workers {
-            match worker.child.try_wait()? {
-                Some(status) => {
+            match worker.child.try_wait() {
+                Ok(Some(status)) => {
                     exited_workers.push((*pid, worker.worker_type.clone(), status));
                 }
-                None => continue,
+                Ok(None) => continue,
+                Err(e) => {
+                    log_warning!(
+                        self.logger,
+                        Facility::Supervisor,
+                        &format!("Error checking worker {}: {}", pid, e)
+                    );
+                    continue;
+                }
             }
         }
 
-        if exited_workers.is_empty() {
-            return Ok(None);
+        let mut result = Vec::new();
+        for (pid, worker_type, status) in exited_workers {
+            self.workers.remove(&pid);
+
+            let WorkerType::DataPlane { interface, core_id } = worker_type;
+            let backoff_key = (interface.clone(), core_id);
+            let graceful = status.success();
+
+            let backoff_ms = if graceful {
+                log_info!(
+                    self.logger,
+                    Facility::Supervisor,
+                    &format!(
+                        "Data Plane worker PID {} (interface={}, core={}) exited gracefully, restarting immediately",
+                        pid, interface, core_id
+                    )
+                );
+                // Reset backoff for graceful exits
+                self.backoff_counters
+                    .insert(backoff_key.clone(), INITIAL_BACKOFF_MS);
+                0 // no sleep needed
+            } else {
+                let backoff = self
+                    .backoff_counters
+                    .entry(backoff_key.clone())
+                    .or_insert(INITIAL_BACKOFF_MS);
+                let current_backoff = *backoff;
+                log_warning!(
+                    self.logger,
+                    Facility::Supervisor,
+                    &format!(
+                        "Data Plane worker PID {} (interface={}, core={}) failed (status: {}), restarting after {}ms",
+                        pid, interface, core_id, status, current_backoff
+                    )
+                );
+                *backoff = (*backoff * 2).min(MAX_BACKOFF_MS);
+                current_backoff
+            };
+
+            let fanout_group_id = self
+                .interfaces
+                .get(&interface)
+                .map(|i| i.fanout_group_id)
+                .unwrap_or(0);
+
+            // Mark as restarting so get_worker_info() reports it
+            self.restarting.insert(backoff_key, backoff_ms);
+
+            result.push(ExitedWorkerInfo {
+                interface,
+                core_id,
+                graceful,
+                backoff_ms,
+                fanout_group_id,
+            });
         }
 
-        let (pid, worker_type, status) = exited_workers.remove(0);
+        result
+    }
 
-        if self.workers.remove(&pid).is_none() {
-            log_warning!(
-                self.logger,
-                Facility::Supervisor,
-                &format!("Worker {} not found in workers map during restart", pid)
-            );
+    /// Register a newly spawned worker after async restart completes.
+    ///
+    /// Inserts the worker, clears the restarting entry, resets backoff,
+    /// and spawns log/stats consumers.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn register_spawned_worker(
+        &mut self,
+        child: Child,
+        ingress_cmd_stream: tokio::net::UnixStream,
+        egress_cmd_stream: tokio::net::UnixStream,
+        log_pipe: Option<std::os::unix::io::OwnedFd>,
+        stats_pipe: Option<std::os::unix::io::OwnedFd>,
+        interface: &str,
+        core_id: u32,
+    ) -> Result<u32> {
+        let pid = child
+            .id()
+            .ok_or_else(|| anyhow::anyhow!("Worker process exited immediately after spawn"))?;
+
+        let ingress_cmd_stream_arc = Arc::new(tokio::sync::Mutex::new(ingress_cmd_stream));
+        let egress_cmd_stream_arc = Arc::new(tokio::sync::Mutex::new(egress_cmd_stream));
+
+        self.workers.insert(
+            pid,
+            Worker {
+                pid,
+                worker_type: WorkerType::DataPlane {
+                    interface: interface.to_string(),
+                    core_id,
+                },
+                child,
+                ingress_cmd_stream: Some(ingress_cmd_stream_arc),
+                egress_cmd_stream: Some(egress_cmd_stream_arc),
+                log_pipe,
+                stats_pipe,
+            },
+        );
+
+        // Clear restarting state
+        self.restarting.remove(&(interface.to_string(), core_id));
+
+        // Reset backoff on successful spawn
+        self.backoff_counters
+            .insert((interface.to_string(), core_id), INITIAL_BACKOFF_MS);
+
+        log_debug!(
+            self.logger,
+            Facility::Supervisor,
+            &format!(
+                "Worker registered for interface '{}' (PID={}, core={})",
+                interface, pid, core_id
+            )
+        );
+
+        #[cfg(not(feature = "testing"))]
+        if let Some(pipe_fd) = self.workers.get(&pid).and_then(|w| w.log_pipe.as_ref()) {
+            self.spawn_log_consumer(pid, pipe_fd)?;
         }
 
-        let WorkerType::DataPlane { interface, core_id } = worker_type;
-        let backoff_key = (interface.clone(), core_id);
-        let backoff = self
-            .backoff_counters
-            .entry(backoff_key)
-            .or_insert(INITIAL_BACKOFF_MS);
-        if status.success() {
-            log_info!(
-                self.logger,
-                Facility::Supervisor,
-                &format!(
-                    "Data Plane worker (interface={}, core={}) exited gracefully, restarting immediately",
-                    interface, core_id
-                )
-            );
-            *backoff = INITIAL_BACKOFF_MS;
-        } else {
-            log_warning!(
-                self.logger,
-                Facility::Supervisor,
-                &format!(
-                    "Data Plane worker (interface={}, core={}) failed (status: {}), restarting after {}ms",
-                    interface, core_id, status, *backoff
-                )
-            );
-            sleep(Duration::from_millis(*backoff)).await;
-            *backoff = (*backoff * 2).min(MAX_BACKOFF_MS);
+        #[cfg(not(feature = "testing"))]
+        if let Some(pipe_fd) = self.workers.get(&pid).and_then(|w| w.stats_pipe.as_ref()) {
+            self.spawn_stats_consumer(pid, pipe_fd)?;
         }
 
-        let fanout_group_id = self
-            .interfaces
-            .get(&interface)
-            .map(|i| i.fanout_group_id)
-            .unwrap_or(0);
+        Ok(pid)
+    }
 
-        self.spawn_data_plane_for_interface(&interface, core_id, fanout_group_id)
-            .await?;
-        Ok(Some((pid, true)))
+    /// Check if an interface has workers currently being restarted
+    pub(super) fn is_restarting_for_interface(&self, interface: &str) -> bool {
+        self.restarting.keys().any(|(iface, _)| iface == interface)
     }
 
     /// Initiate graceful shutdown of all workers with timeout
@@ -675,21 +803,38 @@ impl WorkerManager {
     }
 
     /// Get worker info for all workers (for ListWorkers command)
+    ///
+    /// Includes both running workers and workers currently being restarted.
     pub(super) fn get_worker_info(&self) -> Vec<crate::WorkerInfo> {
-        self.workers
+        let mut info: Vec<crate::WorkerInfo> = self
+            .workers
             .values()
             .map(|w| {
-                let WorkerType::DataPlane {
-                    interface: _,
-                    core_id,
-                } = &w.worker_type;
+                let WorkerType::DataPlane { interface, core_id } = &w.worker_type;
                 crate::WorkerInfo {
                     pid: w.pid,
                     worker_type: "DataPlane".to_string(),
                     core_id: Some(*core_id),
+                    interface: Some(interface.clone()),
+                    status: crate::WorkerStatus::Running,
                 }
             })
-            .collect()
+            .collect();
+
+        // Add entries for workers currently being restarted
+        for ((interface, core_id), backoff_ms) in &self.restarting {
+            info.push(crate::WorkerInfo {
+                pid: 0,
+                worker_type: "DataPlane".to_string(),
+                core_id: Some(*core_id),
+                interface: Some(interface.clone()),
+                status: crate::WorkerStatus::Restarting {
+                    backoff_ms: *backoff_ms,
+                },
+            });
+        }
+
+        info
     }
 
     /// Spawn async task to consume JSON logs from worker's stderr pipe

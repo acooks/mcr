@@ -39,6 +39,9 @@ mod cli_functional; // CLI functional tests: mcrctl commands against running sup
 #[path = "integration/supervisor_resilience.rs"]
 mod supervisor_resilience; // 3 tests: Worker restart, rule persistence, multi-failure handling
 
+#[path = "integration/control_socket_responsiveness.rs"]
+mod control_socket_responsiveness; // 2 tests: Control socket latency during worker restarts
+
 // Protocol integration tests
 #[path = "integration/protocol_igmp.rs"]
 mod protocol_igmp; // IGMP querier control and configuration tests (requires root)
