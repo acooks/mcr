@@ -36,7 +36,6 @@ pub enum InterfaceEvent {
     /// Interface has come up or been added
     Up(String),
     /// Interface has gone down or been removed
-    #[allow(dead_code)] // Reserved for future use
     Down(String),
 }
 

@@ -1055,9 +1055,7 @@ impl ProtocolState {
                         // Parse Join/Prune message
                         // Format: upstream neighbor (encoded), reserved, num_groups, holdtime
                         // Then for each group: encoded group, num_joins, num_prunes, sources
-                        if let Some((upstream, joins, prunes, holdtime)) =
-                            parse_pim_join_prune(&payload)
-                        {
+                        if let Some(jp) = parse_pim_join_prune(&payload) {
                             // Ignore our own Join/Prune messages (can happen due to multicast loopback)
                             let is_own_message = if let Some(iface_state) =
                                 self.pim_state.get_interface(&reported_interface)
@@ -1084,28 +1082,28 @@ impl ProtocolState {
                                     "PIM: Received Join/Prune from {} on {}: {} joins, {} prunes",
                                     src_ip,
                                     reported_interface,
-                                    joins.len(),
-                                    prunes.len()
+                                    jp.joins.len(),
+                                    jp.prunes.len()
                                 )
                                 );
 
                                 // Track which routes exist before processing prunes
                                 // so we can detect removals
                                 let prune_targets: Vec<_> =
-                                    prunes.iter().map(|(src, grp)| (*src, *grp)).collect();
+                                    jp.prunes.iter().map(|(src, grp)| (*src, *grp)).collect();
 
                                 // Process joins and prunes, get timers
                                 let timers = self.pim_state.process_join_prune(
                                     &reported_interface,
-                                    upstream,
-                                    &joins,
-                                    &prunes,
-                                    Duration::from_secs(holdtime as u64),
+                                    jp.upstream,
+                                    &jp.joins,
+                                    &jp.prunes,
+                                    Duration::from_secs(jp.holdtime_secs as u64),
                                 );
                                 result.add_timers(timers);
 
                                 // Populate upstream_interface via RPF lookup for any routes that need it
-                                for (source, group) in &joins {
+                                for (source, group) in &jp.joins {
                                     match source {
                                         None => {
                                             // (*,G) - RPF towards RP
@@ -1157,7 +1155,7 @@ impl ProtocolState {
                                 }
 
                                 // Generate MRIB actions for joins
-                                for (source, group) in &joins {
+                                for (source, group) in &jp.joins {
                                     match source {
                                         None => {
                                             // (*,G) join - look up the resulting state
