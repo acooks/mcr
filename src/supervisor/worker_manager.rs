@@ -95,6 +95,10 @@ pub(super) struct ExitedWorkerInfo {
 /// Creates necessary IPC channels (command streams, log pipe, stats pipe) and
 /// spawns the worker subprocess. The worker receives AF_PACKET socket from
 /// the supervisor via SCM_RIGHTS for privilege separation.
+///
+/// IMPORTANT: The AF_PACKET socket is created BEFORE spawning the child process.
+/// This ensures that if socket creation fails (e.g., interface doesn't exist),
+/// no orphaned child process is left running.
 pub async fn spawn_data_plane_worker(
     core_id: u32,
     interface: String,
@@ -109,7 +113,25 @@ pub async fn spawn_data_plane_worker(
 )> {
     logger.debug(
         Facility::Supervisor,
-        &format!("Spawning worker for core {}", core_id),
+        &format!(
+            "Spawning worker for interface '{}' core {} (fanout_group_id={})",
+            interface, core_id, fanout_group_id
+        ),
+    );
+
+    // Create AF_PACKET socket FIRST - if this fails (e.g., interface doesn't exist),
+    // we return early without spawning a child process. This prevents orphaned workers.
+    let af_packet_socket =
+        socket_helpers::create_af_packet_socket(&interface, fanout_group_id, logger)?;
+
+    log_debug!(
+        logger,
+        Facility::Supervisor,
+        &format!(
+            "AF_PACKET socket created for interface '{}' (fd={})",
+            interface,
+            af_packet_socket.as_raw_fd()
+        )
     );
 
     // Create pipe for worker stderr (for JSON logging)
@@ -231,9 +253,7 @@ pub async fn spawn_data_plane_worker(
     let egress_cmd_supervisor_stream =
         socket_helpers::create_and_send_socketpair(&supervisor_sock).await?;
 
-    // Create the AF_PACKET socket and send it to the worker
-    let af_packet_socket =
-        socket_helpers::create_af_packet_socket(&interface, fanout_group_id, logger)?;
+    // Send the pre-created AF_PACKET socket to the worker
     socket_helpers::send_fd(&supervisor_sock, af_packet_socket.as_raw_fd()).await?;
     drop(af_packet_socket);
 
