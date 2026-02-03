@@ -1387,12 +1387,16 @@ async fn handle_client(
                             }
                         }
                         Err(e) => {
-                            log_error!(
+                            let backoff = {
+                                let mut mgr = worker_manager.lock().unwrap();
+                                mgr.track_failed_spawn(&interface, core_id, fanout_group_id)
+                            };
+                            log_warning!(
                                 logger,
                                 Facility::Supervisor,
                                 &format!(
-                                    "Failed to spawn worker for '{}' core {}: {}",
-                                    interface, core_id, e
+                                    "Failed to spawn worker for '{}' core {}: {} (will retry in {}ms)",
+                                    interface, core_id, e, backoff
                                 )
                             );
                         }
@@ -1778,8 +1782,10 @@ pub async fn run(
 
     // Start netlink monitor for real-time interface change detection (H3.4)
     // This refreshes the interface cache immediately when interfaces change,
-    // rather than waiting for the TTL to expire.
-    let _netlink_monitor_handle = netlink_monitor::spawn_netlink_monitor(supervisor_logger.clone());
+    // rather than waiting for the TTL to expire. The channel enables immediate
+    // retry of pending worker spawns when interfaces come up.
+    let (_netlink_monitor_handle, mut netlink_rx) =
+        netlink_monitor::spawn_netlink_monitor(supervisor_logger.clone());
 
     log_debug!(
         supervisor_logger,
@@ -2137,15 +2143,16 @@ pub async fn run(
             }
 
             // Periodic worker health check (every 250ms)
-            // Fast: detect exited workers (non-blocking try_wait), then spawn
-            // async restart tasks so backoff sleep doesn't block the select loop.
+            // Fast: detect exited workers (non-blocking try_wait) and drain pending spawns,
+            // then spawn async restart tasks so backoff sleep doesn't block the select loop.
             _ = health_check_interval.tick() => {
-                let exited = {
+                let (exited, pending) = {
                     let mut manager = worker_manager.lock().unwrap();
-                    manager.detect_exited_workers()
+                    (manager.detect_exited_workers(), manager.drain_pending_spawns())
                 };
 
-                for info in exited {
+                // Process both exited worker restarts and pending spawn retries
+                for info in exited.into_iter().chain(pending) {
                     let wm = Arc::clone(&worker_manager);
                     let logger = supervisor_logger.clone();
                     let rules = Arc::clone(&master_rules);
@@ -2215,18 +2222,162 @@ pub async fn run(
                                 }
                             }
                             Err(e) => {
-                                let mut mgr = wm.lock().unwrap();
-                                mgr.restarting.remove(&(info.interface.clone(), info.core_id));
-                                log_error!(
+                                let backoff = {
+                                    let mut mgr = wm.lock().unwrap();
+                                    mgr.restarting.remove(&(info.interface.clone(), info.core_id));
+                                    // Re-queue for another retry attempt with increased backoff
+                                    mgr.track_failed_spawn(&info.interface, info.core_id, info.fanout_group_id)
+                                };
+                                log_warning!(
                                     logger,
                                     Facility::Supervisor,
-                                    &format!("Failed to restart worker for interface '{}' core {}: {}",
-                                        info.interface, info.core_id, e)
+                                    &format!(
+                                        "Failed to restart worker for '{}' core {}: {} (will retry in {}ms)",
+                                        info.interface, info.core_id, e, backoff
+                                    )
                                 );
                             }
                         }
                     });
                 }
+            }
+
+            // Interface up event from netlink - immediate spawn retry
+            // When an interface appears, immediately retry any pending spawns for it
+            // instead of waiting for the next health check tick + backoff delay.
+            Some(event) = netlink_rx.recv() => {
+                if let netlink_monitor::InterfaceEvent::Up(interface) = event {
+                    // Check if we have pending spawns for this interface
+                    let pending_for_interface: Vec<worker_manager::ExitedWorkerInfo> = {
+                        let mut mgr = worker_manager.lock().unwrap();
+                        mgr.drain_pending_spawns_for_interface(&interface)
+                    };
+
+                    if !pending_for_interface.is_empty() {
+                        log_info!(
+                            supervisor_logger,
+                            Facility::Supervisor,
+                            &format!(
+                                "Interface '{}' detected via netlink, retrying {} pending spawn(s)",
+                                interface,
+                                pending_for_interface.len()
+                            )
+                        );
+
+                        // Spawn retry tasks immediately (no backoff sleep since interface just came up)
+                        for info in pending_for_interface {
+                            let wm = Arc::clone(&worker_manager);
+                            let logger = supervisor_logger.clone();
+                            let rules = Arc::clone(&master_rules);
+                            tokio::spawn(async move {
+                                // No backoff sleep - info.graceful is true for immediate retry
+                                match worker_manager::spawn_data_plane_worker(
+                                    info.core_id,
+                                    info.interface.clone(),
+                                    info.fanout_group_id,
+                                    &logger,
+                                )
+                                .await
+                                {
+                                    Ok((child, ingress, egress, log_pipe, stats_pipe)) => {
+                                        let new_pid = {
+                                            let mut mgr = wm.lock().unwrap();
+                                            mgr.register_spawned_worker(
+                                                child,
+                                                ingress,
+                                                egress,
+                                                log_pipe,
+                                                stats_pipe,
+                                                &info.interface,
+                                                info.core_id,
+                                            )
+                                        };
+
+                                        // Sync rules to the spawned worker
+                                        if let Ok(pid) = new_pid {
+                                            let rules_snapshot: Vec<ForwardingRule> = {
+                                                let r = rules.lock().unwrap();
+                                                r.values().cloned().collect()
+                                            };
+                                            if !rules_snapshot.is_empty() {
+                                                let streams = {
+                                                    let mgr = wm.lock().unwrap();
+                                                    mgr.get_all_dp_cmd_streams_with_interface()
+                                                };
+                                                for (iface, ingress_stream, egress_stream) in streams
+                                                {
+                                                    if iface != info.interface {
+                                                        continue;
+                                                    }
+                                                    let iface_rules: Vec<ForwardingRule> =
+                                                        rules_snapshot
+                                                            .iter()
+                                                            .filter(|r| r.input_interface == iface)
+                                                            .cloned()
+                                                            .collect();
+                                                    let sync_cmd =
+                                                        RelayCommand::SyncRules(iface_rules);
+                                                    if let Ok(cmd_bytes) =
+                                                        serde_json::to_vec(&sync_cmd)
+                                                    {
+                                                        let cmd_bytes: Bytes = cmd_bytes.into();
+                                                        {
+                                                            let mut stream =
+                                                                ingress_stream.lock().await;
+                                                            let mut framed = Framed::new(
+                                                                &mut *stream,
+                                                                LengthDelimitedCodec::new(),
+                                                            );
+                                                            let _ =
+                                                                framed.send(cmd_bytes.clone()).await;
+                                                        }
+                                                        {
+                                                            let mut stream =
+                                                                egress_stream.lock().await;
+                                                            let mut framed = Framed::new(
+                                                                &mut *stream,
+                                                                LengthDelimitedCodec::new(),
+                                                            );
+                                                            let _ = framed.send(cmd_bytes).await;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            log_info!(
+                                                logger,
+                                                Facility::Supervisor,
+                                                &format!(
+                                                    "Worker PID {} spawned for interface '{}' core {} (netlink triggered)",
+                                                    pid, info.interface, info.core_id
+                                                )
+                                            );
+                                        }
+                                    }
+                                    Err(e) => {
+                                        // Re-queue for retry with backoff
+                                        let backoff = {
+                                            let mut mgr = wm.lock().unwrap();
+                                            mgr.track_failed_spawn(
+                                                &info.interface,
+                                                info.core_id,
+                                                info.fanout_group_id,
+                                            )
+                                        };
+                                        log_warning!(
+                                            logger,
+                                            Facility::Supervisor,
+                                            &format!(
+                                                "Failed to spawn worker for '{}' core {} (netlink triggered): {} (will retry in {}ms)",
+                                                info.interface, info.core_id, e, backoff
+                                            )
+                                        );
+                                    }
+                                }
+                            });
+                        }
+                    }
+                }
+                // InterfaceEvent::Down is ignored - workers will handle interface removal
             }
 
             // Periodic ruleset sync (every 5 minutes)
