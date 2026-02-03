@@ -83,6 +83,7 @@ impl StarGRoute {
                 group: self.group,
                 port,
                 interface: iface.clone(),
+                ttl: None,
             })
             .collect();
 
@@ -184,6 +185,7 @@ impl SGRoute {
                 group: self.group,
                 port,
                 interface: iface.clone(),
+                ttl: None,
             })
             .collect();
 
@@ -423,6 +425,7 @@ impl MulticastRib {
                             group: rule.input_group,
                             port: rule.input_port,
                             interface: igmp_iface.clone(),
+                            ttl: None,
                         });
                     }
                 }
@@ -448,6 +451,7 @@ impl MulticastRib {
                             group: rule.input_group,
                             port: rule.input_port,
                             interface: downstream_iface.clone(),
+                            ttl: None,
                         });
                     }
                 }
@@ -698,6 +702,7 @@ mod tests {
                 group: group.parse().unwrap(),
                 port,
                 interface: "eth1".to_string(),
+                ttl: None,
             }],
             source: RuleSource::Static,
         }

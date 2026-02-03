@@ -73,10 +73,18 @@ impl std::fmt::Display for RuleSource {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub enum WorkerStatus {
+    Running,
+    Restarting { backoff_ms: u64 },
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct WorkerInfo {
     pub pid: u32,
     pub worker_type: String,
     pub core_id: Option<u32>,
+    pub interface: Option<String>,
+    pub status: WorkerStatus,
 }
 
 pub mod supervisor;
@@ -158,6 +166,9 @@ pub struct OutputDestination {
     pub group: Ipv4Addr,
     pub port: u16,
     pub interface: String,
+    /// Per-output multicast TTL override (falls back to global `multicast_ttl`)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<u8>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -939,6 +950,7 @@ mod tests {
                 group: "224.0.0.2".parse().unwrap(),
                 port: 5001,
                 interface: "127.0.0.1".to_string(),
+                ttl: None,
             }],
         };
         let json = serde_json::to_string(&add_command).unwrap();
@@ -1017,6 +1029,7 @@ mod tests {
                 group: "224.0.0.2".parse().unwrap(),
                 port: 5001,
                 interface: "127.0.0.1".to_string(),
+                ttl: None,
             }],
             source: RuleSource::Static,
         };
@@ -1038,6 +1051,7 @@ mod tests {
                 group: "239.1.1.1".parse().unwrap(),
                 port: 5000,
                 interface: "eth1".to_string(),
+                ttl: None,
             }],
             source: RuleSource::Pim {
                 tree_type: PimTreeType::SG,

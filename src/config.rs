@@ -41,6 +41,14 @@ pub struct Config {
     /// Control plane integration configuration (optional)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control_plane: Option<ControlPlaneConfig>,
+
+    /// TTL for outgoing multicast packets (default: 1)
+    ///
+    /// Controls the IP_MULTICAST_TTL socket option on egress UDP sockets.
+    /// TTL=1 restricts packets to the local link (safe default).
+    /// Increase for relaying across routed subnets.
+    #[serde(default)]
+    pub multicast_ttl: Option<u8>,
 }
 
 /// PIM-SM configuration
@@ -262,6 +270,10 @@ pub struct OutputSpec {
 
     /// Network interface name
     pub interface: String,
+
+    /// Per-output multicast TTL override (falls back to global `multicast_ttl`)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<u8>,
 }
 
 impl Config {
@@ -407,6 +419,7 @@ impl Config {
             igmp: None,
             msdp: None,
             control_plane: None,
+            multicast_ttl: None,
         }
     }
 }
@@ -428,6 +441,7 @@ impl ConfigRule {
                     group: o.group,
                     port: o.port,
                     interface: o.interface.clone(),
+                    ttl: o.ttl,
                 })
                 .collect(),
             source: RuleSource::Static, // Config file rules are static
@@ -450,6 +464,7 @@ impl ConfigRule {
                     group: o.group,
                     port: o.port,
                     interface: o.interface.clone(),
+                    ttl: o.ttl,
                 })
                 .collect(),
         }
@@ -886,6 +901,7 @@ mod tests {
             igmp: None,
             msdp: None,
             control_plane: None,
+            multicast_ttl: None,
         };
 
         let result = config.validate();
@@ -909,6 +925,7 @@ mod tests {
             igmp: None,
             msdp: None,
             control_plane: None,
+            multicast_ttl: None,
         };
 
         let result = config.validate();
@@ -935,6 +952,7 @@ mod tests {
             igmp: None,
             msdp: None,
             control_plane: None,
+            multicast_ttl: None,
         };
 
         let result = config.validate();
@@ -963,6 +981,7 @@ mod tests {
             igmp: None,
             msdp: None,
             control_plane: None,
+            multicast_ttl: None,
         };
 
         let result = config.validate();
@@ -991,6 +1010,7 @@ mod tests {
             igmp: None,
             msdp: None,
             control_plane: None,
+            multicast_ttl: None,
         };
 
         let result = config.validate();
@@ -1017,12 +1037,14 @@ mod tests {
                     group: "239.2.2.2".parse().unwrap(),
                     port: 5001,
                     interface: "".to_string(), // Invalid empty output interface
+                    ttl: None,
                 }],
             }],
             pim: None,
             igmp: None,
             msdp: None,
             control_plane: None,
+            multicast_ttl: None,
         };
 
         let result = config.validate();
@@ -1049,6 +1071,7 @@ mod tests {
             igmp: None,
             msdp: None,
             control_plane: None,
+            multicast_ttl: None,
         };
 
         let result = config.validate();
@@ -1070,12 +1093,14 @@ mod tests {
                     group: "239.2.2.2".parse().unwrap(),
                     port: 0, // Invalid port
                     interface: "eth1".to_string(),
+                    ttl: None,
                 }],
             }],
             pim: None,
             igmp: None,
             msdp: None,
             control_plane: None,
+            multicast_ttl: None,
         };
 
         let result = config.validate();
@@ -1105,12 +1130,14 @@ mod tests {
                     group: "239.1.1.1".parse().unwrap(), // Multicast output
                     port: 5001,
                     interface: "eth1".to_string(),
+                    ttl: None,
                 }],
             }],
             pim: None,
             igmp: None,
             msdp: None,
             control_plane: None,
+            multicast_ttl: None,
         };
 
         let result = config.validate();
@@ -1133,12 +1160,14 @@ mod tests {
                     group: "10.0.0.1".parse().unwrap(), // Unicast is allowed
                     port: 5001,
                     interface: "eth1".to_string(),
+                    ttl: None,
                 }],
             }],
             pim: None,
             igmp: None,
             msdp: None,
             control_plane: None,
+            multicast_ttl: None,
         };
 
         let result = config.validate();
@@ -1154,6 +1183,7 @@ mod tests {
             igmp: None,
             msdp: None,
             control_plane: None,
+            multicast_ttl: None,
         };
 
         let result = config.validate();
@@ -1174,6 +1204,7 @@ mod tests {
             igmp: None,
             msdp: None,
             control_plane: None,
+            multicast_ttl: None,
         };
 
         let result = config.validate();
@@ -1196,6 +1227,7 @@ mod tests {
                 group: "239.2.2.2".parse().unwrap(),
                 port: 5001,
                 interface: "eth1".to_string(),
+                ttl: None,
             }],
         };
 
@@ -1263,12 +1295,14 @@ mod tests {
                     group: "239.2.2.2".parse().unwrap(),
                     port: 5001,
                     interface: "eth1".to_string(),
+                    ttl: None,
                 }],
             }],
             pim: None,
             igmp: None,
             msdp: None,
             control_plane: None,
+            multicast_ttl: None,
         };
 
         let interfaces = config.get_interfaces();
@@ -1290,12 +1324,14 @@ mod tests {
                     group: "239.2.2.2".parse().unwrap(),
                     port: 5001,
                     interface: "eth1".to_string(),
+                    ttl: None,
                 }],
             }],
             pim: None,
             igmp: None,
             msdp: None,
             control_plane: None,
+            multicast_ttl: None,
         };
 
         // Serialize to JSON5 and parse back
@@ -1327,6 +1363,7 @@ mod tests {
             igmp: None,
             msdp: None,
             control_plane: None,
+            multicast_ttl: None,
         };
 
         assert!(config.validate().is_ok());
@@ -1347,6 +1384,7 @@ mod tests {
             igmp: None,
             msdp: None,
             control_plane: None,
+            multicast_ttl: None,
         };
 
         let result = config.validate();
@@ -1368,6 +1406,7 @@ mod tests {
             igmp: None,
             msdp: None,
             control_plane: None,
+            multicast_ttl: None,
         };
 
         let result = config.validate();
@@ -1400,6 +1439,7 @@ mod tests {
             igmp: None,
             msdp: None,
             control_plane: None,
+            multicast_ttl: None,
         };
 
         let result = config.validate();
@@ -1425,6 +1465,7 @@ mod tests {
             igmp: None,
             msdp: None,
             control_plane: None,
+            multicast_ttl: None,
         };
 
         let result = config.validate();
@@ -1452,6 +1493,7 @@ mod tests {
             igmp: None,
             msdp: None,
             control_plane: None,
+            multicast_ttl: None,
         };
 
         let result = config.validate();
@@ -1479,6 +1521,7 @@ mod tests {
             igmp: None,
             msdp: None,
             control_plane: None,
+            multicast_ttl: None,
         };
 
         let result = config.validate();
@@ -1500,6 +1543,7 @@ mod tests {
             }),
             msdp: None,
             control_plane: None,
+            multicast_ttl: None,
         };
 
         assert!(config.validate().is_ok());
@@ -1519,6 +1563,7 @@ mod tests {
             }),
             msdp: None,
             control_plane: None,
+            multicast_ttl: None,
         };
 
         let result = config.validate();
@@ -1542,6 +1587,7 @@ mod tests {
             }),
             msdp: None,
             control_plane: None,
+            multicast_ttl: None,
         };
 
         let result = config.validate();
@@ -1562,6 +1608,7 @@ mod tests {
             }),
             msdp: None,
             control_plane: None,
+            multicast_ttl: None,
         };
 
         let result = config.validate();
@@ -1582,6 +1629,7 @@ mod tests {
             }),
             msdp: None,
             control_plane: None,
+            multicast_ttl: None,
         };
 
         let result = config.validate();
@@ -1602,6 +1650,7 @@ mod tests {
             }),
             msdp: None,
             control_plane: None,
+            multicast_ttl: None,
         };
 
         let result = config.validate();
@@ -1699,6 +1748,7 @@ mod tests {
                 hold_time: 75,
             }),
             control_plane: None,
+            multicast_ttl: None,
         };
 
         assert!(config.validate().is_ok());
@@ -1719,6 +1769,7 @@ mod tests {
                 hold_time: 75,
             }),
             control_plane: None,
+            multicast_ttl: None,
         };
 
         let result = config.validate();
@@ -1745,6 +1796,7 @@ mod tests {
                 hold_time: 75,
             }),
             control_plane: None,
+            multicast_ttl: None,
         };
 
         let result = config.validate();
@@ -1766,6 +1818,7 @@ mod tests {
                 hold_time: 75,
             }),
             control_plane: None,
+            multicast_ttl: None,
         };
 
         let result = config.validate();
@@ -1787,6 +1840,7 @@ mod tests {
                 hold_time: 50, // Must be > keepalive_interval
             }),
             control_plane: None,
+            multicast_ttl: None,
         };
 
         let result = config.validate();
@@ -1821,6 +1875,7 @@ mod tests {
                 hold_time: 75,
             }),
             control_plane: None,
+            multicast_ttl: None,
         };
 
         let result = config.validate();
@@ -1847,6 +1902,7 @@ mod tests {
                 hold_time: 75,
             }),
             control_plane: None,
+            multicast_ttl: None,
         };
 
         let result = config.validate();
@@ -1898,6 +1954,7 @@ mod tests {
                 external_neighbors_enabled: true,
                 event_buffer_size: 256,
             }),
+            multicast_ttl: None,
         };
 
         assert!(config.validate().is_ok());
@@ -1916,6 +1973,7 @@ mod tests {
                 external_neighbors_enabled: false,
                 event_buffer_size: 1024,
             }),
+            multicast_ttl: None,
         };
 
         assert!(config.validate().is_ok());
@@ -1934,6 +1992,7 @@ mod tests {
                 external_neighbors_enabled: true,
                 event_buffer_size: 512,
             }),
+            multicast_ttl: None,
         };
 
         assert!(config.validate().is_ok());
@@ -1952,6 +2011,7 @@ mod tests {
                 external_neighbors_enabled: true,
                 event_buffer_size: 256,
             }),
+            multicast_ttl: None,
         };
 
         let result = config.validate();
@@ -1974,6 +2034,7 @@ mod tests {
                 external_neighbors_enabled: true,
                 event_buffer_size: 0, // Invalid
             }),
+            multicast_ttl: None,
         };
 
         let result = config.validate();
@@ -1996,6 +2057,7 @@ mod tests {
                 external_neighbors_enabled: true,
                 event_buffer_size: 100000, // Too large
             }),
+            multicast_ttl: None,
         };
 
         let result = config.validate();

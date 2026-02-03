@@ -156,6 +156,107 @@ pub fn get_interfaces() -> Vec<NetworkInterface> {
 // Socket creation helpers
 // ============================================================================
 
+/// Attach a BPF filter to an AF_PACKET socket that drops outgoing packets.
+///
+/// AF_PACKET sockets bound with `ETH_P_ALL` capture all frames including those sent
+/// by the local host (e.g., forwarded packets sent via `sendto`). When bidirectional
+/// forwarding rules exist, this creates an infinite forwarding loop. This filter
+/// drops `PACKET_OUTGOING` frames in the kernel before they reach userspace.
+///
+/// BPF program (4 instructions):
+/// ```text
+/// LD   pkt_type            ; load skb->pkt_type
+/// JEQ  #PACKET_OUTGOING, drop
+/// RET  #0xFFFF             ; accept
+/// drop: RET #0             ; drop
+/// ```
+fn attach_outgoing_filter(fd: RawFd) -> Result<()> {
+    // Classic BPF instructions
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct SockFilter {
+        code: u16,
+        jt: u8,
+        jf: u8,
+        k: u32,
+    }
+
+    #[repr(C)]
+    struct SockFprog {
+        len: u16,
+        filter: *const SockFilter,
+    }
+
+    // BPF instruction constants
+    const BPF_LD: u16 = 0x00;
+    const BPF_W: u16 = 0x00;
+    const BPF_ABS: u16 = 0x20;
+    const BPF_JMP: u16 = 0x05;
+    const BPF_JEQ: u16 = 0x10;
+    const BPF_K: u16 = 0x00;
+    const BPF_RET: u16 = 0x06;
+
+    // SKF_AD_OFF + SKF_AD_PKTTYPE to load skb->pkt_type
+    const SKF_AD_OFF: u32 = 0xFFFFF000;
+    const SKF_AD_PKTTYPE: u32 = 4;
+
+    const PACKET_OUTGOING: u32 = 4;
+
+    let filter: [SockFilter; 4] = [
+        // LD pkt_type
+        SockFilter {
+            code: BPF_LD | BPF_W | BPF_ABS,
+            jt: 0,
+            jf: 0,
+            k: SKF_AD_OFF + SKF_AD_PKTTYPE,
+        },
+        // JEQ #PACKET_OUTGOING, 1, 0  (if outgoing, skip 1 to drop; else fall through)
+        SockFilter {
+            code: BPF_JMP | BPF_JEQ | BPF_K,
+            jt: 1,
+            jf: 0,
+            k: PACKET_OUTGOING,
+        },
+        // RET #0xFFFF (accept)
+        SockFilter {
+            code: BPF_RET | BPF_K,
+            jt: 0,
+            jf: 0,
+            k: 0xFFFF,
+        },
+        // RET #0 (drop)
+        SockFilter {
+            code: BPF_RET | BPF_K,
+            jt: 0,
+            jf: 0,
+            k: 0,
+        },
+    ];
+
+    let prog = SockFprog {
+        len: filter.len() as u16,
+        filter: filter.as_ptr(),
+    };
+
+    // SAFETY: setsockopt with SO_ATTACH_FILTER is safe when:
+    // - fd is a valid socket (caller's responsibility)
+    // - prog points to a valid sock_fprog with correct len and filter pointer
+    // - The BPF program is well-formed (verified by kernel before attachment)
+    let result = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_ATTACH_FILTER,
+            &prog as *const _ as *const libc::c_void,
+            std::mem::size_of::<SockFprog>() as libc::socklen_t,
+        )
+    };
+    check_libc_result(
+        result,
+        "attach BPF outgoing-packet filter (SO_ATTACH_FILTER)",
+    )
+}
+
 /// Create and configure an AF_PACKET socket bound to a specific interface.
 ///
 /// This function creates the socket with CAP_NET_RAW privileges in the supervisor,
@@ -258,6 +359,13 @@ pub(crate) fn create_af_packet_socket(
             ),
         );
     }
+
+    // Attach BPF filter to drop outgoing packets (prevents forwarding loops)
+    attach_outgoing_filter(recv_socket.as_raw_fd())?;
+    logger.debug(
+        Facility::Supervisor,
+        &format!("BPF outgoing-packet filter attached for {}", interface_name),
+    );
 
     // Set non-blocking
     recv_socket.set_nonblocking(true)?;
@@ -1523,5 +1631,22 @@ mod tests {
         let cache = InterfaceCache::default();
         assert!(!cache.is_empty());
         assert_eq!(cache.ttl(), DEFAULT_INTERFACE_CACHE_TTL);
+    }
+
+    #[test]
+    #[ignore = "requires CAP_NET_RAW (run with: cargo test -- --ignored)"]
+    fn test_attach_outgoing_filter() {
+        let fd = create_packet_socket(
+            libc::SOCK_RAW,
+            libc::ETH_P_ALL as u16,
+            SocketFlags::default(),
+        )
+        .unwrap();
+        let result = attach_outgoing_filter(fd.as_raw_fd());
+        assert!(
+            result.is_ok(),
+            "attach_outgoing_filter failed: {:?}",
+            result.err()
+        );
     }
 }
