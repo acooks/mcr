@@ -26,7 +26,7 @@ crossbeam-queue = "0.3"
 rtnetlink = "0.20"
 
 [dev-dependencies]
-proptest = "1.9.0"
+proptest = "1.10.0"
 rusty-fork = "0.3.1"
 tempfile = "3.24.0"
 uuid = { version = "1.19.0", features = ["v4"] }
