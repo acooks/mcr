@@ -1098,6 +1098,22 @@ pub fn set_multicast_ttl(fd: RawFd, ttl: u8) -> Result<()> {
     check_libc_result(result, &format!("set IP_MULTICAST_TTL to {}", ttl))
 }
 
+/// Bind a socket to a specific network interface using SO_BINDTODEVICE.
+/// This forces packets to egress on the specified interface regardless of
+/// the source IP binding. Useful for forwarding to unnumbered interfaces.
+pub fn bind_to_device(fd: RawFd, interface_name: &str) -> Result<()> {
+    let result = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_BINDTODEVICE,
+            interface_name.as_ptr() as *const libc::c_void,
+            interface_name.len() as libc::socklen_t,
+        )
+    };
+    check_libc_result(result, &format!("bind to device {}", interface_name))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

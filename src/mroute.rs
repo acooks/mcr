@@ -84,6 +84,7 @@ impl StarGRoute {
                 port,
                 interface: iface.clone(),
                 ttl: None,
+                source_ip: None,
             })
             .collect();
 
@@ -95,6 +96,7 @@ impl StarGRoute {
             input_interface: input_interface.to_string(),
             input_group: self.group,
             input_port: port,
+            input_protocol: 17,
             input_source: None, // (*,G) matches any source
             outputs,
             source: RuleSource::Pim {
@@ -186,6 +188,7 @@ impl SGRoute {
                 port,
                 interface: iface.clone(),
                 ttl: None,
+                source_ip: None,
             })
             .collect();
 
@@ -200,6 +203,7 @@ impl SGRoute {
             input_interface: input_interface.to_string(),
             input_group: self.group,
             input_port: port,
+            input_protocol: 17,
             input_source: Some(self.source), // (S,G) matches specific source
             outputs,
             source: RuleSource::Pim {
@@ -426,6 +430,7 @@ impl MulticastRib {
                             port: rule.input_port,
                             interface: igmp_iface.clone(),
                             ttl: None,
+                            source_ip: None,
                         });
                     }
                 }
@@ -452,6 +457,7 @@ impl MulticastRib {
                             port: rule.input_port,
                             interface: downstream_iface.clone(),
                             ttl: None,
+                            source_ip: None,
                         });
                     }
                 }
@@ -561,12 +567,13 @@ impl MulticastRib {
         // This can happen when both (*,G) and (S,G) routes exist for the same group
         // and the router is the RP - both generate rules for the same input interface.
         // We merge outputs and prefer the (S,G) source filter if present.
-        let mut deduplicated: HashMap<(String, Ipv4Addr, u16), ForwardingRule> = HashMap::new();
+        let mut deduplicated: HashMap<(String, Ipv4Addr, u16, u8), ForwardingRule> = HashMap::new();
         for rule in rules {
             let key = (
                 rule.input_interface.clone(),
                 rule.input_group,
                 rule.input_port,
+                rule.input_protocol,
             );
             if let Some(existing) = deduplicated.get_mut(&key) {
                 // Merge outputs (avoiding duplicates by interface)
@@ -697,12 +704,14 @@ mod tests {
             input_interface: interface.to_string(),
             input_group: group.parse().unwrap(),
             input_port: port,
+            input_protocol: 17,
             input_source: None,
             outputs: vec![OutputDestination {
                 group: group.parse().unwrap(),
                 port,
                 interface: "eth1".to_string(),
                 ttl: None,
+                source_ip: None,
             }],
             source: RuleSource::Static,
         }
