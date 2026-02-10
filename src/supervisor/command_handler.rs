@@ -116,6 +116,7 @@ pub fn handle_supervisor_command(
             input_interface,
             input_group,
             input_port,
+            input_protocol,
             outputs,
         } => {
             // Validate input interface name
@@ -140,18 +141,23 @@ pub fn handle_supervisor_command(
             }
 
             // Validate port numbers (reject port 0)
-            if let Err(e) = validate_port(input_port, "input_port") {
-                return (Response::Error(e), CommandAction::None);
+            // ESP (protocol 50) has no port — it uses SPI instead, so port=0 is valid
+            if input_protocol != crate::IP_PROTO_ESP {
+                if let Err(e) = validate_port(input_port, "input_port") {
+                    return (Response::Error(e), CommandAction::None);
+                }
             }
             for (i, output) in outputs.iter().enumerate() {
-                if let Err(e) = validate_port(output.port, &format!("output[{}].port", i)) {
-                    return (Response::Error(e), CommandAction::None);
+                if input_protocol != crate::IP_PROTO_ESP {
+                    if let Err(e) = validate_port(output.port, &format!("output[{}].port", i)) {
+                        return (Response::Error(e), CommandAction::None);
+                    }
                 }
             }
 
             // Generate stable rule ID if not provided
             let rule_id = if rule_id.is_empty() {
-                crate::generate_rule_id(&input_interface, input_group, input_port)
+                crate::generate_rule_id(&input_interface, input_group, input_port, input_protocol)
             } else {
                 rule_id
             };
@@ -162,6 +168,7 @@ pub fn handle_supervisor_command(
                 input_interface,
                 input_group,
                 input_port,
+                input_protocol,
                 input_source: None, // CLI-added rules don't have source filtering
                 outputs,
                 source: crate::RuleSource::Dynamic, // Rules added via CLI are dynamic
@@ -750,6 +757,7 @@ mod tests {
                 input_interface: "lo".to_string(),
                 input_group: "224.0.0.1".parse().unwrap(),
                 input_port: 5000,
+                input_protocol: 17,
                 outputs: vec![],
             },
             &master_rules,
@@ -780,6 +788,7 @@ mod tests {
                 input_interface: "lo".to_string(),
                 input_group: "224.0.0.1".parse().unwrap(),
                 input_port: 5000,
+                input_protocol: 17,
                 input_source: None,
                 outputs: vec![],
                 source: crate::RuleSource::Static,
@@ -879,6 +888,7 @@ mod tests {
         let flow_stats_1 = crate::FlowStats {
             input_group: "224.0.0.1".parse().unwrap(),
             input_port: 5000,
+            input_protocol: 17,
             packets_relayed: 1000,
             bytes_relayed: 1500000,
             packets_per_second: 100.0,
@@ -887,6 +897,7 @@ mod tests {
         let flow_stats_2 = crate::FlowStats {
             input_group: "224.0.0.1".parse().unwrap(),
             input_port: 5000,
+            input_protocol: 17,
             packets_relayed: 2000,
             bytes_relayed: 3000000,
             packets_per_second: 200.0,
@@ -1111,6 +1122,7 @@ mod tests {
                 input_interface: "lo".to_string(),
                 input_group: "224.0.0.1".parse().unwrap(),
                 input_port: 5000,
+                input_protocol: 17,
                 input_source: None,
                 outputs: vec![],
                 source: crate::RuleSource::Static,
@@ -1187,11 +1199,13 @@ mod tests {
                 input_interface: "eth0".to_string(),
                 input_group: "224.0.0.1".parse().unwrap(),
                 input_port: 5000,
+                input_protocol: 17,
                 outputs: vec![crate::OutputDestination {
                     group: "224.0.0.2".parse().unwrap(),
                     port: 5001,
                     interface: "eth0".to_string(), // Same as input!
                     ttl: None,
+                    source_ip: None,
                 }],
             },
             &master_rules,
@@ -1232,11 +1246,13 @@ mod tests {
                 input_interface: "lo".to_string(),
                 input_group: "224.0.0.1".parse().unwrap(),
                 input_port: 5000,
+                input_protocol: 17,
                 outputs: vec![crate::OutputDestination {
                     group: "224.0.0.2".parse().unwrap(),
                     port: 5001,
                     interface: "eth0".to_string(), // Different from input - OK
                     ttl: None,
+                    source_ip: None,
                 }],
             },
             &master_rules,
@@ -1353,11 +1369,13 @@ mod tests {
                 input_interface: "this_interface_name_is_way_too_long".to_string(),
                 input_group: "224.0.0.1".parse().unwrap(),
                 input_port: 5000,
+                input_protocol: 17,
                 outputs: vec![crate::OutputDestination {
                     group: "224.0.0.2".parse().unwrap(),
                     port: 5001,
                     interface: "eth1".to_string(),
                     ttl: None,
+                    source_ip: None,
                 }],
             },
             &master_rules,
@@ -1394,11 +1412,13 @@ mod tests {
                 input_interface: "eth0".to_string(),
                 input_group: "224.0.0.1".parse().unwrap(),
                 input_port: 5000,
+                input_protocol: 17,
                 outputs: vec![crate::OutputDestination {
                     group: "224.0.0.2".parse().unwrap(),
                     port: 5001,
                     interface: "invalid/name".to_string(),
                     ttl: None,
+                    source_ip: None,
                 }],
             },
             &master_rules,
@@ -1454,12 +1474,14 @@ mod tests {
                 name: None,
                 input_interface: "eth0".to_string(),
                 input_group: "224.0.0.1".parse().unwrap(),
-                input_port: 0, // Invalid
+                input_port: 0, // Invalid for UDP
+                input_protocol: 17,
                 outputs: vec![crate::OutputDestination {
                     group: "224.0.0.2".parse().unwrap(),
                     port: 5001,
                     interface: "eth1".to_string(),
                     ttl: None,
+                    source_ip: None,
                 }],
             },
             &master_rules,
@@ -1496,11 +1518,13 @@ mod tests {
                 input_interface: "eth0".to_string(),
                 input_group: "224.0.0.1".parse().unwrap(),
                 input_port: 5000,
+                input_protocol: 17,
                 outputs: vec![crate::OutputDestination {
                     group: "224.0.0.2".parse().unwrap(),
-                    port: 0, // Invalid
+                    port: 0, // Invalid for UDP
                     interface: "eth1".to_string(),
                     ttl: None,
+                    source_ip: None,
                 }],
             },
             &master_rules,
@@ -1519,5 +1543,127 @@ mod tests {
             }
             _ => panic!("Expected Error response, got {:?}", response),
         }
+    }
+
+    #[test]
+    fn test_add_esp_rule_accepts_port_zero() {
+        let master_rules = Mutex::new(HashMap::new());
+        let worker_map = Mutex::new(HashMap::new());
+        let global_min_level =
+            std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
+        let facility_min_levels = std::sync::RwLock::new(HashMap::new());
+        let worker_stats = Mutex::new(HashMap::new());
+
+        let (response, action) = handle_supervisor_command(
+            crate::SupervisorCommand::AddRule {
+                rule_id: "esp-rule".to_string(),
+                name: Some("ESP test".to_string()),
+                input_interface: "eth0".to_string(),
+                input_group: "239.255.0.100".parse().unwrap(),
+                input_port: 0,      // Valid for ESP
+                input_protocol: 50, // ESP
+                outputs: vec![crate::OutputDestination {
+                    group: "239.255.0.100".parse().unwrap(),
+                    port: 0, // No port for ESP
+                    interface: "eth1".to_string(),
+                    ttl: None,
+                    source_ip: None,
+                }],
+            },
+            &master_rules,
+            &worker_map,
+            &global_min_level,
+            &facility_min_levels,
+            &worker_stats,
+            None,
+            None,
+        );
+
+        assert!(
+            matches!(response, crate::Response::Success(_)),
+            "ESP rule with port=0 should succeed, got: {:?}",
+            response
+        );
+        assert!(matches!(
+            action,
+            CommandAction::EnsureWorkersAndBroadcast { .. }
+        ));
+
+        let rules = master_rules.lock().unwrap();
+        assert_eq!(rules.len(), 1);
+        let rule = rules.values().next().unwrap();
+        assert_eq!(rule.input_protocol, 50);
+        assert_eq!(rule.input_port, 0);
+    }
+
+    #[test]
+    fn test_add_esp_and_udp_rules_coexist() {
+        let master_rules = Mutex::new(HashMap::new());
+        let worker_map = Mutex::new(HashMap::new());
+        let global_min_level =
+            std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
+        let facility_min_levels = std::sync::RwLock::new(HashMap::new());
+        let worker_stats = Mutex::new(HashMap::new());
+
+        // Add ESP rule
+        let (response, _) = handle_supervisor_command(
+            crate::SupervisorCommand::AddRule {
+                rule_id: "esp-rule".to_string(),
+                name: None,
+                input_interface: "eth0".to_string(),
+                input_group: "239.1.1.1".parse().unwrap(),
+                input_port: 0,
+                input_protocol: 50,
+                outputs: vec![crate::OutputDestination {
+                    group: "239.1.1.1".parse().unwrap(),
+                    port: 0,
+                    interface: "eth1".to_string(),
+                    ttl: None,
+                    source_ip: None,
+                }],
+            },
+            &master_rules,
+            &worker_map,
+            &global_min_level,
+            &facility_min_levels,
+            &worker_stats,
+            None,
+            None,
+        );
+        assert!(matches!(response, crate::Response::Success(_)));
+
+        // Add UDP rule for same group
+        let (response, _) = handle_supervisor_command(
+            crate::SupervisorCommand::AddRule {
+                rule_id: "udp-rule".to_string(),
+                name: None,
+                input_interface: "eth0".to_string(),
+                input_group: "239.1.1.1".parse().unwrap(),
+                input_port: 5000,
+                input_protocol: 17,
+                outputs: vec![crate::OutputDestination {
+                    group: "239.1.1.1".parse().unwrap(),
+                    port: 5000,
+                    interface: "eth1".to_string(),
+                    ttl: None,
+                    source_ip: None,
+                }],
+            },
+            &master_rules,
+            &worker_map,
+            &global_min_level,
+            &facility_min_levels,
+            &worker_stats,
+            None,
+            None,
+        );
+        assert!(
+            matches!(response, crate::Response::Success(_)),
+            "UDP and ESP rules for same group should coexist, got: {:?}",
+            response
+        );
+
+        let rules = master_rules.lock().unwrap();
+        assert_eq!(rules.len(), 2, "Both ESP and UDP rules should exist");
     }
 }

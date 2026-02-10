@@ -17,7 +17,7 @@
 use std::net::Ipv4Addr;
 use thiserror::Error;
 
-use crate::{IP_PROTO_IGMP, IP_PROTO_PIM};
+use crate::{IP_PROTO_ESP, IP_PROTO_IGMP, IP_PROTO_PIM};
 
 /// Errors that can occur during packet parsing
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
@@ -31,7 +31,7 @@ pub enum ParseError {
     #[error("Invalid IP version: expected 4, got {0}")]
     InvalidIpVersion(u8),
 
-    #[error("Invalid IP protocol: expected 17 (UDP), got {0}")]
+    #[error("Unsupported IP protocol: {0}")]
     InvalidIpProtocol(u8),
 
     #[error("IP header checksum mismatch: expected {expected:#06x}, got {actual:#06x}")]
@@ -97,6 +97,13 @@ pub struct UdpHeader {
     pub dst_port: u16,
     pub length: u16,
     pub checksum: u16,
+}
+
+/// Parsed ESP header (8 bytes minimum: SPI + Sequence Number)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EspHeader {
+    pub spi: u32,
+    pub seq_no: u32,
 }
 
 /// Parsed IGMP header (8 bytes)
@@ -245,11 +252,21 @@ impl PacketHeaders {
     }
 }
 
-/// Parsed packet - can be UDP, IGMP, or PIM
+/// Parsed packet - can be UDP, ESP, IGMP, or PIM
 #[derive(Debug, Clone)]
 pub enum ParsedPacket {
     /// UDP multicast data packet
     Udp(PacketHeaders),
+    /// ESP (IPsec) data packet - relayed opaquely
+    Esp {
+        ethernet: EthernetHeader,
+        ipv4: Ipv4Header,
+        esp: EspHeader,
+        /// Offset into the raw packet where ESP header starts (payload includes ESP header)
+        payload_offset: usize,
+        /// Length from ESP header through ICV (full ESP payload for raw socket egress)
+        payload_len: usize,
+    },
     /// IGMP control packet
     Igmp {
         ethernet: EthernetHeader,
@@ -271,6 +288,7 @@ impl ParsedPacket {
     pub fn src_ip(&self) -> Ipv4Addr {
         match self {
             ParsedPacket::Udp(h) => h.ipv4.src_ip,
+            ParsedPacket::Esp { ipv4, .. } => ipv4.src_ip,
             ParsedPacket::Igmp { ipv4, .. } => ipv4.src_ip,
             ParsedPacket::Pim { ipv4, .. } => ipv4.src_ip,
         }
@@ -280,6 +298,7 @@ impl ParsedPacket {
     pub fn dst_ip(&self) -> Ipv4Addr {
         match self {
             ParsedPacket::Udp(h) => h.ipv4.dst_ip,
+            ParsedPacket::Esp { ipv4, .. } => ipv4.dst_ip,
             ParsedPacket::Igmp { ipv4, .. } => ipv4.dst_ip,
             ParsedPacket::Pim { ipv4, .. } => ipv4.dst_ip,
         }
@@ -289,6 +308,7 @@ impl ParsedPacket {
     pub fn protocol(&self) -> u8 {
         match self {
             ParsedPacket::Udp(h) => h.ipv4.protocol,
+            ParsedPacket::Esp { ipv4, .. } => ipv4.protocol,
             ParsedPacket::Igmp { ipv4, .. } => ipv4.protocol,
             ParsedPacket::Pim { ipv4, .. } => ipv4.protocol,
         }
@@ -299,9 +319,9 @@ impl ParsedPacket {
         matches!(self, ParsedPacket::Igmp { .. } | ParsedPacket::Pim { .. })
     }
 
-    /// Check if this is a data packet (UDP)
+    /// Check if this is a data packet (UDP or ESP)
     pub fn is_data(&self) -> bool {
-        matches!(self, ParsedPacket::Udp(_))
+        matches!(self, ParsedPacket::Udp(_) | ParsedPacket::Esp { .. })
     }
 }
 
@@ -439,6 +459,29 @@ pub fn parse_packet_any(data: &[u8], validate_checksums: bool) -> Result<ParsedP
             })
         }
 
+        IP_PROTO_ESP => {
+            // ESP (IPsec) - relay opaquely including ESP header
+            let esp_offset = ip_offset + ipv4.header_len();
+            let esp = parse_esp(&data[esp_offset..])?;
+            // payload_offset starts at ESP header — raw socket egress sends full ESP header + encrypted data + ICV
+            let payload_offset = esp_offset;
+            let payload_len = ipv4.total_length as usize - ipv4.header_len();
+            let expected_total = ip_offset + ipv4.total_length as usize;
+            if data.len() < expected_total {
+                return Err(ParseError::PacketTooShort {
+                    expected: expected_total,
+                    actual: data.len(),
+                });
+            }
+            Ok(ParsedPacket::Esp {
+                ethernet,
+                ipv4,
+                esp,
+                payload_offset,
+                payload_len,
+            })
+        }
+
         IP_PROTO_PIM => {
             // PIM
             let pim_offset = ip_offset + ipv4.header_len();
@@ -521,6 +564,21 @@ fn parse_pim(data: &[u8], _validate_checksum: bool) -> Result<(PimHeader, Vec<u8
     };
 
     Ok((pim, payload))
+}
+
+/// Parse ESP header (8 bytes: SPI + Sequence Number)
+fn parse_esp(data: &[u8]) -> Result<EspHeader, ParseError> {
+    if data.len() < 8 {
+        return Err(ParseError::PacketTooShort {
+            expected: 8,
+            actual: data.len(),
+        });
+    }
+
+    Ok(EspHeader {
+        spi: u32::from_be_bytes([data[0], data[1], data[2], data[3]]),
+        seq_no: u32::from_be_bytes([data[4], data[5], data[6], data[7]]),
+    })
 }
 
 /// Parse Ethernet header (14 bytes)
@@ -663,7 +721,7 @@ fn parse_udp(
 ///
 /// The checksum is the 16-bit one's complement of the one's complement sum
 /// of all 16-bit words in the header.
-fn calculate_ip_checksum(data: &[u8]) -> u16 {
+pub fn calculate_ip_checksum(data: &[u8]) -> u16 {
     let mut sum: u32 = 0;
 
     // Sum all 16-bit words
@@ -1408,5 +1466,117 @@ mod tests {
             checksum: 0,
         };
         assert!(header.is_join_prune());
+    }
+
+    /// Create a minimal valid Ethernet/IPv4/ESP packet for testing
+    fn create_esp_packet() -> Vec<u8> {
+        let mut packet = Vec::new();
+
+        // Ethernet header (14 bytes)
+        packet.extend_from_slice(&[0x01, 0x00, 0x5e, 0x00, 0x00, 0x01]); // Dst MAC (multicast)
+        packet.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]); // Src MAC
+        packet.extend_from_slice(&[0x08, 0x00]); // EtherType: IPv4
+
+        // IPv4 header (20 bytes, no options)
+        packet.push(0x45); // Version 4, IHL 5 (20 bytes)
+        packet.push(0x00); // DSCP 0, ECN 0
+                           // Total length: 20 IP + 8 ESP header + 24 payload = 52 bytes
+        packet.extend_from_slice(&[0x00, 0x34]);
+        packet.extend_from_slice(&[0x00, 0x01]); // Identification
+        packet.extend_from_slice(&[0x00, 0x00]); // Flags: 0, Fragment offset: 0
+        packet.push(64); // TTL
+        packet.push(50); // Protocol: ESP
+        packet.extend_from_slice(&[0x00, 0x00]); // Checksum (will calculate)
+        packet.extend_from_slice(&[10, 1, 0, 1]); // Src IP
+        packet.extend_from_slice(&[239, 255, 0, 100]); // Dst IP (multicast)
+
+        // Calculate and insert IP checksum
+        let ip_start = 14;
+        let ip_checksum = calculate_ip_checksum(&packet[ip_start..ip_start + 20]);
+        packet[24] = (ip_checksum >> 8) as u8;
+        packet[25] = (ip_checksum & 0xFF) as u8;
+
+        // ESP header (8 bytes)
+        packet.extend_from_slice(&[0x00, 0x00, 0x01, 0x00]); // SPI = 256
+        packet.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]); // Sequence Number = 1
+
+        // ESP payload (24 bytes of dummy encrypted data + ICV)
+        packet.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE]);
+        packet.extend_from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
+        packet.extend_from_slice(&[0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10]);
+
+        packet
+    }
+
+    #[test]
+    fn test_parse_esp_packet() {
+        let packet = create_esp_packet();
+        let result = parse_packet_any(&packet, false);
+        assert!(result.is_ok(), "ESP packet should parse successfully");
+
+        let parsed = result.unwrap();
+        match &parsed {
+            ParsedPacket::Esp {
+                ipv4,
+                esp,
+                payload_offset,
+                payload_len,
+                ..
+            } => {
+                assert_eq!(ipv4.protocol, 50);
+                assert_eq!(ipv4.src_ip, Ipv4Addr::new(10, 1, 0, 1));
+                assert_eq!(ipv4.dst_ip, Ipv4Addr::new(239, 255, 0, 100));
+                assert_eq!(esp.spi, 256);
+                assert_eq!(esp.seq_no, 1);
+                // payload_offset should point to ESP header start (not after it)
+                assert_eq!(*payload_offset, 34); // 14 ethernet + 20 IP
+                                                 // payload_len = total_length (52) - IP header (20) = 32
+                assert_eq!(*payload_len, 32);
+            }
+            _ => panic!("Expected ESP packet, got {:?}", parsed),
+        }
+
+        assert!(parsed.is_data());
+        assert!(!parsed.is_control());
+        assert_eq!(parsed.protocol(), 50);
+        assert_eq!(parsed.src_ip(), Ipv4Addr::new(10, 1, 0, 1));
+        assert_eq!(parsed.dst_ip(), Ipv4Addr::new(239, 255, 0, 100));
+    }
+
+    #[test]
+    fn test_parse_packet_rejects_esp() {
+        // parse_packet() is UDP-only and should reject ESP
+        let packet = create_esp_packet();
+        let result = parse_packet(&packet, false);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ParseError::InvalidIpProtocol(50) => {} // Expected
+            e => panic!("Expected InvalidIpProtocol(50), got {:?}", e),
+        }
+    }
+
+    #[test]
+    fn test_parse_esp_too_short() {
+        let mut packet = create_esp_packet();
+        // Truncate to just after IP header (remove ESP data)
+        packet.truncate(34 + 4); // Only 4 bytes of ESP (need 8)
+
+        // Update IP total_length to match truncated packet
+        let new_total = (packet.len() - 14) as u16;
+        packet[16] = (new_total >> 8) as u8;
+        packet[17] = (new_total & 0xFF) as u8;
+        // Recalculate IP checksum
+        packet[24] = 0;
+        packet[25] = 0;
+        let ip_checksum = calculate_ip_checksum(&packet[14..34]);
+        packet[24] = (ip_checksum >> 8) as u8;
+        packet[25] = (ip_checksum & 0xFF) as u8;
+
+        let result = parse_packet_any(&packet, false);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ParseError::PacketTooShort { expected: 8, .. } => {} // Expected
+            e => panic!("Expected PacketTooShort, got {:?}", e),
+        }
     }
 }

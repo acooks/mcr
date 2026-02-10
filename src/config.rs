@@ -257,6 +257,10 @@ pub struct InputSpec {
 
     /// UDP port
     pub port: u16,
+
+    /// IP protocol ("esp" for ESP/50, default UDP/17)
+    #[serde(default)]
+    pub protocol: Option<String>,
 }
 
 /// Output specification for a rule
@@ -305,13 +309,18 @@ impl Config {
 
     /// Validate the configuration
     pub fn validate(&self) -> Result<(), ConfigError> {
-        // Check for duplicate rules (same input tuple)
-        let mut seen_inputs: HashMap<(String, Ipv4Addr, u16), usize> = HashMap::new();
+        // Check for duplicate rules (same input tuple including protocol)
+        let mut seen_inputs: HashMap<(String, Ipv4Addr, u16, u8), usize> = HashMap::new();
         for (idx, rule) in self.rules.iter().enumerate() {
+            let protocol: u8 = match rule.input.protocol.as_deref() {
+                Some("esp") => 50,
+                _ => 17,
+            };
             let key = (
                 rule.input.interface.clone(),
                 rule.input.group,
                 rule.input.port,
+                protocol,
             );
             if let Some(prev_idx) = seen_inputs.get(&key) {
                 return Err(ConfigError::DuplicateRule {
@@ -329,8 +338,10 @@ impl Config {
                 validate_interface_name(&output.interface)?;
             }
 
-            // Validate ports
-            if rule.input.port == 0 {
+            let is_esp = protocol == 50;
+
+            // Validate ports (port=0 is valid for ESP since ESP has no port concept)
+            if rule.input.port == 0 && !is_esp {
                 return Err(ConfigError::InvalidPort {
                     port: 0,
                     context: format!("rule {}", idx),
@@ -427,12 +438,21 @@ impl Config {
 impl ConfigRule {
     /// Convert to a ForwardingRule with a generated ID (hash of input tuple)
     pub fn to_forwarding_rule(&self) -> ForwardingRule {
+        let input_protocol = match self.input.protocol.as_deref() {
+            Some("esp") => 50,
+            _ => 17,
+        };
         ForwardingRule {
             rule_id: self.generate_rule_id(),
             name: self.name.clone(),
             input_interface: self.input.interface.clone(),
             input_group: self.input.group,
-            input_port: self.input.port,
+            input_port: if input_protocol == 50 {
+                0
+            } else {
+                self.input.port
+            },
+            input_protocol,
             input_source: None, // Static rules from config don't have source filtering
             outputs: self
                 .outputs
@@ -442,6 +462,7 @@ impl ConfigRule {
                     port: o.port,
                     interface: o.interface.clone(),
                     ttl: o.ttl,
+                    source_ip: None, // Static config rules don't specify source_ip
                 })
                 .collect(),
             source: RuleSource::Static, // Config file rules are static
@@ -456,6 +477,11 @@ impl ConfigRule {
                 interface: rule.input_interface.clone(),
                 group: rule.input_group,
                 port: rule.input_port,
+                protocol: if rule.input_protocol == 50 {
+                    Some("esp".into())
+                } else {
+                    None
+                },
             },
             outputs: rule
                 .outputs
@@ -472,7 +498,16 @@ impl ConfigRule {
 
     /// Generate a stable rule ID from the input tuple (hash-based)
     fn generate_rule_id(&self) -> String {
-        crate::generate_rule_id(&self.input.interface, self.input.group, self.input.port)
+        let protocol = match self.input.protocol.as_deref() {
+            Some("esp") => 50,
+            _ => 17,
+        };
+        crate::generate_rule_id(
+            &self.input.interface,
+            self.input.group,
+            self.input.port,
+            protocol,
+        )
     }
 }
 
@@ -884,6 +919,7 @@ mod tests {
                         interface: "eth0".to_string(),
                         group: "239.1.1.1".parse().unwrap(),
                         port: 5000,
+                        protocol: None,
                     },
                     outputs: vec![],
                 },
@@ -893,6 +929,7 @@ mod tests {
                         interface: "eth0".to_string(),
                         group: "239.1.1.1".parse().unwrap(),
                         port: 5000,
+                        protocol: None,
                     },
                     outputs: vec![],
                 },
@@ -918,6 +955,7 @@ mod tests {
                     interface: "".to_string(),
                     group: "239.1.1.1".parse().unwrap(),
                     port: 5000,
+                    protocol: None,
                 },
                 outputs: vec![],
             }],
@@ -945,6 +983,7 @@ mod tests {
                     interface: "thisinterfaceistoolong".to_string(), // > 15 chars
                     group: "239.1.1.1".parse().unwrap(),
                     port: 5000,
+                    protocol: None,
                 },
                 outputs: vec![],
             }],
@@ -974,6 +1013,7 @@ mod tests {
                     interface: "eth0/bad".to_string(), // contains '/'
                     group: "239.1.1.1".parse().unwrap(),
                     port: 5000,
+                    protocol: None,
                 },
                 outputs: vec![],
             }],
@@ -1003,6 +1043,7 @@ mod tests {
                     interface: "0eth".to_string(), // starts with digit
                     group: "239.1.1.1".parse().unwrap(),
                     port: 5000,
+                    protocol: None,
                 },
                 outputs: vec![],
             }],
@@ -1032,6 +1073,7 @@ mod tests {
                     interface: "eth0".to_string(),
                     group: "239.1.1.1".parse().unwrap(),
                     port: 5000,
+                    protocol: None,
                 },
                 outputs: vec![OutputSpec {
                     group: "239.2.2.2".parse().unwrap(),
@@ -1064,6 +1106,7 @@ mod tests {
                     interface: "eth0".to_string(),
                     group: "239.1.1.1".parse().unwrap(),
                     port: 0,
+                    protocol: None,
                 },
                 outputs: vec![],
             }],
@@ -1088,6 +1131,7 @@ mod tests {
                     interface: "eth0".to_string(),
                     group: "239.1.1.1".parse().unwrap(),
                     port: 5000,
+                    protocol: None,
                 },
                 outputs: vec![OutputSpec {
                     group: "239.2.2.2".parse().unwrap(),
@@ -1125,6 +1169,7 @@ mod tests {
                     interface: "eth0".to_string(),
                     group: "192.168.1.1".parse().unwrap(), // Unicast input is allowed
                     port: 5000,
+                    protocol: None,
                 },
                 outputs: vec![OutputSpec {
                     group: "239.1.1.1".parse().unwrap(), // Multicast output
@@ -1155,6 +1200,7 @@ mod tests {
                     interface: "eth0".to_string(),
                     group: "239.1.1.1".parse().unwrap(),
                     port: 5000,
+                    protocol: None,
                 },
                 outputs: vec![OutputSpec {
                     group: "10.0.0.1".parse().unwrap(), // Unicast is allowed
@@ -1222,6 +1268,7 @@ mod tests {
                 interface: "eth0".to_string(),
                 group: "239.1.1.1".parse().unwrap(),
                 port: 5000,
+                protocol: None,
             },
             outputs: vec![OutputSpec {
                 group: "239.2.2.2".parse().unwrap(),
@@ -1250,6 +1297,7 @@ mod tests {
                 interface: "eth0".to_string(),
                 group: "239.1.1.1".parse().unwrap(),
                 port: 5000,
+                protocol: None,
             },
             outputs: vec![],
         };
@@ -1260,6 +1308,7 @@ mod tests {
                 interface: "eth0".to_string(),
                 group: "239.1.1.1".parse().unwrap(),
                 port: 5000,
+                protocol: None,
             },
             outputs: vec![],
         };
@@ -1274,6 +1323,7 @@ mod tests {
                 interface: "eth0".to_string(),
                 group: "239.1.1.1".parse().unwrap(),
                 port: 5001, // Different port
+                protocol: None,
             },
             outputs: vec![],
         };
@@ -1290,6 +1340,7 @@ mod tests {
                     interface: "eth0".to_string(),
                     group: "239.1.1.1".parse().unwrap(),
                     port: 5000,
+                    protocol: None,
                 },
                 outputs: vec![OutputSpec {
                     group: "239.2.2.2".parse().unwrap(),
@@ -1319,6 +1370,7 @@ mod tests {
                     interface: "eth0".to_string(),
                     group: "239.1.1.1".parse().unwrap(),
                     port: 5000,
+                    protocol: None,
                 },
                 outputs: vec![OutputSpec {
                     group: "239.2.2.2".parse().unwrap(),
@@ -2099,5 +2151,284 @@ mod tests {
         assert_eq!(cp.rpf_provider, "disabled");
         assert!(cp.external_neighbors_enabled);
         assert_eq!(cp.event_buffer_size, 256);
+    }
+
+    #[test]
+    fn test_parse_esp_config_rule() {
+        let json5 = r#"{
+            rules: [
+                {
+                    input: { interface: "eth0", group: "239.255.0.100", port: 0, protocol: "esp" },
+                    outputs: [
+                        { group: "239.255.0.100", port: 0, interface: "eth1" }
+                    ]
+                }
+            ]
+        }"#;
+        let config = Config::parse(json5).unwrap();
+        assert_eq!(config.rules.len(), 1);
+        assert_eq!(config.rules[0].input.protocol, Some("esp".to_string()));
+        assert_eq!(config.rules[0].input.port, 0);
+    }
+
+    #[test]
+    fn test_esp_config_to_forwarding_rule() {
+        let config_rule = ConfigRule {
+            name: Some("ESP relay".to_string()),
+            input: InputSpec {
+                interface: "eth0".to_string(),
+                group: "239.255.0.100".parse().unwrap(),
+                port: 0,
+                protocol: Some("esp".to_string()),
+            },
+            outputs: vec![OutputSpec {
+                group: "239.255.0.100".parse().unwrap(),
+                port: 0,
+                interface: "eth1".to_string(),
+                ttl: None,
+            }],
+        };
+
+        let rule = config_rule.to_forwarding_rule();
+        assert_eq!(
+            rule.input_protocol, 50,
+            "ESP config should produce protocol 50"
+        );
+        assert_eq!(rule.input_port, 0, "ESP rule should have port 0");
+        assert_eq!(
+            rule.input_group,
+            "239.255.0.100".parse::<std::net::Ipv4Addr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_esp_config_port_forced_to_zero() {
+        // Even if port is non-zero in config, ESP rules should force port=0
+        let config_rule = ConfigRule {
+            name: None,
+            input: InputSpec {
+                interface: "eth0".to_string(),
+                group: "239.255.0.100".parse().unwrap(),
+                port: 5000, // Non-zero, but ESP should override to 0
+                protocol: Some("esp".to_string()),
+            },
+            outputs: vec![OutputSpec {
+                group: "239.255.0.100".parse().unwrap(),
+                port: 0,
+                interface: "eth1".to_string(),
+                ttl: None,
+            }],
+        };
+
+        let rule = config_rule.to_forwarding_rule();
+        assert_eq!(
+            rule.input_port, 0,
+            "ESP should force input_port to 0 regardless of config"
+        );
+        assert_eq!(rule.input_protocol, 50);
+    }
+
+    #[test]
+    fn test_esp_config_validation_accepts_port_zero() {
+        let config = Config {
+            pinning: HashMap::new(),
+            rules: vec![ConfigRule {
+                name: None,
+                input: InputSpec {
+                    interface: "eth0".to_string(),
+                    group: "239.255.0.100".parse().unwrap(),
+                    port: 0,
+                    protocol: Some("esp".to_string()),
+                },
+                outputs: vec![OutputSpec {
+                    group: "239.255.0.100".parse().unwrap(),
+                    port: 5000,
+                    interface: "eth1".to_string(),
+                    ttl: None,
+                }],
+            }],
+            pim: None,
+            igmp: None,
+            msdp: None,
+            control_plane: None,
+            multicast_ttl: None,
+        };
+        // ESP with input port=0 should be valid (output port must be non-zero)
+        assert!(
+            config.validate().is_ok(),
+            "ESP rules with input port=0 should pass validation"
+        );
+    }
+
+    #[test]
+    fn test_udp_config_validation_rejects_port_zero() {
+        let config = Config {
+            pinning: HashMap::new(),
+            rules: vec![ConfigRule {
+                name: None,
+                input: InputSpec {
+                    interface: "eth0".to_string(),
+                    group: "239.255.0.100".parse().unwrap(),
+                    port: 0,
+                    protocol: None, // UDP (default)
+                },
+                outputs: vec![OutputSpec {
+                    group: "239.255.0.100".parse().unwrap(),
+                    port: 5000,
+                    interface: "eth1".to_string(),
+                    ttl: None,
+                }],
+            }],
+            pim: None,
+            igmp: None,
+            msdp: None,
+            control_plane: None,
+            multicast_ttl: None,
+        };
+        // UDP with port=0 should be rejected
+        let result = config.validate();
+        assert!(
+            result.is_err(),
+            "UDP rules with port=0 should fail validation"
+        );
+    }
+
+    #[test]
+    fn test_duplicate_detection_allows_different_protocols() {
+        // Same (interface, group, port) but different protocol should NOT be duplicates
+        let config = Config {
+            pinning: HashMap::new(),
+            rules: vec![
+                ConfigRule {
+                    name: Some("UDP rule".to_string()),
+                    input: InputSpec {
+                        interface: "eth0".to_string(),
+                        group: "239.1.1.1".parse().unwrap(),
+                        port: 0,
+                        protocol: None, // This will fail validation for UDP port=0, use port=5000
+                    },
+                    outputs: vec![OutputSpec {
+                        group: "239.1.1.1".parse().unwrap(),
+                        port: 5000,
+                        interface: "eth1".to_string(),
+                        ttl: None,
+                    }],
+                },
+                ConfigRule {
+                    name: Some("ESP rule".to_string()),
+                    input: InputSpec {
+                        interface: "eth0".to_string(),
+                        group: "239.1.1.1".parse().unwrap(),
+                        port: 0,
+                        protocol: Some("esp".to_string()),
+                    },
+                    outputs: vec![OutputSpec {
+                        group: "239.1.1.1".parse().unwrap(),
+                        port: 5000,
+                        interface: "eth1".to_string(),
+                        ttl: None,
+                    }],
+                },
+            ],
+            pim: None,
+            igmp: None,
+            msdp: None,
+            control_plane: None,
+            multicast_ttl: None,
+        };
+
+        // Fix: UDP rule needs a non-zero port
+        let mut config = config;
+        config.rules[0].input.port = 5000;
+
+        let result = config.validate();
+        assert!(
+            result.is_ok(),
+            "Same group with different protocols should not be duplicate: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_esp_config_roundtrip() {
+        // ForwardingRule(ESP) -> ConfigRule -> ForwardingRule(ESP)
+        let original = crate::ForwardingRule {
+            rule_id: "esp-round".to_string(),
+            name: Some("ESP roundtrip".to_string()),
+            input_interface: "eth0".to_string(),
+            input_group: "239.255.0.100".parse().unwrap(),
+            input_port: 0,
+            input_protocol: 50,
+            input_source: None,
+            outputs: vec![crate::OutputDestination {
+                group: "239.255.0.100".parse().unwrap(),
+                port: 0,
+                interface: "eth1".to_string(),
+                ttl: None,
+                source_ip: None,
+            }],
+            source: crate::RuleSource::Static,
+        };
+
+        let config_rule = ConfigRule::from_forwarding_rule(&original);
+        assert_eq!(config_rule.input.protocol, Some("esp".to_string()));
+        assert_eq!(config_rule.input.port, 0);
+
+        let roundtripped = config_rule.to_forwarding_rule();
+        assert_eq!(roundtripped.input_protocol, 50);
+        assert_eq!(roundtripped.input_port, 0);
+        assert_eq!(roundtripped.input_group, original.input_group);
+        assert_eq!(roundtripped.input_interface, original.input_interface);
+    }
+
+    #[test]
+    fn test_udp_config_roundtrip_no_protocol_field() {
+        // UDP ForwardingRule -> ConfigRule should NOT have protocol field
+        let original = crate::ForwardingRule {
+            rule_id: "udp-round".to_string(),
+            name: None,
+            input_interface: "eth0".to_string(),
+            input_group: "224.0.0.1".parse().unwrap(),
+            input_port: 5000,
+            input_protocol: 17,
+            input_source: None,
+            outputs: vec![],
+            source: crate::RuleSource::Static,
+        };
+
+        let config_rule = ConfigRule::from_forwarding_rule(&original);
+        assert_eq!(
+            config_rule.input.protocol, None,
+            "UDP rules should have protocol=None in config"
+        );
+
+        let roundtripped = config_rule.to_forwarding_rule();
+        assert_eq!(roundtripped.input_protocol, 17);
+    }
+
+    #[test]
+    fn test_unknown_protocol_defaults_to_udp() {
+        // Unknown protocol string should default to UDP (17)
+        let config_rule = ConfigRule {
+            name: None,
+            input: InputSpec {
+                interface: "eth0".to_string(),
+                group: "239.1.1.1".parse().unwrap(),
+                port: 5000,
+                protocol: Some("unknown_proto".to_string()),
+            },
+            outputs: vec![OutputSpec {
+                group: "239.1.1.1".parse().unwrap(),
+                port: 5000,
+                interface: "eth1".to_string(),
+                ttl: None,
+            }],
+        };
+
+        let rule = config_rule.to_forwarding_rule();
+        assert_eq!(
+            rule.input_protocol, 17,
+            "Unknown protocol string should default to UDP (17)"
+        );
     }
 }

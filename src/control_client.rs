@@ -318,6 +318,7 @@ fn parse_output_destination(s: &str) -> Result<OutputDestination, String> {
         port,
         interface,
         ttl: None,
+        source_ip: None,
     })
 }
 
@@ -374,6 +375,7 @@ pub fn build_command(cli_command: CliCommand) -> Result<multicast_relay::Supervi
             input_interface,
             input_group,
             input_port,
+            input_protocol: 17,
             outputs,
         },
         CliCommand::Remove { rule_id, name } => {
@@ -816,6 +818,7 @@ mod tests {
                 port: 6000,
                 interface: "eth1".to_string(),
                 ttl: None,
+                source_ip: None,
             }],
         };
         let supervisor_cmd = build_command(cmd).unwrap();
@@ -826,6 +829,7 @@ mod tests {
                 input_interface,
                 input_group,
                 input_port,
+                input_protocol: _,
                 outputs,
             } => {
                 assert_eq!(rule_id, "test-rule");
