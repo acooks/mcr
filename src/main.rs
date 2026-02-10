@@ -5,8 +5,44 @@ use multicast_relay::{config::Config, supervisor, worker, Args, Command};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+/// Log a message, using JSON format if enabled
+macro_rules! log_info {
+    ($json:expr, $facility:expr, $($arg:tt)*) => {
+        if $json {
+            let msg = format!($($arg)*);
+            let log_msg = serde_json::json!({
+                "timestamp": chrono::Utc::now().to_rfc3339(),
+                "level": "Info",
+                "facility": $facility,
+                "message": msg,
+            });
+            eprintln!("{}", log_msg);
+        } else {
+            eprintln!($($arg)*);
+        }
+    };
+}
+
+macro_rules! log_error {
+    ($json:expr, $facility:expr, $($arg:tt)*) => {
+        if $json {
+            let msg = format!($($arg)*);
+            let log_msg = serde_json::json!({
+                "timestamp": chrono::Utc::now().to_rfc3339(),
+                "level": "Error",
+                "facility": $facility,
+                "message": msg,
+            });
+            eprintln!("{}", log_msg);
+        } else {
+            eprintln!($($arg)*);
+        }
+    };
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
+    let log_json = args.log_json;
 
     match args.command {
         Command::Supervisor {
@@ -26,7 +62,9 @@ fn main() -> Result<()> {
                 if let Some(ttl) = config.multicast_ttl {
                     std::env::set_var("MCR_MULTICAST_TTL", ttl.to_string());
                 }
-                eprintln!(
+                log_info!(
+                    log_json,
+                    "Supervisor",
                     "[Supervisor] Loaded config from {:?} ({} rules)",
                     path,
                     config.rules.len()
@@ -77,10 +115,10 @@ fn main() -> Result<()> {
                 tokio::spawn(async move {
                     tokio::select! {
                         _ = sigterm.recv() => {
-                            eprintln!("[Supervisor] Received SIGTERM, initiating graceful shutdown");
+                            log_info!(log_json, "Supervisor", "[Supervisor] Received SIGTERM, initiating graceful shutdown");
                         }
                         _ = sigint.recv() => {
-                            eprintln!("[Supervisor] Received SIGINT, initiating graceful shutdown");
+                            log_info!(log_json, "Supervisor", "[Supervisor] Received SIGINT, initiating graceful shutdown");
                         }
                     }
                     // Send shutdown signal to supervisor
@@ -100,14 +138,14 @@ fn main() -> Result<()> {
                 .await;
 
                 if let Err(e) = result {
-                    eprintln!("[Supervisor] Error: {}", e);
+                    log_error!(log_json, "Supervisor", "[Supervisor] Error: {}", e);
                     std::process::exit(1);
                 }
 
                 // Give workers a brief moment to flush final logs
                 tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
-                eprintln!("[Supervisor] Shutdown complete");
+                log_info!(log_json, "Supervisor", "[Supervisor] Shutdown complete");
             });
         }
         Command::Worker {
@@ -149,7 +187,12 @@ fn main() -> Result<()> {
             runtime.block_on(async {
                 if let Err(e) = worker::run_data_plane(config, worker::DefaultWorkerLifecycle).await
                 {
-                    eprintln!("Data Plane worker process failed: {}", e);
+                    log_error!(
+                        log_json,
+                        "DataPlane",
+                        "Data Plane worker process failed: {}",
+                        e
+                    );
                     std::process::exit(1);
                 }
             });
