@@ -102,22 +102,38 @@ fn drop_privileges(uid: Uid, gid: Gid, caps_to_keep: Option<&HashSet<Capability>
     // Set the GID (requires CAP_SETGID)
     nix::unistd::setgid(gid).context("Failed to set GID")?;
 
-    // Set capabilities after group changes but before changing UID
     if let Some(caps) = caps_to_keep {
-        caps::set(None, CapSet::Effective, caps)?;
+        // PR_SET_KEEPCAPS preserves Permitted capabilities across setuid().
+        // Without this, setuid(non-root) clears all capability sets.
+        unsafe {
+            if libc::prctl(libc::PR_SET_KEEPCAPS, 1) != 0 {
+                return Err(anyhow::anyhow!("Failed to set PR_SET_KEEPCAPS"));
+            }
+        }
+
+        // Set UID while keepcaps is active — Permitted set is preserved
+        nix::unistd::setuid(uid).context("Failed to set UID")?;
+
+        // Now restrict capabilities to only what we need.
+        // After setuid, Effective is cleared but Permitted is kept (due to keepcaps).
         caps::set(None, CapSet::Permitted, caps)?;
+        caps::set(None, CapSet::Effective, caps)?;
         caps::set(None, CapSet::Inheritable, caps)?;
 
-        // Raise ambient capabilities for each capability we want to keep
-        // Ambient capabilities are inherited by child threads even after setuid()
         for cap in caps {
             caps::raise(None, CapSet::Ambient, *cap)
                 .with_context(|| format!("Failed to raise {:?} in Ambient set", cap))?;
         }
+
+        // Clear keepcaps flag (no longer needed)
+        unsafe {
+            libc::prctl(libc::PR_SET_KEEPCAPS, 0);
+        }
+    } else {
+        // No capabilities to keep — just drop to target UID
+        nix::unistd::setuid(uid).context("Failed to set UID")?;
     }
 
-    // Set the UID last (irreversible)
-    nix::unistd::setuid(uid).context("Failed to set UID")?;
     Ok(())
 }
 
@@ -253,11 +269,18 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
     const NOBODY_UID: u32 = 65534;
     const NOBODY_GID: u32 = 65534;
 
-    // Drop privileges completely - no capabilities needed since we have the socket FD
+    // Drop privileges but retain CAP_NET_RAW — needed for ESP egress sockets
+    // (create_raw_esp_socket creates SOCK_RAW for protocol 50 on demand).
+    // The pre-configured AF_PACKET ingress socket doesn't need capabilities,
+    // but ESP rules require creating new raw sockets at runtime.
+    let caps_to_keep: HashSet<Capability> =
+        [Capability::CAP_NET_RAW, Capability::CAP_NET_BIND_SERVICE]
+            .into_iter()
+            .collect();
     lifecycle.drop_privileges(
         Uid::from_raw(NOBODY_UID),
         Gid::from_raw(NOBODY_GID),
-        None, // No capabilities needed - we have the pre-configured AF_PACKET socket
+        Some(&caps_to_keep),
     )?;
 
     logger.debug(Facility::DataPlane, "Privileges dropped");
