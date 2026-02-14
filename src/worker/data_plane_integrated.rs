@@ -8,7 +8,7 @@ use crate::logging::{Facility, Logger};
 use crate::worker::{
     buffer_pool::BufferPool,
     unified_loop::{UnifiedConfig, UnifiedDataPlane},
-    EgressChannelSet, IngressChannelSet,
+    IngressChannelSet,
 };
 use crate::DataPlaneConfig;
 use anyhow::Result;
@@ -20,7 +20,6 @@ use anyhow::Result;
 pub fn run_unified_data_plane(
     config: DataPlaneConfig,
     ingress_channels: IngressChannelSet,
-    _egress_channels: EgressChannelSet, // Not used in unified mode
     logger: Logger,
 ) -> Result<()> {
     // Extract FDs from channel sets

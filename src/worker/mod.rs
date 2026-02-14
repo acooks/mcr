@@ -19,7 +19,6 @@ use crate::{DataPlaneConfig, RelayCommand};
 use data_plane_integrated::run_unified_data_plane as data_plane_task;
 
 use caps::{CapSet, Capability};
-use nix::sys::eventfd::EventFd;
 use nix::sys::socket::{recvmsg, MsgFlags};
 use std::collections::HashSet;
 use std::os::unix::io::AsRawFd;
@@ -31,12 +30,6 @@ pub struct IngressChannelSet {
     /// This socket is created and configured (bound, fanout set) by the supervisor
     /// with CAP_NET_RAW privileges, allowing the worker to drop all privileges.
     pub af_packet_fd: OwnedFd,
-}
-
-/// Channel set for egress thread communication
-pub struct EgressChannelSet {
-    pub cmd_stream_fd: OwnedFd,
-    pub shutdown_event_fd: EventFd, // For data path wakeup (from ingress)
 }
 
 // ... other code ...
@@ -178,7 +171,6 @@ pub trait WorkerLifecycle: Send + 'static {
         &self,
         config: DataPlaneConfig,
         ingress_channels: IngressChannelSet,
-        egress_channels: EgressChannelSet,
         logger: Logger,
     ) -> Result<()>;
 }
@@ -203,10 +195,9 @@ impl WorkerLifecycle for DefaultWorkerLifecycle {
         &self,
         config: DataPlaneConfig,
         ingress_channels: IngressChannelSet,
-        egress_channels: EgressChannelSet,
         logger: Logger,
     ) -> Result<()> {
-        data_plane_task(config, ingress_channels, egress_channels, logger)
+        data_plane_task(config, ingress_channels, logger)
     }
 }
 
@@ -214,8 +205,6 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
     config: DataPlaneConfig,
     lifecycle: T,
 ) -> Result<()> {
-    use nix::sys::eventfd::{EfdFlags, EventFd};
-
     // AF_PACKET socket is created by the supervisor and passed to us via SCM_RIGHTS.
     // This allows workers to drop ALL privileges after receiving the pre-configured socket.
     // Privilege dropping happens after we receive all FDs from the supervisor.
@@ -257,7 +246,6 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
 
     // Receive FDs from supervisor
     let ingress_cmd_fd = recv_fd(&supervisor_sock).await?;
-    let egress_cmd_fd = recv_fd(&supervisor_sock).await?;
     let af_packet_fd = recv_fd(&supervisor_sock).await?;
 
     // Now that we have the pre-configured AF_PACKET socket from the supervisor,
@@ -285,13 +273,8 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
 
     logger.debug(Facility::DataPlane, "Privileges dropped");
 
-    // Create shutdown eventfd for egress (data path wakeup from ingress)
-    let egress_shutdown_event_fd = EventFd::from_value_and_flags(0, EfdFlags::EFD_NONBLOCK)
-        .context("Failed to create egress shutdown eventfd")?;
-
     // Convert raw FDs to OwnedFd for channel sets
     let ingress_cmd_owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(ingress_cmd_fd) };
-    let egress_cmd_owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(egress_cmd_fd) };
     let af_packet_owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(af_packet_fd) };
 
     // Create channel sets (no more mpsc or tokio bridge!)
@@ -300,13 +283,8 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
         af_packet_fd: af_packet_owned,
     };
 
-    let egress_channels = EgressChannelSet {
-        cmd_stream_fd: egress_cmd_owned,
-        shutdown_event_fd: egress_shutdown_event_fd,
-    };
-
     // Call run_data_plane_task directly - synchronous and blocking (io_uring-based design)
-    lifecycle.run_data_plane_task(config, ingress_channels, egress_channels, logger)
+    lifecycle.run_data_plane_task(config, ingress_channels, logger)
 }
 
 #[cfg(test)]
