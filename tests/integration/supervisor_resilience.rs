@@ -5,13 +5,14 @@
 //! and restarts them with proper state synchronization.
 
 use anyhow::{Context, Result};
-use multicast_relay::{ForwardingRule, RuleSource};
+use multicast_relay::{ForwardingRule, OutputDestination, RuleSource, WorkerStatus};
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
 
-use crate::common::{ControlClient, McrInstance};
+use crate::common::{ControlClient, McrInstance, NetworkNamespace, VethPair};
 
 /// Helper to check if a process is running (not a zombie)
 fn is_process_running(pid: u32) -> bool {
@@ -305,4 +306,151 @@ async fn test_supervisor_handles_multiple_worker_failures() -> Result<()> {
     }
 
     anyhow::bail!("Supervisor did not restart all workers within timeout")
+}
+
+/// Test: Worker spawns when interface appears after rule is added
+///
+/// This reproduces the original bug from docs/bug-worker-spawn-failure.md:
+/// when a rule is added for a non-existent interface, the worker spawn fails.
+/// The supervisor should queue the spawn and retry when the interface appears
+/// (via netlink RTM_NEWLINK monitoring).
+///
+/// Sequence:
+/// 1. Start supervisor in isolated network namespace
+/// 2. Add rule for non-existent interface "veth-late"
+/// 3. Verify worker is in Restarting state (spawn failed, queued for retry)
+/// 4. Create "veth-late" interface
+/// 5. Verify worker transitions to Running state (netlink event triggers retry)
+#[tokio::test]
+async fn test_worker_spawns_when_interface_appears() -> Result<()> {
+    require_root!();
+
+    // Enter isolated network namespace so we can create/destroy interfaces freely
+    let _ns = NetworkNamespace::enter()?;
+    _ns.enable_loopback().await?;
+
+    // Start supervisor (default interface=lo, lazy worker spawning)
+    let mcr = McrInstance::builder()
+        .num_workers(1)
+        .start_async()
+        .await
+        .context("Failed to start supervisor")?;
+
+    let client = ControlClient::new(mcr.control_socket());
+    sleep(Duration::from_millis(500)).await;
+
+    // Add a rule for "veth-late" which doesn't exist yet.
+    // The supervisor accepts the rule (stored in master_rules) but
+    // spawn_data_plane_worker() fails because the interface doesn't exist.
+    // The failed spawn is queued in pending_spawns for retry.
+    let rule = ForwardingRule {
+        rule_id: "late-iface-rule".to_string(),
+        name: Some("late-interface-test".to_string()),
+        input_interface: "veth-late".to_string(),
+        input_group: "239.1.1.1".parse()?,
+        input_port: 5000,
+        input_protocol: 17,
+        input_source: None,
+        outputs: vec![OutputDestination {
+            group: "239.2.2.2".parse()?,
+            port: 6000,
+            interface: Arc::from("lo"),
+            ttl: None,
+            source_ip: None,
+        }],
+        source: RuleSource::Dynamic,
+    };
+    client.add_rule(rule).await?;
+    println!("[TEST] Rule added for non-existent interface 'veth-late'");
+
+    // Wait for the spawn attempt to fail and be queued
+    sleep(Duration::from_millis(500)).await;
+
+    // Verify the worker is in Restarting state (failed spawn, pending retry)
+    let workers = client.list_workers().await?;
+    let late_workers: Vec<_> = workers
+        .iter()
+        .filter(|w| w.interface.as_deref() == Some("veth-late"))
+        .collect();
+    println!(
+        "[TEST] Workers for veth-late: {:?}",
+        late_workers
+            .iter()
+            .map(|w| (&w.status, w.pid))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        !late_workers.is_empty(),
+        "Should have a pending worker entry for veth-late"
+    );
+    assert!(
+        late_workers
+            .iter()
+            .all(|w| matches!(w.status, WorkerStatus::Restarting { .. })),
+        "Worker should be in Restarting state (spawn failed)"
+    );
+
+    // Now create the interface — this triggers RTM_NEWLINK via netlink monitor,
+    // which calls drain_pending_spawns_for_interface("veth-late") and retries immediately.
+    let _veth = VethPair::create("veth-late", "veth-late-p").await?;
+    _veth.up().await?;
+    println!("[TEST] Created veth-late interface");
+
+    // Wait for netlink event to trigger retry and worker to spawn
+    let mut found_running = false;
+    for attempt in 0..50 {
+        sleep(Duration::from_millis(200)).await;
+
+        match client.list_workers().await {
+            Ok(workers) => {
+                let late_workers: Vec<_> = workers
+                    .iter()
+                    .filter(|w| w.interface.as_deref() == Some("veth-late"))
+                    .collect();
+                if attempt % 5 == 0 {
+                    println!(
+                        "[TEST] Attempt {}: veth-late workers: {:?}",
+                        attempt,
+                        late_workers
+                            .iter()
+                            .map(|w| (&w.status, w.pid))
+                            .collect::<Vec<_>>()
+                    );
+                }
+                if late_workers
+                    .iter()
+                    .any(|w| matches!(w.status, WorkerStatus::Running) && is_process_running(w.pid))
+                {
+                    found_running = true;
+                    println!(
+                        "[TEST] Worker for veth-late is now Running (PID {})",
+                        late_workers
+                            .iter()
+                            .find(|w| matches!(w.status, WorkerStatus::Running))
+                            .unwrap()
+                            .pid
+                    );
+                    break;
+                }
+            }
+            Err(e) => {
+                println!("[TEST] Attempt {}: Error listing workers: {}", attempt, e);
+            }
+        }
+    }
+
+    assert!(
+        found_running,
+        "Worker for veth-late should transition to Running after interface creation"
+    );
+
+    // Verify the rule is still present
+    let rules = client.list_rules().await?;
+    assert!(
+        rules.iter().any(|r| r.rule_id == "late-iface-rule"),
+        "Rule should persist through the spawn retry cycle"
+    );
+
+    println!("[TEST] Late interface worker spawn test PASSED");
+    Ok(())
 }
