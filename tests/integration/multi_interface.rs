@@ -430,6 +430,7 @@ async fn test_dynamic_spawn_for_new_interface() -> Result<()> {
                 port: 6001,
                 interface: "veth1b".to_string(),
                 ttl: None,
+                source_ip: None,
             }],
         )
         .await?;

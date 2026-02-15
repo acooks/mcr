@@ -72,6 +72,7 @@ impl<'a> ControlClient<'a> {
                 input_interface,
                 input_group,
                 input_port,
+                input_protocol: 17,
                 outputs,
             })
             .await?

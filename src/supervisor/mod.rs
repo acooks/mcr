@@ -274,7 +274,7 @@ async fn sync_rules_to_workers(
     // Track whether we synced rules to at least one worker
     let mut synced_to_any = false;
 
-    for (interface, ingress_stream, egress_stream) in stream_pairs_with_iface {
+    for (interface, ingress_stream) in stream_pairs_with_iface {
         // Filter rules to only include those matching this worker's input interface
         let interface_rules: Vec<ForwardingRule> = rules
             .iter()
@@ -308,12 +308,6 @@ async fn sync_rules_to_workers(
 
         let sync_cmd = RelayCommand::SyncRules(interface_rules);
         if let Ok(cmd_bytes) = serde_json::to_vec(&sync_cmd) {
-            // Send to worker via ingress stream and wait for ACK
-            // Note: In unified mode, the worker only monitors the ingress command stream,
-            // so we only need to send once and wait for one ACK.
-            // The egress_stream is kept for compatibility but not used here.
-            let _ = egress_stream; // Suppress unused variable warning
-
             let worker_ack = {
                 let mut stream = ingress_stream.lock().await;
                 let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
@@ -1228,7 +1222,7 @@ async fn handle_client(
                     manager.get_all_dp_cmd_streams_with_interface()
                 };
 
-                for (interface, ingress_stream, egress_stream) in stream_pairs_with_iface {
+                for (interface, ingress_stream) in stream_pairs_with_iface {
                     // Filter rules to only include those matching this worker's input interface
                     let interface_rules: Vec<ForwardingRule> = all_rules
                         .iter()
@@ -1253,17 +1247,9 @@ async fn handle_client(
                         }
                     };
 
-                    // Send to ingress worker (Bytes::clone is cheap - Arc-based)
-                    let cmd_bytes_clone = cmd_bytes.clone();
+                    // Send to worker (Bytes::clone is cheap - Arc-based)
                     tokio::spawn(async move {
                         let mut stream = ingress_stream.lock().await;
-                        let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
-                        let _ = framed.send(cmd_bytes_clone).await;
-                    });
-
-                    // Send to egress worker
-                    tokio::spawn(async move {
-                        let mut stream = egress_stream.lock().await;
                         let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
                         let _ = framed.send(cmd_bytes).await;
                     });
@@ -1283,20 +1269,10 @@ async fn handle_client(
                     // For ping, wait for all sends to complete and verify success
                     let mut send_tasks = Vec::new();
 
-                    for (ingress_stream, egress_stream) in stream_pairs {
-                        // Send to ingress (Bytes::clone is cheap - Arc-based)
+                    for ingress_stream in stream_pairs {
                         let cmd_bytes_clone = cmd_bytes.clone();
                         let task = tokio::spawn(async move {
                             let mut stream = ingress_stream.lock().await;
-                            let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
-                            framed.send(cmd_bytes_clone).await
-                        });
-                        send_tasks.push(task);
-
-                        // Send to egress
-                        let cmd_bytes_clone = cmd_bytes.clone();
-                        let task = tokio::spawn(async move {
-                            let mut stream = egress_stream.lock().await;
                             let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
                             framed.send(cmd_bytes_clone).await
                         });
@@ -1334,19 +1310,10 @@ async fn handle_client(
                     }
                 } else {
                     // For non-ping, non-SyncRules commands, fire and forget
-                    for (ingress_stream, egress_stream) in stream_pairs {
-                        // Send to ingress (Bytes::clone is cheap - Arc-based)
+                    for ingress_stream in stream_pairs {
                         let cmd_bytes_clone = cmd_bytes.clone();
                         tokio::spawn(async move {
                             let mut stream = ingress_stream.lock().await;
-                            let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
-                            let _ = framed.send(cmd_bytes_clone).await;
-                        });
-
-                        // Send to egress
-                        let cmd_bytes_clone = cmd_bytes.clone();
-                        tokio::spawn(async move {
-                            let mut stream = egress_stream.lock().await;
                             let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
                             let _ = framed.send(cmd_bytes_clone).await;
                         });
@@ -1417,7 +1384,7 @@ async fn handle_client(
                 manager.get_all_dp_cmd_streams_with_interface()
             };
 
-            for (worker_interface, ingress_stream, egress_stream) in stream_pairs_with_iface {
+            for (worker_interface, ingress_stream) in stream_pairs_with_iface {
                 if worker_interface != interface {
                     continue;
                 }
@@ -1425,13 +1392,6 @@ async fn handle_client(
                 let cmd_bytes_clone = cmd_bytes.clone();
                 tokio::spawn(async move {
                     let mut stream = ingress_stream.lock().await;
-                    let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
-                    let _ = framed.send(cmd_bytes_clone).await;
-                });
-
-                let cmd_bytes_clone = cmd_bytes.clone();
-                tokio::spawn(async move {
-                    let mut stream = egress_stream.lock().await;
                     let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
                     let _ = framed.send(cmd_bytes_clone).await;
                 });
@@ -1909,7 +1869,7 @@ pub async fn run(
 
             // Get streams with interface info for per-interface filtering
             let stream_pairs_with_iface = manager.get_all_dp_cmd_streams_with_interface();
-            for (interface, ingress_stream, egress_stream) in stream_pairs_with_iface {
+            for (interface, ingress_stream) in stream_pairs_with_iface {
                 // Filter rules to only include those matching this worker's input interface
                 let interface_rules: Vec<ForwardingRule> = rules_snapshot
                     .iter()
@@ -1920,18 +1880,9 @@ pub async fn run(
                 let sync_cmd = RelayCommand::SyncRules(interface_rules);
                 if let Ok(cmd_bytes) = serde_json::to_vec(&sync_cmd) {
                     let cmd_bytes: Bytes = cmd_bytes.into();
-                    // Send to ingress worker using length-delimited framing
-                    {
-                        let mut stream = ingress_stream.lock().await;
-                        let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
-                        let _ = framed.send(cmd_bytes.clone()).await;
-                    }
-                    // Send to egress worker using length-delimited framing
-                    {
-                        let mut stream = egress_stream.lock().await;
-                        let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
-                        let _ = framed.send(cmd_bytes).await;
-                    }
+                    let mut stream = ingress_stream.lock().await;
+                    let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
+                    let _ = framed.send(cmd_bytes).await;
                 }
             }
         } else {
@@ -2193,7 +2144,7 @@ pub async fn run(
                                             let mgr = wm.lock().unwrap();
                                             mgr.get_all_dp_cmd_streams_with_interface()
                                         };
-                                        for (iface, ingress_stream, egress_stream) in streams {
+                                        for (iface, ingress_stream) in streams {
                                             if iface != info.interface {
                                                 continue;
                                             }
@@ -2205,16 +2156,9 @@ pub async fn run(
                                             let sync_cmd = RelayCommand::SyncRules(iface_rules);
                                             if let Ok(cmd_bytes) = serde_json::to_vec(&sync_cmd) {
                                                 let cmd_bytes: Bytes = cmd_bytes.into();
-                                                {
-                                                    let mut stream = ingress_stream.lock().await;
-                                                    let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
-                                                    let _ = framed.send(cmd_bytes.clone()).await;
-                                                }
-                                                {
-                                                    let mut stream = egress_stream.lock().await;
-                                                    let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
-                                                    let _ = framed.send(cmd_bytes).await;
-                                                }
+                                                let mut stream = ingress_stream.lock().await;
+                                                let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
+                                                let _ = framed.send(cmd_bytes).await;
                                             }
                                         }
                                     }
@@ -2304,8 +2248,7 @@ pub async fn run(
                                                     let mgr = wm.lock().unwrap();
                                                     mgr.get_all_dp_cmd_streams_with_interface()
                                                 };
-                                                for (iface, ingress_stream, egress_stream) in streams
-                                                {
+                                                for (iface, ingress_stream) in streams {
                                                     if iface != info.interface {
                                                         continue;
                                                     }
@@ -2321,25 +2264,13 @@ pub async fn run(
                                                         serde_json::to_vec(&sync_cmd)
                                                     {
                                                         let cmd_bytes: Bytes = cmd_bytes.into();
-                                                        {
-                                                            let mut stream =
-                                                                ingress_stream.lock().await;
-                                                            let mut framed = Framed::new(
-                                                                &mut *stream,
-                                                                LengthDelimitedCodec::new(),
-                                                            );
-                                                            let _ =
-                                                                framed.send(cmd_bytes.clone()).await;
-                                                        }
-                                                        {
-                                                            let mut stream =
-                                                                egress_stream.lock().await;
-                                                            let mut framed = Framed::new(
-                                                                &mut *stream,
-                                                                LengthDelimitedCodec::new(),
-                                                            );
-                                                            let _ = framed.send(cmd_bytes).await;
-                                                        }
+                                                        let mut stream =
+                                                            ingress_stream.lock().await;
+                                                        let mut framed = Framed::new(
+                                                            &mut *stream,
+                                                            LengthDelimitedCodec::new(),
+                                                        );
+                                                        let _ = framed.send(cmd_bytes).await;
                                                     }
                                                 }
                                             }
@@ -2414,7 +2345,7 @@ pub async fn run(
                         manager.get_all_dp_cmd_streams_with_interface()
                     };
 
-                    for (interface, ingress_stream, egress_stream) in stream_pairs_with_iface {
+                    for (interface, ingress_stream) in stream_pairs_with_iface {
                         // Filter rules to only include those matching this worker's input interface
                         let interface_rules: Vec<ForwardingRule> = rules_snapshot
                             .iter()
@@ -2422,23 +2353,29 @@ pub async fn run(
                             .cloned()
                             .collect();
 
+                        // Diagnostic: show per-interface rule counts and groups
+                        let rule_groups: Vec<String> = interface_rules
+                            .iter()
+                            .map(|r| format!("({} p{} port{})", r.input_group, r.input_protocol, r.input_port))
+                            .collect();
+                        log_info!(
+                            supervisor_logger,
+                            Facility::Supervisor,
+                            &format!(
+                                "  sync worker interface={}: {} rules {:?}",
+                                interface,
+                                interface_rules.len(),
+                                rule_groups
+                            )
+                        );
+
                         let sync_cmd = RelayCommand::SyncRules(interface_rules);
                         if let Ok(cmd_bytes) = serde_json::to_vec(&sync_cmd) {
                             let cmd_bytes: Bytes = cmd_bytes.into();
-                            // Send to ingress worker using length-delimited framing
-                            {
-                                let mut stream = ingress_stream.lock().await;
-                                let mut framed =
-                                    Framed::new(&mut *stream, LengthDelimitedCodec::new());
-                                let _ = framed.send(cmd_bytes.clone()).await;
-                            }
-                            // Send to egress worker using length-delimited framing
-                            {
-                                let mut stream = egress_stream.lock().await;
-                                let mut framed =
-                                    Framed::new(&mut *stream, LengthDelimitedCodec::new());
-                                let _ = framed.send(cmd_bytes).await;
-                            }
+                            let mut stream = ingress_stream.lock().await;
+                            let mut framed =
+                                Framed::new(&mut *stream, LengthDelimitedCodec::new());
+                            let _ = framed.send(cmd_bytes).await;
                         }
                     }
                 } else {

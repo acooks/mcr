@@ -18,9 +18,15 @@ pub mod protocols;
 /// Increment when making breaking changes to SupervisorCommand or Response.
 pub const PROTOCOL_VERSION: u32 = 1;
 
-/// IP protocol numbers for PIM and IGMP
+/// IP protocol numbers for PIM, IGMP, and ESP
 pub const IP_PROTO_IGMP: u8 = 2;
+pub const IP_PROTO_ESP: u8 = 50;
 pub const IP_PROTO_PIM: u8 = 103;
+
+/// Default IP protocol for serde deserialization (UDP).
+fn default_udp_protocol() -> u8 {
+    17
+}
 
 /// PIM tree type for (S,G) vs (*,G) routing
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -93,6 +99,11 @@ pub mod worker;
 #[derive(Parser, Debug, PartialEq, serde::Deserialize)]
 #[command(author, version, about, long_about = None)]
 pub struct Args {
+    /// Output logs as JSON to stderr (for supervisor log collection)
+    #[arg(long, global = true)]
+    #[serde(default)]
+    pub log_json: bool,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -169,6 +180,11 @@ pub struct OutputDestination {
     /// Per-output multicast TTL override (falls back to global `multicast_ttl`)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl: Option<u8>,
+    /// Explicit source IP for egress socket binding.
+    /// If None, the source IP is derived from the output interface's IP address.
+    /// Use this when forwarding to unnumbered interfaces (e.g., veths without IP addresses).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_ip: Option<Ipv4Addr>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -182,6 +198,9 @@ pub enum SupervisorCommand {
         input_interface: String,
         input_group: Ipv4Addr,
         input_port: u16,
+        /// IP protocol number (default: 17 = UDP, 50 = ESP)
+        #[serde(default = "default_udp_protocol")]
+        input_protocol: u8,
         outputs: Vec<OutputDestination>,
     },
     RemoveRule {
@@ -831,6 +850,9 @@ pub struct ForwardingRule {
     pub input_interface: String,
     pub input_group: Ipv4Addr,
     pub input_port: u16,
+    /// IP protocol number (default: 17 = UDP, 50 = ESP)
+    #[serde(default = "default_udp_protocol")]
+    pub input_protocol: u8,
     /// Optional source IP filter for PIM (S,G) matching.
     /// If Some, only packets from this source are matched.
     /// If None, packets from any source are matched ((*,G) or static rules).
@@ -846,6 +868,9 @@ pub struct ForwardingRule {
 pub struct FlowStats {
     pub input_group: Ipv4Addr,
     pub input_port: u16,
+    /// IP protocol number (default: 17 = UDP, 50 = ESP)
+    #[serde(default = "default_udp_protocol")]
+    pub input_protocol: u8,
     pub packets_relayed: u64,
     pub bytes_relayed: u64,
     pub packets_per_second: f64,
@@ -904,13 +929,14 @@ fn default_rule_id() -> String {
     String::new()
 }
 
-/// Generate a stable rule ID from the input tuple (interface, group, port).
+/// Generate a stable rule ID from the input tuple (interface, group, port, protocol).
 /// This produces a deterministic 16-character hex string that is stable across reloads.
-pub fn generate_rule_id(interface: &str, group: Ipv4Addr, port: u16) -> String {
+pub fn generate_rule_id(interface: &str, group: Ipv4Addr, port: u16, protocol: u8) -> String {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     interface.hash(&mut hasher);
     group.hash(&mut hasher);
     port.hash(&mut hasher);
+    protocol.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
 }
 
@@ -946,11 +972,13 @@ mod tests {
             input_interface: "eth0".to_string(),
             input_group: "224.0.0.1".parse().unwrap(),
             input_port: 5000,
+            input_protocol: 17,
             outputs: vec![OutputDestination {
                 group: "224.0.0.2".parse().unwrap(),
                 port: 5001,
                 interface: "127.0.0.1".to_string(),
                 ttl: None,
+                source_ip: None,
             }],
         };
         let json = serde_json::to_string(&add_command).unwrap();
@@ -993,6 +1021,7 @@ mod tests {
             input_interface: "eth0".to_string(),
             input_group: "224.0.0.1".parse().unwrap(),
             input_port: 5000,
+            input_protocol: 17,
             input_source: None,
             outputs: vec![],
             source: RuleSource::Static,
@@ -1005,6 +1034,7 @@ mod tests {
         let stats = FlowStats {
             input_group: "224.0.0.1".parse().unwrap(),
             input_port: 5000,
+            input_protocol: 17,
             packets_relayed: 100,
             bytes_relayed: 12345,
             packets_per_second: 10.0,
@@ -1024,12 +1054,14 @@ mod tests {
             input_interface: "eth0".to_string(),
             input_group: "224.0.0.1".parse().unwrap(),
             input_port: 5000,
+            input_protocol: 17,
             input_source: None,
             outputs: vec![OutputDestination {
                 group: "224.0.0.2".parse().unwrap(),
                 port: 5001,
                 interface: "127.0.0.1".to_string(),
                 ttl: None,
+                source_ip: None,
             }],
             source: RuleSource::Static,
         };
@@ -1046,12 +1078,14 @@ mod tests {
             input_interface: "eth0".to_string(),
             input_group: "239.1.1.1".parse().unwrap(),
             input_port: 5000,
+            input_protocol: 17,
             input_source: Some("10.0.0.5".parse().unwrap()),
             outputs: vec![OutputDestination {
                 group: "239.1.1.1".parse().unwrap(),
                 port: 5000,
                 interface: "eth1".to_string(),
                 ttl: None,
+                source_ip: None,
             }],
             source: RuleSource::Pim {
                 tree_type: PimTreeType::SG,
@@ -1099,6 +1133,7 @@ mod tests {
         let stats = FlowStats {
             input_group: "224.0.0.1".parse().unwrap(),
             input_port: 5000,
+            input_protocol: 17,
             packets_relayed: 100,
             bytes_relayed: 12345,
             packets_per_second: 10.0,
@@ -1121,8 +1156,8 @@ mod tests {
     #[test]
     fn test_generate_rule_id_is_stable() {
         // Same inputs should produce same ID
-        let id1 = generate_rule_id("eth0", "224.0.0.1".parse().unwrap(), 5000);
-        let id2 = generate_rule_id("eth0", "224.0.0.1".parse().unwrap(), 5000);
+        let id1 = generate_rule_id("eth0", "224.0.0.1".parse().unwrap(), 5000, 17);
+        let id2 = generate_rule_id("eth0", "224.0.0.1".parse().unwrap(), 5000, 17);
         assert_eq!(id1, id2, "Same inputs should generate same ID");
 
         // ID should be 16 hex characters
@@ -1133,14 +1168,18 @@ mod tests {
         );
 
         // Different inputs should produce different IDs
-        let id3 = generate_rule_id("eth0", "224.0.0.1".parse().unwrap(), 5001);
+        let id3 = generate_rule_id("eth0", "224.0.0.1".parse().unwrap(), 5001, 17);
         assert_ne!(id1, id3, "Different port should generate different ID");
 
-        let id4 = generate_rule_id("eth1", "224.0.0.1".parse().unwrap(), 5000);
+        let id4 = generate_rule_id("eth1", "224.0.0.1".parse().unwrap(), 5000, 17);
         assert_ne!(id1, id4, "Different interface should generate different ID");
 
-        let id5 = generate_rule_id("eth0", "224.0.0.2".parse().unwrap(), 5000);
+        let id5 = generate_rule_id("eth0", "224.0.0.2".parse().unwrap(), 5000, 17);
         assert_ne!(id1, id5, "Different group should generate different ID");
+
+        // Different protocol should generate different ID
+        let id6 = generate_rule_id("eth0", "224.0.0.1".parse().unwrap(), 5000, 50);
+        assert_ne!(id1, id6, "Different protocol should generate different ID");
     }
 
     #[test]
@@ -1289,5 +1328,136 @@ mod tests {
         let json = serde_json::to_string(&resp).unwrap();
         let deserialized: Response = serde_json::from_str(&json).unwrap();
         assert_eq!(resp, deserialized);
+    }
+
+    #[test]
+    fn test_forwarding_rule_esp_serialization() {
+        let rule = ForwardingRule {
+            rule_id: "esp-rule".to_string(),
+            name: Some("ESP relay".to_string()),
+            input_interface: "eth0".to_string(),
+            input_group: "239.255.0.100".parse().unwrap(),
+            input_port: 0,
+            input_protocol: 50,
+            input_source: None,
+            outputs: vec![OutputDestination {
+                group: "239.255.0.100".parse().unwrap(),
+                port: 0,
+                interface: "eth1".to_string(),
+                ttl: None,
+                source_ip: None,
+            }],
+            source: RuleSource::Static,
+        };
+        let json = serde_json::to_string(&rule).unwrap();
+        // Protocol should be serialized
+        assert!(
+            json.contains("\"input_protocol\":50"),
+            "ESP protocol should be in JSON: {}",
+            json
+        );
+        // Round-trip
+        let deserialized: ForwardingRule = serde_json::from_str(&json).unwrap();
+        assert_eq!(rule, deserialized);
+        assert_eq!(deserialized.input_protocol, 50);
+    }
+
+    #[test]
+    fn test_forwarding_rule_backward_compat_no_protocol_field() {
+        // JSON from an older MCR version that doesn't have input_protocol
+        let json = r#"{
+            "rule_id": "old-rule",
+            "input_interface": "eth0",
+            "input_group": "224.0.0.1",
+            "input_port": 5000,
+            "input_source": null,
+            "outputs": [],
+            "source": "Static"
+        }"#;
+        let rule: ForwardingRule = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            rule.input_protocol, 17,
+            "Missing input_protocol should default to 17 (UDP)"
+        );
+        assert_eq!(rule.input_port, 5000);
+    }
+
+    #[test]
+    fn test_flow_stats_backward_compat_no_protocol_field() {
+        // JSON from an older MCR version
+        let json = r#"{
+            "input_group": "224.0.0.1",
+            "input_port": 5000,
+            "packets_relayed": 100,
+            "bytes_relayed": 50000,
+            "packets_per_second": 10.0,
+            "bits_per_second": 400000.0
+        }"#;
+        let stats: FlowStats = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            stats.input_protocol, 17,
+            "Missing input_protocol should default to 17 (UDP)"
+        );
+    }
+
+    #[test]
+    fn test_flow_stats_esp_serialization() {
+        let stats = FlowStats {
+            input_group: "239.255.0.100".parse().unwrap(),
+            input_port: 0,
+            input_protocol: 50,
+            packets_relayed: 1000,
+            bytes_relayed: 500000,
+            packets_per_second: 100.0,
+            bits_per_second: 4000000.0,
+        };
+        let json = serde_json::to_string(&stats).unwrap();
+        assert!(json.contains("\"input_protocol\":50"));
+        let deserialized: FlowStats = serde_json::from_str(&json).unwrap();
+        assert_eq!(stats, deserialized);
+    }
+
+    #[test]
+    fn test_supervisor_command_backward_compat_no_protocol() {
+        // AddRule from an older client without input_protocol field
+        let json = r#"{"AddRule": {
+            "rule_id": "old-cmd",
+            "input_interface": "eth0",
+            "input_group": "224.0.0.1",
+            "input_port": 5000,
+            "outputs": []
+        }}"#;
+        let cmd: SupervisorCommand = serde_json::from_str(json).unwrap();
+        match cmd {
+            SupervisorCommand::AddRule {
+                input_protocol,
+                input_port,
+                ..
+            } => {
+                assert_eq!(
+                    input_protocol, 17,
+                    "Missing input_protocol should default to 17"
+                );
+                assert_eq!(input_port, 5000);
+            }
+            _ => panic!("Expected AddRule"),
+        }
+    }
+
+    #[test]
+    fn test_supervisor_command_esp_serialization() {
+        let cmd = SupervisorCommand::AddRule {
+            rule_id: "esp-cmd".to_string(),
+            name: None,
+            input_interface: "eth0".to_string(),
+            input_group: "239.255.0.100".parse().unwrap(),
+            input_port: 0,
+            input_protocol: 50,
+            outputs: vec![],
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("\"input_protocol\":50"));
+        let deserialized: SupervisorCommand = serde_json::from_str(&json).unwrap();
+        assert_eq!(cmd, deserialized);
     }
 }

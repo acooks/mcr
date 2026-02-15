@@ -27,18 +27,11 @@ pub(super) const INITIAL_BACKOFF_MS: u64 = 250;
 /// Maximum backoff delay for restarting failed workers (16 seconds)
 pub(super) const MAX_BACKOFF_MS: u64 = 16000;
 
-/// Type alias for a pair of async command streams (ingress, egress)
-pub(super) type CmdStreamPair = (
-    Arc<tokio::sync::Mutex<UnixStream>>,
-    Arc<tokio::sync::Mutex<UnixStream>>,
-);
+/// Type alias for an async command stream to a worker
+pub(super) type CmdStream = Arc<tokio::sync::Mutex<UnixStream>>;
 
-/// Type alias for command streams with associated interface name
-pub(super) type CmdStreamWithInterface = (
-    String,
-    Arc<tokio::sync::Mutex<UnixStream>>,
-    Arc<tokio::sync::Mutex<UnixStream>>,
-);
+/// Type alias for a command stream with associated interface name
+pub(super) type CmdStreamWithInterface = (String, Arc<tokio::sync::Mutex<UnixStream>>);
 
 /// Result of spawning a data plane worker process.
 ///
@@ -47,7 +40,6 @@ pub(super) type CmdStreamWithInterface = (
 pub(super) struct SpawnedWorker {
     pub child: tokio::process::Child,
     pub ingress_cmd_stream: UnixStream,
-    pub egress_cmd_stream: UnixStream,
     pub log_pipe: Option<std::os::unix::io::OwnedFd>,
     pub stats_pipe: Option<std::os::unix::io::OwnedFd>,
 }
@@ -63,9 +55,7 @@ pub(super) struct Worker {
     pub(super) pid: u32,
     pub(super) worker_type: WorkerType,
     pub(super) child: Child,
-    // Data plane workers have TWO command streams (ingress + egress)
     pub(super) ingress_cmd_stream: Option<Arc<tokio::sync::Mutex<UnixStream>>>,
-    pub(super) egress_cmd_stream: Option<Arc<tokio::sync::Mutex<UnixStream>>>,
     #[cfg_attr(feature = "testing", allow(dead_code))]
     pub(super) log_pipe: Option<std::os::unix::io::OwnedFd>,
     #[cfg_attr(feature = "testing", allow(dead_code))]
@@ -273,10 +263,8 @@ pub async fn spawn_data_plane_worker(
     let log_pipe = log_read_fd;
     let stats_pipe = stats_read_fd;
 
-    // Send TWO command sockets to the child process
+    // Send command socket to the child process
     let ingress_cmd_supervisor_stream =
-        socket_helpers::create_and_send_socketpair(&supervisor_sock).await?;
-    let egress_cmd_supervisor_stream =
         socket_helpers::create_and_send_socketpair(&supervisor_sock).await?;
 
     // Send the pre-created AF_PACKET socket to the worker
@@ -286,7 +274,6 @@ pub async fn spawn_data_plane_worker(
     Ok(SpawnedWorker {
         child,
         ingress_cmd_stream: ingress_cmd_supervisor_stream,
-        egress_cmd_stream: egress_cmd_supervisor_stream,
         log_pipe,
         stats_pipe,
     })
@@ -392,7 +379,6 @@ impl WorkerManager {
             .id()
             .ok_or_else(|| anyhow::anyhow!("Worker process exited immediately after spawn"))?;
         let ingress_cmd_stream_arc = Arc::new(tokio::sync::Mutex::new(spawned.ingress_cmd_stream));
-        let egress_cmd_stream_arc = Arc::new(tokio::sync::Mutex::new(spawned.egress_cmd_stream));
 
         self.workers.insert(
             pid,
@@ -404,7 +390,6 @@ impl WorkerManager {
                 },
                 child: spawned.child,
                 ingress_cmd_stream: Some(ingress_cmd_stream_arc),
-                egress_cmd_stream: Some(egress_cmd_stream_arc),
                 log_pipe: spawned.log_pipe,
                 stats_pipe: spawned.stats_pipe,
             },
@@ -683,7 +668,6 @@ impl WorkerManager {
             .ok_or_else(|| anyhow::anyhow!("Worker process exited immediately after spawn"))?;
 
         let ingress_cmd_stream_arc = Arc::new(tokio::sync::Mutex::new(spawned.ingress_cmd_stream));
-        let egress_cmd_stream_arc = Arc::new(tokio::sync::Mutex::new(spawned.egress_cmd_stream));
 
         self.workers.insert(
             pid,
@@ -695,7 +679,6 @@ impl WorkerManager {
                 },
                 child: spawned.child,
                 ingress_cmd_stream: Some(ingress_cmd_stream_arc),
-                egress_cmd_stream: Some(egress_cmd_stream_arc),
                 log_pipe: spawned.log_pipe,
                 stats_pipe: spawned.stats_pipe,
             },
@@ -759,24 +742,6 @@ impl WorkerManager {
                     if let Err(e) = framed.send(cmd_bytes_clone.into()).await {
                         eprintln!(
                             "[Supervisor] Failed to send Shutdown to {} ingress: {}",
-                            worker_type_desc, e
-                        );
-                    }
-                });
-                shutdown_tasks.push(task);
-            }
-
-            if let Some(egress_stream) = &worker.egress_cmd_stream {
-                let stream_mutex = egress_stream.clone();
-                let worker_type_desc = format!("{:?}", worker.worker_type);
-                let cmd_bytes_clone = cmd_bytes.clone();
-
-                let task = tokio::spawn(async move {
-                    let mut stream = stream_mutex.lock().await;
-                    let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
-                    if let Err(e) = framed.send(cmd_bytes_clone.into()).await {
-                        eprintln!(
-                            "[Supervisor] Failed to send Shutdown to {} egress: {}",
                             worker_type_desc, e
                         );
                     }
@@ -879,14 +844,11 @@ impl WorkerManager {
     }
 
     /// Get all data plane command streams for broadcasting
-    pub(super) fn get_all_dp_cmd_streams(&self) -> Vec<CmdStreamPair> {
+    pub(super) fn get_all_dp_cmd_streams(&self) -> Vec<CmdStream> {
         self.workers
             .values()
             .filter(|w| matches!(w.worker_type, WorkerType::DataPlane { .. }))
-            .filter_map(|w| match (&w.ingress_cmd_stream, &w.egress_cmd_stream) {
-                (Some(ingress), Some(egress)) => Some((ingress.clone(), egress.clone())),
-                _ => None,
-            })
+            .filter_map(|w| w.ingress_cmd_stream.clone())
             .collect()
     }
 
@@ -896,12 +858,9 @@ impl WorkerManager {
             .values()
             .filter_map(|w| {
                 let WorkerType::DataPlane { interface, .. } = &w.worker_type;
-                match (&w.ingress_cmd_stream, &w.egress_cmd_stream) {
-                    (Some(ingress), Some(egress)) => {
-                        Some((interface.clone(), ingress.clone(), egress.clone()))
-                    }
-                    _ => None,
-                }
+                w.ingress_cmd_stream
+                    .as_ref()
+                    .map(|stream| (interface.clone(), stream.clone()))
             })
             .collect()
     }
