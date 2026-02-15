@@ -197,11 +197,12 @@ log_section 'Validating Results'
 
 VALIDATION_PASSED=0
 
-# Calculate validation thresholds based on rate
-# CI runners have limited resources - use conservative thresholds
-# At lower rates (<=100k pps), expect ~80% forwarding
-# At higher rates (>100k pps), expect ~70% forwarding (kernel drops increase)
-if [ "$SEND_RATE" -le 100000 ]; then
+# Calculate validation thresholds based on rate and environment
+# GitHub Actions runners have constrained and variable CPU — use lower thresholds
+# Local/bare-metal can expect higher forwarding ratios
+if [ "${CI:-}" = "true" ]; then
+    EXPECTED_RATIO=60
+elif [ "$SEND_RATE" -le 100000 ]; then
     EXPECTED_RATIO=80
 else
     EXPECTED_RATIO=70

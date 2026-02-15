@@ -22,3 +22,6 @@ test_results/
 # Node.js dependencies
 node_modules/
 *.profraw
+
+# Local cargo config (vendor paths, cross-compilation toolchains)
+.cargo/config.toml

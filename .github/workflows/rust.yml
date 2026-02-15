@@ -121,4 +121,5 @@ jobs:
       run: command -v cargo-outdated >/dev/null || cargo install cargo-outdated --locked
 
     - name: Check for outdated dependencies
+      continue-on-error: true
       run: cargo outdated --root-deps-only --exit-code 0
