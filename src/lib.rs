@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::hash::{Hash, Hasher};
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 pub use config::{Config, ConfigRule, InputSpec, OutputSpec};
 
@@ -176,7 +177,7 @@ pub struct DataPlaneConfig {
 pub struct OutputDestination {
     pub group: Ipv4Addr,
     pub port: u16,
-    pub interface: String,
+    pub interface: Arc<str>,
     /// Per-output multicast TTL override (falls back to global `multicast_ttl`)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl: Option<u8>,
@@ -976,7 +977,7 @@ mod tests {
             outputs: vec![OutputDestination {
                 group: "224.0.0.2".parse().unwrap(),
                 port: 5001,
-                interface: "127.0.0.1".to_string(),
+                interface: "127.0.0.1".into(),
                 ttl: None,
                 source_ip: None,
             }],
@@ -1059,7 +1060,7 @@ mod tests {
             outputs: vec![OutputDestination {
                 group: "224.0.0.2".parse().unwrap(),
                 port: 5001,
-                interface: "127.0.0.1".to_string(),
+                interface: "127.0.0.1".into(),
                 ttl: None,
                 source_ip: None,
             }],
@@ -1083,7 +1084,7 @@ mod tests {
             outputs: vec![OutputDestination {
                 group: "239.1.1.1".parse().unwrap(),
                 port: 5000,
-                interface: "eth1".to_string(),
+                interface: "eth1".into(),
                 ttl: None,
                 source_ip: None,
             }],
@@ -1343,7 +1344,7 @@ mod tests {
             outputs: vec![OutputDestination {
                 group: "239.255.0.100".parse().unwrap(),
                 port: 0,
-                interface: "eth1".to_string(),
+                interface: "eth1".into(),
                 ttl: None,
                 source_ip: None,
             }],

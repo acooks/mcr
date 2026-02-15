@@ -170,7 +170,7 @@ mod tests {
             outputs: vec![OutputDestination {
                 group: Ipv4Addr::new(239, 2, 2, 2),
                 port: 6000,
-                interface: "eth1".to_string(),
+                interface: "eth1".into(),
                 ttl: None,
                 source_ip: None,
             }],

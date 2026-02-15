@@ -4,8 +4,7 @@
 use anyhow::{bail, Context, Result};
 use nix::sched::{unshare, CloneFlags};
 use nix::unistd;
-use rtnetlink::{new_connection, Handle, LinkUnspec, LinkVeth};
-use std::net::Ipv4Addr;
+use std::process::Command;
 
 /// Network namespace guard - automatically cleaned up on drop
 ///
@@ -31,22 +30,17 @@ impl NetworkNamespace {
 
     /// Enable the loopback interface
     pub async fn enable_loopback(&self) -> Result<()> {
-        let (connection, handle, _) = new_connection()?;
-        tokio::spawn(connection);
+        let output = Command::new("ip")
+            .args(["link", "set", "lo", "up"])
+            .output()
+            .context("Failed to run ip command")?;
 
-        // Find loopback interface
-        let mut links = handle.link().get().match_name("lo".to_string()).execute();
-        let lo = links
-            .try_next()
-            .await?
-            .context("Loopback interface not found")?;
-
-        // Bring it up
-        handle
-            .link()
-            .set(LinkUnspec::new_with_index(lo.header.index).up().build())
-            .execute()
-            .await?;
+        if !output.status.success() {
+            bail!(
+                "Failed to bring up loopback: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
 
         Ok(())
     }
@@ -61,68 +55,50 @@ impl Drop for NetworkNamespace {
 
 /// Veth pair - virtual ethernet device pair
 pub struct VethPair {
-    handle: Handle,
     veth_a: String,
     veth_b: String,
-    _connection_handle: tokio::task::JoinHandle<()>,
 }
 
 impl VethPair {
     /// Create a new veth pair
     pub async fn create(veth_a: &str, veth_b: &str) -> Result<Self> {
-        let (connection, handle, _) = new_connection()?;
-        let connection_handle = tokio::spawn(connection);
+        let output = Command::new("ip")
+            .args([
+                "link", "add", veth_a, "type", "veth", "peer", "name", veth_b,
+            ])
+            .output()
+            .context("Failed to run ip command")?;
 
-        // Create veth pair
-        handle
-            .link()
-            .add(LinkVeth::new(veth_a, veth_b).build())
-            .execute()
-            .await
-            .with_context(|| format!("Failed to create veth pair {} <-> {}", veth_a, veth_b))?;
+        if !output.status.success() {
+            bail!(
+                "Failed to create veth pair {} <-> {}: {}",
+                veth_a,
+                veth_b,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
 
         Ok(Self {
-            handle,
             veth_a: veth_a.to_string(),
             veth_b: veth_b.to_string(),
-            _connection_handle: connection_handle,
         })
     }
 
     /// Set IP address on an interface
     pub async fn set_addr(&self, interface: &str, addr: &str) -> Result<&Self> {
-        // Parse address (e.g., "10.0.0.1/24")
-        let parts: Vec<&str> = addr.split('/').collect();
-        if parts.len() != 2 {
-            bail!("Address must be in CIDR format: {}", addr);
+        let output = Command::new("ip")
+            .args(["addr", "add", addr, "dev", interface])
+            .output()
+            .context("Failed to run ip command")?;
+
+        if !output.status.success() {
+            bail!(
+                "Failed to add address {} to {}: {}",
+                addr,
+                interface,
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
-
-        let ip: Ipv4Addr = parts[0]
-            .parse()
-            .with_context(|| format!("Invalid IP address: {}", parts[0]))?;
-        let prefix_len: u8 = parts[1]
-            .parse()
-            .with_context(|| format!("Invalid prefix length: {}", parts[1]))?;
-
-        // Get interface index
-        let mut links = self
-            .handle
-            .link()
-            .get()
-            .match_name(interface.to_string())
-            .execute();
-        let link = links
-            .try_next()
-            .await?
-            .with_context(|| format!("Interface not found: {}", interface))?;
-
-        // Add address
-        self.handle
-            .address()
-            .add(link.header.index, ip.into(), prefix_len)
-            .execute()
-            .await
-            .with_context(|| format!("Failed to add address {} to {}", addr, interface))?;
 
         Ok(self)
     }
@@ -136,23 +112,18 @@ impl VethPair {
 
     /// Bring up a specific interface
     async fn set_up(&self, interface: &str) -> Result<()> {
-        let mut links = self
-            .handle
-            .link()
-            .get()
-            .match_name(interface.to_string())
-            .execute();
-        let link = links
-            .try_next()
-            .await?
-            .with_context(|| format!("Interface not found: {}", interface))?;
+        let output = Command::new("ip")
+            .args(["link", "set", interface, "up"])
+            .output()
+            .context("Failed to run ip command")?;
 
-        self.handle
-            .link()
-            .set(LinkUnspec::new_with_index(link.header.index).up().build())
-            .execute()
-            .await
-            .with_context(|| format!("Failed to bring up interface {}", interface))?;
+        if !output.status.success() {
+            bail!(
+                "Failed to bring up interface {}: {}",
+                interface,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
 
         Ok(())
     }
@@ -164,6 +135,3 @@ impl Drop for VethPair {
         // No explicit cleanup needed
     }
 }
-
-// Re-export for convenience
-use futures_util::stream::TryStreamExt;

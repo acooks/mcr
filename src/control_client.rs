@@ -5,6 +5,7 @@ use multicast_relay::logging::{Facility, Severity};
 use multicast_relay::{Config, OutputDestination};
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -310,9 +311,7 @@ fn parse_output_destination(s: &str) -> Result<OutputDestination, String> {
     let port = parts[1]
         .parse()
         .map_err(|e| format!("Invalid port: {}", e))?;
-    let interface = parts[2]
-        .parse()
-        .map_err(|e| format!("Invalid interface IP: {}", e))?;
+    let interface: Arc<str> = parts[2].into();
     Ok(OutputDestination {
         group,
         port,
@@ -637,7 +636,7 @@ mod tests {
         let dest = parse_output_destination(s).unwrap();
         assert_eq!(dest.group, "224.0.0.1".parse::<Ipv4Addr>().unwrap());
         assert_eq!(dest.port, 5000);
-        assert_eq!(dest.interface, "127.0.0.1".to_string());
+        assert_eq!(&*dest.interface, "127.0.0.1");
 
         // --- Error Cases ---
         let s_invalid_parts = "invalid";
@@ -816,7 +815,7 @@ mod tests {
             outputs: vec![OutputDestination {
                 group: "239.2.2.2".parse().unwrap(),
                 port: 6000,
-                interface: "eth1".to_string(),
+                interface: "eth1".into(),
                 ttl: None,
                 source_ip: None,
             }],

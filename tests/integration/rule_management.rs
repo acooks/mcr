@@ -140,7 +140,7 @@ async fn test_get_stats_e2e() -> Result<()> {
         outputs: vec![multicast_relay::OutputDestination {
             group: "239.2.2.2".parse()?,
             port: 6002,
-            interface: veth_a.clone(), // Different from input interface to pass validation
+            interface: veth_a.clone().into(), // Different from input interface to pass validation
             ttl: None,
             source_ip: None,
         }],

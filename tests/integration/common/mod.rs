@@ -25,10 +25,8 @@ macro_rules! require_root {
         if !nix::unistd::geteuid().is_root() {
             panic!(
                 "This test requires root privileges for network namespace creation.\n\
-                 Run with: sudo -E cargo test --test integration\n\
-                 \n\
-                 Note: The mcrd binary itself can run without root using capabilities:\n\
-                 sudo setcap 'cap_net_raw,cap_setuid,cap_setgid=eip' mcrd"
+                 Run with: sudo -E cargo test --test integration -- --test-threads=1\n\
+                 Or:       just test-integration"
             );
         }
     };
