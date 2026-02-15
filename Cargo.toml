@@ -31,7 +31,7 @@ rusty-fork = "0.3.1"
 tempfile = "3.24.0"
 uuid = { version = "1.19.0", features = ["v4"] }
 wait-timeout = "0.2.1"
-regex = "1.10"
+regex = "1.12"
 futures-util = "0.3"
 mcr-test-macros = { path = "mcr-test-macros" }
 [features]
