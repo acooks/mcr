@@ -36,7 +36,9 @@ LISTENER_OUTPUT_FILE="/tmp/mcr_e2e_listener_${TEST_ID}.txt"
 IP_IN_HOST="192.168.100.1/24"
 IP_IN_NS="192.168.100.2/24"
 IP_IN_NS_ADDR="192.168.100.2"  # Without CIDR for traffic generator
+IP_IN_HOST_ADDR="192.168.100.1"  # Without CIDR for host-side generator
 IP_OUT_HOST="192.168.101.1/24"
+IP_OUT_HOST_ADDR="192.168.101.1"  # Without CIDR for host-side listener
 IP_OUT_NS="192.168.101.2/24"
 
 # Test parameters
@@ -56,6 +58,8 @@ cleanup() {
     sudo killall -q mcrd socat || true
     sudo ip netns pids "$NS_NAME" 2>/dev/null | xargs -r sudo kill 2>/dev/null || true
     sudo ip netns del "$NS_NAME" 2>/dev/null || true
+    sudo ip route del "$INPUT_GROUP/32" dev "$VETH_IN_HOST" 2>/dev/null || true
+    sudo ip route del "$OUTPUT_GROUP/32" dev "$VETH_OUT_HOST" 2>/dev/null || true
     sudo rm -f "$SUPERVISOR_SOCKET" || true
     rm -f "$LISTENER_OUTPUT_FILE" || true
     echo "Cleanup complete."
@@ -114,10 +118,11 @@ sudo ip netns exec "$NS_NAME" ip link set "$VETH_OUT_NS" up
 # Enable loopback
 sudo ip netns exec "$NS_NAME" ip link set lo up
 
-# Add multicast routes for the traffic generator and listener
-# The traffic generator and listener use UDP sockets which require kernel routing
-# The relay itself works at Layer 2 and doesn't need routes
-sudo ip netns exec "$NS_NAME" ip route add 224.0.0.0/4 dev "$VETH_IN_NS"
+# Add multicast routes on the HOST side for the traffic generator and listener
+# Generator sends via vhin (host) → vnin (namespace) where MCR receives
+# Listener receives on vhout (host) ← vnout (namespace) where MCR sends
+sudo ip route add "$INPUT_GROUP/32" dev "$VETH_IN_HOST"
+sudo ip route add "$OUTPUT_GROUP/32" dev "$VETH_OUT_HOST"
 
 echo "Network namespace created successfully with dual veth pairs"
 echo "  Ingress:  $VETH_IN_NS ($IP_IN_NS)"
@@ -161,11 +166,10 @@ done
 echo ""
 
 # --- Start UDP Listener ---
-echo "--- Starting UDP listener (socat) in namespace ---"
-# Redirect socat's stdout to file (avoids permission issues with OPEN)
-# Listener binds to OUTPUT interface to receive relayed traffic
-sudo ip netns exec "$NS_NAME" \
-    socat -u UDP4-RECV:${OUTPUT_PORT},ip-add-membership="${OUTPUT_GROUP}:${OUTPUT_INTERFACE}" \
+echo "--- Starting UDP listener (socat) on host side ---"
+# Listener runs on HOST side of egress veth pair to receive relayed traffic
+# MCR sends via vnout (namespace) → vhout (host) where socat captures
+socat -u UDP4-RECV:${OUTPUT_PORT},ip-add-membership="${OUTPUT_GROUP}:${IP_OUT_HOST_ADDR}" \
     STDOUT > "$LISTENER_OUTPUT_FILE" &
 LISTENER_PID=$!
 sleep 1 # Give the listener time to bind
@@ -181,9 +185,11 @@ sudo ip netns exec "$NS_NAME" "$CONTROL_CLIENT_BINARY" --socket-path "$SUPERVISO
 echo ""
 
 # --- Send Initial Burst ---
-echo "--- Sending packets to be relayed ---"
-sudo ip netns exec "$NS_NAME" "$TRAFFIC_GENERATOR_BINARY" \
-    --interface "$IP_IN_NS_ADDR" \
+echo "--- Sending packets from host side to be relayed ---"
+# Generator runs on HOST side: packets go vhin (host) → vnin (namespace)
+# MCR's AF_PACKET on vnin sees these as RX (ingress from wire)
+"$TRAFFIC_GENERATOR_BINARY" \
+    --interface "$IP_IN_HOST_ADDR" \
     --group "$INPUT_GROUP" \
     --port "$INPUT_PORT" \
     --count "$PACKET_COUNT" \
@@ -193,13 +199,13 @@ sudo ip netns exec "$NS_NAME" "$TRAFFIC_GENERATOR_BINARY" \
 sleep 0.5
 
 # Kill the listener to force it to flush and close the output file
-sudo kill $LISTENER_PID 2>/dev/null || true
+kill $LISTENER_PID 2>/dev/null || true
 wait $LISTENER_PID 2>/dev/null || true
 echo ""
 
 # --- Verify Packets ---
 echo "--- Verifying packets were relayed ---"
-RECEIVED_COUNT=$(grep -c "$PAYLOAD" "$LISTENER_OUTPUT_FILE" || echo "0")
+RECEIVED_COUNT=$(grep -c "$PAYLOAD" "$LISTENER_OUTPUT_FILE") || RECEIVED_COUNT=0
 if [ "$RECEIVED_COUNT" -eq "$PACKET_COUNT" ]; then
     echo "✅ SUCCESS: Received all $PACKET_COUNT packets."
     echo ""
