@@ -9,6 +9,12 @@
 #
 # Topology: Traffic Generator -> MCR -> Sink
 #
+# Validation strategy: All traffic phases run against a single MCR instance.
+# After all phases complete, SIGTERM triggers FINAL stats emission.
+# Cumulative counters validate that dynamic rule changes took effect:
+#   - no_match count validates phase 1 (no rules → traffic unmatched)
+#   - matched count validates phases 2+3 (rules added → traffic matched)
+#
 # Usage: sudo ./dynamic_rules.sh
 #
 
@@ -54,7 +60,14 @@ sleep 1
 #############################################
 log_section 'Test 1: Traffic Without Matching Rule'
 
-log_info "Sending traffic to 239.1.1.1:5001 (no rule exists)..."
+# Add a dummy rule for a different group to ensure the worker is spawned.
+# Without any rules, the supervisor doesn't spawn a data plane worker, so
+# no AF_PACKET socket is opened and no traffic is received at all.
+log_info "Adding dummy rule to spawn worker (different group)..."
+add_rule /tmp/mcr_dynamic.sock veth-mcr 239.99.99.99 9999 '239.99.99.98:9998:lo'
+sleep 1
+
+log_info "Sending $PACKETS_PER_PHASE packets to 239.1.1.1:5001 (no matching rule)..."
 ip netns exec "$NETNS" "$TRAFFIC_GENERATOR_BINARY" \
     --interface 10.0.0.1 \
     --group 239.1.1.1 \
@@ -63,39 +76,19 @@ ip netns exec "$NETNS" "$TRAFFIC_GENERATOR_BINARY" \
     --size "$PACKET_SIZE" \
     --count "$PACKETS_PER_PHASE"
 
+log_info "Test 1: $PACKETS_PER_PHASE packets sent (will validate via FINAL stats)"
 sleep 1
-
-# Check stats - without a rule, matched should be 0
-# Note: rx may include non-multicast traffic (ARP, etc)
-sleep 2  # Wait for stats to be emitted
-
-MATCHED=$(extract_stat /tmp/mcr_dynamic.log 'STATS:Ingress' 'matched')
-NOT_MATCHED=$(extract_stat /tmp/mcr_dynamic.log 'STATS:Ingress' 'not_matched')
-
-log_info "Before rule: matched=$MATCHED, not_matched=$NOT_MATCHED"
-
-# We expect matched=0 since there's no rule for this traffic
-# not_matched may or may not count depending on implementation
-if [ "$MATCHED" -eq 0 ]; then
-    log_info "Test 1 (No Rule): PASSED - no packets matched (as expected without rule)"
-    TEST1_PASSED=0
-else
-    log_error "Test 1 (No Rule): FAILED - matched=$MATCHED (expected 0)"
-    TEST1_PASSED=1
-fi
 
 #############################################
 # TEST 2: Add rule during runtime
 #############################################
 log_section 'Test 2: Add Rule During Runtime'
 
-log_info "Adding forwarding rule..."
+log_info "Adding forwarding rule for 239.1.1.1:5001..."
 add_rule /tmp/mcr_dynamic.sock veth-mcr 239.1.1.1 5001 '239.2.2.2:5002:lo'
 sleep 1
 
-log_info "Sending traffic to 239.1.1.1:5001 (rule now exists)..."
-BEFORE_MATCHED=$(extract_stat /tmp/mcr_dynamic.log 'STATS:Ingress' 'matched')
-
+log_info "Sending $PACKETS_PER_PHASE packets to 239.1.1.1:5001 (rule now exists)..."
 ip netns exec "$NETNS" "$TRAFFIC_GENERATOR_BINARY" \
     --interface 10.0.0.1 \
     --group 239.1.1.1 \
@@ -104,19 +97,8 @@ ip netns exec "$NETNS" "$TRAFFIC_GENERATOR_BINARY" \
     --size "$PACKET_SIZE" \
     --count "$PACKETS_PER_PHASE"
 
+log_info "Test 2: $PACKETS_PER_PHASE packets sent (will validate via FINAL stats)"
 sleep 1
-
-AFTER_MATCHED=$(extract_stat /tmp/mcr_dynamic.log 'STATS:Ingress' 'matched')
-NEW_MATCHED=$((AFTER_MATCHED - BEFORE_MATCHED))
-
-log_info "After adding rule: matched=$NEW_MATCHED new packets"
-
-# Should match most of the new packets (80% threshold)
-if validate_min_percent "$NEW_MATCHED" "$PACKETS_PER_PHASE" 80 "Test 2 (Add Rule)"; then
-    TEST2_PASSED=0
-else
-    TEST2_PASSED=1
-fi
 
 #############################################
 # TEST 3: Add second rule for different group
@@ -130,8 +112,7 @@ sleep 1
 # Add another IP to generator interface
 ip netns exec "$NETNS" ip addr add 10.0.0.11/24 dev veth-gen || true
 
-log_info "Sending traffic to both groups concurrently..."
-BEFORE_MATCHED=$(extract_stat /tmp/mcr_dynamic.log 'STATS:Ingress' 'matched')
+log_info "Sending $PACKETS_PER_PHASE packets to each group concurrently..."
 
 # Send to both groups
 ip netns exec "$NETNS" "$TRAFFIC_GENERATOR_BINARY" \
@@ -155,49 +136,81 @@ GEN2_PID=$!
 wait $GEN1_PID || true
 wait $GEN2_PID || true
 
+log_info "Test 3: $((PACKETS_PER_PHASE * 2)) packets sent (will validate via FINAL stats)"
 sleep 1
 
-AFTER_MATCHED=$(extract_stat /tmp/mcr_dynamic.log 'STATS:Ingress' 'matched')
-NEW_MATCHED=$((AFTER_MATCHED - BEFORE_MATCHED))
-
-log_info "After concurrent traffic: matched=$NEW_MATCHED new packets"
-
-# Should match most packets from both streams (80% threshold)
-TOTAL_SENT=$((PACKETS_PER_PHASE * 2))
-if validate_min_percent "$NEW_MATCHED" "$TOTAL_SENT" 80 "Test 3 (Multiple Rules)"; then
-    TEST3_PASSED=0
-else
-    TEST3_PASSED=1
-fi
-
 #############################################
-# TEST 4: Remove rule during traffic
+# TEST 4: Rule listing
 #############################################
-log_section 'Test 4: Remove Rule During Traffic'
-
-# Note: This test depends on the mcrctl supporting rule removal
-# If not implemented, we'll just verify the rule can be listed
+log_section 'Test 4: Rule Listing'
 
 log_info "Checking rule listing functionality..."
 RULE_LIST=$("$CONTROL_CLIENT_BINARY" --socket-path /tmp/mcr_dynamic.sock list 2>&1 || echo "List command not supported")
 log_info "Current rules: $RULE_LIST"
 
-# If we can remove rules, test that; otherwise just pass
+# Verify both rules are visible
 if echo "$RULE_LIST" | grep -q "239.1.1.1"; then
     log_info "Test 4 (Rule Listing): PASSED - rules are visible"
     TEST4_PASSED=0
 else
-    log_info "Test 4 (Rule Listing): SKIPPED - rule listing may not show details"
-    TEST4_PASSED=0
+    log_error "Test 4 (Rule Listing): FAILED - rules not found in listing"
+    TEST4_PASSED=1
 fi
 
 #############################################
-# Graceful shutdown
+# Graceful shutdown to emit FINAL stats
 #############################################
-log_section 'Cleanup'
+log_section 'Triggering Graceful Shutdown for FINAL Stats'
 
 kill -TERM "$MCR_PID" 2>/dev/null || true
-sleep 2
+# Wait for worker to emit FINAL stats and exit
+for i in $(seq 1 30); do
+    if ! kill -0 "$MCR_PID" 2>/dev/null; then break; fi
+    sleep 0.1
+done
+sleep 1
+
+#############################################
+# Validate using FINAL stats
+#############################################
+log_section 'Validating FINAL Stats'
+
+# Expected cumulative totals:
+#   Phase 1: 10k packets with no rule → no_match += ~10k
+#   Phase 2: 10k packets with 1 rule  → matched += ~10k
+#   Phase 3: 20k packets with 2 rules → matched += ~20k
+#   Total expected: matched ~= 30k, no_match ~= 10k
+
+FINAL_MATCHED=$(extract_stat /tmp/mcr_dynamic.log 'STATS:Ingress' 'matched')
+FINAL_NO_MATCH=$(extract_stat /tmp/mcr_dynamic.log 'STATS:Ingress' 'no_match')
+
+log_info "FINAL stats: matched=$FINAL_MATCHED, no_match=$FINAL_NO_MATCH"
+
+# Test 1 validation: Phase 1 traffic (no rule) should show up as no_match
+# 80% threshold accounts for kernel drops on veth pairs
+NO_MATCH_THRESHOLD=$((PACKETS_PER_PHASE * 80 / 100))
+if [ "$FINAL_NO_MATCH" -ge "$NO_MATCH_THRESHOLD" ]; then
+    log_info "Test 1 (No Rule): PASSED - no_match=$FINAL_NO_MATCH (>= $NO_MATCH_THRESHOLD)"
+    TEST1_PASSED=0
+else
+    log_error "Test 1 (No Rule): FAILED - no_match=$FINAL_NO_MATCH (expected >= $NO_MATCH_THRESHOLD)"
+    TEST1_PASSED=1
+fi
+
+# Test 2+3 validation: Phases 2+3 traffic (with rules) should be matched
+# Phase 2: 10k to 239.1.1.1 (1 rule), Phase 3: 10k each to 2 groups (2 rules)
+# Total expected matched: ~30k
+TOTAL_RULE_TRAFFIC=$((PACKETS_PER_PHASE * 3))
+MATCHED_THRESHOLD=$((TOTAL_RULE_TRAFFIC * 80 / 100))
+if [ "$FINAL_MATCHED" -ge "$MATCHED_THRESHOLD" ]; then
+    log_info "Test 2+3 (Dynamic Rules): PASSED - matched=$FINAL_MATCHED (>= $MATCHED_THRESHOLD)"
+    TEST2_PASSED=0
+    TEST3_PASSED=0
+else
+    log_error "Test 2+3 (Dynamic Rules): FAILED - matched=$FINAL_MATCHED (expected >= $MATCHED_THRESHOLD)"
+    TEST2_PASSED=1
+    TEST3_PASSED=1
+fi
 
 #############################################
 # Final Summary
