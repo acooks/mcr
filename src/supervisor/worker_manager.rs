@@ -5,8 +5,8 @@
 //! This module handles spawning, monitoring, and managing data plane worker processes.
 //! Workers are spawned per-interface with configurable core pinning and fanout groups.
 
+use super::send_sink;
 use anyhow::Result;
-use futures::SinkExt;
 use std::collections::HashMap;
 #[cfg(not(feature = "testing"))]
 use std::os::unix::io::FromRawFd;
@@ -739,7 +739,7 @@ impl WorkerManager {
                 let task = tokio::spawn(async move {
                     let mut stream = stream_mutex.lock().await;
                     let mut framed = Framed::new(&mut *stream, LengthDelimitedCodec::new());
-                    if let Err(e) = framed.send(cmd_bytes_clone.into()).await {
+                    if let Err(e) = send_sink(&mut framed, cmd_bytes_clone.into()).await {
                         eprintln!(
                             "[Supervisor] Failed to send Shutdown to {} ingress: {}",
                             worker_type_desc, e
@@ -751,7 +751,12 @@ impl WorkerManager {
         }
 
         let send_timeout = Duration::from_secs(1);
-        match tokio::time::timeout(send_timeout, futures::future::join_all(shutdown_tasks)).await {
+        let await_all = async {
+            for task in shutdown_tasks {
+                let _ = task.await;
+            }
+        };
+        match tokio::time::timeout(send_timeout, await_all).await {
             Ok(_) => {
                 eprintln!("[Supervisor] All shutdown commands sent successfully");
             }

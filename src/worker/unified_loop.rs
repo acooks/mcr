@@ -67,7 +67,7 @@ const SEND_MAX: u64 = 2_000_000;
 struct SendWorkItem {
     payload: Arc<[u8]>, // Shared payload for zero-copy fan-out
     dest_addr: SocketAddr,
-    interface_name: String,
+    interface_name: Arc<str>,
     multicast_ttl: u8,
     /// Explicit source IP for egress, if specified in the rule
     source_ip: Option<Ipv4Addr>,
@@ -80,7 +80,7 @@ struct ForwardingTarget {
     payload_offset: usize,
     payload_len: usize,
     dest_addr: SocketAddr,
-    interface_name: String,
+    interface_name: Arc<str>,
     multicast_ttl: u8,
     /// Explicit source IP for egress, if specified in the rule
     source_ip: Option<Ipv4Addr>,
@@ -162,6 +162,7 @@ pub struct UnifiedStats {
     pub rules_rejected: u64,         // Rules rejected due to max_rules limit
     pub flow_counters_evicted: u64,  // Flow counters evicted due to max_flow_counters limit
     pub egress_sockets_evicted: u64, // Egress sockets evicted due to max_egress_sockets limit
+    pub esp_not_matched_logged: u64, // Diagnostic: count of logged not-matched ESP packets
 }
 
 /// Per-flow counters for stats reporting
@@ -176,7 +177,7 @@ struct FlowCounters {
 }
 
 /// Key for the egress socket cache: (interface, dest_addr, ttl, source_ip, protocol)
-type EgressSocketKey = (String, SocketAddr, u8, Ipv4Addr, u8);
+type EgressSocketKey = (Arc<str>, SocketAddr, u8, Ipv4Addr, u8);
 
 /// Unified single-threaded data plane loop
 pub struct UnifiedDataPlane {
@@ -200,6 +201,8 @@ pub struct UnifiedDataPlane {
 
     // Egress (keyed by interface, dest, TTL, source_ip, protocol)
     egress_sockets: HashMap<EgressSocketKey, (OwnedFd, Ipv4Addr)>,
+    // Cache interface name → IPv4 address to avoid getifaddrs() syscall per packet
+    interface_ip_cache: HashMap<Arc<str>, Ipv4Addr>,
     send_queue: VecDeque<SendWorkItem>,
     in_flight_sends: HashMap<u64, Arc<[u8]>>,
     next_send_user_data: u64,
@@ -212,6 +215,10 @@ pub struct UnifiedDataPlane {
     cmd_stream_fd: OwnedFd,
     cmd_buffer: Vec<u8>,
     cmd_reader: crate::worker::command_reader::CommandReader,
+
+    // Pre-allocated scratch buffers for hot-path loops (avoid per-iteration heap alloc)
+    completions: Vec<(u64, i32)>,
+    targets: Vec<ForwardingTarget>,
 
     // Stats and config
     config: UnifiedConfig,
@@ -313,6 +320,7 @@ impl UnifiedDataPlane {
             rules: HashMap::new(),
             flow_counters: HashMap::new(),
             egress_sockets: HashMap::new(),
+            interface_ip_cache: HashMap::new(),
             send_queue: VecDeque::with_capacity(config.send_batch_size),
             in_flight_sends: HashMap::new(),
             next_send_user_data: SEND_BASE,
@@ -321,6 +329,8 @@ impl UnifiedDataPlane {
             cmd_stream_fd,
             cmd_buffer: vec![0u8; 4096],
             cmd_reader: crate::worker::command_reader::CommandReader::new(),
+            completions: Vec::new(),
+            targets: Vec::new(),
             config,
             stats: UnifiedStats::default(),
             logger,
@@ -517,24 +527,27 @@ impl UnifiedDataPlane {
 
     /// Process all available completions
     fn process_completions(&mut self) -> Result<()> {
-        let mut completions = Vec::new();
+        self.completions.clear();
         {
             let mut cq = self.ring.completion();
             for cqe in &mut cq {
-                completions.push((cqe.user_data(), cqe.result()));
+                self.completions.push((cqe.user_data(), cqe.result()));
             }
             // Sync to mark completions as consumed
             cq.sync();
         }
 
-        if !completions.is_empty() && self.stats.packets_received < 5 {
+        if !self.completions.is_empty() && self.stats.packets_received < 5 {
             self.logger.debug(
                 Facility::DataPlane,
-                &format!("Processing {} completions", completions.len()),
+                &format!("Processing {} completions", self.completions.len()),
             );
         }
 
-        for (user_data, result) in completions {
+        // Iterate by index to avoid borrow conflict with self
+        let num_completions = self.completions.len();
+        for i in 0..num_completions {
+            let (user_data, result) = self.completions[i];
             match user_data {
                 COMMAND_USER_DATA => self.handle_command_completion(result)?,
                 SHUTDOWN_USER_DATA => self.handle_shutdown_completion(result)?,
@@ -622,6 +635,23 @@ impl UnifiedDataPlane {
                         }
                     }
                     crate::RelayCommand::SyncRules(rules) => {
+                        // Diagnostic: show rules received at WARNING level
+                        let rule_keys: Vec<String> = rules
+                            .iter()
+                            .map(|r| {
+                                format!(
+                                    "({} p{} port{} in={})",
+                                    r.input_group,
+                                    r.input_protocol,
+                                    r.input_port,
+                                    r.input_interface
+                                )
+                            })
+                            .collect();
+                        self.logger.warning(
+                            Facility::DataPlane,
+                            &format!("SyncRules received: {} rules {:?}", rules.len(), rule_keys),
+                        );
                         self.logger.debug(
                             Facility::DataPlane,
                             &format!("Synchronizing ruleset with {} rules", rules.len()),
@@ -747,14 +777,14 @@ impl UnifiedDataPlane {
             self.stats.bytes_received += bytes_received as u64;
         }
 
-        // Parse packet and lookup rule(s) - returns Vec for fan-out support
-        let targets = self.process_received_packet(&buffer[..bytes_received])?;
+        // Parse packet and lookup rule(s) - populates self.targets for fan-out support
+        self.process_received_packet(&buffer[..bytes_received])?;
 
-        if !targets.is_empty() {
+        if !self.targets.is_empty() {
             // Extract payload once and wrap in Arc for zero-copy sharing across outputs
             // All targets have the same payload offset/len (from same received packet)
-            let payload_start = targets[0].payload_offset;
-            let payload_len = targets[0].payload_len;
+            let payload_start = self.targets[0].payload_offset;
+            let payload_len = self.targets[0].payload_len;
             let payload: Arc<[u8]> = Arc::from(&buffer[payload_start..payload_start + payload_len]);
 
             // Increment rules_matched once per matched packet (not per output)
@@ -763,14 +793,14 @@ impl UnifiedDataPlane {
             }
 
             // Queue send operation for each target (Arc clone is cheap - just refcount increment)
-            for target in targets {
+            for i in 0..self.targets.len() {
                 self.send_queue.push_back(SendWorkItem {
                     payload: Arc::clone(&payload),
-                    dest_addr: target.dest_addr,
-                    interface_name: target.interface_name,
-                    multicast_ttl: target.multicast_ttl,
-                    source_ip: target.source_ip,
-                    protocol: target.protocol,
+                    dest_addr: self.targets[i].dest_addr,
+                    interface_name: Arc::clone(&self.targets[i].interface_name),
+                    multicast_ttl: self.targets[i].multicast_ttl,
+                    source_ip: self.targets[i].source_ip,
+                    protocol: self.targets[i].protocol,
                 });
             }
         }
@@ -881,9 +911,11 @@ impl UnifiedDataPlane {
         Ok(())
     }
 
-    /// Process a received packet and determine where to forward it
-    /// Returns a vector of forwarding targets (supports fan-out to multiple destinations)
-    fn process_received_packet(&mut self, packet_data: &[u8]) -> Result<Vec<ForwardingTarget>> {
+    /// Process a received packet and determine where to forward it.
+    /// Populates `self.targets` with forwarding destinations (supports fan-out).
+    fn process_received_packet(&mut self, packet_data: &[u8]) -> Result<()> {
+        self.targets.clear();
+
         // Parse packet headers (Ethernet → IPv4 → UDP/ESP/IGMP/PIM)
         let parsed = match parse_packet_any(packet_data, false) {
             Ok(p) => p,
@@ -892,7 +924,7 @@ impl UnifiedDataPlane {
                 if self.config.track_stats {
                     self.stats.packets_filtered += 1;
                 }
-                return Ok(Vec::new());
+                return Ok(());
             }
         };
 
@@ -915,7 +947,7 @@ impl UnifiedDataPlane {
                 if self.config.track_stats {
                     self.stats.packets_filtered += 1;
                 }
-                return Ok(Vec::new());
+                return Ok(());
             }
         };
 
@@ -934,7 +966,23 @@ impl UnifiedDataPlane {
                     if self.config.track_stats {
                         self.stats.rules_not_matched += 1;
                     }
-                    return Ok(Vec::new());
+                    // Diagnostic: log first 10 not-matched ESP packets
+                    if protocol == 50 && self.stats.esp_not_matched_logged < 10 {
+                        self.stats.esp_not_matched_logged += 1;
+                        let rule_keys: Vec<String> = self
+                            .rules
+                            .keys()
+                            .map(|(g, p, port)| format!("({} p{} port{})", g, p, port))
+                            .collect();
+                        self.logger.warning(
+                            Facility::DataPlane,
+                            &format!(
+                                "ESP not_matched: dst={} src={} proto={} port={} key=({},{},{}) rules={:?}",
+                                dst_ip, src_ip, protocol, port, dst_ip, protocol, port, rule_keys
+                            ),
+                        );
+                    }
+                    return Ok(());
                 }
             },
         };
@@ -947,42 +995,38 @@ impl UnifiedDataPlane {
                 if self.config.track_stats {
                     self.stats.rules_not_matched += 1;
                 }
-                return Ok(Vec::new());
+                return Ok(());
             }
         }
 
         // Check if rule has any outputs
         if rule.outputs.is_empty() {
-            return Ok(Vec::new());
+            return Ok(());
         }
 
         // Create forwarding targets for ALL outputs (fan-out support)
         // For protocol-learned routes (port=0), preserve the original packet's port
-        let targets: Vec<ForwardingTarget> = rule
-            .outputs
-            .iter()
-            .map(|output| {
-                let dest_port = if protocol == 50 {
-                    0 // ESP has no port
-                } else if output.port == 0 {
-                    port // Preserve original port for wildcard UDP rules
-                } else {
-                    output.port
-                };
-                ForwardingTarget {
-                    payload_offset,
-                    payload_len,
-                    dest_addr: SocketAddr::new(output.group.into(), dest_port),
-                    interface_name: output.interface.clone(),
-                    multicast_ttl: output.ttl.unwrap_or(self.config.multicast_ttl),
-                    source_ip: output.source_ip,
-                    protocol,
-                }
-            })
-            .collect();
+        for output in &rule.outputs {
+            let dest_port = if protocol == 50 {
+                0 // ESP has no port
+            } else if output.port == 0 {
+                port // Preserve original port for wildcard UDP rules
+            } else {
+                output.port
+            };
+            self.targets.push(ForwardingTarget {
+                payload_offset,
+                payload_len,
+                dest_addr: SocketAddr::new(output.group.into(), dest_port),
+                interface_name: Arc::clone(&output.interface),
+                multicast_ttl: output.ttl.unwrap_or(self.config.multicast_ttl),
+                source_ip: output.source_ip,
+                protocol,
+            });
+        }
 
         // Update per-flow counters (use exact packet key for granular stats)
-        if self.config.track_stats && !targets.is_empty() {
+        if self.config.track_stats && !self.targets.is_empty() {
             // Check if we need to evict old flow counters
             if self.config.max_flow_counters > 0
                 && !self.flow_counters.contains_key(&exact_key)
@@ -1005,7 +1049,7 @@ impl UnifiedDataPlane {
             counter.bytes_relayed += payload_len as u64;
         }
 
-        Ok(targets)
+        Ok(())
     }
 
     /// Submit receive buffers to io_uring
@@ -1099,7 +1143,16 @@ impl UnifiedDataPlane {
             // Determine source IP: use explicit source_ip if provided, otherwise derive from interface
             let source_ip = match item.source_ip {
                 Some(ip) => ip,
-                None => get_interface_ip(&item.interface_name)?,
+                None => {
+                    if let Some(&cached) = self.interface_ip_cache.get(&item.interface_name) {
+                        cached
+                    } else {
+                        let ip = get_interface_ip(&item.interface_name)?;
+                        self.interface_ip_cache
+                            .insert(item.interface_name.clone(), ip);
+                        ip
+                    }
+                }
             };
 
             // Get or create egress socket (keyed by interface, dest, TTL, source IP, protocol)
@@ -1336,12 +1389,15 @@ fn create_connected_udp_socket(
         .context("Failed to set SO_SNDBUF")?;
 
     // For multicast destinations, set IP_MULTICAST_IF and TTL.
-    // However, for unnumbered interfaces (where source_ip was explicitly provided),
-    // skip IP_MULTICAST_IF as it would conflict with SO_BINDTODEVICE - the source_ip
-    // belongs to a different interface than the one we're binding to.
+    // For numbered interfaces, use the source IP to select the multicast interface.
+    // For unnumbered interfaces (source_ip on a different device), use the interface
+    // index directly — the address-based form would select the wrong device.
     if let std::net::IpAddr::V4(dest_ipv4) = dest_addr.ip() {
         if dest_ipv4.is_multicast() {
-            if !is_unnumbered {
+            if is_unnumbered {
+                let if_index = socket_helpers::get_interface_index(interface_name)?;
+                socket_helpers::set_multicast_if_by_index(socket.as_raw_fd(), if_index)?;
+            } else {
                 socket_helpers::set_multicast_if_by_addr(socket.as_raw_fd(), source_ip)?;
             }
             socket_helpers::set_multicast_ttl(socket.as_raw_fd(), multicast_ttl)?;
@@ -1382,7 +1438,10 @@ fn create_raw_esp_socket(
 
     if let std::net::IpAddr::V4(dest_ipv4) = dest_addr.ip() {
         if dest_ipv4.is_multicast() {
-            if !is_unnumbered {
+            if is_unnumbered {
+                let if_index = socket_helpers::get_interface_index(interface_name)?;
+                socket_helpers::set_multicast_if_by_index(socket.as_raw_fd(), if_index)?;
+            } else {
                 socket_helpers::set_multicast_if_by_addr(socket.as_raw_fd(), source_ip)?;
             }
             socket_helpers::set_multicast_ttl(socket.as_raw_fd(), multicast_ttl)?;
@@ -1412,7 +1471,7 @@ mod tests {
             outputs: vec![OutputDestination {
                 group: "224.0.0.2".parse().unwrap(),
                 port: 5001,
-                interface: "lo".to_string(),
+                interface: "lo".into(),
                 ttl: None,
                 source_ip: None,
             }],
@@ -1666,7 +1725,7 @@ mod tests {
             outputs: vec![OutputDestination {
                 group: "224.0.0.2".parse().unwrap(),
                 port: 0,
-                interface: "lo".to_string(),
+                interface: "lo".into(),
                 ttl: None,
                 source_ip: None,
             }],
