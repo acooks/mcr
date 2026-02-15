@@ -369,13 +369,17 @@ pub(crate) fn create_af_packet_socket(
 }
 
 /// Get network interface index by name
+///
+/// Uses if_nametoindex() directly instead of iterating through getifaddrs().
+/// This works for interfaces without addresses (unnumbered interfaces with
+/// IPv6 disabled), which don't appear in getifaddrs() results.
 pub(crate) fn get_interface_index(interface_name: &str) -> Result<i32> {
-    for iface in get_interfaces() {
-        if iface.name == interface_name {
-            return Ok(iface.index as i32);
-        }
+    use nix::net::if_::if_nametoindex;
+
+    match if_nametoindex(interface_name) {
+        Ok(index) => Ok(index as i32),
+        Err(_) => Err(anyhow::anyhow!("Interface not found: {}", interface_name)),
     }
-    Err(anyhow::anyhow!("Interface not found: {}", interface_name))
 }
 
 /// Linux interface flags (from if.h)
