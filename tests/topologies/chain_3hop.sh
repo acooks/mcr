@@ -106,6 +106,17 @@ run_traffic 10.0.0.1 239.1.1.1 5001 $PACKET_COUNT $PACKET_SIZE $SEND_RATE
 log_info 'Waiting for pipeline to flush...'
 sleep 5
 
+# Trigger graceful shutdown to emit FINAL stats
+log_info 'Triggering graceful shutdown for FINAL stats...'
+kill -TERM \$mcr1_PID 2>/dev/null || true
+for i in \$(seq 1 30); do
+    if ! kill -0 \$mcr1_PID 2>/dev/null; then break; fi
+    sleep 0.1
+done
+kill -TERM \$mcr2_PID 2>/dev/null || true
+kill -TERM \$mcr3_PID 2>/dev/null || true
+sleep 2
+
 # Print final stats
 print_final_stats \
     'MCR-1:/tmp/mcr1.log' \
