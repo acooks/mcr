@@ -20,6 +20,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::protocols::pim::{SGState, StarGState};
@@ -82,7 +83,7 @@ impl StarGRoute {
             .map(|iface| OutputDestination {
                 group: self.group,
                 port,
-                interface: iface.clone(),
+                interface: Arc::from(iface.as_str()),
                 ttl: None,
                 source_ip: None,
             })
@@ -186,7 +187,7 @@ impl SGRoute {
             .map(|iface| OutputDestination {
                 group: self.group,
                 port,
-                interface: iface.clone(),
+                interface: Arc::from(iface.as_str()),
                 ttl: None,
                 source_ip: None,
             })
@@ -422,13 +423,13 @@ impl MulticastRib {
                     let already_present = rule
                         .outputs
                         .iter()
-                        .any(|o| &o.interface == igmp_iface && o.group == rule.input_group);
+                        .any(|o| *o.interface == **igmp_iface && o.group == rule.input_group);
 
                     if !already_present {
                         rule.outputs.push(OutputDestination {
                             group: rule.input_group,
                             port: rule.input_port,
-                            interface: igmp_iface.clone(),
+                            interface: Arc::from(igmp_iface.as_str()),
                             ttl: None,
                             source_ip: None,
                         });
@@ -449,13 +450,13 @@ impl MulticastRib {
                     let already_present = rule
                         .outputs
                         .iter()
-                        .any(|o| &o.interface == downstream_iface);
+                        .any(|o| *o.interface == **downstream_iface);
 
                     if !already_present {
                         rule.outputs.push(OutputDestination {
                             group: rule.input_group,
                             port: rule.input_port,
-                            interface: downstream_iface.clone(),
+                            interface: Arc::from(downstream_iface.as_str()),
                             ttl: None,
                             source_ip: None,
                         });
@@ -577,10 +578,10 @@ impl MulticastRib {
             );
             if let Some(existing) = deduplicated.get_mut(&key) {
                 // Merge outputs (avoiding duplicates by interface)
-                let existing_output_ifaces: HashSet<String> = existing
+                let existing_output_ifaces: HashSet<Arc<str>> = existing
                     .outputs
                     .iter()
-                    .map(|o| o.interface.clone())
+                    .map(|o| Arc::clone(&o.interface))
                     .collect();
                 let new_outputs: Vec<_> = rule
                     .outputs
@@ -709,7 +710,7 @@ mod tests {
             outputs: vec![OutputDestination {
                 group: group.parse().unwrap(),
                 port,
-                interface: "eth1".to_string(),
+                interface: "eth1".into(),
                 ttl: None,
                 source_ip: None,
             }],
@@ -969,8 +970,7 @@ mod tests {
         let rule = &rules[0];
         assert_eq!(rule.outputs.len(), 2); // eth1 (static) + eth2 (IGMP)
 
-        let output_interfaces: HashSet<&str> =
-            rule.outputs.iter().map(|o| o.interface.as_str()).collect();
+        let output_interfaces: HashSet<&str> = rule.outputs.iter().map(|o| &*o.interface).collect();
         assert!(output_interfaces.contains("eth1"));
         assert!(output_interfaces.contains("eth2"));
     }
@@ -996,7 +996,7 @@ mod tests {
 
         let rule = &rules[0];
         assert_eq!(rule.outputs.len(), 1); // Only eth1, not eth0
-        assert_eq!(rule.outputs[0].interface, "eth1");
+        assert_eq!(&*rule.outputs[0].interface, "eth1");
     }
 
     #[test]
@@ -1020,7 +1020,7 @@ mod tests {
 
         let rule = &rules[0];
         assert_eq!(rule.outputs.len(), 1); // Still just one output
-        assert_eq!(rule.outputs[0].interface, "eth1");
+        assert_eq!(&*rule.outputs[0].interface, "eth1");
     }
 
     #[test]
@@ -1048,8 +1048,7 @@ mod tests {
         let rule = &rules[0];
         assert_eq!(rule.outputs.len(), 2);
 
-        let output_interfaces: HashSet<&str> =
-            rule.outputs.iter().map(|o| o.interface.as_str()).collect();
+        let output_interfaces: HashSet<&str> = rule.outputs.iter().map(|o| &*o.interface).collect();
         assert!(output_interfaces.contains("eth1"));
         assert!(output_interfaces.contains("eth2"));
     }
@@ -1079,8 +1078,7 @@ mod tests {
         let rule = &rules[0];
         assert_eq!(rule.outputs.len(), 2);
 
-        let output_interfaces: HashSet<&str> =
-            rule.outputs.iter().map(|o| o.interface.as_str()).collect();
+        let output_interfaces: HashSet<&str> = rule.outputs.iter().map(|o| &*o.interface).collect();
         assert!(output_interfaces.contains("eth1"));
         assert!(output_interfaces.contains("eth2"));
     }
@@ -1109,7 +1107,7 @@ mod tests {
 
         let rule = &rules[0];
         assert_eq!(rule.outputs.len(), 1); // Only eth1
-        assert_eq!(rule.outputs[0].interface, "eth1");
+        assert_eq!(&*rule.outputs[0].interface, "eth1");
     }
 
     #[test]
@@ -1136,8 +1134,7 @@ mod tests {
         let rule = &rules[0];
         assert_eq!(rule.outputs.len(), 4);
 
-        let output_interfaces: HashSet<&str> =
-            rule.outputs.iter().map(|o| o.interface.as_str()).collect();
+        let output_interfaces: HashSet<&str> = rule.outputs.iter().map(|o| &*o.interface).collect();
         assert!(output_interfaces.contains("eth1"));
         assert!(output_interfaces.contains("eth2"));
         assert!(output_interfaces.contains("eth3"));
@@ -1179,7 +1176,7 @@ mod tests {
         let rule = &rules[0];
         assert_eq!(rule.input_interface, "veth_s_p");
         assert_eq!(rule.outputs.len(), 1);
-        assert_eq!(rule.outputs[0].interface, "veth_r");
+        assert_eq!(&*rule.outputs[0].interface, "veth_r");
 
         // Case 2: We are NOT the RP (different local_rp_address)
         let other_rp: Ipv4Addr = "10.2.0.1".parse().unwrap();
@@ -1235,9 +1232,11 @@ mod tests {
             // Output should never contain the input interface
             for output in &rule.outputs {
                 assert_ne!(
-                    output.interface, rule.input_interface,
+                    &*output.interface,
+                    rule.input_interface.as_str(),
                     "Output {} should not equal input {}",
-                    output.interface, rule.input_interface
+                    output.interface,
+                    rule.input_interface
                 );
             }
         }
@@ -1277,7 +1276,7 @@ mod tests {
         let rule = &rules[0];
         assert_eq!(rule.input_interface, "veth_s");
         assert_eq!(rule.outputs.len(), 1);
-        assert_eq!(rule.outputs[0].interface, "veth_r");
+        assert_eq!(&*rule.outputs[0].interface, "veth_r");
     }
 
     #[test]
@@ -1331,7 +1330,7 @@ mod tests {
         assert_eq!(rule.input_interface, "veth_s");
         assert_eq!(rule.input_group, group);
         assert_eq!(rule.outputs.len(), 1);
-        assert_eq!(rule.outputs[0].interface, "veth_r");
+        assert_eq!(&*rule.outputs[0].interface, "veth_r");
 
         // The (S,G) route has a source filter - verify it's preserved
         assert_eq!(rule.input_source, Some(source_addr));
@@ -1370,11 +1369,8 @@ mod tests {
         assert_eq!(static_rule.input_port, 5000);
 
         // Static rule should have outputs: eth1 (original) + eth3, eth4 (from *,G)
-        let static_outputs: HashSet<&str> = static_rule
-            .outputs
-            .iter()
-            .map(|o| o.interface.as_str())
-            .collect();
+        let static_outputs: HashSet<&str> =
+            static_rule.outputs.iter().map(|o| &*o.interface).collect();
         assert!(
             static_outputs.contains("eth1"),
             "Static rule missing original output eth1"
@@ -1394,11 +1390,8 @@ mod tests {
         assert_eq!(star_g_rule.input_port, 0); // Protocol-learned uses port=0
 
         // (*,G) rule should have its own downstream outputs
-        let star_g_outputs: HashSet<&str> = star_g_rule
-            .outputs
-            .iter()
-            .map(|o| o.interface.as_str())
-            .collect();
+        let star_g_outputs: HashSet<&str> =
+            star_g_rule.outputs.iter().map(|o| &*o.interface).collect();
         assert!(star_g_outputs.contains("eth3"));
         assert!(star_g_outputs.contains("eth4"));
     }
@@ -1428,11 +1421,8 @@ mod tests {
         let static_rule = rules.iter().find(|r| r.input_interface == "eth0").unwrap();
 
         // eth0 should NOT be in outputs (would be loop)
-        let static_outputs: HashSet<&str> = static_rule
-            .outputs
-            .iter()
-            .map(|o| o.interface.as_str())
-            .collect();
+        let static_outputs: HashSet<&str> =
+            static_rule.outputs.iter().map(|o| &*o.interface).collect();
         assert!(
             !static_outputs.contains("eth0"),
             "Static rule should not have input interface as output"
@@ -1472,11 +1462,8 @@ mod tests {
             .iter()
             .find(|r| r.input_interface == "eth0" && r.input_port == 5000)
             .unwrap();
-        let static_outputs: HashSet<&str> = static_rule
-            .outputs
-            .iter()
-            .map(|o| o.interface.as_str())
-            .collect();
+        let static_outputs: HashSet<&str> =
+            static_rule.outputs.iter().map(|o| &*o.interface).collect();
         // Static rule gets (*,G) downstream merged
         assert!(static_outputs.contains("eth1")); // Original
         assert!(static_outputs.contains("eth2")); // From (*,G)
@@ -1486,11 +1473,8 @@ mod tests {
             .iter()
             .find(|r| r.input_interface == "eth0" && r.input_port == 0)
             .unwrap();
-        let star_g_outputs: HashSet<&str> = star_g_rule
-            .outputs
-            .iter()
-            .map(|o| o.interface.as_str())
-            .collect();
+        let star_g_outputs: HashSet<&str> =
+            star_g_rule.outputs.iter().map(|o| &*o.interface).collect();
         assert!(star_g_outputs.contains("eth2")); // (*,G) downstream
     }
 }

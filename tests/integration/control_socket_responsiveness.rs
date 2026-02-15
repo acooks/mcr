@@ -268,3 +268,65 @@ async fn test_control_socket_responsive_during_repeated_failures() -> Result<()>
     println!("[TEST] Control socket responsiveness during repeated failures PASSED");
     Ok(())
 }
+
+/// Test: Control socket responds promptly during periodic ruleset sync
+///
+/// The periodic sync timer sends filtered rulesets to all data plane workers.
+/// Before the fix, this used inline lock().await + send().await inside the
+/// select! loop — if any worker was slow/hung, all other select! arms were
+/// blocked. After the fix, sends are spawned as separate tasks.
+///
+/// This test uses MCR_PERIODIC_SYNC_SECS=2 to trigger frequent syncs and
+/// verifies the control socket remains responsive throughout.
+#[tokio::test]
+async fn test_control_socket_responsive_during_periodic_sync() -> Result<()> {
+    require_root!();
+
+    let mcr = McrInstance::builder()
+        .num_workers(1)
+        .env("MCR_PERIODIC_SYNC_SECS", "2")
+        .start_async()
+        .await
+        .context("Failed to start supervisor")?;
+
+    let client = ControlClient::new(mcr.control_socket());
+    sleep(Duration::from_millis(500)).await;
+
+    // Add a rule to create workers (periodic sync only sends when rules exist)
+    let rule = ForwardingRule {
+        rule_id: "periodic-sync-test".to_string(),
+        name: Some("periodic-sync-test".to_string()),
+        input_interface: "lo".to_string(),
+        input_group: "239.0.0.1".parse()?,
+        input_port: 5000,
+        input_protocol: 17,
+        input_source: None,
+        outputs: vec![],
+        source: RuleSource::Static,
+    };
+    client.add_rule(rule).await?;
+    sleep(Duration::from_millis(500)).await;
+
+    // Measure latency over 5 seconds, spanning multiple 2-second periodic syncs
+    let (worst_ms, total, failed) = measure_worst_latency(&client, Duration::from_secs(5)).await;
+    println!(
+        "[TEST] During periodic sync: worst={}ms, total={}, failed={} queries",
+        worst_ms, total, failed
+    );
+
+    assert_eq!(
+        failed, 0,
+        "Control socket had {} failed/timed-out queries during periodic sync",
+        failed
+    );
+    assert!(
+        worst_ms < MAX_RESPONSE_MS as u128,
+        "Worst response {}ms exceeds {}ms limit -- \
+         select! loop likely blocked by periodic sync sends",
+        worst_ms,
+        MAX_RESPONSE_MS,
+    );
+
+    println!("[TEST] Control socket responsiveness during periodic sync PASSED");
+    Ok(())
+}

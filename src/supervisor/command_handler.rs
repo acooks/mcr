@@ -177,7 +177,7 @@ pub fn handle_supervisor_command(
             // Validate interface configuration to prevent packet loops and reflection
             for output in &rule.outputs {
                 // Reject self-loops: input and output on same interface creates packet feedback loops
-                if rule.input_interface == output.interface {
+                if rule.input_interface == *output.interface {
                     return (
                         Response::Error(format!(
                             "Rule rejected: input_interface '{}' and output_interface '{}' cannot be the same. \
@@ -192,7 +192,7 @@ pub fn handle_supervisor_command(
             }
 
             // Warn about loopback interface usage (allowed but not recommended)
-            if rule.input_interface == "lo" || rule.outputs.iter().any(|o| o.interface == "lo") {
+            if rule.input_interface == "lo" || rule.outputs.iter().any(|o| &*o.interface == "lo") {
                 eprintln!(
                     "[Supervisor] WARNING: Rule '{}' uses loopback interface. \
                     This can cause packet reflection artifacts where transmitted packets are \
@@ -1203,7 +1203,7 @@ mod tests {
                 outputs: vec![crate::OutputDestination {
                     group: "224.0.0.2".parse().unwrap(),
                     port: 5001,
-                    interface: "eth0".to_string(), // Same as input!
+                    interface: "eth0".into(), // Same as input!
                     ttl: None,
                     source_ip: None,
                 }],
@@ -1250,7 +1250,7 @@ mod tests {
                 outputs: vec![crate::OutputDestination {
                     group: "224.0.0.2".parse().unwrap(),
                     port: 5001,
-                    interface: "eth0".to_string(), // Different from input - OK
+                    interface: "eth0".into(), // Different from input - OK
                     ttl: None,
                     source_ip: None,
                 }],
@@ -1373,7 +1373,7 @@ mod tests {
                 outputs: vec![crate::OutputDestination {
                     group: "224.0.0.2".parse().unwrap(),
                     port: 5001,
-                    interface: "eth1".to_string(),
+                    interface: "eth1".into(),
                     ttl: None,
                     source_ip: None,
                 }],
@@ -1416,7 +1416,7 @@ mod tests {
                 outputs: vec![crate::OutputDestination {
                     group: "224.0.0.2".parse().unwrap(),
                     port: 5001,
-                    interface: "invalid/name".to_string(),
+                    interface: "invalid/name".into(),
                     ttl: None,
                     source_ip: None,
                 }],
@@ -1479,7 +1479,7 @@ mod tests {
                 outputs: vec![crate::OutputDestination {
                     group: "224.0.0.2".parse().unwrap(),
                     port: 5001,
-                    interface: "eth1".to_string(),
+                    interface: "eth1".into(),
                     ttl: None,
                     source_ip: None,
                 }],
@@ -1522,7 +1522,7 @@ mod tests {
                 outputs: vec![crate::OutputDestination {
                     group: "224.0.0.2".parse().unwrap(),
                     port: 0, // Invalid for UDP
-                    interface: "eth1".to_string(),
+                    interface: "eth1".into(),
                     ttl: None,
                     source_ip: None,
                 }],
@@ -1565,7 +1565,7 @@ mod tests {
                 outputs: vec![crate::OutputDestination {
                     group: "239.255.0.100".parse().unwrap(),
                     port: 0, // No port for ESP
-                    interface: "eth1".to_string(),
+                    interface: "eth1".into(),
                     ttl: None,
                     source_ip: None,
                 }],
@@ -1617,7 +1617,7 @@ mod tests {
                 outputs: vec![crate::OutputDestination {
                     group: "239.1.1.1".parse().unwrap(),
                     port: 0,
-                    interface: "eth1".to_string(),
+                    interface: "eth1".into(),
                     ttl: None,
                     source_ip: None,
                 }],
@@ -1644,7 +1644,7 @@ mod tests {
                 outputs: vec![crate::OutputDestination {
                     group: "239.1.1.1".parse().unwrap(),
                     port: 5000,
-                    interface: "eth1".to_string(),
+                    interface: "eth1".into(),
                     ttl: None,
                     source_ip: None,
                 }],

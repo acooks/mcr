@@ -1487,3 +1487,70 @@ async fn test_cli_config_save_no_path_error() -> Result<()> {
 
     Ok(())
 }
+
+/// Test: Ping response reports accurate worker stream count
+///
+/// After removing the dead egress command stream (commit 4691080), the ping
+/// response should report N/N worker streams (one ingress stream per worker),
+/// not 2N/2N (which would indicate the old ingress+egress pair counting).
+///
+/// Note: --num-workers only applies to pinned interfaces (from config startup).
+/// Dynamically-added rules (via AddRule) always spawn 1 worker per interface
+/// (is_pinned=false path in worker_manager). This test verifies the count
+/// after a dynamic AddRule, so expects 1/1.
+#[tokio::test]
+async fn test_cli_ping_worker_count_accuracy() -> Result<()> {
+    require_root!();
+
+    let mcr = McrInstance::builder()
+        .num_workers(1)
+        .start_async()
+        .await
+        .context("Failed to start supervisor")?;
+
+    let client = crate::common::ControlClient::new(mcr.control_socket());
+    sleep(Duration::from_millis(500)).await;
+
+    // Add a rule to trigger worker spawning on "lo" (1 worker for dynamic rules)
+    let rule = multicast_relay::ForwardingRule {
+        rule_id: "ping-count-test".to_string(),
+        name: Some("ping-count-test".to_string()),
+        input_interface: "lo".to_string(),
+        input_group: "239.0.0.1".parse()?,
+        input_port: 5000,
+        input_protocol: 17,
+        input_source: None,
+        outputs: vec![],
+        source: multicast_relay::RuleSource::Static,
+    };
+    client.add_rule(rule).await?;
+    sleep(Duration::from_millis(500)).await;
+
+    // Send ping via ControlClient and check the response
+    let response = client
+        .send_command(multicast_relay::SupervisorCommand::Ping)
+        .await?;
+
+    match response {
+        multicast_relay::Response::Success(msg) => {
+            println!("[TEST] Ping response: {}", msg);
+            assert!(
+                msg.contains("pong"),
+                "Expected pong in response, got: {}",
+                msg
+            );
+            // Verify the stream count is 1/1 (not 2/2 from old ingress+egress pair)
+            assert!(
+                msg.contains("1/1 worker streams ready"),
+                "Expected '1/1 worker streams ready', got: {}",
+                msg
+            );
+        }
+        other => {
+            panic!("Expected Success response for ping, got: {:?}", other);
+        }
+    }
+
+    println!("[TEST] Ping worker count accuracy PASSED");
+    Ok(())
+}

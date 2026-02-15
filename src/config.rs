@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::validation;
 use crate::{ForwardingRule, OutputDestination, RuleSource};
@@ -460,7 +461,7 @@ impl ConfigRule {
                 .map(|o| OutputDestination {
                     group: o.group,
                     port: o.port,
-                    interface: o.interface.clone(),
+                    interface: Arc::from(o.interface.as_str()),
                     ttl: o.ttl,
                     source_ip: None, // Static config rules don't specify source_ip
                 })
@@ -489,7 +490,7 @@ impl ConfigRule {
                 .map(|o| OutputSpec {
                     group: o.group,
                     port: o.port,
-                    interface: o.interface.clone(),
+                    interface: o.interface.to_string(),
                     ttl: o.ttl,
                 })
                 .collect(),
@@ -2363,7 +2364,7 @@ mod tests {
             outputs: vec![crate::OutputDestination {
                 group: "239.255.0.100".parse().unwrap(),
                 port: 0,
-                interface: "eth1".to_string(),
+                interface: "eth1".into(),
                 ttl: None,
                 source_ip: None,
             }],
