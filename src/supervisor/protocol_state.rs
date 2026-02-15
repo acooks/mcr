@@ -2283,7 +2283,11 @@ impl ProtocolState {
                 source: rule.input_source,
                 group: rule.input_group,
                 input_interface: rule.input_interface.clone(),
-                output_interfaces: rule.outputs.iter().map(|o| o.interface.clone()).collect(),
+                output_interfaces: rule
+                    .outputs
+                    .iter()
+                    .map(|o| o.interface.to_string())
+                    .collect(),
                 entry_type: crate::MrouteEntryType::Static,
                 age_secs: 0, // Static rules don't have uptime tracking
             });

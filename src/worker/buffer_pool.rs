@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Buffer Pool for Data Plane
 //!
-//! This module provides a high-performance, lock-free buffer pool designed for a
-//! multi-threaded data plane. It uses `crossbeam-queue` to allow contention-free
-//! access between ingress and egress threads.
+//! This module provides a buffer pool for the data plane.
+//! Buffers are acquired and returned via `Mutex<VecDeque>`, which is
+//! uncontended in the single-threaded io_uring unified loop.
 
-use crossbeam_queue::SegQueue;
+use std::collections::VecDeque;
 use std::ops::{Deref, DerefMut};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 const SMALL_BUFFER_SIZE: usize = 2048;
 const STANDARD_BUFFER_SIZE: usize = 4096;
@@ -77,37 +77,36 @@ impl DerefMut for ManagedBuffer {
     }
 }
 
-/// The lock-free pool manager. It is cheap to clone as it only contains Arcs.
+/// Buffer pool manager. Cheap to clone (Arc-wrapped).
 pub struct BufferPool {
-    free_small: SegQueue<Box<[u8]>>,
-    free_standard: SegQueue<Box<[u8]>>,
-    free_jumbo: SegQueue<Box<[u8]>>,
+    free_small: Mutex<VecDeque<Box<[u8]>>>,
+    free_standard: Mutex<VecDeque<Box<[u8]>>>,
+    free_jumbo: Mutex<VecDeque<Box<[u8]>>>,
 }
 
 impl BufferPool {
     /// Creates a new `BufferPool` and pre-allocates all buffers.
     /// Returns an `Arc` so it can be shared between threads.
     pub fn new(small_count: usize, std_count: usize, jumbo_count: usize) -> Arc<Self> {
-        let pool = Arc::new(Self {
-            free_small: SegQueue::new(),
-            free_standard: SegQueue::new(),
-            free_jumbo: SegQueue::new(),
-        });
+        let mut small = VecDeque::with_capacity(small_count);
+        let mut standard = VecDeque::with_capacity(std_count);
+        let mut jumbo = VecDeque::with_capacity(jumbo_count);
 
         for _ in 0..small_count {
-            pool.free_small
-                .push(vec![0u8; SMALL_BUFFER_SIZE].into_boxed_slice());
+            small.push_back(vec![0u8; SMALL_BUFFER_SIZE].into_boxed_slice());
         }
         for _ in 0..std_count {
-            pool.free_standard
-                .push(vec![0u8; STANDARD_BUFFER_SIZE].into_boxed_slice());
+            standard.push_back(vec![0u8; STANDARD_BUFFER_SIZE].into_boxed_slice());
         }
         for _ in 0..jumbo_count {
-            pool.free_jumbo
-                .push(vec![0u8; JUMBO_BUFFER_SIZE].into_boxed_slice());
+            jumbo.push_back(vec![0u8; JUMBO_BUFFER_SIZE].into_boxed_slice());
         }
 
-        pool
+        Arc::new(Self {
+            free_small: Mutex::new(small),
+            free_standard: Mutex::new(standard),
+            free_jumbo: Mutex::new(jumbo),
+        })
     }
 
     /// Acquires a buffer from the appropriate free pool.
@@ -119,30 +118,40 @@ impl BufferPool {
             BufferSize::Jumbo => &self.free_jumbo,
         };
 
-        queue.pop().map(|buffer| ManagedBuffer {
-            buffer,
-            size_category: size,
-            pool: self.clone(),
-        })
+        queue
+            .lock()
+            .unwrap()
+            .pop_front()
+            .map(|buffer| ManagedBuffer {
+                buffer,
+                size_category: size,
+                pool: self.clone(),
+            })
     }
 
     /// Releases a buffer back to its corresponding free pool.
     /// This is called by the `Drop` implementation of `ManagedBuffer`.
+    ///
+    /// Recovers from mutex poison to avoid panicking inside `drop()`,
+    /// which would cause a double-panic and process abort.
     fn release(&self, buffer: Box<[u8]>, size: BufferSize) {
         let queue = match size {
             BufferSize::Small => &self.free_small,
             BufferSize::Standard => &self.free_standard,
             BufferSize::Jumbo => &self.free_jumbo,
         };
-        queue.push(buffer);
+        queue
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push_back(buffer);
     }
 
     /// Returns the number of available buffers in a specific pool.
     pub fn available(&self, size: BufferSize) -> usize {
         match size {
-            BufferSize::Small => self.free_small.len(),
-            BufferSize::Standard => self.free_standard.len(),
-            BufferSize::Jumbo => self.free_jumbo.len(),
+            BufferSize::Small => self.free_small.lock().unwrap().len(),
+            BufferSize::Standard => self.free_standard.lock().unwrap().len(),
+            BufferSize::Jumbo => self.free_jumbo.lock().unwrap().len(),
         }
     }
 }

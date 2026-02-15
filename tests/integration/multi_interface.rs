@@ -428,8 +428,9 @@ async fn test_dynamic_spawn_for_new_interface() -> Result<()> {
             vec![multicast_relay::OutputDestination {
                 group: "239.2.2.3".parse()?,
                 port: 6001,
-                interface: "veth1b".to_string(),
+                interface: "veth1b".into(),
                 ttl: None,
+                source_ip: None,
             }],
         )
         .await?;

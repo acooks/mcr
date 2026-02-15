@@ -51,7 +51,7 @@ use std::sync::Arc;
 use crate::logging::{Facility, Logger};
 use crate::supervisor::socket_helpers;
 use crate::worker::buffer_pool::{BufferPool, BufferSize, ManagedBuffer};
-use crate::worker::packet_parser::parse_packet;
+use crate::worker::packet_parser::{parse_packet_any, ParsedPacket};
 use crate::ForwardingRule;
 use std::time::Instant;
 
@@ -67,8 +67,12 @@ const SEND_MAX: u64 = 2_000_000;
 struct SendWorkItem {
     payload: Arc<[u8]>, // Shared payload for zero-copy fan-out
     dest_addr: SocketAddr,
-    interface_name: String,
+    interface_name: Arc<str>,
     multicast_ttl: u8,
+    /// Explicit source IP for egress, if specified in the rule
+    source_ip: Option<Ipv4Addr>,
+    /// IP protocol number (17 = UDP, 50 = ESP)
+    protocol: u8,
 }
 
 /// Metadata about where to forward a packet
@@ -76,8 +80,12 @@ struct ForwardingTarget {
     payload_offset: usize,
     payload_len: usize,
     dest_addr: SocketAddr,
-    interface_name: String,
+    interface_name: Arc<str>,
     multicast_ttl: u8,
+    /// Explicit source IP for egress, if specified in the rule
+    source_ip: Option<Ipv4Addr>,
+    /// IP protocol number (17 = UDP, 50 = ESP)
+    protocol: u8,
 }
 
 /// Configuration for the unified data plane
@@ -154,6 +162,7 @@ pub struct UnifiedStats {
     pub rules_rejected: u64,         // Rules rejected due to max_rules limit
     pub flow_counters_evicted: u64,  // Flow counters evicted due to max_flow_counters limit
     pub egress_sockets_evicted: u64, // Egress sockets evicted due to max_egress_sockets limit
+    pub esp_not_matched_logged: u64, // Diagnostic: count of logged not-matched ESP packets
 }
 
 /// Per-flow counters for stats reporting
@@ -166,6 +175,9 @@ struct FlowCounters {
     last_bytes: u64,
     last_snapshot_time: Option<Instant>,
 }
+
+/// Key for the egress socket cache: (interface, dest_addr, ttl, source_ip, protocol)
+type EgressSocketKey = (Arc<str>, SocketAddr, u8, Ipv4Addr, u8);
 
 /// Unified single-threaded data plane loop
 pub struct UnifiedDataPlane {
@@ -181,14 +193,16 @@ pub struct UnifiedDataPlane {
     in_flight_recvs: HashMap<u64, ManagedBuffer>,
     next_recv_user_data: u64,
 
-    // Forwarding rules (keyed by input_group, input_port)
-    rules: HashMap<(Ipv4Addr, u16), ForwardingRule>,
+    // Forwarding rules (keyed by input_group, input_protocol, input_port)
+    rules: HashMap<(Ipv4Addr, u8, u16), ForwardingRule>,
 
-    // Per-flow counters for stats reporting (keyed by input_group, input_port)
-    flow_counters: HashMap<(Ipv4Addr, u16), FlowCounters>,
+    // Per-flow counters for stats reporting (keyed by input_group, input_protocol, input_port)
+    flow_counters: HashMap<(Ipv4Addr, u8, u16), FlowCounters>,
 
-    // Egress
-    egress_sockets: HashMap<(String, SocketAddr, u8), (OwnedFd, Ipv4Addr)>,
+    // Egress (keyed by interface, dest, TTL, source_ip, protocol)
+    egress_sockets: HashMap<EgressSocketKey, (OwnedFd, Ipv4Addr)>,
+    // Cache interface name → IPv4 address to avoid getifaddrs() syscall per packet
+    interface_ip_cache: HashMap<Arc<str>, Ipv4Addr>,
     send_queue: VecDeque<SendWorkItem>,
     in_flight_sends: HashMap<u64, Arc<[u8]>>,
     next_send_user_data: u64,
@@ -201,6 +215,10 @@ pub struct UnifiedDataPlane {
     cmd_stream_fd: OwnedFd,
     cmd_buffer: Vec<u8>,
     cmd_reader: crate::worker::command_reader::CommandReader,
+
+    // Pre-allocated scratch buffers for hot-path loops (avoid per-iteration heap alloc)
+    completions: Vec<(u64, i32)>,
+    targets: Vec<ForwardingTarget>,
 
     // Stats and config
     config: UnifiedConfig,
@@ -302,6 +320,7 @@ impl UnifiedDataPlane {
             rules: HashMap::new(),
             flow_counters: HashMap::new(),
             egress_sockets: HashMap::new(),
+            interface_ip_cache: HashMap::new(),
             send_queue: VecDeque::with_capacity(config.send_batch_size),
             in_flight_sends: HashMap::new(),
             next_send_user_data: SEND_BASE,
@@ -310,6 +329,8 @@ impl UnifiedDataPlane {
             cmd_stream_fd,
             cmd_buffer: vec![0u8; 4096],
             cmd_reader: crate::worker::command_reader::CommandReader::new(),
+            completions: Vec::new(),
+            targets: Vec::new(),
             config,
             stats: UnifiedStats::default(),
             logger,
@@ -327,7 +348,7 @@ impl UnifiedDataPlane {
 
     /// Add a forwarding rule
     pub fn add_rule(&mut self, rule: ForwardingRule) -> Result<()> {
-        let key = (rule.input_group, rule.input_port);
+        let key = (rule.input_group, rule.input_protocol, rule.input_port);
 
         // Check capacity (if limit is set and key doesn't already exist)
         if self.config.max_rules > 0
@@ -376,7 +397,7 @@ impl UnifiedDataPlane {
         // Atomically replace entire ruleset
         self.rules.clear();
         for rule in rules {
-            let key = (rule.input_group, rule.input_port);
+            let key = (rule.input_group, rule.input_protocol, rule.input_port);
             self.rules.insert(key, rule);
         }
         Ok(())
@@ -425,7 +446,8 @@ impl UnifiedDataPlane {
 
                 crate::FlowStats {
                     input_group: key.0,
-                    input_port: key.1,
+                    input_port: key.2,
+                    input_protocol: key.1,
                     packets_relayed: counters.packets_relayed,
                     bytes_relayed: counters.bytes_relayed,
                     packets_per_second,
@@ -505,24 +527,27 @@ impl UnifiedDataPlane {
 
     /// Process all available completions
     fn process_completions(&mut self) -> Result<()> {
-        let mut completions = Vec::new();
+        self.completions.clear();
         {
             let mut cq = self.ring.completion();
             for cqe in &mut cq {
-                completions.push((cqe.user_data(), cqe.result()));
+                self.completions.push((cqe.user_data(), cqe.result()));
             }
             // Sync to mark completions as consumed
             cq.sync();
         }
 
-        if !completions.is_empty() && self.stats.packets_received < 5 {
+        if !self.completions.is_empty() && self.stats.packets_received < 5 {
             self.logger.debug(
                 Facility::DataPlane,
-                &format!("Processing {} completions", completions.len()),
+                &format!("Processing {} completions", self.completions.len()),
             );
         }
 
-        for (user_data, result) in completions {
+        // Iterate by index to avoid borrow conflict with self
+        let num_completions = self.completions.len();
+        for i in 0..num_completions {
+            let (user_data, result) = self.completions[i];
             match user_data {
                 COMMAND_USER_DATA => self.handle_command_completion(result)?,
                 SHUTDOWN_USER_DATA => self.handle_shutdown_completion(result)?,
@@ -610,6 +635,23 @@ impl UnifiedDataPlane {
                         }
                     }
                     crate::RelayCommand::SyncRules(rules) => {
+                        // Diagnostic: show rules received at WARNING level
+                        let rule_keys: Vec<String> = rules
+                            .iter()
+                            .map(|r| {
+                                format!(
+                                    "({} p{} port{} in={})",
+                                    r.input_group,
+                                    r.input_protocol,
+                                    r.input_port,
+                                    r.input_interface
+                                )
+                            })
+                            .collect();
+                        self.logger.warning(
+                            Facility::DataPlane,
+                            &format!("SyncRules received: {} rules {:?}", rules.len(), rule_keys),
+                        );
                         self.logger.debug(
                             Facility::DataPlane,
                             &format!("Synchronizing ruleset with {} rules", rules.len()),
@@ -735,14 +777,14 @@ impl UnifiedDataPlane {
             self.stats.bytes_received += bytes_received as u64;
         }
 
-        // Parse packet and lookup rule(s) - returns Vec for fan-out support
-        let targets = self.process_received_packet(&buffer[..bytes_received])?;
+        // Parse packet and lookup rule(s) - populates self.targets for fan-out support
+        self.process_received_packet(&buffer[..bytes_received])?;
 
-        if !targets.is_empty() {
+        if !self.targets.is_empty() {
             // Extract payload once and wrap in Arc for zero-copy sharing across outputs
             // All targets have the same payload offset/len (from same received packet)
-            let payload_start = targets[0].payload_offset;
-            let payload_len = targets[0].payload_len;
+            let payload_start = self.targets[0].payload_offset;
+            let payload_len = self.targets[0].payload_len;
             let payload: Arc<[u8]> = Arc::from(&buffer[payload_start..payload_start + payload_len]);
 
             // Increment rules_matched once per matched packet (not per output)
@@ -751,12 +793,14 @@ impl UnifiedDataPlane {
             }
 
             // Queue send operation for each target (Arc clone is cheap - just refcount increment)
-            for target in targets {
+            for i in 0..self.targets.len() {
                 self.send_queue.push_back(SendWorkItem {
                     payload: Arc::clone(&payload),
-                    dest_addr: target.dest_addr,
-                    interface_name: target.interface_name,
-                    multicast_ttl: target.multicast_ttl,
+                    dest_addr: self.targets[i].dest_addr,
+                    interface_name: Arc::clone(&self.targets[i].interface_name),
+                    multicast_ttl: self.targets[i].multicast_ttl,
+                    source_ip: self.targets[i].source_ip,
+                    protocol: self.targets[i].protocol,
                 });
             }
         }
@@ -867,25 +911,52 @@ impl UnifiedDataPlane {
         Ok(())
     }
 
-    /// Process a received packet and determine where to forward it
-    /// Returns a vector of forwarding targets (supports fan-out to multiple destinations)
-    fn process_received_packet(&mut self, packet_data: &[u8]) -> Result<Vec<ForwardingTarget>> {
-        // Parse packet headers (Ethernet → IPv4 → UDP)
-        let headers = match parse_packet(packet_data, false) {
-            Ok(h) => h,
+    /// Process a received packet and determine where to forward it.
+    /// Populates `self.targets` with forwarding destinations (supports fan-out).
+    fn process_received_packet(&mut self, packet_data: &[u8]) -> Result<()> {
+        self.targets.clear();
+
+        // Parse packet headers (Ethernet → IPv4 → UDP/ESP/IGMP/PIM)
+        let parsed = match parse_packet_any(packet_data, false) {
+            Ok(p) => p,
             Err(_) => {
-                // Not a valid UDP packet (could be ARP, IPv6, TCP, etc.)
+                // Not a valid packet (could be ARP, IPv6, unsupported protocol, etc.)
                 if self.config.track_stats {
                     self.stats.packets_filtered += 1;
                 }
-                return Ok(Vec::new());
+                return Ok(());
             }
         };
 
-        // Lookup forwarding rule based on (multicast_group, port)
+        // Only forward data packets (UDP, ESP), not control (IGMP, PIM)
+        let (dst_ip, protocol, port, payload_offset, payload_len) = match &parsed {
+            ParsedPacket::Udp(h) => (
+                h.ipv4.dst_ip,
+                17u8,
+                h.udp.dst_port,
+                h.payload_offset,
+                h.payload_len,
+            ),
+            ParsedPacket::Esp {
+                ipv4,
+                payload_offset,
+                payload_len,
+                ..
+            } => (ipv4.dst_ip, 50u8, 0u16, *payload_offset, *payload_len),
+            _ => {
+                if self.config.track_stats {
+                    self.stats.packets_filtered += 1;
+                }
+                return Ok(());
+            }
+        };
+
+        let src_ip = parsed.src_ip();
+
+        // Lookup forwarding rule based on (multicast_group, protocol, port)
         // First try exact match, then try wildcard port (0) for protocol-learned routes
-        let exact_key = (headers.ipv4.dst_ip, headers.udp.dst_port);
-        let wildcard_key = (headers.ipv4.dst_ip, 0u16);
+        let exact_key = (dst_ip, protocol, port);
+        let wildcard_key = (dst_ip, protocol, 0u16);
         let rule = match self.rules.get(&exact_key) {
             Some(r) => r,
             None => match self.rules.get(&wildcard_key) {
@@ -895,7 +966,23 @@ impl UnifiedDataPlane {
                     if self.config.track_stats {
                         self.stats.rules_not_matched += 1;
                     }
-                    return Ok(Vec::new());
+                    // Diagnostic: log first 10 not-matched ESP packets
+                    if protocol == 50 && self.stats.esp_not_matched_logged < 10 {
+                        self.stats.esp_not_matched_logged += 1;
+                        let rule_keys: Vec<String> = self
+                            .rules
+                            .keys()
+                            .map(|(g, p, port)| format!("({} p{} port{})", g, p, port))
+                            .collect();
+                        self.logger.warning(
+                            Facility::DataPlane,
+                            &format!(
+                                "ESP not_matched: dst={} src={} proto={} port={} key=({},{},{}) rules={:?}",
+                                dst_ip, src_ip, protocol, port, dst_ip, protocol, port, rule_keys
+                            ),
+                        );
+                    }
+                    return Ok(());
                 }
             },
         };
@@ -903,44 +990,43 @@ impl UnifiedDataPlane {
         // Check source filter for PIM (S,G) matching
         // If rule.input_source is Some, the packet's source must match
         if let Some(required_source) = rule.input_source {
-            if headers.ipv4.src_ip != required_source {
+            if src_ip != required_source {
                 // Source doesn't match (S,G) rule - packet is not forwarded
                 if self.config.track_stats {
                     self.stats.rules_not_matched += 1;
                 }
-                return Ok(Vec::new());
+                return Ok(());
             }
         }
 
         // Check if rule has any outputs
         if rule.outputs.is_empty() {
-            return Ok(Vec::new());
+            return Ok(());
         }
 
         // Create forwarding targets for ALL outputs (fan-out support)
         // For protocol-learned routes (port=0), preserve the original packet's port
-        let original_port = headers.udp.dst_port;
-        let targets: Vec<ForwardingTarget> = rule
-            .outputs
-            .iter()
-            .map(|output| {
-                let dest_port = if output.port == 0 {
-                    original_port // Preserve original port for wildcard rules
-                } else {
-                    output.port
-                };
-                ForwardingTarget {
-                    payload_offset: headers.payload_offset,
-                    payload_len: headers.payload_len,
-                    dest_addr: SocketAddr::new(output.group.into(), dest_port),
-                    interface_name: output.interface.clone(),
-                    multicast_ttl: output.ttl.unwrap_or(self.config.multicast_ttl),
-                }
-            })
-            .collect();
+        for output in &rule.outputs {
+            let dest_port = if protocol == 50 {
+                0 // ESP has no port
+            } else if output.port == 0 {
+                port // Preserve original port for wildcard UDP rules
+            } else {
+                output.port
+            };
+            self.targets.push(ForwardingTarget {
+                payload_offset,
+                payload_len,
+                dest_addr: SocketAddr::new(output.group.into(), dest_port),
+                interface_name: Arc::clone(&output.interface),
+                multicast_ttl: output.ttl.unwrap_or(self.config.multicast_ttl),
+                source_ip: output.source_ip,
+                protocol,
+            });
+        }
 
         // Update per-flow counters (use exact packet key for granular stats)
-        if self.config.track_stats && !targets.is_empty() {
+        if self.config.track_stats && !self.targets.is_empty() {
             // Check if we need to evict old flow counters
             if self.config.max_flow_counters > 0
                 && !self.flow_counters.contains_key(&exact_key)
@@ -960,10 +1046,10 @@ impl UnifiedDataPlane {
 
             let counter = self.flow_counters.entry(exact_key).or_default();
             counter.packets_relayed += 1;
-            counter.bytes_relayed += headers.payload_len as u64;
+            counter.bytes_relayed += payload_len as u64;
         }
 
-        Ok(targets)
+        Ok(())
     }
 
     /// Submit receive buffers to io_uring
@@ -1054,11 +1140,28 @@ impl UnifiedDataPlane {
         for _ in 0..batch_size {
             let item = self.send_queue.pop_front().unwrap();
 
-            // Get or create egress socket (keyed by interface, dest, and TTL)
+            // Determine source IP: use explicit source_ip if provided, otherwise derive from interface
+            let source_ip = match item.source_ip {
+                Some(ip) => ip,
+                None => {
+                    if let Some(&cached) = self.interface_ip_cache.get(&item.interface_name) {
+                        cached
+                    } else {
+                        let ip = get_interface_ip(&item.interface_name)?;
+                        self.interface_ip_cache
+                            .insert(item.interface_name.clone(), ip);
+                        ip
+                    }
+                }
+            };
+
+            // Get or create egress socket (keyed by interface, dest, TTL, source IP, protocol)
             let key = (
                 item.interface_name.clone(),
                 item.dest_addr,
                 item.multicast_ttl,
+                source_ip,
+                item.protocol,
             );
             if !self.egress_sockets.contains_key(&key) {
                 // Check if we need to evict old sockets
@@ -1073,9 +1176,23 @@ impl UnifiedDataPlane {
                     }
                 }
 
-                let source_ip = get_interface_ip(&item.interface_name)?;
-                let socket =
-                    create_connected_udp_socket(source_ip, item.dest_addr, item.multicast_ttl)?;
+                let socket = if item.protocol == 50 {
+                    create_raw_esp_socket(
+                        source_ip,
+                        item.dest_addr,
+                        item.multicast_ttl,
+                        &item.interface_name,
+                        item.source_ip.is_some(),
+                    )?
+                } else {
+                    create_connected_udp_socket(
+                        source_ip,
+                        item.dest_addr,
+                        item.multicast_ttl,
+                        &item.interface_name,
+                        item.source_ip.is_some(),
+                    )?
+                };
                 self.egress_sockets.insert(key.clone(), (socket, source_ip));
             }
 
@@ -1253,6 +1370,8 @@ fn create_connected_udp_socket(
     source_ip: Ipv4Addr,
     dest_addr: SocketAddr,
     multicast_ttl: u8,
+    interface_name: &str,
+    is_unnumbered: bool,
 ) -> Result<OwnedFd> {
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
     socket.set_reuse_address(true)?;
@@ -1269,16 +1388,67 @@ fn create_connected_udp_socket(
         .set_send_buffer_size(send_buffer_size)
         .context("Failed to set SO_SNDBUF")?;
 
-    // For multicast destinations, set IP_MULTICAST_IF to ensure packets egress
-    // on the correct interface. Without this, multicast packets may go out the
-    // wrong interface or be dropped in multi-interface/multi-namespace topologies.
+    // For multicast destinations, set IP_MULTICAST_IF and TTL.
+    // For numbered interfaces, use the source IP to select the multicast interface.
+    // For unnumbered interfaces (source_ip on a different device), use the interface
+    // index directly — the address-based form would select the wrong device.
     if let std::net::IpAddr::V4(dest_ipv4) = dest_addr.ip() {
         if dest_ipv4.is_multicast() {
-            socket_helpers::set_multicast_if_by_addr(socket.as_raw_fd(), source_ip)?;
+            if is_unnumbered {
+                let if_index = socket_helpers::get_interface_index(interface_name)?;
+                socket_helpers::set_multicast_if_by_index(socket.as_raw_fd(), if_index)?;
+            } else {
+                socket_helpers::set_multicast_if_by_addr(socket.as_raw_fd(), source_ip)?;
+            }
             socket_helpers::set_multicast_ttl(socket.as_raw_fd(), multicast_ttl)?;
         }
     }
 
+    // Bind socket to the output interface to force packets out the correct device.
+    // This is essential for unnumbered interfaces where source IP alone cannot
+    // determine the egress path.
+    socket_helpers::bind_to_device(socket.as_raw_fd(), interface_name)?;
+
+    socket.bind(&SocketAddr::new(source_ip.into(), 0).into())?;
+    socket.connect(&dest_addr.into())?;
+    Ok(socket.into())
+}
+
+/// Create a raw ESP socket for egress.
+/// Raw sockets with protocol 50 (ESP) send the full ESP payload (SPI + SeqNo + encrypted data + ICV).
+/// The kernel prepends the IP header automatically (no IP_HDRINCL needed).
+fn create_raw_esp_socket(
+    source_ip: Ipv4Addr,
+    dest_addr: SocketAddr,
+    multicast_ttl: u8,
+    interface_name: &str,
+    is_unnumbered: bool,
+) -> Result<OwnedFd> {
+    let socket = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::from(50)))?;
+    socket.set_reuse_address(true)?;
+
+    let send_buffer_size = std::env::var("MCR_SOCKET_SNDBUF")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(4 * 1024 * 1024);
+
+    socket
+        .set_send_buffer_size(send_buffer_size)
+        .context("Failed to set SO_SNDBUF for ESP socket")?;
+
+    if let std::net::IpAddr::V4(dest_ipv4) = dest_addr.ip() {
+        if dest_ipv4.is_multicast() {
+            if is_unnumbered {
+                let if_index = socket_helpers::get_interface_index(interface_name)?;
+                socket_helpers::set_multicast_if_by_index(socket.as_raw_fd(), if_index)?;
+            } else {
+                socket_helpers::set_multicast_if_by_addr(socket.as_raw_fd(), source_ip)?;
+            }
+            socket_helpers::set_multicast_ttl(socket.as_raw_fd(), multicast_ttl)?;
+        }
+    }
+
+    socket_helpers::bind_to_device(socket.as_raw_fd(), interface_name)?;
     socket.bind(&SocketAddr::new(source_ip.into(), 0).into())?;
     socket.connect(&dest_addr.into())?;
     Ok(socket.into())
@@ -1296,34 +1466,45 @@ mod tests {
             input_interface: "lo".to_string(),
             input_group: input_group.parse().unwrap(),
             input_port,
+            input_protocol: 17,
             input_source: None,
             outputs: vec![OutputDestination {
                 group: "224.0.0.2".parse().unwrap(),
                 port: 5001,
-                interface: "lo".to_string(),
+                interface: "lo".into(),
                 ttl: None,
+                source_ip: None,
             }],
             source: crate::RuleSource::Static,
         }
     }
 
-    fn create_test_rules_map() -> HashMap<(Ipv4Addr, u16), ForwardingRule> {
+    fn create_test_rules_map() -> HashMap<(Ipv4Addr, u8, u16), ForwardingRule> {
         let mut rules = HashMap::new();
 
         let rule1 = create_test_rule("rule-1", "224.0.0.1", 5000);
         let rule2 = create_test_rule("rule-2", "224.0.0.2", 5001);
         let rule3 = create_test_rule("rule-3", "224.0.0.3", 5002);
 
-        rules.insert((rule1.input_group, rule1.input_port), rule1);
-        rules.insert((rule2.input_group, rule2.input_port), rule2);
-        rules.insert((rule3.input_group, rule3.input_port), rule3);
+        rules.insert(
+            (rule1.input_group, rule1.input_protocol, rule1.input_port),
+            rule1,
+        );
+        rules.insert(
+            (rule2.input_group, rule2.input_protocol, rule2.input_port),
+            rule2,
+        );
+        rules.insert(
+            (rule3.input_group, rule3.input_protocol, rule3.input_port),
+            rule3,
+        );
 
         rules
     }
 
     // Helper function that mimics the remove_rule logic for testing
     fn remove_rule_from_map(
-        rules: &mut HashMap<(Ipv4Addr, u16), ForwardingRule>,
+        rules: &mut HashMap<(Ipv4Addr, u8, u16), ForwardingRule>,
         rule_id: &str,
     ) -> Result<()> {
         let key_to_remove = rules
@@ -1419,7 +1600,11 @@ mod tests {
         let mut rules = create_test_rules_map();
 
         let new_rule = create_test_rule("rule-4", "224.0.0.4", 5003);
-        let key = (new_rule.input_group, new_rule.input_port);
+        let key = (
+            new_rule.input_group,
+            new_rule.input_protocol,
+            new_rule.input_port,
+        );
 
         rules.insert(key, new_rule.clone());
         assert_eq!(rules.len(), 4);
@@ -1438,8 +1623,14 @@ mod tests {
         let rule1 = create_test_rule("rule-a", "224.0.0.1", 5000);
         let rule2 = create_test_rule("rule-b", "224.0.0.2", 5000);
 
-        rules.insert((rule1.input_group, rule1.input_port), rule1);
-        rules.insert((rule2.input_group, rule2.input_port), rule2);
+        rules.insert(
+            (rule1.input_group, rule1.input_protocol, rule1.input_port),
+            rule1,
+        );
+        rules.insert(
+            (rule2.input_group, rule2.input_protocol, rule2.input_port),
+            rule2,
+        );
 
         assert_eq!(rules.len(), 2);
 
@@ -1464,7 +1655,7 @@ mod tests {
         // Simulate what sync_rules does: clear and insert new rules
         rules.clear();
         for rule in new_rules {
-            let key = (rule.input_group, rule.input_port);
+            let key = (rule.input_group, rule.input_protocol, rule.input_port);
             rules.insert(key, rule);
         }
 
@@ -1517,5 +1708,373 @@ mod tests {
         assert_eq!(stats.rules_rejected, 0);
         assert_eq!(stats.flow_counters_evicted, 0);
         assert_eq!(stats.egress_sockets_evicted, 0);
+    }
+
+    // === ESP Protocol Matching Tests ===
+
+    /// Create an ESP forwarding rule for testing
+    fn create_esp_rule(rule_id: &str, input_group: &str) -> ForwardingRule {
+        ForwardingRule {
+            rule_id: rule_id.to_string(),
+            name: None,
+            input_interface: "lo".to_string(),
+            input_group: input_group.parse().unwrap(),
+            input_port: 0,
+            input_protocol: 50,
+            input_source: None,
+            outputs: vec![OutputDestination {
+                group: "224.0.0.2".parse().unwrap(),
+                port: 0,
+                interface: "lo".into(),
+                ttl: None,
+                source_ip: None,
+            }],
+            source: crate::RuleSource::Static,
+        }
+    }
+
+    /// Helper: create a minimal ESP packet for a given multicast group
+    fn make_esp_packet(dst_group: [u8; 4], src_ip: [u8; 4]) -> Vec<u8> {
+        use crate::worker::packet_parser::calculate_ip_checksum;
+        let mut packet = Vec::new();
+        // Ethernet header (14 bytes)
+        packet.extend_from_slice(&[0x01, 0x00, 0x5e, 0x00, 0x00, 0x01]); // Dst MAC
+        packet.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]); // Src MAC
+        packet.extend_from_slice(&[0x08, 0x00]); // EtherType: IPv4
+                                                 // IPv4 header (20 bytes)
+        packet.push(0x45); // Version 4, IHL 5
+        packet.push(0x00);
+        packet.extend_from_slice(&[0x00, 0x30]); // Total length: 48 (20 IP + 8 ESP + 20 payload)
+        packet.extend_from_slice(&[0x00, 0x01]); // Identification
+        packet.extend_from_slice(&[0x00, 0x00]); // Flags, Fragment offset
+        packet.push(64); // TTL
+        packet.push(50); // Protocol: ESP
+        packet.extend_from_slice(&[0x00, 0x00]); // Checksum placeholder
+        packet.extend_from_slice(&src_ip);
+        packet.extend_from_slice(&dst_group);
+        // Calculate IP checksum
+        let ip_checksum = calculate_ip_checksum(&packet[14..34]);
+        packet[24] = (ip_checksum >> 8) as u8;
+        packet[25] = (ip_checksum & 0xFF) as u8;
+        // ESP header (8 bytes)
+        packet.extend_from_slice(&[0x00, 0x00, 0x01, 0x00]); // SPI = 256
+        packet.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]); // SeqNo = 1
+                                                             // Payload (20 bytes)
+        packet.extend_from_slice(&[0xDE; 20]);
+        packet
+    }
+
+    /// Helper: create a minimal UDP packet for a given multicast group and port
+    fn make_udp_packet(dst_group: [u8; 4], dst_port: u16, src_ip: [u8; 4]) -> Vec<u8> {
+        use crate::worker::packet_parser::calculate_ip_checksum;
+        let mut packet = Vec::new();
+        // Ethernet header (14 bytes)
+        packet.extend_from_slice(&[0x01, 0x00, 0x5e, 0x00, 0x00, 0x01]);
+        packet.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+        packet.extend_from_slice(&[0x08, 0x00]);
+        // IPv4 header (20 bytes)
+        packet.push(0x45);
+        packet.push(0x00);
+        packet.extend_from_slice(&[0x00, 0x2C]); // Total length: 44 (20 IP + 8 UDP + 16 payload)
+        packet.extend_from_slice(&[0x00, 0x01]);
+        packet.extend_from_slice(&[0x00, 0x00]);
+        packet.push(64);
+        packet.push(17); // Protocol: UDP
+        packet.extend_from_slice(&[0x00, 0x00]);
+        packet.extend_from_slice(&src_ip);
+        packet.extend_from_slice(&dst_group);
+        let ip_checksum = calculate_ip_checksum(&packet[14..34]);
+        packet[24] = (ip_checksum >> 8) as u8;
+        packet[25] = (ip_checksum & 0xFF) as u8;
+        // UDP header (8 bytes)
+        packet.extend_from_slice(&[(dst_port >> 8) as u8, (dst_port & 0xFF) as u8]); // Src port (reuse dst)
+        packet.extend_from_slice(&[(dst_port >> 8) as u8, (dst_port & 0xFF) as u8]); // Dst port
+        packet.extend_from_slice(&[0x00, 0x18]); // Length: 24
+        packet.extend_from_slice(&[0x00, 0x00]); // Checksum: 0
+                                                 // Payload (16 bytes)
+        packet.extend_from_slice(b"Hello, multicast");
+        packet
+    }
+
+    #[test]
+    fn test_esp_rule_lookup() {
+        // ESP rule should be findable by (group, protocol=50, port=0)
+        let mut rules: HashMap<(Ipv4Addr, u8, u16), ForwardingRule> = HashMap::new();
+        let rule = create_esp_rule("esp-rule-1", "239.255.0.100");
+        rules.insert(
+            (rule.input_group, rule.input_protocol, rule.input_port),
+            rule,
+        );
+
+        let esp_key: (Ipv4Addr, u8, u16) = ("239.255.0.100".parse().unwrap(), 50, 0);
+        assert!(
+            rules.contains_key(&esp_key),
+            "ESP rule should be found by (group, 50, 0)"
+        );
+
+        // UDP key for same group should NOT match
+        let udp_key: (Ipv4Addr, u8, u16) = ("239.255.0.100".parse().unwrap(), 17, 5000);
+        assert!(
+            !rules.contains_key(&udp_key),
+            "UDP key should not find ESP rule"
+        );
+    }
+
+    #[test]
+    fn test_esp_udp_coexistence() {
+        // Both ESP and UDP rules for the same multicast group should coexist
+        let mut rules: HashMap<(Ipv4Addr, u8, u16), ForwardingRule> = HashMap::new();
+
+        let esp_rule = create_esp_rule("esp-rule", "239.1.1.1");
+        let udp_rule = create_test_rule("udp-rule", "239.1.1.1", 5000);
+
+        rules.insert(
+            (
+                esp_rule.input_group,
+                esp_rule.input_protocol,
+                esp_rule.input_port,
+            ),
+            esp_rule,
+        );
+        rules.insert(
+            (
+                udp_rule.input_group,
+                udp_rule.input_protocol,
+                udp_rule.input_port,
+            ),
+            udp_rule,
+        );
+
+        assert_eq!(
+            rules.len(),
+            2,
+            "ESP and UDP rules for same group should coexist"
+        );
+
+        // Each key finds only its own rule
+        let esp_found = rules
+            .get(&("239.1.1.1".parse().unwrap(), 50u8, 0u16))
+            .unwrap();
+        assert_eq!(esp_found.rule_id, "esp-rule");
+        assert_eq!(esp_found.input_protocol, 50);
+
+        let udp_found = rules
+            .get(&("239.1.1.1".parse().unwrap(), 17u8, 5000u16))
+            .unwrap();
+        assert_eq!(udp_found.rule_id, "udp-rule");
+        assert_eq!(udp_found.input_protocol, 17);
+    }
+
+    #[test]
+    fn test_esp_packet_extracts_correct_key() {
+        // Parse an ESP packet and verify the key that process_received_packet would use
+        use crate::worker::packet_parser::{parse_packet_any, ParsedPacket};
+
+        let packet = make_esp_packet([239, 255, 0, 100], [10, 1, 0, 1]);
+        let parsed = parse_packet_any(&packet, false).unwrap();
+
+        let (dst_ip, protocol, port) = match &parsed {
+            ParsedPacket::Esp { ipv4, .. } => (ipv4.dst_ip, 50u8, 0u16),
+            _ => panic!("Expected ESP packet"),
+        };
+
+        assert_eq!(dst_ip, Ipv4Addr::new(239, 255, 0, 100));
+        assert_eq!(protocol, 50);
+        assert_eq!(port, 0);
+
+        // This key should match an ESP rule
+        let mut rules: HashMap<(Ipv4Addr, u8, u16), ForwardingRule> = HashMap::new();
+        let rule = create_esp_rule("esp-rule", "239.255.0.100");
+        rules.insert(
+            (rule.input_group, rule.input_protocol, rule.input_port),
+            rule,
+        );
+
+        let key = (dst_ip, protocol, port);
+        assert!(
+            rules.contains_key(&key),
+            "ESP packet key should match ESP rule"
+        );
+    }
+
+    #[test]
+    fn test_udp_packet_does_not_match_esp_rule() {
+        use crate::worker::packet_parser::{parse_packet_any, ParsedPacket};
+
+        // Only an ESP rule for 239.255.0.100
+        let mut rules: HashMap<(Ipv4Addr, u8, u16), ForwardingRule> = HashMap::new();
+        let rule = create_esp_rule("esp-rule", "239.255.0.100");
+        rules.insert(
+            (rule.input_group, rule.input_protocol, rule.input_port),
+            rule,
+        );
+
+        // UDP packet to the same group
+        let packet = make_udp_packet([239, 255, 0, 100], 5000, [10, 1, 0, 1]);
+        let parsed = parse_packet_any(&packet, false).unwrap();
+
+        let (dst_ip, protocol, port) = match &parsed {
+            ParsedPacket::Udp(h) => (h.ipv4.dst_ip, 17u8, h.udp.dst_port),
+            _ => panic!("Expected UDP packet"),
+        };
+
+        let exact_key = (dst_ip, protocol, port);
+        let wildcard_key = (dst_ip, protocol, 0u16);
+        assert!(
+            !rules.contains_key(&exact_key),
+            "UDP exact key should not match ESP rule"
+        );
+        assert!(
+            !rules.contains_key(&wildcard_key),
+            "UDP wildcard key should not match ESP rule"
+        );
+    }
+
+    #[test]
+    fn test_esp_packet_does_not_match_udp_rule() {
+        use crate::worker::packet_parser::{parse_packet_any, ParsedPacket};
+
+        // Only a UDP rule for 239.255.0.100
+        let mut rules: HashMap<(Ipv4Addr, u8, u16), ForwardingRule> = HashMap::new();
+        let rule = create_test_rule("udp-rule", "239.255.0.100", 5000);
+        rules.insert(
+            (rule.input_group, rule.input_protocol, rule.input_port),
+            rule,
+        );
+
+        // ESP packet to the same group
+        let packet = make_esp_packet([239, 255, 0, 100], [10, 1, 0, 1]);
+        let parsed = parse_packet_any(&packet, false).unwrap();
+
+        let (dst_ip, protocol, port) = match &parsed {
+            ParsedPacket::Esp { ipv4, .. } => (ipv4.dst_ip, 50u8, 0u16),
+            _ => panic!("Expected ESP packet"),
+        };
+
+        let key = (dst_ip, protocol, port);
+        assert!(
+            !rules.contains_key(&key),
+            "ESP packet key should not match UDP rule"
+        );
+    }
+
+    #[test]
+    fn test_port_zero_semantic_split() {
+        // port=0 for protocol=50 means "ESP, no port"
+        // port=0 for protocol=17 means "UDP wildcard port"
+        // These are different keys and should not collide
+        let mut rules: HashMap<(Ipv4Addr, u8, u16), ForwardingRule> = HashMap::new();
+
+        let esp_rule = create_esp_rule("esp-rule", "239.1.1.1");
+        let mut udp_wildcard = create_test_rule("udp-wildcard", "239.1.1.1", 0);
+        udp_wildcard.input_port = 0; // Wildcard UDP rule
+
+        let esp_key = (
+            esp_rule.input_group,
+            esp_rule.input_protocol,
+            esp_rule.input_port,
+        );
+        let udp_key = (
+            udp_wildcard.input_group,
+            udp_wildcard.input_protocol,
+            udp_wildcard.input_port,
+        );
+
+        rules.insert(esp_key, esp_rule);
+        rules.insert(udp_key, udp_wildcard);
+
+        assert_eq!(
+            rules.len(),
+            2,
+            "ESP port=0 and UDP port=0 should be distinct keys"
+        );
+
+        // ESP lookup: (group, 50, 0)
+        assert_eq!(
+            rules
+                .get(&("239.1.1.1".parse().unwrap(), 50u8, 0u16))
+                .unwrap()
+                .rule_id,
+            "esp-rule"
+        );
+        // UDP wildcard lookup: (group, 17, 0)
+        assert_eq!(
+            rules
+                .get(&("239.1.1.1".parse().unwrap(), 17u8, 0u16))
+                .unwrap()
+                .rule_id,
+            "udp-wildcard"
+        );
+    }
+
+    #[test]
+    fn test_esp_source_filtering() {
+        use crate::worker::packet_parser::parse_packet_any;
+
+        // ESP rule with source filter
+        let mut rule = create_esp_rule("esp-sg-rule", "239.255.0.100");
+        rule.input_source = Some("10.1.0.1".parse().unwrap());
+
+        let mut rules: HashMap<(Ipv4Addr, u8, u16), ForwardingRule> = HashMap::new();
+        rules.insert(
+            (rule.input_group, rule.input_protocol, rule.input_port),
+            rule,
+        );
+
+        // ESP packet from matching source
+        let packet_match = make_esp_packet([239, 255, 0, 100], [10, 1, 0, 1]);
+        let parsed = parse_packet_any(&packet_match, false).unwrap();
+        let src_ip = parsed.src_ip();
+        let key = ("239.255.0.100".parse::<Ipv4Addr>().unwrap(), 50u8, 0u16);
+        let rule = rules.get(&key).unwrap();
+        assert_eq!(rule.input_source, Some(Ipv4Addr::new(10, 1, 0, 1)));
+        assert_eq!(src_ip, Ipv4Addr::new(10, 1, 0, 1), "Source should match");
+
+        // ESP packet from non-matching source
+        let packet_nomatch = make_esp_packet([239, 255, 0, 100], [10, 2, 0, 1]);
+        let parsed = parse_packet_any(&packet_nomatch, false).unwrap();
+        let src_ip = parsed.src_ip();
+        assert_ne!(
+            src_ip,
+            rule.input_source.unwrap(),
+            "Source should NOT match"
+        );
+    }
+
+    #[test]
+    fn test_esp_flow_counters_separate_from_udp() {
+        // Flow counters keyed by (group, protocol, port) — ESP and UDP are distinct
+        let mut flow_counters: HashMap<(Ipv4Addr, u8, u16), u64> = HashMap::new();
+        let group: Ipv4Addr = "239.1.1.1".parse().unwrap();
+
+        let esp_key = (group, 50u8, 0u16);
+        let udp_key = (group, 17u8, 5000u16);
+
+        *flow_counters.entry(esp_key).or_default() += 100;
+        *flow_counters.entry(udp_key).or_default() += 200;
+
+        assert_eq!(flow_counters.len(), 2);
+        assert_eq!(*flow_counters.get(&esp_key).unwrap(), 100);
+        assert_eq!(*flow_counters.get(&udp_key).unwrap(), 200);
+    }
+
+    #[test]
+    fn test_esp_forwarding_target_port_zero() {
+        // When protocol=50, dest_port should always be 0 regardless of output config
+        // This mirrors the logic in process_received_packet:
+        // if protocol == 50 { 0 } else if output.port == 0 { port } else { output.port }
+        let protocol = 50u8;
+        let output_port = 5000u16; // Even if misconfigured, ESP should get 0
+        let original_port = 0u16;
+
+        let dest_port = if protocol == 50 {
+            0
+        } else if output_port == 0 {
+            original_port
+        } else {
+            output_port
+        };
+
+        assert_eq!(dest_port, 0, "ESP dest_port must always be 0");
     }
 }

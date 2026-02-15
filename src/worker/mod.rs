@@ -19,7 +19,6 @@ use crate::{DataPlaneConfig, RelayCommand};
 use data_plane_integrated::run_unified_data_plane as data_plane_task;
 
 use caps::{CapSet, Capability};
-use nix::sys::eventfd::EventFd;
 use nix::sys::socket::{recvmsg, MsgFlags};
 use std::collections::HashSet;
 use std::os::unix::io::AsRawFd;
@@ -31,12 +30,6 @@ pub struct IngressChannelSet {
     /// This socket is created and configured (bound, fanout set) by the supervisor
     /// with CAP_NET_RAW privileges, allowing the worker to drop all privileges.
     pub af_packet_fd: OwnedFd,
-}
-
-/// Channel set for egress thread communication
-pub struct EgressChannelSet {
-    pub cmd_stream_fd: OwnedFd,
-    pub shutdown_event_fd: EventFd, // For data path wakeup (from ingress)
 }
 
 // ... other code ...
@@ -102,22 +95,38 @@ fn drop_privileges(uid: Uid, gid: Gid, caps_to_keep: Option<&HashSet<Capability>
     // Set the GID (requires CAP_SETGID)
     nix::unistd::setgid(gid).context("Failed to set GID")?;
 
-    // Set capabilities after group changes but before changing UID
     if let Some(caps) = caps_to_keep {
-        caps::set(None, CapSet::Effective, caps)?;
+        // PR_SET_KEEPCAPS preserves Permitted capabilities across setuid().
+        // Without this, setuid(non-root) clears all capability sets.
+        unsafe {
+            if libc::prctl(libc::PR_SET_KEEPCAPS, 1) != 0 {
+                return Err(anyhow::anyhow!("Failed to set PR_SET_KEEPCAPS"));
+            }
+        }
+
+        // Set UID while keepcaps is active — Permitted set is preserved
+        nix::unistd::setuid(uid).context("Failed to set UID")?;
+
+        // Now restrict capabilities to only what we need.
+        // After setuid, Effective is cleared but Permitted is kept (due to keepcaps).
         caps::set(None, CapSet::Permitted, caps)?;
+        caps::set(None, CapSet::Effective, caps)?;
         caps::set(None, CapSet::Inheritable, caps)?;
 
-        // Raise ambient capabilities for each capability we want to keep
-        // Ambient capabilities are inherited by child threads even after setuid()
         for cap in caps {
             caps::raise(None, CapSet::Ambient, *cap)
                 .with_context(|| format!("Failed to raise {:?} in Ambient set", cap))?;
         }
+
+        // Clear keepcaps flag (no longer needed)
+        unsafe {
+            libc::prctl(libc::PR_SET_KEEPCAPS, 0);
+        }
+    } else {
+        // No capabilities to keep — just drop to target UID
+        nix::unistd::setuid(uid).context("Failed to set UID")?;
     }
 
-    // Set the UID last (irreversible)
-    nix::unistd::setuid(uid).context("Failed to set UID")?;
     Ok(())
 }
 
@@ -162,7 +171,6 @@ pub trait WorkerLifecycle: Send + 'static {
         &self,
         config: DataPlaneConfig,
         ingress_channels: IngressChannelSet,
-        egress_channels: EgressChannelSet,
         logger: Logger,
     ) -> Result<()>;
 }
@@ -187,10 +195,9 @@ impl WorkerLifecycle for DefaultWorkerLifecycle {
         &self,
         config: DataPlaneConfig,
         ingress_channels: IngressChannelSet,
-        egress_channels: EgressChannelSet,
         logger: Logger,
     ) -> Result<()> {
-        data_plane_task(config, ingress_channels, egress_channels, logger)
+        data_plane_task(config, ingress_channels, logger)
     }
 }
 
@@ -198,8 +205,6 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
     config: DataPlaneConfig,
     lifecycle: T,
 ) -> Result<()> {
-    use nix::sys::eventfd::{EfdFlags, EventFd};
-
     // AF_PACKET socket is created by the supervisor and passed to us via SCM_RIGHTS.
     // This allows workers to drop ALL privileges after receiving the pre-configured socket.
     // Privilege dropping happens after we receive all FDs from the supervisor.
@@ -241,7 +246,6 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
 
     // Receive FDs from supervisor
     let ingress_cmd_fd = recv_fd(&supervisor_sock).await?;
-    let egress_cmd_fd = recv_fd(&supervisor_sock).await?;
     let af_packet_fd = recv_fd(&supervisor_sock).await?;
 
     // Now that we have the pre-configured AF_PACKET socket from the supervisor,
@@ -253,22 +257,24 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
     const NOBODY_UID: u32 = 65534;
     const NOBODY_GID: u32 = 65534;
 
-    // Drop privileges completely - no capabilities needed since we have the socket FD
+    // Drop privileges but retain CAP_NET_RAW — needed for ESP egress sockets
+    // (create_raw_esp_socket creates SOCK_RAW for protocol 50 on demand).
+    // The pre-configured AF_PACKET ingress socket doesn't need capabilities,
+    // but ESP rules require creating new raw sockets at runtime.
+    let caps_to_keep: HashSet<Capability> =
+        [Capability::CAP_NET_RAW, Capability::CAP_NET_BIND_SERVICE]
+            .into_iter()
+            .collect();
     lifecycle.drop_privileges(
         Uid::from_raw(NOBODY_UID),
         Gid::from_raw(NOBODY_GID),
-        None, // No capabilities needed - we have the pre-configured AF_PACKET socket
+        Some(&caps_to_keep),
     )?;
 
     logger.debug(Facility::DataPlane, "Privileges dropped");
 
-    // Create shutdown eventfd for egress (data path wakeup from ingress)
-    let egress_shutdown_event_fd = EventFd::from_value_and_flags(0, EfdFlags::EFD_NONBLOCK)
-        .context("Failed to create egress shutdown eventfd")?;
-
     // Convert raw FDs to OwnedFd for channel sets
     let ingress_cmd_owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(ingress_cmd_fd) };
-    let egress_cmd_owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(egress_cmd_fd) };
     let af_packet_owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(af_packet_fd) };
 
     // Create channel sets (no more mpsc or tokio bridge!)
@@ -277,13 +283,8 @@ pub async fn run_data_plane<T: WorkerLifecycle>(
         af_packet_fd: af_packet_owned,
     };
 
-    let egress_channels = EgressChannelSet {
-        cmd_stream_fd: egress_cmd_owned,
-        shutdown_event_fd: egress_shutdown_event_fd,
-    };
-
     // Call run_data_plane_task directly - synchronous and blocking (io_uring-based design)
-    lifecycle.run_data_plane_task(config, ingress_channels, egress_channels, logger)
+    lifecycle.run_data_plane_task(config, ingress_channels, logger)
 }
 
 #[cfg(test)]
@@ -312,6 +313,7 @@ mod tests {
             input_interface: "eth0".to_string(),
             input_group: "224.0.0.1".parse().unwrap(),
             input_port: 5000,
+            input_protocol: 17,
             input_source: None,
             outputs: vec![],
             source: crate::RuleSource::Static,
