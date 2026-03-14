@@ -202,6 +202,11 @@ pub enum SupervisorCommand {
         /// IP protocol number (default: 17 = UDP, 50 = ESP)
         #[serde(default = "default_udp_protocol")]
         input_protocol: u8,
+        /// Source IP filter. When present, only relay packets whose IP
+        /// source address matches. Used for per-source relay rules that
+        /// prevent forwarding loops in ring topologies.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_source: Option<Ipv4Addr>,
         outputs: Vec<OutputDestination>,
     },
     RemoveRule {
@@ -974,6 +979,7 @@ mod tests {
             input_group: "224.0.0.1".parse().unwrap(),
             input_port: 5000,
             input_protocol: 17,
+            input_source: None,
             outputs: vec![OutputDestination {
                 group: "224.0.0.2".parse().unwrap(),
                 port: 5001,
@@ -1454,6 +1460,7 @@ mod tests {
             input_group: "239.255.0.100".parse().unwrap(),
             input_port: 0,
             input_protocol: 50,
+            input_source: None,
             outputs: vec![],
         };
         let json = serde_json::to_string(&cmd).unwrap();

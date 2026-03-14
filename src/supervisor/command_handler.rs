@@ -117,6 +117,7 @@ pub fn handle_supervisor_command(
             input_group,
             input_port,
             input_protocol,
+            input_source,
             outputs,
         } => {
             // Validate input interface name
@@ -169,7 +170,7 @@ pub fn handle_supervisor_command(
                 input_group,
                 input_port,
                 input_protocol,
-                input_source: None, // CLI-added rules don't have source filtering
+                input_source,
                 outputs,
                 source: crate::RuleSource::Dynamic, // Rules added via CLI are dynamic
             };
@@ -758,6 +759,7 @@ mod tests {
                 input_group: "224.0.0.1".parse().unwrap(),
                 input_port: 5000,
                 input_protocol: 17,
+                input_source: None,
                 outputs: vec![],
             },
             &master_rules,
@@ -1200,6 +1202,7 @@ mod tests {
                 input_group: "224.0.0.1".parse().unwrap(),
                 input_port: 5000,
                 input_protocol: 17,
+                input_source: None,
                 outputs: vec![crate::OutputDestination {
                     group: "224.0.0.2".parse().unwrap(),
                     port: 5001,
@@ -1247,6 +1250,7 @@ mod tests {
                 input_group: "224.0.0.1".parse().unwrap(),
                 input_port: 5000,
                 input_protocol: 17,
+                input_source: None,
                 outputs: vec![crate::OutputDestination {
                     group: "224.0.0.2".parse().unwrap(),
                     port: 5001,
@@ -1370,6 +1374,7 @@ mod tests {
                 input_group: "224.0.0.1".parse().unwrap(),
                 input_port: 5000,
                 input_protocol: 17,
+                input_source: None,
                 outputs: vec![crate::OutputDestination {
                     group: "224.0.0.2".parse().unwrap(),
                     port: 5001,
@@ -1413,6 +1418,7 @@ mod tests {
                 input_group: "224.0.0.1".parse().unwrap(),
                 input_port: 5000,
                 input_protocol: 17,
+                input_source: None,
                 outputs: vec![crate::OutputDestination {
                     group: "224.0.0.2".parse().unwrap(),
                     port: 5001,
@@ -1476,6 +1482,7 @@ mod tests {
                 input_group: "224.0.0.1".parse().unwrap(),
                 input_port: 0, // Invalid for UDP
                 input_protocol: 17,
+                input_source: None,
                 outputs: vec![crate::OutputDestination {
                     group: "224.0.0.2".parse().unwrap(),
                     port: 5001,
@@ -1519,6 +1526,7 @@ mod tests {
                 input_group: "224.0.0.1".parse().unwrap(),
                 input_port: 5000,
                 input_protocol: 17,
+                input_source: None,
                 outputs: vec![crate::OutputDestination {
                     group: "224.0.0.2".parse().unwrap(),
                     port: 0, // Invalid for UDP
@@ -1562,6 +1570,7 @@ mod tests {
                 input_group: "239.255.0.100".parse().unwrap(),
                 input_port: 0,      // Valid for ESP
                 input_protocol: 50, // ESP
+                input_source: None,
                 outputs: vec![crate::OutputDestination {
                     group: "239.255.0.100".parse().unwrap(),
                     port: 0, // No port for ESP
@@ -1614,6 +1623,7 @@ mod tests {
                 input_group: "239.1.1.1".parse().unwrap(),
                 input_port: 0,
                 input_protocol: 50,
+                input_source: None,
                 outputs: vec![crate::OutputDestination {
                     group: "239.1.1.1".parse().unwrap(),
                     port: 0,
@@ -1641,6 +1651,7 @@ mod tests {
                 input_group: "239.1.1.1".parse().unwrap(),
                 input_port: 5000,
                 input_protocol: 17,
+                input_source: None,
                 outputs: vec![crate::OutputDestination {
                     group: "239.1.1.1".parse().unwrap(),
                     port: 5000,

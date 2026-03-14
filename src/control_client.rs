@@ -375,6 +375,7 @@ pub fn build_command(cli_command: CliCommand) -> Result<multicast_relay::Supervi
             input_group,
             input_port,
             input_protocol: 17,
+            input_source: None, // CLI-added rules have no source filter
             outputs,
         },
         CliCommand::Remove { rule_id, name } => {
@@ -829,6 +830,7 @@ mod tests {
                 input_group,
                 input_port,
                 input_protocol: _,
+                input_source: _,
                 outputs,
             } => {
                 assert_eq!(rule_id, "test-rule");
