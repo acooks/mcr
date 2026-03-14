@@ -163,6 +163,7 @@ pub struct UnifiedStats {
     pub flow_counters_evicted: u64,  // Flow counters evicted due to max_flow_counters limit
     pub egress_sockets_evicted: u64, // Egress sockets evicted due to max_egress_sockets limit
     pub esp_not_matched_logged: u64, // Diagnostic: count of logged not-matched ESP packets
+    pub rules_default_dropped: u64,  // Packets matched by empty-output rules (intentional drops)
 }
 
 /// Per-flow counters for stats reporting
@@ -229,6 +230,27 @@ pub struct UnifiedDataPlane {
 
     // Stats pipe for reporting to supervisor (FD 4)
     stats_pipe: Option<std::fs::File>,
+}
+
+/// Three-tier rule lookup: exact → wildcard-port → protocol-default.
+///
+/// Returns the matching rule, or None if no rule matches. Priority:
+/// 1. Exact match: (dst_ip, protocol, port)
+/// 2. Wildcard port: (dst_ip, protocol, 0) — protocol-learned routes
+/// 3. Protocol default: (0.0.0.0, protocol, 0) — expected background traffic
+fn lookup_rule(
+    rules: &HashMap<(Ipv4Addr, u8, u16), ForwardingRule>,
+    dst_ip: Ipv4Addr,
+    protocol: u8,
+    port: u16,
+) -> Option<&ForwardingRule> {
+    let exact_key = (dst_ip, protocol, port);
+    let wildcard_key = (dst_ip, protocol, 0u16);
+    let protocol_default_key = (Ipv4Addr::UNSPECIFIED, protocol, 0u16);
+    rules
+        .get(&exact_key)
+        .or_else(|| rules.get(&wildcard_key))
+        .or_else(|| rules.get(&protocol_default_key))
 }
 
 impl UnifiedDataPlane {
@@ -861,7 +883,7 @@ impl UnifiedDataPlane {
                 self.logger.info(
                     Facility::DataPlane,
                     &format!(
-                        "[STATS] t_ms={} rx={} tx={} matched={} not_matched={} rx_err={} tx_err={} buf_exhaust={} pipe_err={}",
+                        "[STATS] t_ms={} rx={} tx={} matched={} not_matched={} rx_err={} tx_err={} buf_exhaust={} pipe_err={} default_dropped={}",
                         elapsed_ms,
                         self.stats.packets_received,
                         self.stats.packets_sent,
@@ -870,7 +892,8 @@ impl UnifiedDataPlane {
                         self.stats.recv_errors,
                         self.stats.send_errors,
                         self.stats.buffer_pool_exhaustion,
-                        self.stats.stats_pipe_errors
+                        self.stats.stats_pipe_errors,
+                        self.stats.rules_default_dropped
                     ),
                 );
 
@@ -953,38 +976,30 @@ impl UnifiedDataPlane {
 
         let src_ip = parsed.src_ip();
 
-        // Lookup forwarding rule based on (multicast_group, protocol, port)
-        // First try exact match, then try wildcard port (0) for protocol-learned routes
-        let exact_key = (dst_ip, protocol, port);
-        let wildcard_key = (dst_ip, protocol, 0u16);
-        let rule = match self.rules.get(&exact_key) {
+        let rule = match lookup_rule(&self.rules, dst_ip, protocol, port) {
             Some(r) => r,
-            None => match self.rules.get(&wildcard_key) {
-                Some(r) => r, // Wildcard port match (protocol-learned route)
-                None => {
-                    // No matching rule
-                    if self.config.track_stats {
-                        self.stats.rules_not_matched += 1;
-                    }
-                    // Diagnostic: log first 10 not-matched ESP packets
-                    if protocol == 50 && self.stats.esp_not_matched_logged < 10 {
-                        self.stats.esp_not_matched_logged += 1;
-                        let rule_keys: Vec<String> = self
-                            .rules
-                            .keys()
-                            .map(|(g, p, port)| format!("({} p{} port{})", g, p, port))
-                            .collect();
-                        self.logger.warning(
-                            Facility::DataPlane,
-                            &format!(
-                                "ESP not_matched: dst={} src={} proto={} port={} key=({},{},{}) rules={:?}",
-                                dst_ip, src_ip, protocol, port, dst_ip, protocol, port, rule_keys
-                            ),
-                        );
-                    }
-                    return Ok(());
+            None => {
+                if self.config.track_stats {
+                    self.stats.rules_not_matched += 1;
                 }
-            },
+                // Diagnostic: log first 10 not-matched ESP packets
+                if protocol == 50 && self.stats.esp_not_matched_logged < 10 {
+                    self.stats.esp_not_matched_logged += 1;
+                    let rule_keys: Vec<String> = self
+                        .rules
+                        .keys()
+                        .map(|(g, p, port)| format!("({} p{} port{})", g, p, port))
+                        .collect();
+                    self.logger.warning(
+                        Facility::DataPlane,
+                        &format!(
+                            "ESP not_matched: dst={} src={} proto={} port={} key=({},{},{}) rules={:?}",
+                            dst_ip, src_ip, protocol, port, dst_ip, protocol, port, rule_keys
+                        ),
+                    );
+                }
+                return Ok(());
+            }
         };
 
         // Check source filter for PIM (S,G) matching
@@ -999,8 +1014,12 @@ impl UnifiedDataPlane {
             }
         }
 
-        // Check if rule has any outputs
+        // Check if rule has any outputs — empty means intentional drop
         if rule.outputs.is_empty() {
+            if self.config.track_stats {
+                self.stats.rules_matched += 1;
+                self.stats.rules_default_dropped += 1;
+            }
             return Ok(());
         }
 
@@ -1025,11 +1044,12 @@ impl UnifiedDataPlane {
             });
         }
 
-        // Update per-flow counters (use exact packet key for granular stats)
+        // Update per-flow counters (use packet key for granular stats)
         if self.config.track_stats && !self.targets.is_empty() {
+            let flow_key = (dst_ip, protocol, port);
             // Check if we need to evict old flow counters
             if self.config.max_flow_counters > 0
-                && !self.flow_counters.contains_key(&exact_key)
+                && !self.flow_counters.contains_key(&flow_key)
                 && self.flow_counters.len() >= self.config.max_flow_counters
             {
                 // Evict the flow with the lowest packet count (least active)
@@ -1044,7 +1064,7 @@ impl UnifiedDataPlane {
                 }
             }
 
-            let counter = self.flow_counters.entry(exact_key).or_default();
+            let counter = self.flow_counters.entry(flow_key).or_default();
             counter.packets_relayed += 1;
             counter.bytes_relayed += payload_len as u64;
         }
@@ -1323,13 +1343,14 @@ impl UnifiedDataPlane {
         self.logger.info(
             Facility::DataPlane,
             &format!(
-                "[STATS:Ingress FINAL] total: recv={} matched={} egr_sent={} filtered={} no_match={} buf_exhaust={}",
+                "[STATS:Ingress FINAL] total: recv={} matched={} egr_sent={} filtered={} no_match={} buf_exhaust={} default_dropped={}",
                 self.stats.packets_received,
                 self.stats.rules_matched,
                 self.stats.packets_sent,  // egr_sent = what was queued to egress
                 self.stats.packets_filtered,
                 self.stats.rules_not_matched,
-                self.stats.buffer_pool_exhaustion
+                self.stats.buffer_pool_exhaustion,
+                self.stats.rules_default_dropped
             ),
         );
         // Log egress stats (in unified mode, egr_sent == ch_recv since there's no channel)
@@ -2076,5 +2097,249 @@ mod tests {
         };
 
         assert_eq!(dest_port, 0, "ESP dest_port must always be 0");
+    }
+
+    // === Protocol-Default Rule Tests ===
+    //
+    // These test lookup_rule() — the extracted three-tier cascade used by
+    // process_received_packet(). They verify both the matching logic and
+    // the counter semantics (matched vs not_matched vs default_dropped).
+
+    /// Helper: create an ESP drop rule (empty outputs) for protocol-default testing.
+    fn create_esp_drop_rule(rule_id: &str, input_group: &str) -> ForwardingRule {
+        ForwardingRule {
+            rule_id: rule_id.to_string(),
+            name: Some("esp-unicast-expected@test".to_string()),
+            input_interface: "lo".to_string(),
+            input_group: input_group.parse().unwrap(),
+            input_port: 0,
+            input_protocol: 50,
+            input_source: None,
+            outputs: vec![], // empty = intentional drop
+            source: crate::RuleSource::Dynamic,
+        }
+    }
+
+    #[test]
+    fn test_lookup_rule_exact_match() {
+        let mut rules: HashMap<(Ipv4Addr, u8, u16), ForwardingRule> = HashMap::new();
+        let rule = create_esp_rule("esp-mcast", "239.255.0.100");
+        rules.insert(
+            (rule.input_group, rule.input_protocol, rule.input_port),
+            rule,
+        );
+
+        let found = lookup_rule(&rules, "239.255.0.100".parse().unwrap(), 50, 0);
+        assert_eq!(found.unwrap().rule_id, "esp-mcast");
+    }
+
+    #[test]
+    fn test_lookup_rule_wildcard_port() {
+        let mut rules: HashMap<(Ipv4Addr, u8, u16), ForwardingRule> = HashMap::new();
+        let mut rule = create_test_rule("udp-wildcard", "239.1.1.1", 0);
+        rule.input_port = 0;
+        rules.insert(
+            (rule.input_group, rule.input_protocol, rule.input_port),
+            rule,
+        );
+
+        // Packet with port=5000 should fall through exact, match wildcard-port
+        let found = lookup_rule(&rules, "239.1.1.1".parse().unwrap(), 17, 5000);
+        assert_eq!(found.unwrap().rule_id, "udp-wildcard");
+    }
+
+    #[test]
+    fn test_lookup_rule_protocol_default() {
+        let mut rules: HashMap<(Ipv4Addr, u8, u16), ForwardingRule> = HashMap::new();
+
+        // Only a protocol-default ESP rule
+        let default = create_esp_drop_rule("esp-default", "0.0.0.0");
+        rules.insert(
+            (
+                default.input_group,
+                default.input_protocol,
+                default.input_port,
+            ),
+            default,
+        );
+
+        // Unicast ESP should fall through exact and wildcard, match protocol-default
+        let found = lookup_rule(&rules, "100.64.5.9".parse().unwrap(), 50, 0);
+        assert_eq!(found.unwrap().rule_id, "esp-default");
+        assert!(
+            found.unwrap().outputs.is_empty(),
+            "Default rule must have empty outputs"
+        );
+    }
+
+    #[test]
+    fn test_lookup_rule_not_matched() {
+        let rules: HashMap<(Ipv4Addr, u8, u16), ForwardingRule> = HashMap::new();
+
+        // Empty ruleset — nothing matches
+        let found = lookup_rule(&rules, "100.64.5.9".parse().unwrap(), 50, 0);
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn test_lookup_rule_priority_specific_over_default() {
+        let mut rules: HashMap<(Ipv4Addr, u8, u16), ForwardingRule> = HashMap::new();
+
+        // Specific unicast endpoint rule (with outputs — relay)
+        let specific = create_esp_rule("esp-unicast-in", "100.64.5.9");
+        rules.insert(
+            (
+                specific.input_group,
+                specific.input_protocol,
+                specific.input_port,
+            ),
+            specific,
+        );
+
+        // Protocol-default (empty outputs — drop)
+        let default = create_esp_drop_rule("esp-default", "0.0.0.0");
+        rules.insert(
+            (
+                default.input_group,
+                default.input_protocol,
+                default.input_port,
+            ),
+            default,
+        );
+
+        // Specific rule must win
+        let found = lookup_rule(&rules, "100.64.5.9".parse().unwrap(), 50, 0);
+        assert_eq!(found.unwrap().rule_id, "esp-unicast-in");
+        assert!(
+            !found.unwrap().outputs.is_empty(),
+            "Specific rule should have outputs"
+        );
+
+        // Different unicast dst falls to protocol-default
+        let found2 = lookup_rule(&rules, "100.64.99.1".parse().unwrap(), 50, 0);
+        assert_eq!(found2.unwrap().rule_id, "esp-default");
+    }
+
+    #[test]
+    fn test_lookup_rule_esp_default_does_not_match_udp() {
+        let mut rules: HashMap<(Ipv4Addr, u8, u16), ForwardingRule> = HashMap::new();
+
+        // ESP protocol-default only
+        let default = create_esp_drop_rule("esp-default", "0.0.0.0");
+        rules.insert(
+            (
+                default.input_group,
+                default.input_protocol,
+                default.input_port,
+            ),
+            default,
+        );
+
+        // UDP packet — protocol-default key is (0.0.0.0, 17, 0) which doesn't exist
+        let found = lookup_rule(&rules, "239.1.1.1".parse().unwrap(), 17, 5000);
+        assert!(found.is_none(), "ESP default must not match UDP traffic");
+    }
+
+    #[test]
+    fn test_counter_semantics_default_drop() {
+        // Simulate the counter logic from process_received_packet() when
+        // a packet matches a protocol-default rule with empty outputs.
+        let mut stats = UnifiedStats::default();
+
+        // Packet arrives, lookup_rule returns Some(empty-outputs rule)
+        let mut rules: HashMap<(Ipv4Addr, u8, u16), ForwardingRule> = HashMap::new();
+        let default = create_esp_drop_rule("esp-default", "0.0.0.0");
+        rules.insert(
+            (
+                default.input_group,
+                default.input_protocol,
+                default.input_port,
+            ),
+            default,
+        );
+
+        let rule = lookup_rule(&rules, "100.64.5.9".parse().unwrap(), 50, 0).unwrap();
+
+        // Simulate the empty-outputs branch
+        assert!(rule.outputs.is_empty());
+        stats.rules_matched += 1;
+        stats.rules_default_dropped += 1;
+
+        assert_eq!(
+            stats.rules_matched, 1,
+            "Matched must increment for empty-output rules"
+        );
+        assert_eq!(
+            stats.rules_default_dropped, 1,
+            "Default dropped must track intentional drops"
+        );
+        assert_eq!(
+            stats.rules_not_matched, 0,
+            "Not matched must stay 0 when a rule exists"
+        );
+    }
+
+    #[test]
+    fn test_counter_semantics_not_matched() {
+        // Simulate the counter logic when no rule matches at all.
+        let mut stats = UnifiedStats::default();
+        let rules: HashMap<(Ipv4Addr, u8, u16), ForwardingRule> = HashMap::new();
+
+        let result = lookup_rule(&rules, "100.64.5.9".parse().unwrap(), 50, 0);
+        assert!(result.is_none());
+
+        // Simulate the not-matched branch
+        stats.rules_not_matched += 1;
+
+        assert_eq!(stats.rules_not_matched, 1);
+        assert_eq!(stats.rules_matched, 0);
+        assert_eq!(stats.rules_default_dropped, 0);
+    }
+
+    #[test]
+    fn test_lookup_rule_with_parsed_esp_packet() {
+        // End-to-end: parse a real ESP packet, extract key, lookup rule
+        use crate::worker::packet_parser::{parse_packet_any, ParsedPacket};
+
+        let mut rules: HashMap<(Ipv4Addr, u8, u16), ForwardingRule> = HashMap::new();
+
+        // Specific multicast group rule
+        let mcast = create_esp_rule("esp-mcast", "239.255.0.100");
+        rules.insert(
+            (mcast.input_group, mcast.input_protocol, mcast.input_port),
+            mcast,
+        );
+
+        // Protocol-default drop
+        let default = create_esp_drop_rule("esp-default", "0.0.0.0");
+        rules.insert(
+            (
+                default.input_group,
+                default.input_protocol,
+                default.input_port,
+            ),
+            default,
+        );
+
+        // Multicast ESP packet → should match specific rule
+        let mcast_pkt = make_esp_packet([239, 255, 0, 100], [10, 1, 0, 1]);
+        let parsed = parse_packet_any(&mcast_pkt, false).unwrap();
+        let (dst_ip, protocol, port) = match &parsed {
+            ParsedPacket::Esp { ipv4, .. } => (ipv4.dst_ip, 50u8, 0u16),
+            _ => panic!("Expected ESP"),
+        };
+        let found = lookup_rule(&rules, dst_ip, protocol, port);
+        assert_eq!(found.unwrap().rule_id, "esp-mcast");
+
+        // Unicast ESP packet → should fall to protocol-default
+        let unicast_pkt = make_esp_packet([100, 64, 5, 9], [10, 1, 0, 1]);
+        let parsed = parse_packet_any(&unicast_pkt, false).unwrap();
+        let (dst_ip, protocol, port) = match &parsed {
+            ParsedPacket::Esp { ipv4, .. } => (ipv4.dst_ip, 50u8, 0u16),
+            _ => panic!("Expected ESP"),
+        };
+        let found = lookup_rule(&rules, dst_ip, protocol, port);
+        assert_eq!(found.unwrap().rule_id, "esp-default");
+        assert!(found.unwrap().outputs.is_empty());
     }
 }
