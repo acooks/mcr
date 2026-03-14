@@ -2136,8 +2136,7 @@ mod tests {
     #[test]
     fn test_lookup_rule_wildcard_port() {
         let mut rules: HashMap<(Ipv4Addr, u8, u16), ForwardingRule> = HashMap::new();
-        let mut rule = create_test_rule("udp-wildcard", "239.1.1.1", 0);
-        rule.input_port = 0;
+        let rule = create_test_rule("udp-wildcard", "239.1.1.1", 0);
         rules.insert(
             (rule.input_group, rule.input_protocol, rule.input_port),
             rule,
