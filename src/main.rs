@@ -11,7 +11,7 @@ macro_rules! log_info {
         if $json {
             let msg = format!($($arg)*);
             let log_msg = serde_json::json!({
-                "timestamp": chrono::Utc::now().to_rfc3339(),
+                "timestamp": multicast_relay::logging::rfc3339_utc(),
                 "level": "Info",
                 "facility": $facility,
                 "message": msg,
@@ -28,7 +28,7 @@ macro_rules! log_error {
         if $json {
             let msg = format!($($arg)*);
             let log_msg = serde_json::json!({
-                "timestamp": chrono::Utc::now().to_rfc3339(),
+                "timestamp": multicast_relay::logging::rfc3339_utc(),
                 "level": "Error",
                 "facility": $facility,
                 "message": msg,
