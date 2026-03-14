@@ -1,6 +1,6 @@
 {
   "dependencies": {
-    "mermaid": "^11.12.2"
+    "mermaid": "^11.13.0"
   },
   "devDependencies": {
     "@mermaid-js/mermaid-cli": "^11.12.0",
