@@ -36,7 +36,7 @@ pub struct StderrJsonLogger;
 impl RingBuffer for StderrJsonLogger {
     fn write(&self, entry: LogEntry) {
         let log_msg = serde_json::json!({
-            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "timestamp": super::rfc3339_utc(),
             "level": format!("{:?}", entry.severity),
             "facility": format!("{:?}", entry.facility),
             "message": entry.get_message(),

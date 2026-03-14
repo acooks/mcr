@@ -19,8 +19,6 @@ coverage.lcov
 test_results/
 .gemini_tmp/
 
-# Node.js dependencies
-node_modules/
 *.profraw
 
 # Local cargo config (vendor paths, cross-compilation toolchains)

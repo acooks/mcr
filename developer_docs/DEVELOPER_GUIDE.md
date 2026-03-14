@@ -77,7 +77,7 @@ When you use `rustup`, it will automatically detect this file and ensure you are
 
 ### Project-Specific Developer Tools
 
-This project uses `just` and `markdownlint-cli` to simplify and standardize development tasks.
+This project uses `just` and `rumdl` to simplify and standardize development tasks.
 
 **`just` Command Runner**
 
@@ -89,10 +89,10 @@ cargo install just
 
 ### Documentation Linter
 
-To ensure documentation is consistent and well-formatted, we use `markdownlint-cli`. Install it globally via `npm`:
+To ensure documentation is consistent and well-formatted, we use `rumdl` (a Rust-based markdown linter):
 
 ```bash
-npm install -g markdownlint-cli
+cargo install rumdl
 ```
 
 Your environment is now fully bootstrapped.

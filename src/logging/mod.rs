@@ -13,6 +13,10 @@ mod macros;
 mod ringbuffer;
 mod severity;
 
+// Timestamp formatting (replaces chrono dependency)
+mod timestamp;
+pub use timestamp::{local_timestamp, rfc3339_utc};
+
 // Public exports
 pub use consumer::{AsyncConsumer, LogSink, StderrSink, StdoutSink};
 pub use entry::{KeyValue, LogEntry};

@@ -15,10 +15,12 @@ echo "=== Pre-commit checks ==="
 # Check if any markdown files are staged
 if git diff --cached --name-only | grep -q '\.md$'; then
     echo "Checking markdown formatting..."
-    if ! npx markdownlint --config .markdownlint.json $(git diff --cached --name-only | grep '\.md$') 2>/dev/null; then
-        echo "ERROR: Markdown lint issues found."
-        echo "Run 'just lint-docs' to see details."
-        exit 1
+    if command -v rumdl &>/dev/null; then
+        if ! rumdl check --config .markdownlint.json $(git diff --cached --name-only | grep '\.md$') 2>/dev/null; then
+            echo "ERROR: Markdown lint issues found."
+            echo "Run 'just lint-docs' to see details."
+            exit 1
+        fi
     fi
 fi
 
