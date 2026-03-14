@@ -155,10 +155,10 @@ The MCR data plane uses a **single-threaded, unified event loop model** with a *
 
 **Event Loop Architecture:**
 
-  1. **Ingress (`AF_PACKET`):** The worker submits multiple `Recv` operations to the `io_uring` for its `AF_PACKET` socket.
-  2. **Egress (`AF_INET`):** When a received packet is processed and ready to be forwarded, the worker submits one or more `Send` operations to the _same_ `io_uring` instance for the appropriate `AF_INET` egress sockets.
-  3. **Unified Completion:** The worker makes a single blocking call (`submit_and_wait()`) that waits for _any_ type of event to complete—a packet being received, a packet having been sent, or a command arriving from the supervisor.
-  4. **Processing:** When the loop wakes, it processes all available completion events, frees buffers from sent packets, forwards newly received packets, and then submits new I/O operations to the ring.
+1. **Ingress (`AF_PACKET`):** The worker submits multiple `Recv` operations to the `io_uring` for its `AF_PACKET` socket.
+2. **Egress (`AF_INET`):** When a received packet is processed and ready to be forwarded, the worker submits one or more `Send` operations to the _same_ `io_uring` instance for the appropriate `AF_INET` egress sockets.
+3. **Unified Completion:** The worker makes a single blocking call (`submit_and_wait()`) that waits for _any_ type of event to complete—a packet being received, a packet having been sent, or a command arriving from the supervisor.
+4. **Processing:** When the loop wakes, it processes all available completion events, frees buffers from sent packets, forwards newly received packets, and then submits new I/O operations to the ring.
 
 ### Data Plane Packet Flow
 

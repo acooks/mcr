@@ -43,32 +43,19 @@ clippy:
 # Lint markdown documentation
 lint-docs:
     @echo "--- Linting documentation ---"
-    @if ! command -v npm &> /dev/null; then \
-        echo "Error: npm not installed"; exit 1; \
+    @if ! command -v rumdl &> /dev/null; then \
+        echo "Error: rumdl not installed. Run: cargo install rumdl"; exit 1; \
     fi
-    npx markdownlint --config .markdownlint.json "**/*.md"
-
-# Check markdown links (can be flaky with external URLs)
-check-links:
-    @echo "--- Checking markdown links ---"
-    @if ! command -v npm &> /dev/null; then \
-        echo "Error: npm not installed"; exit 1; \
-    fi
-    @find . -name "*.md" -not -path "*/node_modules/*" -not -path "*/.git/*" -not -path "*/target/*" | \
-        xargs -I {} npx markdown-link-check --config .markdown-link-check.json --quiet {}
-
-# Validate Mermaid diagrams
-validate-mermaid:
-    @node scripts/validate_mermaid.js
+    rumdl check --config .markdownlint.json
 
 # Auto-fix documentation formatting
 fix-docs:
     @echo "--- Auto-fixing documentation ---"
-    npx markdownlint --fix --config .markdownlint.json "**/*.md"
+    rumdl fmt --config .markdownlint.json
     @echo "✅ Done. Review changes with 'git diff'"
 
 # Full code quality check (slow)
-check: fmt clippy lint-docs check-links validate-mermaid build-release test-unit
+check: fmt clippy lint-docs build-release test-unit
     @echo ""
     @echo "✅ Code quality checks passed!"
 

@@ -44,14 +44,8 @@ jobs:
           target/
         key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
-    - name: Setup Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: '20'
-        cache: 'npm'
-
-    - name: Install Node.js dependencies
-      run: npm ci
+    - name: Install rumdl
+      run: command -v rumdl >/dev/null || cargo install rumdl
 
     - name: Install socat (for topology tests)
       run: sudo apt-get update && sudo apt-get install -y socat
@@ -93,20 +87,14 @@ jobs:
           target/
         key: ${{ runner.os }}-cargo-lint-${{ hashFiles('**/Cargo.lock') }}
 
-    - name: Setup Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: '20'
-        cache: 'npm'
-
-    - name: Install Node.js dependencies
-      run: npm ci
+    - name: Install rumdl
+      run: command -v rumdl >/dev/null || cargo install rumdl
 
     - name: Check formatting
       run: cargo fmt --all -- --check
 
     - name: Lint Markdown documentation
-      run: npx markdownlint --config .markdownlint.json "**/*.md"
+      run: rumdl check --config .markdownlint.json
 
     - name: Run Clippy linter
       run: cargo clippy --all-targets --features integration_test -- -D warnings
