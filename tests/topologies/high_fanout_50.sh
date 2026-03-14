@@ -105,6 +105,21 @@ run_traffic 10.0.0.1 239.1.1.1 5001 $PACKET_COUNT $PACKET_SIZE $SEND_RATE
 log_info 'Waiting for pipeline to flush...'
 sleep 3
 
+# Trigger graceful shutdown to get FINAL stats before validation
+log_info 'Triggering graceful shutdown for FINAL stats...'
+if [ -n \"\$mcr_PID\" ] && kill -0 \"\$mcr_PID\" 2>/dev/null; then
+    kill -TERM \"\$mcr_PID\" 2>/dev/null || true
+fi
+# Wait for MCR to exit and write FINAL stats
+for i in \$(seq 1 30); do
+    if [ -n \"\$mcr_PID\" ] && ! kill -0 \"\$mcr_PID\" 2>/dev/null; then
+        log_info \"MCR exited after \${i}00ms\"
+        break
+    fi
+    sleep 0.1
+done
+sleep 1
+
 # Print final stats
 print_final_stats 'MCR:/tmp/mcr_fanout.log'
 
@@ -113,14 +128,14 @@ log_section 'Validating Results'
 VALIDATION_PASSED=0
 
 # Validate matched packets (expect ~60% on CI runners due to resource constraints)
-validate_stat /tmp/mcr_fanout.log 'STATS' 'matched' $((PACKET_COUNT * 60 / 100)) 'MCR ingress matched' || VALIDATION_PASSED=1
+validate_stat /tmp/mcr_fanout.log 'STATS:Ingress' 'matched' $((PACKET_COUNT * 60 / 100)) 'MCR ingress matched' || VALIDATION_PASSED=1
 
 # Validate TX count (should be FANOUT × matched, proportionally scaled)
 # Using 60% of expected total to match ingress threshold
-validate_stat /tmp/mcr_fanout.log 'STATS' 'tx' $((PACKET_COUNT * FANOUT * 60 / 100)) 'MCR egress TX (${FANOUT}x amplification)' || VALIDATION_PASSED=1
+validate_stat /tmp/mcr_fanout.log 'STATS:Egress' 'sent' $((PACKET_COUNT * FANOUT * 60 / 100)) 'MCR egress TX (${FANOUT}x amplification)' || VALIDATION_PASSED=1
 
 # Validate no buffer exhaustion
-validate_stat_max /tmp/mcr_fanout.log 'STATS' 'buf_exhaust' 100 'Buffer exhaustion count' || VALIDATION_PASSED=1
+validate_stat_max /tmp/mcr_fanout.log 'STATS:Ingress' 'buf_exhaust' 100 'Buffer exhaustion count' || VALIDATION_PASSED=1
 
 log_section 'Test Complete'
 

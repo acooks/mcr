@@ -21,6 +21,7 @@ pub struct IngressStats {
     pub filtered: u64,
     pub no_match: u64,
     pub buf_exhaust: u64,
+    pub default_dropped: u64,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -68,11 +69,8 @@ impl Stats {
         Ok(stats)
     }
 
-    fn parse_ingress_final(content: &str) -> Option<IngressStats> {
-        let re = Regex::new(
-            r"\[STATS:Ingress FINAL\] total: recv=(\d+) matched=(\d+) egr_sent=(\d+) filtered=(\d+) no_match=(\d+) buf_exhaust=(\d+)"
-        ).ok()?;
-
+    fn parse_ingress(content: &str, pattern: &str) -> Option<IngressStats> {
+        let re = Regex::new(pattern).ok()?;
         content
             .lines()
             .rev()
@@ -84,62 +82,54 @@ impl Stats {
                 filtered: caps[4].parse().unwrap(),
                 no_match: caps[5].parse().unwrap(),
                 buf_exhaust: caps[6].parse().unwrap(),
+                default_dropped: caps
+                    .get(7)
+                    .and_then(|m| m.as_str().parse().ok())
+                    .unwrap_or(0),
+            })
+    }
+
+    fn parse_ingress_final(content: &str) -> Option<IngressStats> {
+        Self::parse_ingress(
+            content,
+            r"\[STATS:Ingress FINAL\] total: recv=(\d+) matched=(\d+) egr_sent=(\d+) filtered=(\d+) no_match=(\d+) buf_exhaust=(\d+)(?:\s+default_dropped=(\d+))?",
+        )
+    }
+
+    fn parse_ingress_last(content: &str) -> Option<IngressStats> {
+        Self::parse_ingress(
+            content,
+            r"\[STATS:Ingress\] total: recv=(\d+) matched=(\d+) egr_sent=(\d+) filtered=(\d+) no_match=(\d+) buf_exhaust=(\d+)(?:\s+default_dropped=(\d+))?",
+        )
+    }
+
+    fn parse_egress(content: &str, pattern: &str) -> Option<EgressStats> {
+        let re = Regex::new(pattern).ok()?;
+        content
+            .lines()
+            .rev()
+            .find_map(|line| re.captures(line))
+            .map(|caps| EgressStats {
+                sent: caps[1].parse().unwrap(),
+                submitted: caps[2].parse().unwrap(),
+                ch_recv: caps[3].parse().unwrap(),
+                errors: caps[4].parse().unwrap(),
+                bytes: caps[5].parse().unwrap(),
             })
     }
 
     fn parse_egress_final(content: &str) -> Option<EgressStats> {
-        let re = Regex::new(
-            r"\[STATS:Egress FINAL\] total: sent=(\d+) submitted=(\d+) ch_recv=(\d+) errors=(\d+) bytes=(\d+)"
-        ).ok()?;
-
-        content
-            .lines()
-            .rev()
-            .find_map(|line| re.captures(line))
-            .map(|caps| EgressStats {
-                sent: caps[1].parse().unwrap(),
-                submitted: caps[2].parse().unwrap(),
-                ch_recv: caps[3].parse().unwrap(),
-                errors: caps[4].parse().unwrap(),
-                bytes: caps[5].parse().unwrap(),
-            })
-    }
-
-    fn parse_ingress_last(content: &str) -> Option<IngressStats> {
-        let re = Regex::new(
-            r"\[STATS:Ingress\] total: recv=(\d+) matched=(\d+) egr_sent=(\d+) filtered=(\d+) no_match=(\d+) buf_exhaust=(\d+)"
-        ).ok()?;
-
-        content
-            .lines()
-            .rev()
-            .find_map(|line| re.captures(line))
-            .map(|caps| IngressStats {
-                recv: caps[1].parse().unwrap(),
-                matched: caps[2].parse().unwrap(),
-                egr_sent: caps[3].parse().unwrap(),
-                filtered: caps[4].parse().unwrap(),
-                no_match: caps[5].parse().unwrap(),
-                buf_exhaust: caps[6].parse().unwrap(),
-            })
+        Self::parse_egress(
+            content,
+            r"\[STATS:Egress FINAL\] total: sent=(\d+) submitted=(\d+) ch_recv=(\d+) errors=(\d+) bytes=(\d+)",
+        )
     }
 
     fn parse_egress_last(content: &str) -> Option<EgressStats> {
-        let re = Regex::new(
-            r"\[STATS:Egress\] total: sent=(\d+) submitted=(\d+) ch_recv=(\d+) errors=(\d+) bytes=(\d+)"
-        ).ok()?;
-
-        content
-            .lines()
-            .rev()
-            .find_map(|line| re.captures(line))
-            .map(|caps| EgressStats {
-                sent: caps[1].parse().unwrap(),
-                submitted: caps[2].parse().unwrap(),
-                ch_recv: caps[3].parse().unwrap(),
-                errors: caps[4].parse().unwrap(),
-                bytes: caps[5].parse().unwrap(),
-            })
+        Self::parse_egress(
+            content,
+            r"\[STATS:Egress\] total: sent=(\d+) submitted=(\d+) ch_recv=(\d+) errors=(\d+) bytes=(\d+)",
+        )
     }
 }
 
@@ -161,10 +151,27 @@ mod tests {
         assert_eq!(stats.ingress.recv, 200);
         assert_eq!(stats.ingress.matched, 200);
         assert_eq!(stats.ingress.egr_sent, 200);
+        assert_eq!(stats.ingress.default_dropped, 0); // not present in old format
 
         // Egress uses last periodic stat
         assert_eq!(stats.egress.sent, 100);
         assert_eq!(stats.egress.ch_recv, 100);
+    }
+
+    #[test]
+    fn test_parse_final_stats_with_default_dropped() {
+        let log = r#"
+[STATS:Ingress FINAL] total: recv=300 matched=280 egr_sent=250 filtered=10 no_match=0 buf_exhaust=0 default_dropped=30
+[STATS:Egress FINAL] total: sent=250 submitted=250 ch_recv=250 errors=0 bytes=350000
+"#;
+
+        let stats = Stats::from_log_content(log).unwrap();
+
+        assert_eq!(stats.ingress.recv, 300);
+        assert_eq!(stats.ingress.matched, 280);
+        assert_eq!(stats.ingress.egr_sent, 250);
+        assert_eq!(stats.ingress.no_match, 0);
+        assert_eq!(stats.ingress.default_dropped, 30);
     }
 
     #[test]
@@ -177,6 +184,7 @@ mod tests {
         let stats = Stats::from_log_content(log).unwrap();
 
         assert_eq!(stats.ingress.matched, 50);
+        assert_eq!(stats.ingress.default_dropped, 0);
         assert_eq!(stats.egress.sent, 50);
     }
 }
