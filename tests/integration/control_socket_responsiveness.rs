@@ -104,6 +104,8 @@ async fn test_control_socket_responsive_during_worker_restart() -> Result<()> {
         input_protocol: 17,
         input_source: None,
         outputs: vec![],
+        egress: multicast_relay::EgressMode::Republish,
+        ttl_policy: multicast_relay::TtlPolicy::Decrement,
         source: RuleSource::Static,
     };
     client.add_rule(rule).await?;
@@ -202,6 +204,8 @@ async fn test_control_socket_responsive_during_repeated_failures() -> Result<()>
         input_protocol: 17,
         input_source: None,
         outputs: vec![],
+        egress: multicast_relay::EgressMode::Republish,
+        ttl_policy: multicast_relay::TtlPolicy::Decrement,
         source: RuleSource::Static,
     };
     client.add_rule(rule).await?;
@@ -302,6 +306,8 @@ async fn test_control_socket_responsive_during_periodic_sync() -> Result<()> {
         input_protocol: 17,
         input_source: None,
         outputs: vec![],
+        egress: multicast_relay::EgressMode::Republish,
+        ttl_policy: multicast_relay::TtlPolicy::Decrement,
         source: RuleSource::Static,
     };
     client.add_rule(rule).await?;

@@ -71,6 +71,8 @@ async fn test_supervisor_restarts_killed_worker() -> Result<()> {
         input_protocol: 17,
         input_source: None,
         outputs: vec![],
+        egress: multicast_relay::EgressMode::Republish,
+        ttl_policy: multicast_relay::TtlPolicy::Decrement,
         source: RuleSource::Static,
     };
     client.add_rule(rule).await?;
@@ -165,6 +167,8 @@ async fn test_rules_persist_after_worker_restart() -> Result<()> {
         input_protocol: 17,
         input_source: None,
         outputs: vec![],
+        egress: multicast_relay::EgressMode::Republish,
+        ttl_policy: multicast_relay::TtlPolicy::Decrement,
         source: RuleSource::Static,
     };
     client.add_rule(rule).await?;
@@ -204,6 +208,8 @@ async fn test_rules_persist_after_worker_restart() -> Result<()> {
         input_protocol: 17,
         input_source: None,
         outputs: vec![],
+        egress: multicast_relay::EgressMode::Republish,
+        ttl_policy: multicast_relay::TtlPolicy::Decrement,
         source: RuleSource::Static,
     };
     client.add_rule(new_rule).await?;
@@ -245,6 +251,8 @@ async fn test_supervisor_handles_multiple_worker_failures() -> Result<()> {
         input_protocol: 17,
         input_source: None,
         outputs: vec![],
+        egress: multicast_relay::EgressMode::Republish,
+        ttl_policy: multicast_relay::TtlPolicy::Decrement,
         source: RuleSource::Static,
     };
     client.add_rule(rule).await?;
@@ -358,6 +366,8 @@ async fn test_worker_spawns_when_interface_appears() -> Result<()> {
             ttl: None,
             source_ip: None,
         }],
+        egress: multicast_relay::EgressMode::Republish,
+        ttl_policy: multicast_relay::TtlPolicy::Decrement,
         source: RuleSource::Dynamic,
     };
     client.add_rule(rule).await?;

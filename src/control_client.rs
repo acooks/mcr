@@ -35,6 +35,15 @@ pub enum CliCommand {
         input_port: u16,
         #[arg(long, value_parser = parse_output_destination, value_delimiter = ',')]
         outputs: Vec<OutputDestination>,
+        /// Source IP filter (optional). Only match packets from this source.
+        #[arg(long)]
+        input_source: Option<Ipv4Addr>,
+        /// Egress mode: "republish" (default) or "forward" (preserve original IP header)
+        #[arg(long, default_value = "republish")]
+        egress: String,
+        /// TTL policy for forward mode: "decrement" (default), "preserve", or "reset:N"
+        #[arg(long, default_value = "decrement")]
+        ttl_policy: String,
     },
     /// Remove a forwarding rule
     Remove {
@@ -368,15 +377,49 @@ pub fn build_command(cli_command: CliCommand) -> Result<multicast_relay::Supervi
             input_group,
             input_port,
             outputs,
-        } => multicast_relay::SupervisorCommand::AddRule {
-            rule_id: rule_id.unwrap_or_default(),
-            name,
-            input_interface,
-            input_group,
-            input_port,
-            input_protocol: 17,
-            outputs,
-        },
+            input_source,
+            egress,
+            ttl_policy,
+        } => {
+            let egress_mode = match egress.to_lowercase().as_str() {
+                "republish" => multicast_relay::EgressMode::Republish,
+                "forward" => multicast_relay::EgressMode::Forward,
+                other => {
+                    return Err(anyhow::anyhow!(
+                        "Invalid egress mode '{}'. Must be 'republish' or 'forward'.",
+                        other
+                    ))
+                }
+            };
+            let ttl = match ttl_policy.to_lowercase().as_str() {
+                "decrement" => multicast_relay::TtlPolicy::Decrement,
+                "preserve" => multicast_relay::TtlPolicy::Preserve,
+                s if s.starts_with("reset:") => {
+                    let val: u8 = s[6..].parse().map_err(|_| {
+                        anyhow::anyhow!("Invalid TTL reset value. Use 'reset:N' where N is 0-255.")
+                    })?;
+                    multicast_relay::TtlPolicy::Reset(val)
+                }
+                other => {
+                    return Err(anyhow::anyhow!(
+                        "Invalid TTL policy '{}'. Must be 'decrement', 'preserve', or 'reset:N'.",
+                        other
+                    ))
+                }
+            };
+            multicast_relay::SupervisorCommand::AddRule {
+                rule_id: rule_id.unwrap_or_default(),
+                name,
+                input_interface,
+                input_group,
+                input_port,
+                input_protocol: 17,
+                input_source,
+                outputs,
+                egress: egress_mode,
+                ttl_policy: ttl,
+            }
+        }
         CliCommand::Remove { rule_id, name } => {
             match (rule_id, name) {
                 (Some(id), None) => multicast_relay::SupervisorCommand::RemoveRule { rule_id: id },
@@ -819,6 +862,9 @@ mod tests {
                 ttl: None,
                 source_ip: None,
             }],
+            input_source: None,
+            egress: "republish".to_string(),
+            ttl_policy: "decrement".to_string(),
         };
         let supervisor_cmd = build_command(cmd).unwrap();
         match supervisor_cmd {
@@ -829,7 +875,10 @@ mod tests {
                 input_group,
                 input_port,
                 input_protocol: _,
+                input_source: _,
                 outputs,
+                egress: _,
+                ttl_policy: _,
             } => {
                 assert_eq!(rule_id, "test-rule");
                 assert!(name.is_none());
@@ -841,7 +890,7 @@ mod tests {
             _ => panic!("Expected AddRule command"),
         }
 
-        // Test with name
+        // Test with name and forward mode
         let cmd = CliCommand::Add {
             rule_id: None,
             name: Some("video-feed".to_string()),
@@ -849,12 +898,25 @@ mod tests {
             input_group: "239.1.1.1".parse().unwrap(),
             input_port: 5000,
             outputs: vec![],
+            input_source: Some("10.0.0.1".parse().unwrap()),
+            egress: "forward".to_string(),
+            ttl_policy: "preserve".to_string(),
         };
         let supervisor_cmd = build_command(cmd).unwrap();
         match supervisor_cmd {
-            SupervisorCommand::AddRule { rule_id, name, .. } => {
+            SupervisorCommand::AddRule {
+                rule_id,
+                name,
+                input_source,
+                egress,
+                ttl_policy,
+                ..
+            } => {
                 assert_eq!(rule_id, "");
                 assert_eq!(name, Some("video-feed".to_string()));
+                assert_eq!(input_source, Some("10.0.0.1".parse().unwrap()));
+                assert_eq!(egress, multicast_relay::EgressMode::Forward);
+                assert_eq!(ttl_policy, multicast_relay::TtlPolicy::Preserve);
             }
             _ => panic!("Expected AddRule command"),
         }

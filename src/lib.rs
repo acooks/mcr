@@ -29,6 +29,58 @@ fn default_udp_protocol() -> u8 {
     17
 }
 
+/// Egress mode for a forwarding rule.
+///
+/// Controls how MCR sends packets on the egress path:
+/// - `Republish` (default): extract payload, create new UDP packet from relay's own IP
+/// - `Forward`: preserve original IP packet via IP_HDRINCL (transit relay, ESP)
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum EgressMode {
+    /// Default: extract payload and send as new UDP datagram from relay's own IP.
+    /// Compatible with all interface types (VPNs, tunnels, etc.).
+    #[default]
+    Republish,
+    /// Preserve original IP packet (header + payload) via IP_HDRINCL.
+    /// Used for transit relay (source IP preservation) and non-UDP protocols (ESP).
+    Forward,
+}
+
+/// TTL handling policy for Forward-mode egress.
+///
+/// Only meaningful when `egress` is `Forward`. In `Republish` mode, TTL is
+/// controlled by the per-output `ttl` field and this policy is ignored.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TtlPolicy {
+    /// Decrement TTL by 1, drop packet if TTL reaches 0.
+    /// Standard router behavior — provides loop protection.
+    #[default]
+    Decrement,
+    /// Pass TTL through unchanged.
+    /// For transparent relay where TTL is managed elsewhere.
+    Preserve,
+    /// Set TTL to a fixed value.
+    /// For known topology depth where predictable TTL at receivers is needed.
+    Reset(u8),
+}
+
+impl EgressMode {
+    /// Returns true if this is the default value.
+    /// Used by serde skip_serializing_if.
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+impl TtlPolicy {
+    /// Returns true if this is the default value.
+    /// Used by serde skip_serializing_if.
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// PIM tree type for (S,G) vs (*,G) routing
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum PimTreeType {
@@ -202,7 +254,18 @@ pub enum SupervisorCommand {
         /// IP protocol number (default: 17 = UDP, 50 = ESP)
         #[serde(default = "default_udp_protocol")]
         input_protocol: u8,
+        /// Source IP filter. When present, only relay packets whose IP
+        /// source address matches. Used for per-source relay rules that
+        /// prevent forwarding loops in ring topologies.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_source: Option<Ipv4Addr>,
         outputs: Vec<OutputDestination>,
+        /// Egress mode: Republish (default) or Forward (IP_HDRINCL transit relay)
+        #[serde(default)]
+        egress: EgressMode,
+        /// TTL handling policy for Forward mode
+        #[serde(default)]
+        ttl_policy: TtlPolicy,
     },
     RemoveRule {
         rule_id: String,
@@ -860,6 +923,16 @@ pub struct ForwardingRule {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_source: Option<Ipv4Addr>,
     pub outputs: Vec<OutputDestination>,
+    /// Egress mode: Republish (default) or Forward (IP_HDRINCL transit relay).
+    /// Forward mode preserves the original source IP for transit relay and
+    /// is required for non-UDP protocols (ESP).
+    #[serde(default, skip_serializing_if = "EgressMode::is_default")]
+    pub egress: EgressMode,
+    /// TTL handling policy for Forward mode.
+    /// Decrement (default) provides loop protection; Preserve passes through
+    /// unchanged; Reset overrides to a fixed value.
+    #[serde(default, skip_serializing_if = "TtlPolicy::is_default")]
+    pub ttl_policy: TtlPolicy,
     /// Source of this rule (static, dynamic, PIM, IGMP)
     #[serde(default)]
     pub source: RuleSource,
@@ -974,6 +1047,7 @@ mod tests {
             input_group: "224.0.0.1".parse().unwrap(),
             input_port: 5000,
             input_protocol: 17,
+            input_source: None,
             outputs: vec![OutputDestination {
                 group: "224.0.0.2".parse().unwrap(),
                 port: 5001,
@@ -981,6 +1055,8 @@ mod tests {
                 ttl: None,
                 source_ip: None,
             }],
+            egress: EgressMode::Republish,
+            ttl_policy: TtlPolicy::Decrement,
         };
         let json = serde_json::to_string(&add_command).unwrap();
         let deserialized: SupervisorCommand = serde_json::from_str(&json).unwrap();
@@ -1025,6 +1101,8 @@ mod tests {
             input_protocol: 17,
             input_source: None,
             outputs: vec![],
+            egress: EgressMode::Republish,
+            ttl_policy: TtlPolicy::Decrement,
             source: RuleSource::Static,
         };
         let rules_response = Response::Rules(vec![rule]);
@@ -1064,6 +1142,8 @@ mod tests {
                 ttl: None,
                 source_ip: None,
             }],
+            egress: EgressMode::Republish,
+            ttl_policy: TtlPolicy::Decrement,
             source: RuleSource::Static,
         };
         let json = serde_json::to_string(&rule).unwrap();
@@ -1088,6 +1168,8 @@ mod tests {
                 ttl: None,
                 source_ip: None,
             }],
+            egress: EgressMode::Republish,
+            ttl_policy: TtlPolicy::Decrement,
             source: RuleSource::Pim {
                 tree_type: PimTreeType::SG,
                 created_at: 1234567890,
@@ -1348,6 +1430,8 @@ mod tests {
                 ttl: None,
                 source_ip: None,
             }],
+            egress: EgressMode::Republish,
+            ttl_policy: TtlPolicy::Decrement,
             source: RuleSource::Static,
         };
         let json = serde_json::to_string(&rule).unwrap();
@@ -1433,8 +1517,20 @@ mod tests {
             SupervisorCommand::AddRule {
                 input_protocol,
                 input_port,
+                egress,
+                ttl_policy,
                 ..
             } => {
+                assert_eq!(
+                    egress,
+                    EgressMode::Republish,
+                    "Missing egress should default to Republish"
+                );
+                assert_eq!(
+                    ttl_policy,
+                    TtlPolicy::Decrement,
+                    "Missing ttl_policy should default to Decrement"
+                );
                 assert_eq!(
                     input_protocol, 17,
                     "Missing input_protocol should default to 17"
@@ -1454,11 +1550,71 @@ mod tests {
             input_group: "239.255.0.100".parse().unwrap(),
             input_port: 0,
             input_protocol: 50,
+            input_source: None,
             outputs: vec![],
+            egress: EgressMode::Republish,
+            ttl_policy: TtlPolicy::Decrement,
         };
         let json = serde_json::to_string(&cmd).unwrap();
         assert!(json.contains("\"input_protocol\":50"));
         let deserialized: SupervisorCommand = serde_json::from_str(&json).unwrap();
         assert_eq!(cmd, deserialized);
+    }
+
+    #[test]
+    fn test_forwarding_rule_egress_mode_serialization() {
+        let rule = ForwardingRule {
+            rule_id: "forward-test".to_string(),
+            name: Some("transit relay rule".to_string()),
+            input_interface: "vr-link".to_string(),
+            input_group: "239.0.0.100".parse().unwrap(),
+            input_port: 4789,
+            input_protocol: 17,
+            input_source: Some("100.64.1.1".parse().unwrap()),
+            outputs: vec![OutputDestination {
+                group: "239.0.0.100".parse().unwrap(),
+                port: 4789,
+                interface: "vr-link2".into(),
+                ttl: None,
+                source_ip: None,
+            }],
+            egress: EgressMode::Forward,
+            ttl_policy: TtlPolicy::Decrement,
+            source: RuleSource::Dynamic,
+        };
+        let json = serde_json::to_string(&rule).unwrap();
+        assert!(
+            json.contains("\"egress\":\"forward\""),
+            "egress:forward must appear in JSON: {json}"
+        );
+        let deserialized: ForwardingRule = serde_json::from_str(&json).unwrap();
+        assert_eq!(rule, deserialized);
+        assert_eq!(deserialized.egress, EgressMode::Forward);
+        assert_eq!(deserialized.ttl_policy, TtlPolicy::Decrement);
+    }
+
+    #[test]
+    fn test_ttl_policy_serialization() {
+        // Reset variant serializes with value
+        let rule = ForwardingRule {
+            rule_id: "ttl-test".to_string(),
+            name: None,
+            input_interface: "eth0".to_string(),
+            input_group: "239.1.1.1".parse().unwrap(),
+            input_port: 5000,
+            input_protocol: 17,
+            input_source: None,
+            outputs: vec![],
+            egress: EgressMode::Forward,
+            ttl_policy: TtlPolicy::Reset(64),
+            source: RuleSource::Static,
+        };
+        let json = serde_json::to_string(&rule).unwrap();
+        assert!(
+            json.contains("\"ttl_policy\""),
+            "ttl_policy must appear: {json}"
+        );
+        let deserialized: ForwardingRule = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.ttl_policy, TtlPolicy::Reset(64));
     }
 }

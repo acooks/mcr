@@ -15,6 +15,15 @@ MCR supports three complementary approaches to multicast forwarding:
 
 These can be used independently or combined for hybrid deployments.
 
+MCR also supports extended transport capabilities beyond standard UDP multicast:
+
+| Capability | Use Case | Configuration |
+|------------|----------|---------------|
+| **ESP Transport** | IPsec multicast (protocol 50) | `input: { protocol: "esp" }` |
+| **Forward Egress** | Transit relay with source IP preservation | `egress: "forward"` |
+
+See the [Reference Manual](./REFERENCE.md#59-egress-modes) for detailed configuration.
+
 ---
 
 ## Static Rules

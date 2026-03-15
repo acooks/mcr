@@ -18,6 +18,7 @@
 //! 3. PIM (*,G) routes (shared trees rooted at RP)
 //! 4. IGMP-learned membership (local receiver interest)
 
+use crate::{EgressMode, TtlPolicy};
 use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
 use std::sync::Arc;
@@ -100,6 +101,8 @@ impl StarGRoute {
             input_protocol: 17,
             input_source: None, // (*,G) matches any source
             outputs,
+            egress: EgressMode::Republish,
+            ttl_policy: TtlPolicy::Decrement,
             source: RuleSource::Pim {
                 tree_type: PimTreeType::StarG,
                 created_at: self.created_at.elapsed().as_secs().saturating_add(
@@ -207,6 +210,8 @@ impl SGRoute {
             input_protocol: 17,
             input_source: Some(self.source), // (S,G) matches specific source
             outputs,
+            egress: EgressMode::Republish,
+            ttl_policy: TtlPolicy::Decrement,
             source: RuleSource::Pim {
                 tree_type: PimTreeType::SG,
                 created_at: self.created_at.elapsed().as_secs().saturating_add(
@@ -714,6 +719,8 @@ mod tests {
                 ttl: None,
                 source_ip: None,
             }],
+            egress: EgressMode::Republish,
+            ttl_policy: TtlPolicy::Decrement,
             source: RuleSource::Static,
         }
     }

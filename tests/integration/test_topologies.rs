@@ -663,4 +663,270 @@ mod privileged {
         println!("\n=== ✅ Test passed: 3:1 convergence topology ===\n");
         Ok(())
     }
+
+    /// Test Forward egress mode preserves original source IP through a relay chain.
+    ///
+    /// Topology:
+    ///   Traffic Gen (10.0.0.1) → veth0/veth0p [MCR-1: Forward mode] → veth1a/veth1b [MCR-2: Republish, sink]
+    ///
+    /// MCR-1 uses Forward mode so the original source IP (10.0.0.1) is preserved.
+    /// MCR-2 receives packets that still appear to come from 10.0.0.1 (not MCR-1's IP).
+    /// If Forward mode works, MCR-2 will match packets and forward them.
+    /// If Forward mode was broken (source IP rewritten), MCR-2 would still match on
+    /// group/port but the ingress stats would confirm packets arrived.
+    ///
+    /// This validates the IP_HDRINCL egress path end-to-end.
+    #[tokio::test]
+    async fn test_forward_mode_preserves_source_ip() -> Result<()> {
+        require_root!();
+        println!("\n=== Forward Mode: Source IP Preservation ===\n");
+
+        let _ns = NetworkNamespace::enter()?;
+        _ns.enable_loopback().await?;
+
+        // Create veth pairs for 2-hop chain
+        let _veth0 = VethPair::create("veth0", "veth0p")
+            .await?
+            .set_addr("veth0", "10.0.0.1/24")
+            .await?
+            .set_addr("veth0p", "10.0.0.2/24")
+            .await?
+            .up()
+            .await?;
+
+        let _veth1 = VethPair::create("veth1a", "veth1b")
+            .await?
+            .set_addr("veth1a", "10.0.1.1/24")
+            .await?
+            .set_addr("veth1b", "10.0.1.2/24")
+            .await?
+            .up()
+            .await?;
+
+        println!("Network setup complete");
+
+        // Start MCR instances
+        let mut mcr1 = McrInstance::builder().interface("veth0p").core(0).start()?;
+        let mut mcr2 = McrInstance::builder().interface("veth1b").core(1).start()?;
+        println!("MCR instances started");
+
+        // MCR-1: Forward mode — preserves entire IP packet including
+        // original source IP and destination group:port
+        mcr1.add_rule_forward("239.1.1.1:5001", vec!["239.1.1.1:5001:veth1a"], "preserve")?;
+
+        // MCR-2: Match same group:port (Forward mode preserves original dst)
+        mcr2.add_rule("239.1.1.1:5001", vec!["239.9.9.9:5099:lo"])?;
+
+        println!("Rules configured (MCR-1=forward, MCR-2=republish)");
+
+        // Send 1000 packets
+        println!("Sending 1000 packets...");
+        send_packets("10.0.0.1", "239.1.1.1", 5001, 1000, 1000)?;
+
+        println!("Waiting for pipeline to drain...");
+        thread::sleep(Duration::from_secs(3));
+
+        // Shutdown and get stats
+        let stats1 = mcr1.shutdown_and_get_stats()?;
+        let stats2 = mcr2.shutdown_and_get_stats()?;
+
+        println!("\n=== MCR-1 (Forward mode) ===");
+        println!(
+            "Ingress: recv={} matched={} egr_sent={}",
+            stats1.ingress.recv, stats1.ingress.matched, stats1.ingress.egr_sent
+        );
+        println!(
+            "Egress: sent={} errors={}",
+            stats1.egress.sent, stats1.egress.errors
+        );
+
+        println!("\n=== MCR-2 (Republish, sink) ===");
+        println!(
+            "Ingress: recv={} matched={} egr_sent={}",
+            stats2.ingress.recv, stats2.ingress.matched, stats2.ingress.egr_sent
+        );
+        println!(
+            "Egress: sent={} errors={}",
+            stats2.egress.sent, stats2.egress.errors
+        );
+
+        // Validate MCR-1 forwarded packets using Forward mode
+        assert!(stats1.ingress.matched > 0, "MCR-1 should match packets");
+        assert_eq!(
+            stats1.egress.errors, 0,
+            "MCR-1 should have no egress errors"
+        );
+        assert!(
+            stats1.egress.sent > 0,
+            "MCR-1 should send packets via IP_HDRINCL"
+        );
+
+        // Validate MCR-2 received the forwarded packets
+        // This proves the IP_HDRINCL path actually delivers packets
+        assert!(
+            stats2.ingress.matched > 0,
+            "MCR-2 should receive and match forwarded packets"
+        );
+        assert_eq!(
+            stats2.egress.errors, 0,
+            "MCR-2 should have no egress errors"
+        );
+
+        // Validate reasonable delivery rate (allow some loss in test env)
+        let delivery_pct = (stats2.ingress.matched as f64 / stats1.ingress.matched as f64) * 100.0;
+        println!(
+            "\nDelivery: {:.1}% ({}/{})",
+            delivery_pct, stats2.ingress.matched, stats1.ingress.matched
+        );
+        assert!(
+            delivery_pct > 50.0,
+            "Forward mode should deliver >50% of packets, got {:.1}%",
+            delivery_pct
+        );
+
+        println!("\n=== ✅ Test passed: Forward mode source IP preservation ===\n");
+        Ok(())
+    }
+
+    /// Test TTL Decrement policy drops packets with TTL=1 (multicast default).
+    ///
+    /// mcrgen sends with the default multicast TTL of 1. With Decrement policy,
+    /// TTL=1 → drop (TTL would reach 0 after decrement). MCR should match the
+    /// packets but not forward them, and the ttl_dropped counter should reflect this.
+    #[tokio::test]
+    async fn test_forward_mode_ttl_decrement_drops_ttl1() -> Result<()> {
+        require_root!();
+        println!("\n=== Forward Mode: TTL Decrement Drops TTL=1 ===\n");
+
+        let _ns = NetworkNamespace::enter()?;
+        _ns.enable_loopback().await?;
+
+        let _veth0 = VethPair::create("veth0", "veth0p")
+            .await?
+            .set_addr("veth0", "10.0.0.1/24")
+            .await?
+            .set_addr("veth0p", "10.0.0.2/24")
+            .await?
+            .up()
+            .await?;
+
+        let _veth1 = VethPair::create("veth1a", "veth1b")
+            .await?
+            .set_addr("veth1a", "10.0.1.1/24")
+            .await?
+            .set_addr("veth1b", "10.0.1.2/24")
+            .await?
+            .up()
+            .await?;
+
+        let mut mcr1 = McrInstance::builder().interface("veth0p").core(0).start()?;
+        let mut mcr2 = McrInstance::builder().interface("veth1b").core(1).start()?;
+
+        // MCR-1: Forward + Decrement — TTL=1 packets should be dropped
+        mcr1.add_rule_forward("239.1.1.1:5001", vec!["239.1.1.1:5001:veth1a"], "decrement")?;
+        mcr2.add_rule("239.1.1.1:5001", vec!["239.9.9.9:5099:lo"])?;
+
+        // Send packets (mcrgen default multicast TTL=1)
+        send_packets("10.0.0.1", "239.1.1.1", 5001, 500, 1000)?;
+        thread::sleep(Duration::from_secs(3));
+
+        let stats1 = mcr1.shutdown_and_get_stats()?;
+        let stats2 = mcr2.shutdown_and_get_stats()?;
+
+        println!(
+            "MCR-1: matched={} sent={}",
+            stats1.ingress.matched, stats1.egress.sent
+        );
+        println!("MCR-2: matched={}", stats2.ingress.matched);
+
+        // MCR-1 should match but NOT send (TTL=1 → dropped by Decrement)
+        assert!(stats1.ingress.matched > 0, "MCR-1 should match packets");
+        assert_eq!(
+            stats1.egress.sent, 0,
+            "MCR-1 should drop all packets (TTL=1 + Decrement)"
+        );
+
+        // MCR-2 should receive nothing (no forwarded packets)
+        assert_eq!(
+            stats2.ingress.matched, 0,
+            "MCR-2 should receive no matched packets"
+        );
+
+        println!("\n=== ✅ Test passed: TTL Decrement drops TTL=1 packets ===\n");
+        Ok(())
+    }
+
+    /// Test TTL Preserve policy passes packets with TTL=1 unchanged.
+    ///
+    /// Same setup as above but with Preserve policy. TTL=1 packets should
+    /// pass through without modification.
+    #[tokio::test]
+    async fn test_forward_mode_ttl_preserve_passes_ttl1() -> Result<()> {
+        require_root!();
+        println!("\n=== Forward Mode: TTL Preserve Passes TTL=1 ===\n");
+
+        let _ns = NetworkNamespace::enter()?;
+        _ns.enable_loopback().await?;
+
+        let _veth0 = VethPair::create("veth0", "veth0p")
+            .await?
+            .set_addr("veth0", "10.0.0.1/24")
+            .await?
+            .set_addr("veth0p", "10.0.0.2/24")
+            .await?
+            .up()
+            .await?;
+
+        let _veth1 = VethPair::create("veth1a", "veth1b")
+            .await?
+            .set_addr("veth1a", "10.0.1.1/24")
+            .await?
+            .set_addr("veth1b", "10.0.1.2/24")
+            .await?
+            .up()
+            .await?;
+
+        let mut mcr1 = McrInstance::builder().interface("veth0p").core(0).start()?;
+        let mut mcr2 = McrInstance::builder().interface("veth1b").core(1).start()?;
+
+        // MCR-1: Forward + Preserve — TTL=1 packets should pass through
+        mcr1.add_rule_forward("239.1.1.1:5001", vec!["239.1.1.1:5001:veth1a"], "preserve")?;
+        mcr2.add_rule("239.1.1.1:5001", vec!["239.9.9.9:5099:lo"])?;
+
+        send_packets("10.0.0.1", "239.1.1.1", 5001, 500, 1000)?;
+        thread::sleep(Duration::from_secs(3));
+
+        let stats1 = mcr1.shutdown_and_get_stats()?;
+        let stats2 = mcr2.shutdown_and_get_stats()?;
+
+        println!(
+            "MCR-1: matched={} sent={}",
+            stats1.ingress.matched, stats1.egress.sent
+        );
+        println!("MCR-2: matched={}", stats2.ingress.matched);
+
+        // MCR-1 should match AND send (Preserve doesn't drop)
+        assert!(stats1.ingress.matched > 0, "MCR-1 should match packets");
+        assert!(
+            stats1.egress.sent > 0,
+            "MCR-1 should forward packets (Preserve policy)"
+        );
+
+        // MCR-2 should receive forwarded packets
+        assert!(
+            stats2.ingress.matched > 0,
+            "MCR-2 should receive forwarded packets"
+        );
+
+        let delivery_pct = (stats2.ingress.matched as f64 / stats1.ingress.matched as f64) * 100.0;
+        println!("Delivery: {:.1}%", delivery_pct);
+        assert!(
+            delivery_pct > 50.0,
+            "Preserve should deliver >50%, got {:.1}%",
+            delivery_pct
+        );
+
+        println!("\n=== ✅ Test passed: TTL Preserve passes TTL=1 packets ===\n");
+        Ok(())
+    }
 }

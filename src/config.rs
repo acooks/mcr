@@ -13,6 +13,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::validation;
+use crate::{EgressMode, TtlPolicy};
 use crate::{ForwardingRule, OutputDestination, RuleSource};
 
 /// Startup/running configuration (JSON5 file format)
@@ -245,6 +246,14 @@ pub struct ConfigRule {
 
     /// Output destinations
     pub outputs: Vec<OutputSpec>,
+
+    /// Egress mode: "republish" (default) or "forward"
+    #[serde(default, skip_serializing_if = "EgressMode::is_default")]
+    pub egress: EgressMode,
+
+    /// TTL policy for Forward mode: "decrement" (default), "preserve", or {"reset": N}
+    #[serde(default, skip_serializing_if = "TtlPolicy::is_default")]
+    pub ttl_policy: TtlPolicy,
 }
 
 /// Input specification for a rule
@@ -466,6 +475,8 @@ impl ConfigRule {
                     source_ip: None, // Static config rules don't specify source_ip
                 })
                 .collect(),
+            egress: self.egress,
+            ttl_policy: self.ttl_policy,
             source: RuleSource::Static, // Config file rules are static
         }
     }
@@ -494,6 +505,8 @@ impl ConfigRule {
                     ttl: o.ttl,
                 })
                 .collect(),
+            egress: rule.egress,
+            ttl_policy: rule.ttl_policy,
         }
     }
 
@@ -923,6 +936,8 @@ mod tests {
                         protocol: None,
                     },
                     outputs: vec![],
+                    egress: EgressMode::Republish,
+                    ttl_policy: TtlPolicy::Decrement,
                 },
                 ConfigRule {
                     name: Some("rule2".to_string()),
@@ -933,6 +948,8 @@ mod tests {
                         protocol: None,
                     },
                     outputs: vec![],
+                    egress: EgressMode::Republish,
+                    ttl_policy: TtlPolicy::Decrement,
                 },
             ],
             pim: None,
@@ -959,6 +976,8 @@ mod tests {
                     protocol: None,
                 },
                 outputs: vec![],
+                egress: EgressMode::Republish,
+                ttl_policy: TtlPolicy::Decrement,
             }],
             pim: None,
             igmp: None,
@@ -987,6 +1006,8 @@ mod tests {
                     protocol: None,
                 },
                 outputs: vec![],
+                egress: EgressMode::Republish,
+                ttl_policy: TtlPolicy::Decrement,
             }],
             pim: None,
             igmp: None,
@@ -1017,6 +1038,8 @@ mod tests {
                     protocol: None,
                 },
                 outputs: vec![],
+                egress: EgressMode::Republish,
+                ttl_policy: TtlPolicy::Decrement,
             }],
             pim: None,
             igmp: None,
@@ -1047,6 +1070,8 @@ mod tests {
                     protocol: None,
                 },
                 outputs: vec![],
+                egress: EgressMode::Republish,
+                ttl_policy: TtlPolicy::Decrement,
             }],
             pim: None,
             igmp: None,
@@ -1082,6 +1107,8 @@ mod tests {
                     interface: "".to_string(), // Invalid empty output interface
                     ttl: None,
                 }],
+                egress: EgressMode::Republish,
+                ttl_policy: TtlPolicy::Decrement,
             }],
             pim: None,
             igmp: None,
@@ -1110,6 +1137,8 @@ mod tests {
                     protocol: None,
                 },
                 outputs: vec![],
+                egress: EgressMode::Republish,
+                ttl_policy: TtlPolicy::Decrement,
             }],
             pim: None,
             igmp: None,
@@ -1140,6 +1169,8 @@ mod tests {
                     interface: "eth1".to_string(),
                     ttl: None,
                 }],
+                egress: EgressMode::Republish,
+                ttl_policy: TtlPolicy::Decrement,
             }],
             pim: None,
             igmp: None,
@@ -1178,6 +1209,8 @@ mod tests {
                     interface: "eth1".to_string(),
                     ttl: None,
                 }],
+                egress: EgressMode::Republish,
+                ttl_policy: TtlPolicy::Decrement,
             }],
             pim: None,
             igmp: None,
@@ -1209,6 +1242,8 @@ mod tests {
                     interface: "eth1".to_string(),
                     ttl: None,
                 }],
+                egress: EgressMode::Republish,
+                ttl_policy: TtlPolicy::Decrement,
             }],
             pim: None,
             igmp: None,
@@ -1277,6 +1312,8 @@ mod tests {
                 interface: "eth1".to_string(),
                 ttl: None,
             }],
+            egress: EgressMode::Republish,
+            ttl_policy: TtlPolicy::Decrement,
         };
 
         let forwarding_rule = rule.to_forwarding_rule();
@@ -1301,6 +1338,8 @@ mod tests {
                 protocol: None,
             },
             outputs: vec![],
+            egress: EgressMode::Republish,
+            ttl_policy: TtlPolicy::Decrement,
         };
 
         let rule2 = ConfigRule {
@@ -1312,6 +1351,8 @@ mod tests {
                 protocol: None,
             },
             outputs: vec![],
+            egress: EgressMode::Republish,
+            ttl_policy: TtlPolicy::Decrement,
         };
 
         // Same input tuple should generate same ID
@@ -1327,6 +1368,8 @@ mod tests {
                 protocol: None,
             },
             outputs: vec![],
+            egress: EgressMode::Republish,
+            ttl_policy: TtlPolicy::Decrement,
         };
         assert_ne!(rule1.generate_rule_id(), rule3.generate_rule_id());
     }
@@ -1349,6 +1392,8 @@ mod tests {
                     interface: "eth1".to_string(),
                     ttl: None,
                 }],
+                egress: EgressMode::Republish,
+                ttl_policy: TtlPolicy::Decrement,
             }],
             pim: None,
             igmp: None,
@@ -1379,6 +1424,8 @@ mod tests {
                     interface: "eth1".to_string(),
                     ttl: None,
                 }],
+                egress: EgressMode::Republish,
+                ttl_policy: TtlPolicy::Decrement,
             }],
             pim: None,
             igmp: None,
@@ -2188,6 +2235,8 @@ mod tests {
                 interface: "eth1".to_string(),
                 ttl: None,
             }],
+            egress: EgressMode::Republish,
+            ttl_policy: TtlPolicy::Decrement,
         };
 
         let rule = config_rule.to_forwarding_rule();
@@ -2219,6 +2268,8 @@ mod tests {
                 interface: "eth1".to_string(),
                 ttl: None,
             }],
+            egress: EgressMode::Republish,
+            ttl_policy: TtlPolicy::Decrement,
         };
 
         let rule = config_rule.to_forwarding_rule();
@@ -2247,6 +2298,8 @@ mod tests {
                     interface: "eth1".to_string(),
                     ttl: None,
                 }],
+                egress: EgressMode::Republish,
+                ttl_policy: TtlPolicy::Decrement,
             }],
             pim: None,
             igmp: None,
@@ -2279,6 +2332,8 @@ mod tests {
                     interface: "eth1".to_string(),
                     ttl: None,
                 }],
+                egress: EgressMode::Republish,
+                ttl_policy: TtlPolicy::Decrement,
             }],
             pim: None,
             igmp: None,
@@ -2314,6 +2369,8 @@ mod tests {
                         interface: "eth1".to_string(),
                         ttl: None,
                     }],
+                    egress: EgressMode::Republish,
+                    ttl_policy: TtlPolicy::Decrement,
                 },
                 ConfigRule {
                     name: Some("ESP rule".to_string()),
@@ -2329,6 +2386,8 @@ mod tests {
                         interface: "eth1".to_string(),
                         ttl: None,
                     }],
+                    egress: EgressMode::Republish,
+                    ttl_policy: TtlPolicy::Decrement,
                 },
             ],
             pim: None,
@@ -2368,6 +2427,8 @@ mod tests {
                 ttl: None,
                 source_ip: None,
             }],
+            egress: EgressMode::Republish,
+            ttl_policy: TtlPolicy::Decrement,
             source: crate::RuleSource::Static,
         };
 
@@ -2394,6 +2455,8 @@ mod tests {
             input_protocol: 17,
             input_source: None,
             outputs: vec![],
+            egress: EgressMode::Republish,
+            ttl_policy: TtlPolicy::Decrement,
             source: crate::RuleSource::Static,
         };
 
@@ -2424,6 +2487,8 @@ mod tests {
                 interface: "eth1".to_string(),
                 ttl: None,
             }],
+            egress: EgressMode::Republish,
+            ttl_policy: TtlPolicy::Decrement,
         };
 
         let rule = config_rule.to_forwarding_rule();

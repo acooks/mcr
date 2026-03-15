@@ -145,9 +145,17 @@ The MCR data plane uses a **single-threaded, unified event loop model** with a *
 
 - **Hybrid I/O Strategy (Asymmetrical Pipeline):**
   - **Ingress (Layer 2 - `AF_PACKET`):** Workers indiscriminately capture multicast traffic using raw `AF_PACKET` sockets. This occurs at Layer 2, effectively "sniffing" the wire before the kernel's IP stack can process the packet. This allows MCR to bypass the kernel's Reverse Path Forwarding (RPF) checks, which would otherwise drop traffic from unroutable sources.
-  - **Egress (Layer 3/4 - `AF_INET`/UDP):** Workers transmit packets using standard `SOCK_DGRAM` (UDP) sockets. MCR "republishes" the payload as a new UDP datagram. This allows the application to rely entirely on the Linux kernel for Layer 3 routing, Layer 2 encapsulation (ARP/Neighbor Discovery), and IP fragmentation.
+  - **Egress:** MCR supports two egress modes, configured per-rule via the `egress` field:
 
-  **Why this matters:** Because the egress path is standard UDP, MCR is fully compatible with any interface the Linux kernel supports, including **VPNs (WireGuard, OpenVPN)**, **Tun/Tap interfaces**, and **cellular/satellite links**, provided the routing table is configured correctly.
+    1. **Republish (default):** `SOCK_DGRAM` (UDP) sockets. MCR extracts the payload and sends a _new_ UDP datagram from the relay node's own IP address. The Linux kernel handles Layer 3 routing, Layer 2 encapsulation (ARP/Neighbor Discovery), and IP fragmentation. This mode is compatible with any interface the kernel supports, including **VPNs (WireGuard, OpenVPN)**, **Tun/Tap interfaces**, and **cellular/satellite links**.
+
+    2. **Forward:** `SOCK_RAW` with `IP_HDRINCL`. MCR sends the original IP packet (header and payload) verbatim, preserving the original source IP address. This mode is used for **transit relay**, where an intermediate MCR node must pass traffic through without rewriting the source identity. It is also required for non-UDP IP protocols such as **ESP (IPsec, protocol 50)**, which have no UDP layer and cannot use `SOCK_DGRAM`.
+
+  **When to use Forward mode:** In a chain or ring of MCR nodes where downstream hops use per-source rules (`input_source` filtering), Republish mode breaks because each hop rewrites the source IP to its own address. Forward mode preserves the original sender's identity through the chain, allowing downstream per-source rules to match correctly.
+
+  **Forward mode TTL handling:** Because the original IP header is preserved, TTL must be managed explicitly. The `ttl_policy` field controls this: `decrement` (default) decrements TTL and drops packets at zero (standard router behavior, provides loop protection); `preserve` passes TTL through unchanged; `reset` overrides TTL to a configured value.
+
+  **Trade-offs:** Forward mode bypasses kernel UDP services — there is no kernel-level fragmentation on the egress path, and the relay node's routing table is not consulted for source address selection. Operators must ensure consistent MTU across the forwarding path. Forward mode requires `CAP_NET_RAW` (already required by MCR for `AF_PACKET` ingress).
 
 - **Core Affinity:** The supervisor spawns one data plane worker process per designated CPU core, and this worker process is pinned to that core.
 
@@ -169,10 +177,14 @@ flowchart LR
         AF --> RECV[Recv Batch];
         RECV --> PARSE[Parse Headers];
         PARSE --> LOOKUP{Rule Lookup};
-        LOOKUP -- Match --> SEND[Send Batch];
+        LOOKUP -- Match --> MODE{Egress Mode};
         LOOKUP -- No Match --> DROP([Drop]);
-        SEND --> INET[AF_INET Socket];
-        INET --> OUT[Output Interface];
+        MODE -- Republish --> EXTRACT[Extract Payload];
+        MODE -- Forward --> HDRINCL[Preserve IP Header];
+        EXTRACT --> UDP[SOCK_DGRAM];
+        HDRINCL --> RAW[SOCK_RAW / IP_HDRINCL];
+        UDP --> OUT[Output Interface];
+        RAW --> OUT;
     end
 
     subgraph "Buffer Pool"
@@ -180,7 +192,8 @@ flowchart LR
     end
 
     BP -- Allocate --> RECV;
-    SEND -- Free --> BP;
+    UDP -- Free --> BP;
+    RAW -- Free --> BP;
 ```
 
 - **Benefits of this Model:**
@@ -194,10 +207,11 @@ flowchart LR
 
 - **Egress Path and Zero-Copy Fan-Out:** MCR now supports high-performance, multi-output "fan-out." When a packet needs to be forwarded to multiple destinations, the payload of the single received packet is wrapped in a reference-counted pointer (`Arc<[u8]>`). This allows the same memory to be queued for sending on multiple egress sockets without any memory copying, which is critical for scalable performance. This also applies to single-output forwarding, eliminating the previous `memcpy` overhead.
 
-  The application utilizes three distinct egress paths:
+  The application utilizes four distinct egress paths:
   1. **Control Interface:** Uses `AF_UNIX` sockets for local IPC. MTU is not applicable.
   2. **IGMP Signaling:** Uses `AF_INET` sockets managed by the Supervisor. MTU is not a practical concern.
-  3. **Fast Data Path:** Uses `AF_INET` sockets managed by the data plane workers. This is the exclusive subject of all high-performance design decisions concerning MTU handling, fragmentation, and NIC offloading.
+  3. **Republish Data Path:** Uses `AF_INET`/`SOCK_DGRAM` sockets managed by the data plane workers. MCR creates a new UDP datagram from the extracted payload. The kernel handles routing, ARP, and fragmentation.
+  4. **Forward Data Path:** Uses `AF_INET`/`SOCK_RAW` (`IPPROTO_RAW`/`IP_HDRINCL`) sockets managed by the data plane workers. MCR sends the original IP packet verbatim. Used for transit relay (source IP preservation) and non-UDP protocols (ESP). No kernel fragmentation — MTU must be consistent across the path.
 
 - **Egress Error Handling:** The application will use a "Drop and Count" strategy for transient egress errors. Packets that fail to send due to transient errors will be dropped immediately, with no retry mechanism, to preserve low latency and prevent head-of-line blocking. A new metric, `egress_errors_total`, will be tracked on a per-output-destination basis and exposed via the control interface to provide immediate visibility into egress failures.
 
