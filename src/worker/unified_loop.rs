@@ -203,8 +203,9 @@ pub struct UnifiedDataPlane {
     in_flight_recvs: HashMap<u64, ManagedBuffer>,
     next_recv_user_data: u64,
 
-    // Forwarding rules (keyed by input_group, input_protocol, input_port)
-    rules: HashMap<(Ipv4Addr, u8, u16), ForwardingRule>,
+    // Forwarding rules keyed by (input_source, input_group, input_protocol, input_port).
+    // input_source=None for source-agnostic rules; Some(ip) for per-source rules.
+    rules: HashMap<RuleKey, ForwardingRule>,
 
     // Per-flow counters for stats reporting (keyed by input_group, input_protocol, input_port)
     flow_counters: HashMap<(Ipv4Addr, u8, u16), FlowCounters>,
@@ -241,25 +242,37 @@ pub struct UnifiedDataPlane {
     stats_pipe: Option<std::fs::File>,
 }
 
-/// Three-tier rule lookup: exact → wildcard-port → protocol-default.
+/// Rule storage key: (input_source, input_group, input_protocol, input_port).
+/// `input_source` is None for source-agnostic rules, Some(ip) for per-source rules.
+type RuleKey = (Option<Ipv4Addr>, Ipv4Addr, u8, u16);
+
+/// Six-tier rule lookup: source-specific before source-agnostic at each tier.
 ///
 /// Returns the matching rule, or None if no rule matches. Priority:
-/// 1. Exact match: (dst_ip, protocol, port)
-/// 2. Wildcard port: (dst_ip, protocol, 0) — protocol-learned routes
-/// 3. Protocol default: (0.0.0.0, protocol, 0) — expected background traffic
+/// 1. Source-specific exact:    (Some(src), dst, proto, port)
+/// 2. Source-agnostic exact:    (None, dst, proto, port)
+/// 3. Source-specific wildcard: (Some(src), dst, proto, 0)
+/// 4. Source-agnostic wildcard: (None, dst, proto, 0)
+/// 5. Source-specific default:  (Some(src), 0.0.0.0, proto, 0)
+/// 6. Source-agnostic default:  (None, 0.0.0.0, proto, 0)
 fn lookup_rule(
-    rules: &HashMap<(Ipv4Addr, u8, u16), ForwardingRule>,
+    rules: &HashMap<RuleKey, ForwardingRule>,
+    src_ip: Ipv4Addr,
     dst_ip: Ipv4Addr,
     protocol: u8,
     port: u16,
 ) -> Option<&ForwardingRule> {
-    let exact_key = (dst_ip, protocol, port);
-    let wildcard_key = (dst_ip, protocol, 0u16);
-    let protocol_default_key = (Ipv4Addr::UNSPECIFIED, protocol, 0u16);
+    let src = Some(src_ip);
+    // Tier 1: exact match
     rules
-        .get(&exact_key)
-        .or_else(|| rules.get(&wildcard_key))
-        .or_else(|| rules.get(&protocol_default_key))
+        .get(&(src, dst_ip, protocol, port))
+        .or_else(|| rules.get(&(None, dst_ip, protocol, port)))
+        // Tier 2: wildcard port
+        .or_else(|| rules.get(&(src, dst_ip, protocol, 0)))
+        .or_else(|| rules.get(&(None, dst_ip, protocol, 0)))
+        // Tier 3: protocol default
+        .or_else(|| rules.get(&(src, Ipv4Addr::UNSPECIFIED, protocol, 0)))
+        .or_else(|| rules.get(&(None, Ipv4Addr::UNSPECIFIED, protocol, 0)))
 }
 
 impl UnifiedDataPlane {
@@ -379,7 +392,12 @@ impl UnifiedDataPlane {
 
     /// Add a forwarding rule
     pub fn add_rule(&mut self, rule: ForwardingRule) -> Result<()> {
-        let key = (rule.input_group, rule.input_protocol, rule.input_port);
+        let key: RuleKey = (
+            rule.input_source,
+            rule.input_group,
+            rule.input_protocol,
+            rule.input_port,
+        );
 
         // Check capacity (if limit is set and key doesn't already exist)
         if self.config.max_rules > 0
@@ -428,7 +446,12 @@ impl UnifiedDataPlane {
         // Atomically replace entire ruleset
         self.rules.clear();
         for rule in rules {
-            let key = (rule.input_group, rule.input_protocol, rule.input_port);
+            let key: RuleKey = (
+                rule.input_source,
+                rule.input_group,
+                rule.input_protocol,
+                rule.input_port,
+            );
             self.rules.insert(key, rule);
         }
         Ok(())
@@ -987,7 +1010,7 @@ impl UnifiedDataPlane {
 
         let src_ip = parsed.src_ip();
 
-        let rule = match lookup_rule(&self.rules, dst_ip, protocol, port) {
+        let rule = match lookup_rule(&self.rules, src_ip, dst_ip, protocol, port) {
             Some(r) => r,
             None => {
                 if self.config.track_stats {
@@ -999,13 +1022,16 @@ impl UnifiedDataPlane {
                     let rule_keys: Vec<String> = self
                         .rules
                         .keys()
-                        .map(|(g, p, port)| format!("({} p{} port{})", g, p, port))
+                        .map(|(src, g, p, port)| match src {
+                            Some(s) => format!("(src={} {} p{} port{})", s, g, p, port),
+                            None => format!("({} p{} port{})", g, p, port),
+                        })
                         .collect();
                     self.logger.warning(
                         Facility::DataPlane,
                         &format!(
-                            "ESP not_matched: dst={} src={} proto={} port={} key=({},{},{}) rules={:?}",
-                            dst_ip, src_ip, protocol, port, dst_ip, protocol, port, rule_keys
+                            "ESP not_matched: dst={} src={} proto={} port={} rules={:?}",
+                            dst_ip, src_ip, protocol, port, rule_keys
                         ),
                     );
                 }
@@ -1013,17 +1039,10 @@ impl UnifiedDataPlane {
             }
         };
 
-        // Check source filter for PIM (S,G) matching
-        // If rule.input_source is Some, the packet's source must match
-        if let Some(required_source) = rule.input_source {
-            if src_ip != required_source {
-                // Source doesn't match (S,G) rule - packet is not forwarded
-                if self.config.track_stats {
-                    self.stats.rules_not_matched += 1;
-                }
-                return Ok(());
-            }
-        }
+        // Source filtering is handled by lookup_rule: source-specific keys
+        // (Some(src), group, proto, port) are checked before source-agnostic
+        // keys (None, group, proto, port). A matched rule's input_source is
+        // guaranteed compatible with the packet's src_ip by construction.
 
         // Check if rule has any outputs — empty means intentional drop
         if rule.outputs.is_empty() {
@@ -1649,7 +1668,7 @@ mod tests {
         }
     }
 
-    fn create_test_rules_map() -> HashMap<(Ipv4Addr, u8, u16), ForwardingRule> {
+    fn create_test_rules_map() -> HashMap<RuleKey, ForwardingRule> {
         let mut rules = HashMap::new();
 
         let rule1 = create_test_rule("rule-1", "224.0.0.1", 5000);
@@ -1657,15 +1676,30 @@ mod tests {
         let rule3 = create_test_rule("rule-3", "224.0.0.3", 5002);
 
         rules.insert(
-            (rule1.input_group, rule1.input_protocol, rule1.input_port),
+            (
+                rule1.input_source,
+                rule1.input_group,
+                rule1.input_protocol,
+                rule1.input_port,
+            ),
             rule1,
         );
         rules.insert(
-            (rule2.input_group, rule2.input_protocol, rule2.input_port),
+            (
+                rule2.input_source,
+                rule2.input_group,
+                rule2.input_protocol,
+                rule2.input_port,
+            ),
             rule2,
         );
         rules.insert(
-            (rule3.input_group, rule3.input_protocol, rule3.input_port),
+            (
+                rule3.input_source,
+                rule3.input_group,
+                rule3.input_protocol,
+                rule3.input_port,
+            ),
             rule3,
         );
 
@@ -1674,7 +1708,7 @@ mod tests {
 
     // Helper function that mimics the remove_rule logic for testing
     fn remove_rule_from_map(
-        rules: &mut HashMap<(Ipv4Addr, u8, u16), ForwardingRule>,
+        rules: &mut HashMap<RuleKey, ForwardingRule>,
         rule_id: &str,
     ) -> Result<()> {
         let key_to_remove = rules
@@ -1770,7 +1804,8 @@ mod tests {
         let mut rules = create_test_rules_map();
 
         let new_rule = create_test_rule("rule-4", "224.0.0.4", 5003);
-        let key = (
+        let key: RuleKey = (
+            new_rule.input_source,
             new_rule.input_group,
             new_rule.input_protocol,
             new_rule.input_port,
@@ -1794,11 +1829,21 @@ mod tests {
         let rule2 = create_test_rule("rule-b", "224.0.0.2", 5000);
 
         rules.insert(
-            (rule1.input_group, rule1.input_protocol, rule1.input_port),
+            (
+                rule1.input_source,
+                rule1.input_group,
+                rule1.input_protocol,
+                rule1.input_port,
+            ),
             rule1,
         );
         rules.insert(
-            (rule2.input_group, rule2.input_protocol, rule2.input_port),
+            (
+                rule2.input_source,
+                rule2.input_group,
+                rule2.input_protocol,
+                rule2.input_port,
+            ),
             rule2,
         );
 
@@ -1825,7 +1870,12 @@ mod tests {
         // Simulate what sync_rules does: clear and insert new rules
         rules.clear();
         for rule in new_rules {
-            let key = (rule.input_group, rule.input_protocol, rule.input_port);
+            let key = (
+                rule.input_source,
+                rule.input_group,
+                rule.input_protocol,
+                rule.input_port,
+            );
             rules.insert(key, rule);
         }
 
@@ -1971,21 +2021,26 @@ mod tests {
     #[test]
     fn test_esp_rule_lookup() {
         // ESP rule should be findable by (group, protocol=50, port=0)
-        let mut rules: HashMap<(Ipv4Addr, u8, u16), ForwardingRule> = HashMap::new();
+        let mut rules: HashMap<RuleKey, ForwardingRule> = HashMap::new();
         let rule = create_esp_rule("esp-rule-1", "239.255.0.100");
         rules.insert(
-            (rule.input_group, rule.input_protocol, rule.input_port),
+            (
+                rule.input_source,
+                rule.input_group,
+                rule.input_protocol,
+                rule.input_port,
+            ),
             rule,
         );
 
-        let esp_key: (Ipv4Addr, u8, u16) = ("239.255.0.100".parse().unwrap(), 50, 0);
+        let esp_key: RuleKey = (None, "239.255.0.100".parse().unwrap(), 50, 0);
         assert!(
             rules.contains_key(&esp_key),
             "ESP rule should be found by (group, 50, 0)"
         );
 
         // UDP key for same group should NOT match
-        let udp_key: (Ipv4Addr, u8, u16) = ("239.255.0.100".parse().unwrap(), 17, 5000);
+        let udp_key: RuleKey = (None, "239.255.0.100".parse().unwrap(), 17, 5000);
         assert!(
             !rules.contains_key(&udp_key),
             "UDP key should not find ESP rule"
@@ -1995,13 +2050,14 @@ mod tests {
     #[test]
     fn test_esp_udp_coexistence() {
         // Both ESP and UDP rules for the same multicast group should coexist
-        let mut rules: HashMap<(Ipv4Addr, u8, u16), ForwardingRule> = HashMap::new();
+        let mut rules: HashMap<RuleKey, ForwardingRule> = HashMap::new();
 
         let esp_rule = create_esp_rule("esp-rule", "239.1.1.1");
         let udp_rule = create_test_rule("udp-rule", "239.1.1.1", 5000);
 
         rules.insert(
             (
+                esp_rule.input_source,
                 esp_rule.input_group,
                 esp_rule.input_protocol,
                 esp_rule.input_port,
@@ -2010,6 +2066,7 @@ mod tests {
         );
         rules.insert(
             (
+                udp_rule.input_source,
                 udp_rule.input_group,
                 udp_rule.input_protocol,
                 udp_rule.input_port,
@@ -2025,13 +2082,13 @@ mod tests {
 
         // Each key finds only its own rule
         let esp_found = rules
-            .get(&("239.1.1.1".parse().unwrap(), 50u8, 0u16))
+            .get(&(None, "239.1.1.1".parse().unwrap(), 50u8, 0u16))
             .unwrap();
         assert_eq!(esp_found.rule_id, "esp-rule");
         assert_eq!(esp_found.input_protocol, 50);
 
         let udp_found = rules
-            .get(&("239.1.1.1".parse().unwrap(), 17u8, 5000u16))
+            .get(&(None, "239.1.1.1".parse().unwrap(), 17u8, 5000u16))
             .unwrap();
         assert_eq!(udp_found.rule_id, "udp-rule");
         assert_eq!(udp_found.input_protocol, 17);
@@ -2055,14 +2112,19 @@ mod tests {
         assert_eq!(port, 0);
 
         // This key should match an ESP rule
-        let mut rules: HashMap<(Ipv4Addr, u8, u16), ForwardingRule> = HashMap::new();
+        let mut rules: HashMap<RuleKey, ForwardingRule> = HashMap::new();
         let rule = create_esp_rule("esp-rule", "239.255.0.100");
         rules.insert(
-            (rule.input_group, rule.input_protocol, rule.input_port),
+            (
+                rule.input_source,
+                rule.input_group,
+                rule.input_protocol,
+                rule.input_port,
+            ),
             rule,
         );
 
-        let key = (dst_ip, protocol, port);
+        let key: RuleKey = (None, dst_ip, protocol, port);
         assert!(
             rules.contains_key(&key),
             "ESP packet key should match ESP rule"
@@ -2074,10 +2136,15 @@ mod tests {
         use crate::worker::packet_parser::{parse_packet_any, ParsedPacket};
 
         // Only an ESP rule for 239.255.0.100
-        let mut rules: HashMap<(Ipv4Addr, u8, u16), ForwardingRule> = HashMap::new();
+        let mut rules: HashMap<RuleKey, ForwardingRule> = HashMap::new();
         let rule = create_esp_rule("esp-rule", "239.255.0.100");
         rules.insert(
-            (rule.input_group, rule.input_protocol, rule.input_port),
+            (
+                rule.input_source,
+                rule.input_group,
+                rule.input_protocol,
+                rule.input_port,
+            ),
             rule,
         );
 
@@ -2090,8 +2157,8 @@ mod tests {
             _ => panic!("Expected UDP packet"),
         };
 
-        let exact_key = (dst_ip, protocol, port);
-        let wildcard_key = (dst_ip, protocol, 0u16);
+        let exact_key: RuleKey = (None, dst_ip, protocol, port);
+        let wildcard_key: RuleKey = (None, dst_ip, protocol, 0u16);
         assert!(
             !rules.contains_key(&exact_key),
             "UDP exact key should not match ESP rule"
@@ -2107,10 +2174,15 @@ mod tests {
         use crate::worker::packet_parser::{parse_packet_any, ParsedPacket};
 
         // Only a UDP rule for 239.255.0.100
-        let mut rules: HashMap<(Ipv4Addr, u8, u16), ForwardingRule> = HashMap::new();
+        let mut rules: HashMap<RuleKey, ForwardingRule> = HashMap::new();
         let rule = create_test_rule("udp-rule", "239.255.0.100", 5000);
         rules.insert(
-            (rule.input_group, rule.input_protocol, rule.input_port),
+            (
+                rule.input_source,
+                rule.input_group,
+                rule.input_protocol,
+                rule.input_port,
+            ),
             rule,
         );
 
@@ -2123,7 +2195,7 @@ mod tests {
             _ => panic!("Expected ESP packet"),
         };
 
-        let key = (dst_ip, protocol, port);
+        let key: RuleKey = (None, dst_ip, protocol, port);
         assert!(
             !rules.contains_key(&key),
             "ESP packet key should not match UDP rule"
@@ -2135,18 +2207,20 @@ mod tests {
         // port=0 for protocol=50 means "ESP, no port"
         // port=0 for protocol=17 means "UDP wildcard port"
         // These are different keys and should not collide
-        let mut rules: HashMap<(Ipv4Addr, u8, u16), ForwardingRule> = HashMap::new();
+        let mut rules: HashMap<RuleKey, ForwardingRule> = HashMap::new();
 
         let esp_rule = create_esp_rule("esp-rule", "239.1.1.1");
         let mut udp_wildcard = create_test_rule("udp-wildcard", "239.1.1.1", 0);
         udp_wildcard.input_port = 0; // Wildcard UDP rule
 
-        let esp_key = (
+        let esp_key: RuleKey = (
+            esp_rule.input_source,
             esp_rule.input_group,
             esp_rule.input_protocol,
             esp_rule.input_port,
         );
-        let udp_key = (
+        let udp_key: RuleKey = (
+            udp_wildcard.input_source,
             udp_wildcard.input_group,
             udp_wildcard.input_protocol,
             udp_wildcard.input_port,
@@ -2164,7 +2238,7 @@ mod tests {
         // ESP lookup: (group, 50, 0)
         assert_eq!(
             rules
-                .get(&("239.1.1.1".parse().unwrap(), 50u8, 0u16))
+                .get(&(None, "239.1.1.1".parse().unwrap(), 50u8, 0u16))
                 .unwrap()
                 .rule_id,
             "esp-rule"
@@ -2172,7 +2246,7 @@ mod tests {
         // UDP wildcard lookup: (group, 17, 0)
         assert_eq!(
             rules
-                .get(&("239.1.1.1".parse().unwrap(), 17u8, 0u16))
+                .get(&(None, "239.1.1.1".parse().unwrap(), 17u8, 0u16))
                 .unwrap()
                 .rule_id,
             "udp-wildcard"
@@ -2187,9 +2261,14 @@ mod tests {
         let mut rule = create_esp_rule("esp-sg-rule", "239.255.0.100");
         rule.input_source = Some("10.1.0.1".parse().unwrap());
 
-        let mut rules: HashMap<(Ipv4Addr, u8, u16), ForwardingRule> = HashMap::new();
+        let mut rules: HashMap<RuleKey, ForwardingRule> = HashMap::new();
         rules.insert(
-            (rule.input_group, rule.input_protocol, rule.input_port),
+            (
+                rule.input_source,
+                rule.input_group,
+                rule.input_protocol,
+                rule.input_port,
+            ),
             rule,
         );
 
@@ -2197,7 +2276,12 @@ mod tests {
         let packet_match = make_esp_packet([239, 255, 0, 100], [10, 1, 0, 1]);
         let parsed = parse_packet_any(&packet_match, false).unwrap();
         let src_ip = parsed.src_ip();
-        let key = ("239.255.0.100".parse::<Ipv4Addr>().unwrap(), 50u8, 0u16);
+        let key: RuleKey = (
+            Some(Ipv4Addr::new(10, 1, 0, 1)),
+            "239.255.0.100".parse().unwrap(),
+            50u8,
+            0u16,
+        );
         let rule = rules.get(&key).unwrap();
         assert_eq!(rule.input_source, Some(Ipv4Addr::new(10, 1, 0, 1)));
         assert_eq!(src_ip, Ipv4Addr::new(10, 1, 0, 1), "Source should match");
@@ -2275,39 +2359,62 @@ mod tests {
 
     #[test]
     fn test_lookup_rule_exact_match() {
-        let mut rules: HashMap<(Ipv4Addr, u8, u16), ForwardingRule> = HashMap::new();
+        let mut rules: HashMap<RuleKey, ForwardingRule> = HashMap::new();
         let rule = create_esp_rule("esp-mcast", "239.255.0.100");
         rules.insert(
-            (rule.input_group, rule.input_protocol, rule.input_port),
+            (
+                rule.input_source,
+                rule.input_group,
+                rule.input_protocol,
+                rule.input_port,
+            ),
             rule,
         );
 
-        let found = lookup_rule(&rules, "239.255.0.100".parse().unwrap(), 50, 0);
+        let found = lookup_rule(
+            &rules,
+            Ipv4Addr::new(10, 0, 0, 1),
+            "239.255.0.100".parse().unwrap(),
+            50,
+            0,
+        );
         assert_eq!(found.unwrap().rule_id, "esp-mcast");
     }
 
     #[test]
     fn test_lookup_rule_wildcard_port() {
-        let mut rules: HashMap<(Ipv4Addr, u8, u16), ForwardingRule> = HashMap::new();
+        let mut rules: HashMap<RuleKey, ForwardingRule> = HashMap::new();
         let rule = create_test_rule("udp-wildcard", "239.1.1.1", 0);
         rules.insert(
-            (rule.input_group, rule.input_protocol, rule.input_port),
+            (
+                rule.input_source,
+                rule.input_group,
+                rule.input_protocol,
+                rule.input_port,
+            ),
             rule,
         );
 
         // Packet with port=5000 should fall through exact, match wildcard-port
-        let found = lookup_rule(&rules, "239.1.1.1".parse().unwrap(), 17, 5000);
+        let found = lookup_rule(
+            &rules,
+            Ipv4Addr::new(10, 0, 0, 1),
+            "239.1.1.1".parse().unwrap(),
+            17,
+            5000,
+        );
         assert_eq!(found.unwrap().rule_id, "udp-wildcard");
     }
 
     #[test]
     fn test_lookup_rule_protocol_default() {
-        let mut rules: HashMap<(Ipv4Addr, u8, u16), ForwardingRule> = HashMap::new();
+        let mut rules: HashMap<RuleKey, ForwardingRule> = HashMap::new();
 
         // Only a protocol-default ESP rule
         let default = create_esp_drop_rule("esp-default", "0.0.0.0");
         rules.insert(
             (
+                default.input_source,
                 default.input_group,
                 default.input_protocol,
                 default.input_port,
@@ -2316,7 +2423,13 @@ mod tests {
         );
 
         // Unicast ESP should fall through exact and wildcard, match protocol-default
-        let found = lookup_rule(&rules, "100.64.5.9".parse().unwrap(), 50, 0);
+        let found = lookup_rule(
+            &rules,
+            Ipv4Addr::new(10, 0, 0, 1),
+            "100.64.5.9".parse().unwrap(),
+            50,
+            0,
+        );
         assert_eq!(found.unwrap().rule_id, "esp-default");
         assert!(
             found.unwrap().outputs.is_empty(),
@@ -2326,21 +2439,28 @@ mod tests {
 
     #[test]
     fn test_lookup_rule_not_matched() {
-        let rules: HashMap<(Ipv4Addr, u8, u16), ForwardingRule> = HashMap::new();
+        let rules: HashMap<RuleKey, ForwardingRule> = HashMap::new();
 
         // Empty ruleset — nothing matches
-        let found = lookup_rule(&rules, "100.64.5.9".parse().unwrap(), 50, 0);
+        let found = lookup_rule(
+            &rules,
+            Ipv4Addr::new(10, 0, 0, 1),
+            "100.64.5.9".parse().unwrap(),
+            50,
+            0,
+        );
         assert!(found.is_none());
     }
 
     #[test]
     fn test_lookup_rule_priority_specific_over_default() {
-        let mut rules: HashMap<(Ipv4Addr, u8, u16), ForwardingRule> = HashMap::new();
+        let mut rules: HashMap<RuleKey, ForwardingRule> = HashMap::new();
 
         // Specific unicast endpoint rule (with outputs — relay)
         let specific = create_esp_rule("esp-unicast-in", "100.64.5.9");
         rules.insert(
             (
+                specific.input_source,
                 specific.input_group,
                 specific.input_protocol,
                 specific.input_port,
@@ -2352,6 +2472,7 @@ mod tests {
         let default = create_esp_drop_rule("esp-default", "0.0.0.0");
         rules.insert(
             (
+                default.input_source,
                 default.input_group,
                 default.input_protocol,
                 default.input_port,
@@ -2360,7 +2481,13 @@ mod tests {
         );
 
         // Specific rule must win
-        let found = lookup_rule(&rules, "100.64.5.9".parse().unwrap(), 50, 0);
+        let found = lookup_rule(
+            &rules,
+            Ipv4Addr::new(10, 0, 0, 1),
+            "100.64.5.9".parse().unwrap(),
+            50,
+            0,
+        );
         assert_eq!(found.unwrap().rule_id, "esp-unicast-in");
         assert!(
             !found.unwrap().outputs.is_empty(),
@@ -2368,18 +2495,25 @@ mod tests {
         );
 
         // Different unicast dst falls to protocol-default
-        let found2 = lookup_rule(&rules, "100.64.99.1".parse().unwrap(), 50, 0);
+        let found2 = lookup_rule(
+            &rules,
+            Ipv4Addr::new(10, 0, 0, 1),
+            "100.64.99.1".parse().unwrap(),
+            50,
+            0,
+        );
         assert_eq!(found2.unwrap().rule_id, "esp-default");
     }
 
     #[test]
     fn test_lookup_rule_esp_default_does_not_match_udp() {
-        let mut rules: HashMap<(Ipv4Addr, u8, u16), ForwardingRule> = HashMap::new();
+        let mut rules: HashMap<RuleKey, ForwardingRule> = HashMap::new();
 
         // ESP protocol-default only
         let default = create_esp_drop_rule("esp-default", "0.0.0.0");
         rules.insert(
             (
+                default.input_source,
                 default.input_group,
                 default.input_protocol,
                 default.input_port,
@@ -2388,7 +2522,13 @@ mod tests {
         );
 
         // UDP packet — protocol-default key is (0.0.0.0, 17, 0) which doesn't exist
-        let found = lookup_rule(&rules, "239.1.1.1".parse().unwrap(), 17, 5000);
+        let found = lookup_rule(
+            &rules,
+            Ipv4Addr::new(10, 0, 0, 1),
+            "239.1.1.1".parse().unwrap(),
+            17,
+            5000,
+        );
         assert!(found.is_none(), "ESP default must not match UDP traffic");
     }
 
@@ -2399,10 +2539,11 @@ mod tests {
         let mut stats = UnifiedStats::default();
 
         // Packet arrives, lookup_rule returns Some(empty-outputs rule)
-        let mut rules: HashMap<(Ipv4Addr, u8, u16), ForwardingRule> = HashMap::new();
+        let mut rules: HashMap<RuleKey, ForwardingRule> = HashMap::new();
         let default = create_esp_drop_rule("esp-default", "0.0.0.0");
         rules.insert(
             (
+                default.input_source,
                 default.input_group,
                 default.input_protocol,
                 default.input_port,
@@ -2410,7 +2551,14 @@ mod tests {
             default,
         );
 
-        let rule = lookup_rule(&rules, "100.64.5.9".parse().unwrap(), 50, 0).unwrap();
+        let rule = lookup_rule(
+            &rules,
+            Ipv4Addr::new(10, 0, 0, 1),
+            "100.64.5.9".parse().unwrap(),
+            50,
+            0,
+        )
+        .unwrap();
 
         // Simulate the empty-outputs branch
         assert!(rule.outputs.is_empty());
@@ -2435,9 +2583,15 @@ mod tests {
     fn test_counter_semantics_not_matched() {
         // Simulate the counter logic when no rule matches at all.
         let mut stats = UnifiedStats::default();
-        let rules: HashMap<(Ipv4Addr, u8, u16), ForwardingRule> = HashMap::new();
+        let rules: HashMap<RuleKey, ForwardingRule> = HashMap::new();
 
-        let result = lookup_rule(&rules, "100.64.5.9".parse().unwrap(), 50, 0);
+        let result = lookup_rule(
+            &rules,
+            Ipv4Addr::new(10, 0, 0, 1),
+            "100.64.5.9".parse().unwrap(),
+            50,
+            0,
+        );
         assert!(result.is_none());
 
         // Simulate the not-matched branch
@@ -2453,12 +2607,17 @@ mod tests {
         // End-to-end: parse a real ESP packet, extract key, lookup rule
         use crate::worker::packet_parser::{parse_packet_any, ParsedPacket};
 
-        let mut rules: HashMap<(Ipv4Addr, u8, u16), ForwardingRule> = HashMap::new();
+        let mut rules: HashMap<RuleKey, ForwardingRule> = HashMap::new();
 
         // Specific multicast group rule
         let mcast = create_esp_rule("esp-mcast", "239.255.0.100");
         rules.insert(
-            (mcast.input_group, mcast.input_protocol, mcast.input_port),
+            (
+                mcast.input_source,
+                mcast.input_group,
+                mcast.input_protocol,
+                mcast.input_port,
+            ),
             mcast,
         );
 
@@ -2466,6 +2625,7 @@ mod tests {
         let default = create_esp_drop_rule("esp-default", "0.0.0.0");
         rules.insert(
             (
+                default.input_source,
                 default.input_group,
                 default.input_protocol,
                 default.input_port,
@@ -2480,7 +2640,7 @@ mod tests {
             ParsedPacket::Esp { ipv4, .. } => (ipv4.dst_ip, 50u8, 0u16),
             _ => panic!("Expected ESP"),
         };
-        let found = lookup_rule(&rules, dst_ip, protocol, port);
+        let found = lookup_rule(&rules, Ipv4Addr::new(10, 0, 0, 1), dst_ip, protocol, port);
         assert_eq!(found.unwrap().rule_id, "esp-mcast");
 
         // Unicast ESP packet → should fall to protocol-default
@@ -2490,7 +2650,7 @@ mod tests {
             ParsedPacket::Esp { ipv4, .. } => (ipv4.dst_ip, 50u8, 0u16),
             _ => panic!("Expected ESP"),
         };
-        let found = lookup_rule(&rules, dst_ip, protocol, port);
+        let found = lookup_rule(&rules, Ipv4Addr::new(10, 0, 0, 1), dst_ip, protocol, port);
         assert_eq!(found.unwrap().rule_id, "esp-default");
         assert!(found.unwrap().outputs.is_empty());
     }
@@ -2595,18 +2755,30 @@ mod tests {
     #[test]
     fn test_forward_mode_propagates_to_rule_lookup() {
         // A Forward-mode ESP rule should be findable and have egress=Forward.
-        let mut rules: HashMap<(Ipv4Addr, u8, u16), ForwardingRule> = HashMap::new();
+        let mut rules: HashMap<RuleKey, ForwardingRule> = HashMap::new();
 
         let mut rule = create_esp_rule("esp-relay", "239.255.0.100");
         rule.egress = crate::EgressMode::Forward;
         rule.ttl_policy = crate::TtlPolicy::Decrement;
         rule.input_source = Some("10.1.0.1".parse().unwrap());
         rules.insert(
-            (rule.input_group, rule.input_protocol, rule.input_port),
+            (
+                rule.input_source,
+                rule.input_group,
+                rule.input_protocol,
+                rule.input_port,
+            ),
             rule,
         );
 
-        let found = lookup_rule(&rules, "239.255.0.100".parse().unwrap(), 50, 0).unwrap();
+        let found = lookup_rule(
+            &rules,
+            "10.1.0.1".parse().unwrap(),
+            "239.255.0.100".parse().unwrap(),
+            50,
+            0,
+        )
+        .unwrap();
         assert_eq!(
             found.egress,
             crate::EgressMode::Forward,

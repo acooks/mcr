@@ -254,9 +254,9 @@ pub enum SupervisorCommand {
         /// IP protocol number (default: 17 = UDP, 50 = ESP)
         #[serde(default = "default_udp_protocol")]
         input_protocol: u8,
-        /// Source IP match filter. When present, only packets from this source
-        /// are matched. Used for per-source relay rules that prevent forwarding
-        /// loops in ring topologies.
+        /// Source IP filter. When present, only relay packets whose IP
+        /// source address matches. Used for per-source relay rules that
+        /// prevent forwarding loops in ring topologies.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         input_source: Option<Ipv4Addr>,
         outputs: Vec<OutputDestination>,
