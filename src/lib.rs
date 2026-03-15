@@ -66,18 +66,18 @@ pub enum TtlPolicy {
 }
 
 impl EgressMode {
-    /// Returns true if this is the default value (Republish).
+    /// Returns true if this is the default value.
     /// Used by serde skip_serializing_if.
     pub fn is_default(&self) -> bool {
-        *self == Self::Republish
+        *self == Self::default()
     }
 }
 
 impl TtlPolicy {
-    /// Returns true if this is the default value (Decrement).
+    /// Returns true if this is the default value.
     /// Used by serde skip_serializing_if.
     pub fn is_default(&self) -> bool {
-        *self == Self::Decrement
+        *self == Self::default()
     }
 }
 

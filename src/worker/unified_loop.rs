@@ -917,7 +917,7 @@ impl UnifiedDataPlane {
                 self.logger.info(
                     Facility::DataPlane,
                     &format!(
-                        "[STATS] t_ms={} rx={} tx={} matched={} not_matched={} rx_err={} tx_err={} buf_exhaust={} pipe_err={} default_dropped={}",
+                        "[STATS] t_ms={} rx={} tx={} matched={} not_matched={} rx_err={} tx_err={} buf_exhaust={} pipe_err={} default_dropped={} ttl_dropped={}",
                         elapsed_ms,
                         self.stats.packets_received,
                         self.stats.packets_sent,
@@ -927,7 +927,8 @@ impl UnifiedDataPlane {
                         self.stats.send_errors,
                         self.stats.buffer_pool_exhaustion,
                         self.stats.stats_pipe_errors,
-                        self.stats.rules_default_dropped
+                        self.stats.rules_default_dropped,
+                        self.stats.ttl_expired_dropped
                     ),
                 );
 
@@ -1125,7 +1126,7 @@ impl UnifiedDataPlane {
 
             let counter = self.flow_counters.entry(flow_key).or_default();
             counter.packets_relayed += 1;
-            counter.bytes_relayed += payload_len as u64;
+            counter.bytes_relayed += fwd_payload_len as u64;
         }
 
         Ok(())
@@ -1225,6 +1226,9 @@ impl UnifiedDataPlane {
                 // Apply TTL policy to the IP header in the payload.
                 // TTL is at byte offset 8 from the start of the IP header,
                 // which is the start of the payload in Forward mode.
+                // TODO: For Decrement/Reset, this allocates a copy per packet (to_vec + Arc::from).
+                // Optimization: modify TTL in-place before Arc::from in handle_recv_completion
+                // when there is only one output target (refcount == 1).
                 let payload: Arc<[u8]> = match item.ttl_policy {
                     crate::TtlPolicy::Preserve => item.payload,
                     crate::TtlPolicy::Decrement => {
@@ -1526,6 +1530,15 @@ fn get_interface_ip(interface_name: &str) -> Result<Ipv4Addr> {
     ))
 }
 
+/// Get the configured egress socket send buffer size from MCR_SOCKET_SNDBUF env var.
+/// Default: 4 MB, tuned for high throughput (300k+ pps).
+fn egress_send_buffer_size() -> usize {
+    std::env::var("MCR_SOCKET_SNDBUF")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(4 * 1024 * 1024)
+}
+
 fn create_connected_udp_socket(
     source_ip: Ipv4Addr,
     dest_addr: SocketAddr,
@@ -1536,16 +1549,8 @@ fn create_connected_udp_socket(
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
     socket.set_reuse_address(true)?;
 
-    // Tune socket send buffer for high throughput (300k+ pps)
-    // Default kernel buffer (~208 KB) is too small for sustained high-rate transmission
-    // Set to 4 MB to buffer ~9ms worth of packets at 430 MB/s (307k pps × 1400 bytes)
-    let send_buffer_size = std::env::var("MCR_SOCKET_SNDBUF")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(4 * 1024 * 1024); // Default 4 MB
-
     socket
-        .set_send_buffer_size(send_buffer_size)
+        .set_send_buffer_size(egress_send_buffer_size())
         .context("Failed to set SO_SNDBUF")?;
 
     // For multicast destinations, set IP_MULTICAST_IF and TTL.
@@ -1587,13 +1592,8 @@ fn create_raw_esp_socket(
     let socket = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::from(50)))?;
     socket.set_reuse_address(true)?;
 
-    let send_buffer_size = std::env::var("MCR_SOCKET_SNDBUF")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(4 * 1024 * 1024);
-
     socket
-        .set_send_buffer_size(send_buffer_size)
+        .set_send_buffer_size(egress_send_buffer_size())
         .context("Failed to set SO_SNDBUF for ESP socket")?;
 
     if let std::net::IpAddr::V4(dest_ipv4) = dest_addr.ip() {
@@ -1624,20 +1624,14 @@ fn create_raw_hdrincl_socket(dest_addr: SocketAddr, interface_name: &str) -> Res
     let socket = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::from(255)))?;
     socket.set_reuse_address(true)?;
 
-    let send_buffer_size = std::env::var("MCR_SOCKET_SNDBUF")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(4 * 1024 * 1024);
-
     socket
-        .set_send_buffer_size(send_buffer_size)
+        .set_send_buffer_size(egress_send_buffer_size())
         .context("Failed to set SO_SNDBUF for HDRINCL socket")?;
 
     // SO_BINDTODEVICE forces the packet out the correct downstream interface,
     // regardless of routing table decisions.
     socket_helpers::bind_to_device(socket.as_raw_fd(), interface_name)?;
     socket.connect(&dest_addr.into())?;
-    socket.set_nonblocking(true)?;
     Ok(socket.into())
 }
 

@@ -405,48 +405,7 @@ impl McrInstance {
     /// * `input` - Input multicast group and port (e.g., "239.1.1.1:5001")
     /// * `outputs` - Output destinations (e.g., vec!["239.2.2.2:5002:lo"])
     pub fn add_rule(&mut self, input: &str, outputs: Vec<&str>) -> Result<()> {
-        let interface = self
-            .interface
-            .as_ref()
-            .context("add_rule requires interface to be set")?;
-
-        let control_bin = binary_path("mcrctl");
-
-        // Parse input
-        let input_parts: Vec<&str> = input.split(':').collect();
-        if input_parts.len() != 2 {
-            bail!("Input must be in format group:port");
-        }
-
-        // Build outputs string
-        let outputs_str = outputs.join(",");
-
-        let output = Command::new(control_bin)
-            .arg("--socket-path")
-            .arg(&self.control_socket)
-            .arg("add")
-            .arg("--input-interface")
-            .arg(interface)
-            .arg("--input-group")
-            .arg(input_parts[0])
-            .arg("--input-port")
-            .arg(input_parts[1])
-            .arg("--outputs")
-            .arg(outputs_str)
-            .output()
-            .context("Failed to execute mcrctl")?;
-
-        if !output.status.success() {
-            bail!(
-                "Failed to add rule: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-
-        // Wait for MCR to be ready to process traffic
-        self.wait_until_ready(10)?;
-
-        Ok(())
+        self.add_rule_with_egress(input, outputs, None, None)
     }
 
     /// Add a forwarding rule with Forward egress mode and specified TTL policy
@@ -456,10 +415,21 @@ impl McrInstance {
         outputs: Vec<&str>,
         ttl_policy: &str,
     ) -> Result<()> {
+        self.add_rule_with_egress(input, outputs, Some("forward"), Some(ttl_policy))
+    }
+
+    /// Add a forwarding rule with optional egress mode and TTL policy
+    fn add_rule_with_egress(
+        &mut self,
+        input: &str,
+        outputs: Vec<&str>,
+        egress: Option<&str>,
+        ttl_policy: Option<&str>,
+    ) -> Result<()> {
         let interface = self
             .interface
             .as_ref()
-            .context("add_rule_forward requires interface to be set")?;
+            .context("add_rule requires interface to be set")?;
 
         let control_bin = binary_path("mcrctl");
 
@@ -470,8 +440,8 @@ impl McrInstance {
 
         let outputs_str = outputs.join(",");
 
-        let output = Command::new(control_bin)
-            .arg("--socket-path")
+        let mut cmd = Command::new(control_bin);
+        cmd.arg("--socket-path")
             .arg(&self.control_socket)
             .arg("add")
             .arg("--input-interface")
@@ -481,17 +451,20 @@ impl McrInstance {
             .arg("--input-port")
             .arg(input_parts[1])
             .arg("--outputs")
-            .arg(outputs_str)
-            .arg("--egress")
-            .arg("forward")
-            .arg("--ttl-policy")
-            .arg(ttl_policy)
-            .output()
-            .context("Failed to execute mcrctl")?;
+            .arg(outputs_str);
+
+        if let Some(e) = egress {
+            cmd.arg("--egress").arg(e);
+        }
+        if let Some(t) = ttl_policy {
+            cmd.arg("--ttl-policy").arg(t);
+        }
+
+        let output = cmd.output().context("Failed to execute mcrctl")?;
 
         if !output.status.success() {
             bail!(
-                "Failed to add forward rule: {}",
+                "Failed to add rule: {}",
                 String::from_utf8_lossy(&output.stderr)
             );
         }

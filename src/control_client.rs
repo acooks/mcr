@@ -904,9 +904,19 @@ mod tests {
         };
         let supervisor_cmd = build_command(cmd).unwrap();
         match supervisor_cmd {
-            SupervisorCommand::AddRule { rule_id, name, .. } => {
+            SupervisorCommand::AddRule {
+                rule_id,
+                name,
+                input_source,
+                egress,
+                ttl_policy,
+                ..
+            } => {
                 assert_eq!(rule_id, "");
                 assert_eq!(name, Some("video-feed".to_string()));
+                assert_eq!(input_source, Some("10.0.0.1".parse().unwrap()));
+                assert_eq!(egress, multicast_relay::EgressMode::Forward);
+                assert_eq!(ttl_policy, multicast_relay::TtlPolicy::Preserve);
             }
             _ => panic!("Expected AddRule command"),
         }

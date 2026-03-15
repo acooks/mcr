@@ -88,15 +88,26 @@ impl<'a> ControlClient<'a> {
 
     /// Add a rule from a ForwardingRule struct (without name)
     pub async fn add_rule(&self, rule: ForwardingRule) -> Result<String> {
-        self.add_rule_with_name(
-            rule.rule_id.clone(),
-            None,
-            rule.input_interface,
-            rule.input_group,
-            rule.input_port,
-            rule.outputs,
-        )
-        .await
+        let rule_id = rule.rule_id.clone();
+        match self
+            .send_command(SupervisorCommand::AddRule {
+                rule_id: rule_id.clone(),
+                name: rule.name,
+                input_interface: rule.input_interface,
+                input_group: rule.input_group,
+                input_port: rule.input_port,
+                input_protocol: rule.input_protocol,
+                input_source: rule.input_source,
+                outputs: rule.outputs,
+                egress: rule.egress,
+                ttl_policy: rule.ttl_policy,
+            })
+            .await?
+        {
+            Response::Success(_) => Ok(rule_id),
+            Response::Error(e) => anyhow::bail!("Failed to add rule: {}", e),
+            other => anyhow::bail!("Unexpected response for AddRule: {:?}", other),
+        }
     }
 
     /// Remove a rule by ID
