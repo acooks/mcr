@@ -1521,6 +1521,8 @@ async fn test_cli_ping_worker_count_accuracy() -> Result<()> {
         input_protocol: 17,
         input_source: None,
         outputs: vec![],
+        egress: multicast_relay::EgressMode::Republish,
+        ttl_policy: multicast_relay::TtlPolicy::Decrement,
         source: multicast_relay::RuleSource::Static,
     };
     client.add_rule(rule).await?;

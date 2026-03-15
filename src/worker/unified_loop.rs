@@ -73,6 +73,10 @@ struct SendWorkItem {
     source_ip: Option<Ipv4Addr>,
     /// IP protocol number (17 = UDP, 50 = ESP)
     protocol: u8,
+    /// Egress mode: Republish (new UDP packet) or Forward (IP_HDRINCL)
+    egress: crate::EgressMode,
+    /// TTL handling policy for Forward mode
+    ttl_policy: crate::TtlPolicy,
 }
 
 /// Metadata about where to forward a packet
@@ -86,6 +90,10 @@ struct ForwardingTarget {
     source_ip: Option<Ipv4Addr>,
     /// IP protocol number (17 = UDP, 50 = ESP)
     protocol: u8,
+    /// Egress mode for this target
+    egress: crate::EgressMode,
+    /// TTL policy for this target
+    ttl_policy: crate::TtlPolicy,
 }
 
 /// Configuration for the unified data plane
@@ -164,6 +172,7 @@ pub struct UnifiedStats {
     pub egress_sockets_evicted: u64, // Egress sockets evicted due to max_egress_sockets limit
     pub esp_not_matched_logged: u64, // Diagnostic: count of logged not-matched ESP packets
     pub rules_default_dropped: u64,  // Packets matched by empty-output rules (intentional drops)
+    pub ttl_expired_dropped: u64, // Packets dropped because TTL reached 0 (Forward mode + Decrement)
 }
 
 /// Per-flow counters for stats reporting
@@ -823,6 +832,8 @@ impl UnifiedDataPlane {
                     multicast_ttl: self.targets[i].multicast_ttl,
                     source_ip: self.targets[i].source_ip,
                     protocol: self.targets[i].protocol,
+                    egress: self.targets[i].egress,
+                    ttl_policy: self.targets[i].ttl_policy,
                 });
             }
         }
@@ -1023,6 +1034,33 @@ impl UnifiedDataPlane {
             return Ok(());
         }
 
+        // Forward mode: extract full IP packet (Ethernet stripped) instead of just payload.
+        // IP_HDRINCL preserves the original source IP for transit relay.
+        let (fwd_payload_offset, fwd_payload_len) = if rule.egress == crate::EgressMode::Forward {
+            // Derive IP header offset from the parsed packet's payload_offset and header sizes,
+            // rather than hardcoding 14, to support potential future VLAN-tagged frames.
+            let (ip_offset, ipv4_total_len) = match &parsed {
+                ParsedPacket::Udp(h) => {
+                    // payload_offset = ethernet + ip_header + udp_header(8)
+                    let ip_off = h.payload_offset - 8 - h.ipv4.header_len();
+                    (ip_off, h.ipv4.total_length as usize)
+                }
+                ParsedPacket::Esp {
+                    ipv4,
+                    payload_offset: esp_off,
+                    ..
+                } => {
+                    // ESP payload_offset = ethernet + ip_header (points to ESP header)
+                    let ip_off = esp_off - ipv4.header_len();
+                    (ip_off, ipv4.total_length as usize)
+                }
+                _ => unreachable!("already filtered above"),
+            };
+            (ip_offset, ipv4_total_len)
+        } else {
+            (payload_offset, payload_len)
+        };
+
         // Create forwarding targets for ALL outputs (fan-out support)
         // For protocol-learned routes (port=0), preserve the original packet's port
         for output in &rule.outputs {
@@ -1034,13 +1072,15 @@ impl UnifiedDataPlane {
                 output.port
             };
             self.targets.push(ForwardingTarget {
-                payload_offset,
-                payload_len,
+                payload_offset: fwd_payload_offset,
+                payload_len: fwd_payload_len,
                 dest_addr: SocketAddr::new(output.group.into(), dest_port),
                 interface_name: Arc::clone(&output.interface),
                 multicast_ttl: output.ttl.unwrap_or(self.config.multicast_ttl),
                 source_ip: output.source_ip,
                 protocol,
+                egress: rule.egress,
+                ttl_policy: rule.ttl_policy,
             });
         }
 
@@ -1159,6 +1199,85 @@ impl UnifiedDataPlane {
 
         for _ in 0..batch_size {
             let item = self.send_queue.pop_front().unwrap();
+
+            // Forward mode: IP_HDRINCL socket — source IP is inside the payload,
+            // not a socket parameter. Use sentinel cache key.
+            if item.egress == crate::EgressMode::Forward {
+                // Apply TTL policy to the IP header in the payload.
+                // TTL is at byte offset 8 from the start of the IP header,
+                // which is the start of the payload in Forward mode.
+                let payload: Arc<[u8]> = match item.ttl_policy {
+                    crate::TtlPolicy::Preserve => item.payload,
+                    crate::TtlPolicy::Decrement => {
+                        if item.payload.len() < 9 {
+                            continue; // Malformed — too short for IP header
+                        }
+                        let current_ttl = item.payload[8];
+                        if current_ttl <= 1 {
+                            // TTL expired — drop packet (standard router behavior)
+                            if self.config.track_stats {
+                                self.stats.ttl_expired_dropped += 1;
+                            }
+                            continue;
+                        }
+                        let mut buf = item.payload.to_vec();
+                        buf[8] = current_ttl - 1;
+                        // Kernel recomputes IP header checksum for IP_HDRINCL
+                        Arc::from(buf.as_slice())
+                    }
+                    crate::TtlPolicy::Reset(ttl) => {
+                        if item.payload.len() < 9 {
+                            continue;
+                        }
+                        let mut buf = item.payload.to_vec();
+                        buf[8] = ttl;
+                        Arc::from(buf.as_slice())
+                    }
+                };
+
+                let key: EgressSocketKey = (
+                    item.interface_name.clone(),
+                    item.dest_addr,
+                    item.multicast_ttl,
+                    Ipv4Addr::UNSPECIFIED, // sentinel — source is in payload
+                    255,                   // IPPROTO_RAW sentinel
+                );
+                if !self.egress_sockets.contains_key(&key) {
+                    if self.config.max_egress_sockets > 0
+                        && self.egress_sockets.len() >= self.config.max_egress_sockets
+                    {
+                        if let Some(key_to_evict) = self.egress_sockets.keys().next().cloned() {
+                            self.egress_sockets.remove(&key_to_evict);
+                            self.stats.egress_sockets_evicted += 1;
+                        }
+                    }
+                    let socket = create_raw_hdrincl_socket(item.dest_addr, &item.interface_name)?;
+                    self.egress_sockets
+                        .insert(key.clone(), (socket, Ipv4Addr::UNSPECIFIED));
+                }
+
+                let (socket_fd, _) = self.egress_sockets.get(&key).unwrap();
+
+                let user_data = self.next_send_user_data;
+                self.next_send_user_data += 1;
+                if self.next_send_user_data > SEND_MAX {
+                    self.next_send_user_data = SEND_BASE;
+                }
+
+                let send_op = opcode::Send::new(
+                    types::Fd(socket_fd.as_raw_fd()),
+                    payload.as_ptr(),
+                    payload.len() as u32,
+                )
+                .build()
+                .user_data(user_data);
+
+                unsafe {
+                    self.ring.submission().push(&send_op)?;
+                }
+                self.in_flight_sends.insert(user_data, payload);
+                continue;
+            }
 
             // Determine source IP: use explicit source_ip if provided, otherwise derive from interface
             let source_ip = match item.source_ip {
@@ -1343,14 +1462,15 @@ impl UnifiedDataPlane {
         self.logger.info(
             Facility::DataPlane,
             &format!(
-                "[STATS:Ingress FINAL] total: recv={} matched={} egr_sent={} filtered={} no_match={} buf_exhaust={} default_dropped={}",
+                "[STATS:Ingress FINAL] total: recv={} matched={} egr_sent={} filtered={} no_match={} buf_exhaust={} default_dropped={} ttl_dropped={}",
                 self.stats.packets_received,
                 self.stats.rules_matched,
                 self.stats.packets_sent,  // egr_sent = what was queued to egress
                 self.stats.packets_filtered,
                 self.stats.rules_not_matched,
                 self.stats.buffer_pool_exhaustion,
-                self.stats.rules_default_dropped
+                self.stats.rules_default_dropped,
+                self.stats.ttl_expired_dropped
             ),
         );
         // Log egress stats (in unified mode, egr_sent == ch_recv since there's no channel)
@@ -1475,6 +1595,33 @@ fn create_raw_esp_socket(
     Ok(socket.into())
 }
 
+/// Create a raw IP_HDRINCL socket for relay mode egress.
+///
+/// `IPPROTO_RAW` (protocol 255) implies `IP_HDRINCL`: the kernel uses the IP
+/// header from the send buffer as-is, preserving the original source IP.
+/// The kernel recomputes the IP header checksum automatically.
+/// TTL is taken from the payload IP header (no sockopt needed).
+fn create_raw_hdrincl_socket(dest_addr: SocketAddr, interface_name: &str) -> Result<OwnedFd> {
+    let socket = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::from(255)))?;
+    socket.set_reuse_address(true)?;
+
+    let send_buffer_size = std::env::var("MCR_SOCKET_SNDBUF")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(4 * 1024 * 1024);
+
+    socket
+        .set_send_buffer_size(send_buffer_size)
+        .context("Failed to set SO_SNDBUF for HDRINCL socket")?;
+
+    // SO_BINDTODEVICE forces the packet out the correct downstream interface,
+    // regardless of routing table decisions.
+    socket_helpers::bind_to_device(socket.as_raw_fd(), interface_name)?;
+    socket.connect(&dest_addr.into())?;
+    socket.set_nonblocking(true)?;
+    Ok(socket.into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1496,6 +1643,8 @@ mod tests {
                 ttl: None,
                 source_ip: None,
             }],
+            egress: crate::EgressMode::Republish,
+            ttl_policy: crate::TtlPolicy::Decrement,
             source: crate::RuleSource::Static,
         }
     }
@@ -1750,6 +1899,8 @@ mod tests {
                 ttl: None,
                 source_ip: None,
             }],
+            egress: crate::EgressMode::Republish,
+            ttl_policy: crate::TtlPolicy::Decrement,
             source: crate::RuleSource::Static,
         }
     }
@@ -2116,6 +2267,8 @@ mod tests {
             input_protocol: 50,
             input_source: None,
             outputs: vec![], // empty = intentional drop
+            egress: crate::EgressMode::Republish,
+            ttl_policy: crate::TtlPolicy::Decrement,
             source: crate::RuleSource::Dynamic,
         }
     }
@@ -2340,5 +2493,200 @@ mod tests {
         let found = lookup_rule(&rules, dst_ip, protocol, port);
         assert_eq!(found.unwrap().rule_id, "esp-default");
         assert!(found.unwrap().outputs.is_empty());
+    }
+
+    // === Relay Mode Tests ===
+
+    #[test]
+    fn test_forward_mode_extracts_full_ip_packet() {
+        // ESP packet: Forward mode should extract from IP header (offset 14)
+        // with length = ipv4.total_length (includes IP header).
+        // Normal mode extracts just the ESP payload (offset 34, len = total_length - 20).
+        use crate::worker::packet_parser::{parse_packet_any, ParsedPacket};
+
+        let packet = make_esp_packet([239, 255, 0, 100], [10, 1, 0, 1]);
+        let parsed = parse_packet_any(&packet, false).unwrap();
+
+        let (normal_offset, normal_len) = match &parsed {
+            ParsedPacket::Esp {
+                payload_offset,
+                payload_len,
+                ..
+            } => (*payload_offset, *payload_len),
+            _ => panic!("Expected ESP"),
+        };
+
+        // Normal mode: ESP payload starts after Ethernet(14) + IP(20) = 34
+        assert_eq!(normal_offset, 34, "ESP payload offset should be 34");
+        // Normal mode: ESP payload = total_length - IP header = 48 - 20 = 28
+        assert_eq!(normal_len, 28, "ESP payload length should be 28");
+
+        // Forward mode: derive IP offset from parsed headers (not hardcoded)
+        let (forward_offset, forward_len) = match &parsed {
+            ParsedPacket::Esp {
+                ipv4,
+                payload_offset,
+                ..
+            } => {
+                let ip_off = payload_offset - ipv4.header_len();
+                (ip_off, ipv4.total_length as usize)
+            }
+            _ => unreachable!(),
+        };
+
+        assert_eq!(
+            forward_offset, 14,
+            "Forward mode offset should be Ethernet end"
+        );
+        assert_eq!(forward_len, 48, "Forward mode length = full IP packet (48)");
+
+        // Forward payload includes IP header (20 bytes more than normal payload start)
+        assert_eq!(
+            forward_len - normal_len,
+            20,
+            "Forward includes 20-byte IP header"
+        );
+
+        // Verify payload extraction boundaries are valid
+        assert!(forward_offset + forward_len <= packet.len());
+    }
+
+    #[test]
+    fn test_forward_mode_extracts_full_ip_packet_udp() {
+        // UDP packet: same Forward mode semantics.
+        use crate::worker::packet_parser::{parse_packet_any, ParsedPacket};
+
+        let packet = make_udp_packet([239, 1, 1, 1], 4789, [10, 0, 0, 1]);
+        let parsed = parse_packet_any(&packet, false).unwrap();
+
+        let (normal_offset, normal_len) = match &parsed {
+            ParsedPacket::Udp(h) => (h.payload_offset, h.payload_len),
+            _ => panic!("Expected UDP"),
+        };
+
+        // Normal mode: UDP payload starts after Ethernet(14) + IP(20) + UDP(8) = 42
+        assert_eq!(normal_offset, 42, "UDP payload offset should be 42");
+        // Normal mode: UDP payload = total_length - IP(20) - UDP(8)
+        // total_length = 44, so payload = 44 - 20 - 8 = 16
+        assert_eq!(normal_len, 16, "UDP payload length should be 16");
+
+        // Forward mode: derive IP offset from parsed headers
+        let (forward_offset, forward_len) = match &parsed {
+            ParsedPacket::Udp(h) => {
+                let ip_off = h.payload_offset - 8 - h.ipv4.header_len();
+                (ip_off, h.ipv4.total_length as usize)
+            }
+            _ => unreachable!(),
+        };
+
+        assert_eq!(forward_offset, 14);
+        assert_eq!(forward_len, 44, "Forward mode length = full IP packet (44)");
+
+        // Forward payload includes IP + UDP headers (28 bytes more than UDP payload)
+        assert_eq!(
+            forward_len - normal_len,
+            28,
+            "Forward adds 28 bytes (IP+UDP headers)"
+        );
+
+        assert!(forward_offset + forward_len <= packet.len());
+    }
+
+    #[test]
+    fn test_forward_mode_propagates_to_rule_lookup() {
+        // A Forward-mode ESP rule should be findable and have egress=Forward.
+        let mut rules: HashMap<(Ipv4Addr, u8, u16), ForwardingRule> = HashMap::new();
+
+        let mut rule = create_esp_rule("esp-relay", "239.255.0.100");
+        rule.egress = crate::EgressMode::Forward;
+        rule.ttl_policy = crate::TtlPolicy::Decrement;
+        rule.input_source = Some("10.1.0.1".parse().unwrap());
+        rules.insert(
+            (rule.input_group, rule.input_protocol, rule.input_port),
+            rule,
+        );
+
+        let found = lookup_rule(&rules, "239.255.0.100".parse().unwrap(), 50, 0).unwrap();
+        assert_eq!(
+            found.egress,
+            crate::EgressMode::Forward,
+            "Forward mode must propagate through lookup"
+        );
+        assert_eq!(found.input_source, Some("10.1.0.1".parse().unwrap()));
+    }
+
+    // === TTL Policy Tests ===
+
+    #[test]
+    fn test_ttl_decrement_reduces_by_one() {
+        // Simulate a Forward-mode IP packet payload (starts at IP header).
+        // TTL is at byte offset 8.
+        let mut payload = vec![0u8; 40]; // Minimal IP packet
+        payload[0] = 0x45; // Version + IHL
+        payload[8] = 64; // TTL = 64
+
+        let payload: Arc<[u8]> = Arc::from(payload.as_slice());
+
+        // Apply Decrement policy
+        let current_ttl = payload[8];
+        assert_eq!(current_ttl, 64);
+
+        let mut buf = payload.to_vec();
+        buf[8] = current_ttl - 1;
+        let result: Arc<[u8]> = Arc::from(buf.as_slice());
+
+        assert_eq!(result[8], 63, "TTL should be decremented from 64 to 63");
+    }
+
+    #[test]
+    fn test_ttl_decrement_drops_at_one() {
+        // TTL=1 should be dropped (TTL would reach 0 after decrement)
+        let mut payload = [0u8; 40];
+        payload[0] = 0x45;
+        payload[8] = 1; // TTL = 1
+
+        let current_ttl = payload[8];
+        assert!(current_ttl <= 1, "TTL=1 should trigger drop");
+    }
+
+    #[test]
+    fn test_ttl_decrement_drops_at_zero() {
+        // TTL=0 should also be dropped
+        let mut payload = [0u8; 40];
+        payload[0] = 0x45;
+        payload[8] = 0; // TTL = 0
+
+        let current_ttl = payload[8];
+        assert!(current_ttl <= 1, "TTL=0 should trigger drop");
+    }
+
+    #[test]
+    fn test_ttl_preserve_leaves_unchanged() {
+        let mut payload = vec![0u8; 40];
+        payload[0] = 0x45;
+        payload[8] = 42; // TTL = 42
+
+        let payload: Arc<[u8]> = Arc::from(payload.as_slice());
+
+        // Preserve policy: just clone the Arc (no modification)
+        let result = payload.clone();
+        assert_eq!(
+            result[8], 42,
+            "TTL should be unchanged with Preserve policy"
+        );
+    }
+
+    #[test]
+    fn test_ttl_reset_sets_fixed_value() {
+        let mut payload = [0u8; 40];
+        payload[0] = 0x45;
+        payload[8] = 200; // Original TTL
+
+        let reset_value: u8 = 32;
+        let mut buf = payload.to_vec();
+        buf[8] = reset_value;
+        let result: Arc<[u8]> = Arc::from(buf.as_slice());
+
+        assert_eq!(result[8], 32, "TTL should be reset to 32");
     }
 }

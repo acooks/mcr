@@ -47,6 +47,8 @@ async fn test_add_and_remove_rule_e2e() -> Result<()> {
         input_protocol: 17,
         input_source: None,
         outputs: vec![],
+        egress: multicast_relay::EgressMode::Republish,
+        ttl_policy: multicast_relay::TtlPolicy::Decrement,
         source: RuleSource::Static,
     };
     client.add_rule(rule.clone()).await?;
@@ -144,6 +146,8 @@ async fn test_get_stats_e2e() -> Result<()> {
             ttl: None,
             source_ip: None,
         }],
+        egress: multicast_relay::EgressMode::Republish,
+        ttl_policy: multicast_relay::TtlPolicy::Decrement,
         source: RuleSource::Static,
     };
     client.add_rule(rule.clone()).await?;
@@ -274,6 +278,8 @@ async fn test_max_workers_spawning() -> Result<()> {
         input_protocol: 17,
         input_source: None,
         outputs: vec![],
+        egress: multicast_relay::EgressMode::Republish,
+        ttl_policy: multicast_relay::TtlPolicy::Decrement,
         source: RuleSource::Static,
     };
 
@@ -353,6 +359,8 @@ async fn test_rule_removal_during_traffic() -> Result<()> {
         input_protocol: 17,
         input_source: None,
         outputs: vec![],
+        egress: multicast_relay::EgressMode::Republish,
+        ttl_policy: multicast_relay::TtlPolicy::Decrement,
         source: RuleSource::Static,
     };
     client.add_rule(rule).await?;
@@ -418,6 +426,8 @@ async fn test_rule_removal_during_traffic() -> Result<()> {
         input_protocol: 17,
         input_source: None,
         outputs: vec![],
+        egress: multicast_relay::EgressMode::Republish,
+        ttl_policy: multicast_relay::TtlPolicy::Decrement,
         source: RuleSource::Static,
     };
     client.add_rule(new_rule).await?;
@@ -464,6 +474,8 @@ async fn test_concurrent_rule_modifications() -> Result<()> {
                 input_protocol: 17,
                 input_source: None,
                 outputs: vec![],
+                egress: multicast_relay::EgressMode::Republish,
+                ttl_policy: multicast_relay::TtlPolicy::Decrement,
                 source: RuleSource::Static,
             };
             client.add_rule(rule).await

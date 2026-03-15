@@ -117,7 +117,10 @@ pub fn handle_supervisor_command(
             input_group,
             input_port,
             input_protocol,
+            input_source,
             outputs,
+            egress,
+            ttl_policy,
         } => {
             // Validate input interface name
             if let Err(e) = validate_interface_name(&input_interface) {
@@ -169,10 +172,29 @@ pub fn handle_supervisor_command(
                 input_group,
                 input_port,
                 input_protocol,
-                input_source: None, // CLI-added rules don't have source filtering
+                input_source,
                 outputs,
+                egress,
+                ttl_policy,
                 source: crate::RuleSource::Dynamic, // Rules added via CLI are dynamic
             };
+
+            // Validate Forward mode constraints
+            if rule.egress == crate::EgressMode::Forward {
+                // Forward mode preserves the original IP header — source_ip override is meaningless
+                for (i, output) in rule.outputs.iter().enumerate() {
+                    if output.source_ip.is_some() {
+                        return (
+                            Response::Error(format!(
+                                "Rule rejected: output[{}].source_ip cannot be set when egress is \"forward\". \
+                                Forward mode preserves the original IP header including source IP.",
+                                i
+                            )),
+                            CommandAction::None,
+                        );
+                    }
+                }
+            }
 
             // Validate interface configuration to prevent packet loops and reflection
             for output in &rule.outputs {
@@ -758,7 +780,10 @@ mod tests {
                 input_group: "224.0.0.1".parse().unwrap(),
                 input_port: 5000,
                 input_protocol: 17,
+                input_source: None,
                 outputs: vec![],
+                egress: crate::EgressMode::Republish,
+                ttl_policy: crate::TtlPolicy::Decrement,
             },
             &master_rules,
             &worker_map,
@@ -791,6 +816,8 @@ mod tests {
                 input_protocol: 17,
                 input_source: None,
                 outputs: vec![],
+                egress: crate::EgressMode::Republish,
+                ttl_policy: crate::TtlPolicy::Decrement,
                 source: crate::RuleSource::Static,
             },
         );
@@ -1125,6 +1152,8 @@ mod tests {
                 input_protocol: 17,
                 input_source: None,
                 outputs: vec![],
+                egress: crate::EgressMode::Republish,
+                ttl_policy: crate::TtlPolicy::Decrement,
                 source: crate::RuleSource::Static,
             },
         );
@@ -1200,6 +1229,7 @@ mod tests {
                 input_group: "224.0.0.1".parse().unwrap(),
                 input_port: 5000,
                 input_protocol: 17,
+                input_source: None,
                 outputs: vec![crate::OutputDestination {
                     group: "224.0.0.2".parse().unwrap(),
                     port: 5001,
@@ -1207,6 +1237,8 @@ mod tests {
                     ttl: None,
                     source_ip: None,
                 }],
+                egress: crate::EgressMode::Republish,
+                ttl_policy: crate::TtlPolicy::Decrement,
             },
             &master_rules,
             &worker_map,
@@ -1247,6 +1279,7 @@ mod tests {
                 input_group: "224.0.0.1".parse().unwrap(),
                 input_port: 5000,
                 input_protocol: 17,
+                input_source: None,
                 outputs: vec![crate::OutputDestination {
                     group: "224.0.0.2".parse().unwrap(),
                     port: 5001,
@@ -1254,6 +1287,8 @@ mod tests {
                     ttl: None,
                     source_ip: None,
                 }],
+                egress: crate::EgressMode::Republish,
+                ttl_policy: crate::TtlPolicy::Decrement,
             },
             &master_rules,
             &worker_map,
@@ -1370,6 +1405,7 @@ mod tests {
                 input_group: "224.0.0.1".parse().unwrap(),
                 input_port: 5000,
                 input_protocol: 17,
+                input_source: None,
                 outputs: vec![crate::OutputDestination {
                     group: "224.0.0.2".parse().unwrap(),
                     port: 5001,
@@ -1377,6 +1413,8 @@ mod tests {
                     ttl: None,
                     source_ip: None,
                 }],
+                egress: crate::EgressMode::Republish,
+                ttl_policy: crate::TtlPolicy::Decrement,
             },
             &master_rules,
             &worker_map,
@@ -1413,6 +1451,7 @@ mod tests {
                 input_group: "224.0.0.1".parse().unwrap(),
                 input_port: 5000,
                 input_protocol: 17,
+                input_source: None,
                 outputs: vec![crate::OutputDestination {
                     group: "224.0.0.2".parse().unwrap(),
                     port: 5001,
@@ -1420,6 +1459,8 @@ mod tests {
                     ttl: None,
                     source_ip: None,
                 }],
+                egress: crate::EgressMode::Republish,
+                ttl_policy: crate::TtlPolicy::Decrement,
             },
             &master_rules,
             &worker_map,
@@ -1476,6 +1517,7 @@ mod tests {
                 input_group: "224.0.0.1".parse().unwrap(),
                 input_port: 0, // Invalid for UDP
                 input_protocol: 17,
+                input_source: None,
                 outputs: vec![crate::OutputDestination {
                     group: "224.0.0.2".parse().unwrap(),
                     port: 5001,
@@ -1483,6 +1525,8 @@ mod tests {
                     ttl: None,
                     source_ip: None,
                 }],
+                egress: crate::EgressMode::Republish,
+                ttl_policy: crate::TtlPolicy::Decrement,
             },
             &master_rules,
             &worker_map,
@@ -1519,6 +1563,7 @@ mod tests {
                 input_group: "224.0.0.1".parse().unwrap(),
                 input_port: 5000,
                 input_protocol: 17,
+                input_source: None,
                 outputs: vec![crate::OutputDestination {
                     group: "224.0.0.2".parse().unwrap(),
                     port: 0, // Invalid for UDP
@@ -1526,6 +1571,8 @@ mod tests {
                     ttl: None,
                     source_ip: None,
                 }],
+                egress: crate::EgressMode::Republish,
+                ttl_policy: crate::TtlPolicy::Decrement,
             },
             &master_rules,
             &worker_map,
@@ -1562,6 +1609,7 @@ mod tests {
                 input_group: "239.255.0.100".parse().unwrap(),
                 input_port: 0,      // Valid for ESP
                 input_protocol: 50, // ESP
+                input_source: None,
                 outputs: vec![crate::OutputDestination {
                     group: "239.255.0.100".parse().unwrap(),
                     port: 0, // No port for ESP
@@ -1569,6 +1617,8 @@ mod tests {
                     ttl: None,
                     source_ip: None,
                 }],
+                egress: crate::EgressMode::Republish,
+                ttl_policy: crate::TtlPolicy::Decrement,
             },
             &master_rules,
             &worker_map,
@@ -1614,6 +1664,7 @@ mod tests {
                 input_group: "239.1.1.1".parse().unwrap(),
                 input_port: 0,
                 input_protocol: 50,
+                input_source: None,
                 outputs: vec![crate::OutputDestination {
                     group: "239.1.1.1".parse().unwrap(),
                     port: 0,
@@ -1621,6 +1672,8 @@ mod tests {
                     ttl: None,
                     source_ip: None,
                 }],
+                egress: crate::EgressMode::Republish,
+                ttl_policy: crate::TtlPolicy::Decrement,
             },
             &master_rules,
             &worker_map,
@@ -1641,6 +1694,7 @@ mod tests {
                 input_group: "239.1.1.1".parse().unwrap(),
                 input_port: 5000,
                 input_protocol: 17,
+                input_source: None,
                 outputs: vec![crate::OutputDestination {
                     group: "239.1.1.1".parse().unwrap(),
                     port: 5000,
@@ -1648,6 +1702,8 @@ mod tests {
                     ttl: None,
                     source_ip: None,
                 }],
+                egress: crate::EgressMode::Republish,
+                ttl_policy: crate::TtlPolicy::Decrement,
             },
             &master_rules,
             &worker_map,
@@ -1665,5 +1721,104 @@ mod tests {
 
         let rules = master_rules.lock().unwrap();
         assert_eq!(rules.len(), 2, "Both ESP and UDP rules should exist");
+    }
+
+    #[test]
+    fn test_forward_mode_rejects_output_source_ip() {
+        let master_rules = Mutex::new(HashMap::new());
+        let worker_map = Mutex::new(HashMap::new());
+        let global_min_level =
+            std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
+        let facility_min_levels = std::sync::RwLock::new(HashMap::new());
+        let worker_stats = Mutex::new(HashMap::new());
+
+        let (response, _action) = handle_supervisor_command(
+            crate::SupervisorCommand::AddRule {
+                rule_id: "forward-with-source-ip".to_string(),
+                name: None,
+                input_interface: "eth0".to_string(),
+                input_group: "239.1.1.1".parse().unwrap(),
+                input_port: 5000,
+                input_protocol: 17,
+                input_source: None,
+                outputs: vec![crate::OutputDestination {
+                    group: "239.2.2.2".parse().unwrap(),
+                    port: 5001,
+                    interface: "eth1".into(),
+                    ttl: None,
+                    source_ip: Some("10.0.0.1".parse().unwrap()), // Conflicts with Forward mode
+                }],
+                egress: crate::EgressMode::Forward,
+                ttl_policy: crate::TtlPolicy::Decrement,
+            },
+            &master_rules,
+            &worker_map,
+            &global_min_level,
+            &facility_min_levels,
+            &worker_stats,
+            None,
+            None,
+        );
+
+        match response {
+            crate::Response::Error(msg) => {
+                assert!(
+                    msg.contains("source_ip") && msg.contains("forward"),
+                    "Error should mention source_ip and forward mode: {msg}"
+                );
+            }
+            other => panic!("Expected error for Forward + source_ip, got: {:?}", other),
+        }
+
+        // Verify rule was NOT added
+        let rules = master_rules.lock().unwrap();
+        assert!(
+            rules.is_empty(),
+            "Rule should not be added when validation fails"
+        );
+    }
+
+    #[test]
+    fn test_forward_mode_allows_without_source_ip() {
+        let master_rules = Mutex::new(HashMap::new());
+        let worker_map = Mutex::new(HashMap::new());
+        let global_min_level =
+            std::sync::atomic::AtomicU8::new(crate::logging::Severity::Info as u8);
+        let facility_min_levels = std::sync::RwLock::new(HashMap::new());
+        let worker_stats = Mutex::new(HashMap::new());
+
+        let (response, _action) = handle_supervisor_command(
+            crate::SupervisorCommand::AddRule {
+                rule_id: "forward-ok".to_string(),
+                name: None,
+                input_interface: "eth0".to_string(),
+                input_group: "239.1.1.1".parse().unwrap(),
+                input_port: 5000,
+                input_protocol: 17,
+                input_source: None,
+                outputs: vec![crate::OutputDestination {
+                    group: "239.2.2.2".parse().unwrap(),
+                    port: 5001,
+                    interface: "eth1".into(),
+                    ttl: None,
+                    source_ip: None, // No conflict
+                }],
+                egress: crate::EgressMode::Forward,
+                ttl_policy: crate::TtlPolicy::Decrement,
+            },
+            &master_rules,
+            &worker_map,
+            &global_min_level,
+            &facility_min_levels,
+            &worker_stats,
+            None,
+            None,
+        );
+
+        assert!(
+            matches!(response, crate::Response::Success(_)),
+            "Forward mode without source_ip should succeed: {:?}",
+            response
+        );
     }
 }

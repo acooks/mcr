@@ -449,6 +449,57 @@ impl McrInstance {
         Ok(())
     }
 
+    /// Add a forwarding rule with Forward egress mode and specified TTL policy
+    pub fn add_rule_forward(
+        &mut self,
+        input: &str,
+        outputs: Vec<&str>,
+        ttl_policy: &str,
+    ) -> Result<()> {
+        let interface = self
+            .interface
+            .as_ref()
+            .context("add_rule_forward requires interface to be set")?;
+
+        let control_bin = binary_path("mcrctl");
+
+        let input_parts: Vec<&str> = input.split(':').collect();
+        if input_parts.len() != 2 {
+            bail!("Input must be in format group:port");
+        }
+
+        let outputs_str = outputs.join(",");
+
+        let output = Command::new(control_bin)
+            .arg("--socket-path")
+            .arg(&self.control_socket)
+            .arg("add")
+            .arg("--input-interface")
+            .arg(interface)
+            .arg("--input-group")
+            .arg(input_parts[0])
+            .arg("--input-port")
+            .arg(input_parts[1])
+            .arg("--outputs")
+            .arg(outputs_str)
+            .arg("--egress")
+            .arg("forward")
+            .arg("--ttl-policy")
+            .arg(ttl_policy)
+            .output()
+            .context("Failed to execute mcrctl")?;
+
+        if !output.status.success() {
+            bail!(
+                "Failed to add forward rule: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        self.wait_until_ready(10)?;
+        Ok(())
+    }
+
     /// Run an mcrctl command and return the output
     #[allow(dead_code)]
     pub fn run_mcrctl(&self, args: &[&str]) -> Result<String> {

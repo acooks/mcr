@@ -73,7 +73,10 @@ impl<'a> ControlClient<'a> {
                 input_group,
                 input_port,
                 input_protocol: 17,
+                input_source: None,
                 outputs,
+                egress: multicast_relay::EgressMode::Republish,
+                ttl_policy: multicast_relay::TtlPolicy::Decrement,
             })
             .await?
         {

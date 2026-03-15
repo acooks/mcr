@@ -174,6 +174,8 @@ mod tests {
                 ttl: None,
                 source_ip: None,
             }],
+            egress: crate::EgressMode::Republish,
+            ttl_policy: crate::TtlPolicy::Decrement,
             source: crate::RuleSource::Static,
         });
 

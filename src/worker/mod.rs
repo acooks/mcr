@@ -316,6 +316,8 @@ mod tests {
             input_protocol: 17,
             input_source: None,
             outputs: vec![],
+            egress: crate::EgressMode::Republish,
+            ttl_policy: crate::TtlPolicy::Decrement,
             source: crate::RuleSource::Static,
         });
 

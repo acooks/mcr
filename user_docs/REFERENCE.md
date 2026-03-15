@@ -269,14 +269,12 @@ mcrctl add \
     --outputs <group>:<port>:<interface>[,...]
 ```
 
-**Architecture Note (Republishing vs. Forwarding):**
-Technically, MCR does not "forward" packets in the sense of a router or bridge. Instead, it **republishes** them.
+**Architecture Note (Egress Modes):**
+MCR supports two egress modes, configured per-rule:
 
-1. **Ingress:** It captures the raw packet from the wire using `AF_PACKET`.
-2. **Process:** It extracts the UDP payload.
-3. **Egress:** It sends a *new* UDP datagram using a standard `AF_INET` socket.
+1. **Republish (default):** MCR extracts the payload from the captured packet and sends a *new* UDP datagram using a standard `AF_INET` socket. The source IP is the relay node's own address. The Linux kernel handles all routing, ARP, and fragmentation. This mode is compatible with any output interface the kernel supports, including **VPN tunnels (WireGuard, OpenVPN)**, **VLANs**, and **unicast destinations**.
 
-This means the **Linux Kernel handles all routing and encapsulation** for the egress packet. Consequently, MCR supports any output interface the kernel supports, including **VPN tunnels (WireGuard, OpenVPN)**, **VLANs**, and **Unicast destinations**.
+2. **Forward:** MCR sends the original IP packet (header and payload) verbatim using a raw `IP_HDRINCL` socket, preserving the original source IP address. This mode is used for **transit relay** — intermediate MCR nodes that pass traffic through without rewriting the source identity — and for non-UDP IP protocols like **ESP (IPsec)**. See [Egress Modes](#59-egress-modes) for details.
 
 **Arguments:**
 
@@ -482,7 +480,10 @@ mcrctl config check <file>      # Validate file without loading
 | `rules` | Yes | Array of forwarding rules |
 | `rules[].name` | No | Human-friendly name for the rule (for display and `RemoveRuleByName`) |
 | `rules[].input` | Yes | Input specification: `interface`, `group`, `port` |
+| `rules[].input.protocol` | No | IP protocol: omit for UDP (default), `"esp"` for ESP/IPsec |
 | `rules[].outputs` | Yes | Array of output destinations |
+| `rules[].egress` | No | Egress mode: `"republish"` (default) or `"forward"`. See [Egress Modes](#59-egress-modes) |
+| `rules[].ttl_policy` | No | TTL handling for Forward mode: `"decrement"` (default), `"preserve"`, or `{ "reset": N }` |
 | `pinning` | No | Map of interface name to CPU core list |
 
 **Note:** The `pinning` configuration controls how many workers spawn per interface and which CPU cores they use. If not specified, workers use the `--num-workers` default.
@@ -588,6 +589,89 @@ MCR supports optional PIM-SM and IGMP protocols. Add these sections to your JSON
 | `querier_interfaces` | Yes | Interfaces where we act as IGMP querier |
 | `query_interval` | No | Seconds between General Queries (default: 125) |
 | `robustness` | No | Robustness variable for timer calculations (default: 2) |
+
+### 5.9. Egress Modes
+
+MCR supports two egress strategies, configured per-rule. The default (`republish`) is appropriate for most deployments. The `forward` mode enables transit relay and non-UDP protocol support.
+
+#### Republish (Default)
+
+MCR extracts the payload from the captured packet, creates a new UDP datagram, and sends it from the relay node's own IP address. This is the standard behavior for endpoint relay.
+
+```text
+Source (10.1.0.1) → [MCR republish] → Receiver sees traffic from MCR's IP
+```
+
+#### Forward
+
+MCR sends the original IP packet verbatim, preserving the original source IP address. This is used when MCR acts as a **transit node** in a chain of relays, or when forwarding non-UDP IP protocols (such as ESP).
+
+```text
+Source (10.1.0.1) → [MCR₁ forward] → [MCR₂ forward] → Receiver sees traffic from 10.1.0.1
+```
+
+**When to use Forward mode:**
+
+- **Transit relay chains:** Intermediate MCR nodes that pass traffic through to downstream MCR nodes using per-source (`input_source`) rules. Without Forward mode, each hop rewrites the source IP, breaking downstream source-based matching.
+- **ESP (IPsec) transport:** Multicast traffic carrying ESP payloads (IP protocol 50) instead of UDP. ESP has no UDP layer, so the standard `SOCK_DGRAM` republish path cannot be used.
+- **Ring/redundant topologies:** Topologies where the same traffic may traverse multiple MCR nodes and downstream nodes need to identify the original sender.
+
+#### TTL Policy (Forward Mode Only)
+
+When using Forward mode, TTL is decremented by default (standard router behavior). The `ttl_policy` field controls TTL handling:
+
+| Policy | Behavior | Use Case |
+| :----- | :------- | :------- |
+| `decrement` | TTL is decremented by 1; packets with TTL=0 are dropped | Standard router behavior. **Recommended default** for loop protection in ring topologies. |
+| `preserve` | TTL is passed through unchanged | Transparent relay where TTL management is handled elsewhere |
+| `reset` | TTL is set to a configured value (e.g., `{ reset: 64 }`) | Known topology depth where predictable TTL at receivers is needed |
+
+**Note:** In Republish mode, TTL is controlled by the per-output `ttl` field (default: 1) and `ttl_policy` is ignored.
+
+#### Configuration Example
+
+```json5
+{
+  rules: [
+    // Endpoint rule: standard republish (default)
+    {
+      name: "endpoint-feed",
+      input: { interface: "eth0", group: "239.1.1.1", port: 5000 },
+      outputs: [
+        { interface: "eth1", group: "239.1.1.1", port: 5000 }
+      ]
+      // egress defaults to "republish"
+    },
+
+    // Transit relay rule: preserve original source IP
+    {
+      name: "transit-east",
+      input: { interface: "eth0", group: "239.1.1.1", port: 5001 },
+      outputs: [
+        { interface: "eth1", group: "239.1.1.1", port: 5001 }
+      ],
+      egress: "forward",
+      ttl_policy: "decrement"
+    },
+
+    // ESP forwarding: non-UDP protocol requires forward mode
+    {
+      name: "ipsec-relay",
+      input: { interface: "eth0", group: "239.10.0.1", port: 0, protocol: "esp" },
+      outputs: [
+        { interface: "eth1", group: "239.10.0.1", port: 0 }
+      ],
+      egress: "forward"
+    }
+  ]
+}
+```
+
+#### Constraints
+
+- **Forward mode + `source_ip` output override:** Rejected. In Forward mode, the source IP comes from the original packet's IP header. An explicit `source_ip` override on the output is contradictory and will be rejected at rule-add time.
+- **Forward mode + `ttl` output override:** The per-output `ttl` field is ignored in Forward mode. Use `ttl_policy` instead.
+- **MTU consistency:** Forward mode bypasses kernel fragmentation. The operator must ensure the egress interface MTU is large enough for the forwarded packets. If the IP packet exceeds the egress MTU, the send will fail.
 
 ---
 
