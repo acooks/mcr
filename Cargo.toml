@@ -27,7 +27,7 @@ bytes = "1"
 proptest = "1.10.0"
 rusty-fork = "0.3.1"
 tempfile = "3.25.0"
-uuid = { version = "1.21.0", features = ["v4"] }
+uuid = { version = "1.22.0", features = ["v4"] }
 wait-timeout = "0.2.1"
 regex = "1.12"
 mcr-test-macros = { path = "mcr-test-macros" }
